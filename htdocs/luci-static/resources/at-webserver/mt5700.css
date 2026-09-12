@@ -184,7 +184,11 @@
    应用外壳与页面容器
    --------------------------------------------------------------------------
    注意：视图返回的根节点是 .mt5700-page（.mt5700-app 从未被挂载）。
-   基础字体 / 文字色 / 背景一律落在 .mt5700-page 上，保证真正生效。
+   基础字体 / 文字色一律落在 .mt5700-page 上，保证真正生效。
+
+   这里**不再给页面自己加白底 + 描边 + 圆角**：LuCI 内容区本身已有内边距与背景，
+   再套一层白面板就变成「白底面板里放白色卡片」，两层描边糊在一起、层次全失。
+   页面容器只负责排版与最大宽度；表面留给卡片，卡片才能真正「浮」起来。
    ========================================================================== */
 .mt5700-page,
 .at-page {
@@ -192,10 +196,9 @@
   width: 100%;
   max-width: var(--mt5700-page-max);
   margin: 0 auto;
-  padding: var(--mt5700-page-pad);
-  background: var(--mt5700-card-bg);
-  border: 1px solid var(--mt5700-border);
-  border-radius: var(--mt5700-radius-lg);
+  padding: 0;
+  background: transparent;
+  border: 0;
   font-family: var(--mt5700-font-sans);
   font-size: var(--mt5700-font-size-base);
   line-height: var(--mt5700-lh-base);
@@ -1919,8 +1922,7 @@
 
 @media (max-width: 768px) {
   .mt5700-page {
-    padding: var(--mt5700-space-md);
-    border-radius: var(--mt5700-radius-md);
+    max-width: 100%;
   }
   .mt5700-page-body {
     gap: var(--mt5700-space-md);
