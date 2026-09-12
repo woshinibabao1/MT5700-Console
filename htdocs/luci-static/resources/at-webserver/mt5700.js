@@ -287,10 +287,56 @@ var Mt5700 = (function () {
 		var rpcValue = E('span', { 'class': 'at-status-rpc-value' }, '未连接');
 		rpcBox.appendChild(rpcValue);
 
+		// SIM 卡状态芯片（AT^SIMSQ?）
+		var simBox = E('div', { 'class': 'at-status-rpc at-status-sim' });
+		simBox.appendChild(E('span', { 'class': 'at-status-rpc-label' }, 'SIM'));
+		var simValue = E('span', { 'class': 'at-status-rpc-value' }, '—');
+		simBox.appendChild(simValue);
+
 		card.appendChild(icon);
 		card.appendChild(main);
 		card.appendChild(rpcBox);
+		card.appendChild(simBox);
 		container.appendChild(card);
+
+		/*
+		 * SIM 卡状态（手册 6.6 AT^SIMSQ? 的 <sim_status>）：
+		 *   0 未插卡 / 1 已插卡 / 2 PIN·PUK 锁定 / 3 SIMLOCK
+		 *   10 卡文件初始化中 / 11 已初始化（可接入网络）/ 12 就绪（短信与电话本可接入）
+		 *   98 卡物理失效 / 99 卡已移除 / 100 卡错误
+		 * 11 与 12 的区别很实用：只到 11 时网络能用，但短信/电话本还没接入。
+		 */
+		var SIM_TEXT = {
+			0: '未插卡', 1: '已插卡', 2: 'PIN 锁定', 3: 'SIM 锁定',
+			10: '初始化中', 11: '已初始化', 12: '就绪',
+			98: '卡失效', 99: '已移除', 100: '卡错误'
+		};
+
+		function refreshSimStatus() {
+			if (!cl.connected) {
+				simValue.textContent = '—';
+				simBox.classList.remove('is-warn');
+				return;
+			}
+			cl.sendCommand('AT^SIMSQ?').then(function (res) {
+				var txt = res && res.success && res.data
+					? (String(res.data).match(/\^SIMSQ:\s*(\d+)\s*,\s*(\d+)/) || null)
+					: null;
+				if (!txt) {
+					simValue.textContent = '未知';
+					simBox.classList.remove('is-warn');
+					return;
+				}
+				var st = parseInt(txt[2], 10);
+				var label = SIM_TEXT[st] || ('状态 ' + st);
+				simValue.textContent = label;
+				// 12 才算完全就绪；10/11 与异常状态给出提示色
+				simBox.classList.toggle('is-warn', st !== 12 && st !== 1);
+			}).catch(function () {
+				simValue.textContent = '未知';
+				simBox.classList.remove('is-warn');
+			});
+		}
 
 		function rpcLabel() {
 			var port = cl.port || 8765;
@@ -317,10 +363,15 @@ var Mt5700 = (function () {
 			text.textContent = cfg.text;
 			desc.textContent = (cfg.status === 'offline' && err) ? err : (cfg.desc || '暂时无法获取服务状态');
 			rpcValue.textContent = cfg.status === 'online' ? rpcLabel() : '未连接';
+			// SIM 状态只在服务在线时有意义
+			if (cfg.status === 'online') refreshSimStatus();
+			else { simValue.textContent = '—'; simBox.classList.remove('is-warn'); }
 		}
 
 		apply('connecting');
 		cl.onConnectionStateChange(apply);
+		// 定期刷新 SIM 状态（卡插拔、初始化进度都会变）
+		api.interval(15000, refreshSimStatus);
 		return card;
 	};
 

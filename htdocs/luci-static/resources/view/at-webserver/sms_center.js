@@ -201,7 +201,9 @@ return L.view.extend({
 		/* ---------- 数据 ---------- */
 
 		function refreshStorage() {
-			return AtWs.client.sendCommand('AT^CPMS?').then(function (res) {
+			/* 注意：命令是 AT+CPMS?（标准 3GPP）。此前误写成 AT^CPMS?，
+			   而本模组并不支持 ^CPMS，导致短信存储用量一直是空的。 */
+			return AtWs.client.sendCommand('AT+CPMS?').then(function (res) {
 				if (res.success && res.data) {
 					var m = String(res.data).match(/\+CPMS: "\w+",(\d+),(\d+)/);
 					if (m) {
@@ -293,6 +295,39 @@ return L.view.extend({
 				',' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
 		}
 
+		/*
+		 * 轮询后台短信任务结果。
+		 * 后端把 AT+CMGS 转入独立任务后立刻返回受理，这里按 ~350ms 轮询
+		 * AT+SMSJOB?，直到任务结束或超时（默认 20s）。
+		 * 注意：轮询走的是短信专用查询命令，不会被「发送中」的忙状态挡住。
+		 */
+		function waitSmsJob(timeoutMs) {
+			var deadline = Date.now() + (timeoutMs || 20000);
+			return new Promise(function (resolve, reject) {
+				var tick = function () {
+					AtWs.client.sendCommand('AT+SMSJOB?').then(function (res) {
+						var st = null;
+						try { st = JSON.parse(String(res && res.data ? res.data : '{}')); }
+						catch (e) { st = null; }
+						if (!st || typeof st.running !== 'boolean') {
+							reject(new Error('无法获取短信任务状态'));
+							return;
+						}
+						if (st.running) {
+							if (Date.now() > deadline) { reject(new Error('等待模组确认超时')); return; }
+							setTimeout(tick, 350);
+							return;
+						}
+						if (st.ok) resolve(st.message || '发送成功');
+						else reject(new Error(st.message || '发送失败'));
+					}).catch(function (err) {
+						reject(new Error(String((err && err.message) || err || '查询任务状态失败')));
+					});
+				};
+				setTimeout(tick, 300);
+			});
+		}
+
 		function send(explicitTarget) {
 			var content = msgInput.value.trim();
 			if (!content) { Mt5700.warning('请输入短信内容'); return; }
@@ -328,7 +363,10 @@ return L.view.extend({
 						 *     AT+CMGS=<TPDU 字节数><CR><完整 PDU>
 						 * 模组依据 <length> 读够字节数后自动提交到网络侧，
 						 * 不需要、也不应追加 Ctrl-Z(0x1A) 结束符。
-						 * 返回 +CMGS: <mr> 与 OK 表示发送成功。
+						 *
+						 * 后端收到该命令后不会同步等待模组应答，而是转入独立任务并
+						 * 立刻返回受理；这里轮询 AT+SMSJOB? 取最终结果。
+						 * 这样即使模组迟迟不确认，界面也不会被卡住。
 						 */
 						return AtWs.client.sendCommand('AT+CMGS=' + part.tpduLength + '\r' + part.pdu)
 							.then(function (res) {
@@ -340,15 +378,18 @@ return L.view.extend({
 									throw new Error('模组返回错误：' + txt.replace(/\s+/g, ' ').trim());
 								}
 								/*
-								 * 必须看到 +CMGS: <mr> 或 OK 才算提交成功。
-								 * 若模组只回显命令与数据输入提示符（形如 "AT+CMGS=15" 后跟 0x1A）
-								 * 而没有确认码，说明 PDU 数据未被接受——此时不能报「发送成功」，
-								 * 否则会出现「界面提示成功、短信其实没发出去」。
+								 * 新后端：命令被转入后台任务，返回 SMS_ACCEPTED，需轮询结果。
+								 * 旧后端：同步返回发送结果，此时必须看到 +CMGS/OK 才算成功，
+								 * 只有回显与数据输入提示符（形如 "AT+CMGS=15" + 0x1A）说明
+								 * 模组没接受 PDU —— 不能报成功。
 								 */
+								if (txt.indexOf('SMS_ACCEPTED') >= 0) {
+									return waitSmsJob();
+								}
 								if (!/(\+CMGS:|\bOK\b)/.test(txt)) {
 									throw new Error('模组未确认短信提交（无 +CMGS/OK 应答，短信未发出）');
 								}
-								return res;
+								return txt;
 							});
 					}.bind(null, parts[i]));
 				}

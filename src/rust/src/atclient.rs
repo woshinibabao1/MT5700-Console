@@ -388,6 +388,31 @@ impl AtClient {
         Ok(())
     }
 
+    /// 向模组写入 ESC(0x1B)，取消当前的数据输入态。
+    ///
+    /// 用途：`AT+CMGS` / `AT+CMGW` 会让模组进入「等待 PDU 数据」的状态。若这段数据
+    /// 没有被模组接受（例如模组迟迟不返回 `+CMGS:` / `OK`），该状态会一直挂住串口
+    /// —— 此时**任何** AT 命令都会被模组当成 PDU 数据吞掉，表现为「发一次短信后
+    /// 整个界面全部超时、页面加载不出来」。
+    ///
+    /// 与 [`interrupt`] 的区别：这里不要求存在待应答命令（超时后 pending 已被清空），
+    /// 属于「事后清场」，因此绕过命令锁与 pending 检查直接写入。
+    pub async fn cancel_data_entry(&self) -> Result<(), String> {
+        let writer = {
+            let guard = self.conn.lock().await;
+            match &*guard {
+                Some(c) => c.writer.clone(),
+                None => return Err("AT 通道未连接".into()),
+            }
+        };
+        let mut w = writer.lock().await;
+        w.write_all(&[0x1b]).await.map_err(|e| {
+            log_warn!("写入 ESC 取消失败: {}", e);
+            e.to_string()
+        })?;
+        Ok(())
+    }
+
     async fn send_command_inner(
         &self,
         ctx: &tokio::sync::watch::Receiver<bool>,

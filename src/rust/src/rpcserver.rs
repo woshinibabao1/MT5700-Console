@@ -30,14 +30,34 @@ const MAX_RPC_LINE: usize = 8192;
 const CELLSCAN_ABORT_TOKEN: &str = "abcd";
 const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// 短信数据命令（`AT+CMGS` / `AT+CMGW`）的应答预算。
+/// 单条短信等待模组确认的上限。超时即判定失败并补发 ESC 清场。
 ///
-/// 普通 AT 命令 2 秒足够，但短信要把 PDU 交给模组、再由模组提交到网络侧，
-/// 应答（`+CMGS: <mr>` / `OK` / `+CMS ERROR`）实测要好几秒。
-/// 沿用 2s 会在模组真正应答之前先返回「模组无响应」，前端据此判定发送失败，
-/// 但短信可能已经提交成功——表现为「提示发送失败，对方却收到了」。
-/// 这里给足预算，让失败与成功的判定都以模组真实应答为准。
-const SMS_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// 串口同一时刻只能跑一条命令，所以「不卡死」的做法不是无限等待，而是：
+/// ① 把发送放到独立 tokio 任务里，RPC 立刻返回「已受理」，让 Web 前端不阻塞；
+/// ② 给这次等待一个硬上限（本常量）；
+/// ③ 等待期间其余命令**快速失败**（见 run_command），不再排长队；
+/// ④ 失败后补发 ESC 清掉模组的数据输入态，并进入冷却期，避免反复卡顿。
+const SMS_JOB_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// 短信发送任务查询命令（前端轮询结果用）。
+const SMS_JOB_QUERY: &str = "AT+SMSJOB?";
+
+/// 发送失败后的冷却时长：此期间再点发送直接返回失败原因，不再占用通道。
+const SMS_BLOCK_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// 短信发送任务状态（跨连接共享）。
+#[derive(Default)]
+struct SmsState {
+    running: bool,
+    seq: u64,
+    ok: Option<bool>,
+    message: Option<String>,
+    blocked_until: Option<std::time::Instant>,
+    block_reason: Option<String>,
+}
+
+/// 短信数据命令（`AT+CMGS` / `AT+CMGW`）的应答预算（后台任务内使用）。
+const SMS_SEND_TIMEOUT: Duration = SMS_JOB_TIMEOUT;
 
 /// 发给前端的命令应答。字段名与原实现严格一致。
 #[derive(Serialize)]
@@ -138,6 +158,8 @@ pub struct RpcServer {
     scan: Arc<AsyncMutex<ScanState>>,
     scan_timeout: Duration,
     ctx: tokio::sync::watch::Receiver<bool>,
+    /// 短信后台发送任务状态：发送在独立任务里跑，主命令队列不被占用。
+    sms: Arc<AsyncMutex<SmsState>>,
 }
 
 impl RpcServer {
@@ -155,6 +177,7 @@ impl RpcServer {
             scan: Arc::new(AsyncMutex::new(ScanState { running: false, aborted: false, lines: Vec::new() })),
             scan_timeout: DEFAULT_SCAN_TIMEOUT,
             ctx,
+            sms: Arc::new(AsyncMutex::new(SmsState::default())),
         }
     }
 
@@ -171,6 +194,7 @@ impl RpcServer {
             scan: self.scan.clone(),
             scan_timeout: self.scan_timeout,
             ctx: self.ctx.clone(),
+            sms: self.sms.clone(),
         }
     }
 
@@ -303,6 +327,22 @@ impl RpcServer {
             return resp;
         }
 
+        /*
+         * 短信走独立通道：
+         *  - `AT+SMSJOB?` 返回后台任务状态（前端轮询）
+         *  - `AT+CMGS` / `AT+CMGW` 立刻受理，真正的发送在独立 tokio 任务里跑
+         * 这样即使模组迟迟不确认，也不会占着主命令队列把整个界面拖死。
+         */
+        if let Some(resp) = self.handle_sms_job_command(command).await {
+            return resp;
+        }
+
+        // 短信发送进行中：其余命令立即失败返回，不再排队等待。
+        // 否则每个查询都要等满排队预算，一页十几个查询叠加起来就是「界面加载不出来」。
+        if self.sms.lock().await.running {
+            return err_response("模组正在发送短信，请稍候再试");
+        }
+
         // 扫频要跑几分钟，单独走异步通路。
         if let Some(resp) = self.handle_cell_scan_command(command).await {
             return resp;
@@ -314,21 +354,14 @@ impl RpcServer {
 
         let command = normalize_syscfgex(command);
 
-        // 短信数据命令（AT+CMGS / AT+CMGW）要等模组把消息提交到网络侧，
-        // 实测耗时远超普通命令的 2s 预算；沿用 COMMAND_TIMEOUT 会在模组真正
-        // 应答之前先判定「模组无响应」，前端据此报发送失败。
-        let cmd_timeout = if is_sms_data_command(&command) {
-            SMS_SEND_TIMEOUT
-        } else {
-            crate::atclient::COMMAND_TIMEOUT
-        };
-
         // 外层超时 = 排队预算 + 应答预算 + 余量。
         // 排队预算单独给足，避免初始化/重连期间用户的终端命令被外层提前掐断，
         // 从而出现「模组无响应」的假失败（终端页只有 ATI 有回复的根因）。
         let result = tokio::time::timeout(
-            crate::atclient::QUEUE_WAIT_TIMEOUT + cmd_timeout + Duration::from_secs(3),
-            self.client.send_command(&self.ctx, &command, cmd_timeout, None),
+            crate::atclient::QUEUE_WAIT_TIMEOUT
+                + crate::atclient::COMMAND_TIMEOUT
+                + Duration::from_secs(3),
+            self.client.send_command(&self.ctx, &command, crate::atclient::COMMAND_TIMEOUT, None),
         )
         .await;
 
@@ -346,6 +379,122 @@ impl RpcServer {
             }
             Err(_) => AtCommandResponse { success: false, data: None, error: Some("命令执行超时".into()) },
         }
+    }
+
+    /// 短信专用通道。
+    ///
+    /// - `AT+SMSJOB?`：返回后台发送任务状态，供前端轮询。
+    /// - `AT+CMGS` / `AT+CMGW`：立刻受理并转入独立 tokio 任务，RPC 不阻塞。
+    ///   任务内等待模组确认有时间上限；失败会补发 ESC 清掉模组的「等待 PDU」态，
+    ///   并进入冷却期——冷却期内再发送直接返回失败原因，不再占用通道。
+    async fn handle_sms_job_command(&self, command: &str) -> Option<AtCommandResponse> {
+        let trimmed = command.trim();
+
+        if trimmed.eq_ignore_ascii_case(SMS_JOB_QUERY) {
+            let st = self.sms.lock().await;
+            let payload = serde_json::json!({
+                "running": st.running,
+                "seq": st.seq,
+                "ok": st.ok,
+                "message": st.message,
+            });
+            return Some(AtCommandResponse {
+                success: true,
+                data: Some(payload.to_string()),
+                error: None,
+            });
+        }
+
+        if !is_sms_data_command(command) {
+            return None;
+        }
+
+        let mut st = self.sms.lock().await;
+        if st.running {
+            return Some(AtCommandResponse {
+                success: false,
+                data: None,
+                error: Some("上一条短信仍在发送中，请稍候".into()),
+            });
+        }
+        if let Some(until) = st.blocked_until {
+            let now = std::time::Instant::now();
+            if now < until {
+                let left = (until - now).as_secs() + 1;
+                let reason = st
+                    .block_reason
+                    .clone()
+                    .unwrap_or_else(|| "模组未确认提交".into());
+                return Some(AtCommandResponse {
+                    success: false,
+                    data: None,
+                    error: Some(format!("短信通道暂不可用：{reason}（{left} 秒后自动重试）")),
+                });
+            }
+            st.blocked_until = None;
+            st.block_reason = None;
+        }
+
+        st.running = true;
+        st.seq += 1;
+        st.ok = None;
+        st.message = None;
+        drop(st);
+
+        let client = self.client.clone();
+        let ctx = self.ctx.clone();
+        let state = self.sms.clone();
+        let cmd = trimmed.to_string();
+
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                crate::atclient::QUEUE_WAIT_TIMEOUT + SMS_SEND_TIMEOUT + Duration::from_secs(2),
+                client.send_command(&ctx, &cmd, SMS_SEND_TIMEOUT, None),
+            )
+            .await;
+
+            let (ok, message) = match result {
+                Ok(Ok(resp)) => {
+                    let text = resp.text();
+                    let flat = text.replace(|c| c == '\r' || c == '\n', " ");
+                    if resp.has_error() {
+                        (false, format!("模组返回错误：{}", flat.trim()))
+                    } else if resp.contains("+CMGS:") || resp.ok() {
+                        (true, String::from("短信已提交"))
+                    } else {
+                        (false, format!("模组未确认短信提交：{}", flat.trim()))
+                    }
+                }
+                Ok(Err(e)) => (false, e),
+                Err(_) => (false, String::from("等待模组确认超时")),
+            };
+
+            if !ok {
+                // 模组可能仍停在「等待 PDU 数据」态：必须清掉，否则整条 AT 通道被卡死
+                if let Err(e) = client.cancel_data_entry().await {
+                    log_warn!("取消数据输入态失败: {}", e);
+                }
+                log_warn!("短信发送失败: {}", message);
+            }
+
+            let mut st = state.lock().await;
+            st.running = false;
+            st.ok = Some(ok);
+            st.message = Some(message.clone());
+            if ok {
+                st.blocked_until = None;
+                st.block_reason = None;
+            } else {
+                st.blocked_until = Some(std::time::Instant::now() + SMS_BLOCK_COOLDOWN);
+                st.block_reason = Some(message);
+            }
+        });
+
+        Some(AtCommandResponse {
+            success: true,
+            data: Some(String::from("SMS_ACCEPTED")),
+            error: None,
+        })
     }
 
     async fn handle_schedule_command(&self, command: &str) -> Option<AtCommandResponse> {
