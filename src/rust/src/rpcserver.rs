@@ -582,7 +582,9 @@ fn is_sms_data_command(command: &str) -> bool {
         }
     }
     // 两步下发的第二步：整行都是十六进制字符（可能以 0x1A 结束后跟换行）。
-    let payload = head.trim_end_matches(['\r', '\n', '\u{1a}']).trim();
+    let payload = head
+        .trim_end_matches(|c| c == '\r' || c == '\n' || c == '\u{1a}')
+        .trim();
     !payload.is_empty()
         && payload.len() >= 20
         && payload.bytes().all(|b| b.is_ascii_hexdigit())
