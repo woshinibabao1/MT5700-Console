@@ -213,20 +213,66 @@ ATClient.prototype.handlePush = function (ev) {
  * 把「模组无响应」和「后端还在排队」混为一谈。故前端放宽到 14s，
  * 留出网络与 rpcd 代理余量，让用户看到后端给出的准确原因。
  */
-ATClient.prototype.sendCommand = function (command) {
+/*
+ * 判断一条命令是否「可安全重试」。
+ *
+ * 本模组偶发单次 ERROR / 无响应（同一命令再发一次往往就正常），因此读类命令
+ * 失败后自动重试若干次；写类命令绝不重试——重复下发可能造成重复操作
+ * （例如短信重复发送、锁频命令重复生效）。
+ */
+function isRetryableRead(command) {
+	var cmd = String(command == null ? '' : command).trim();
+	if (!cmd) return false;
+	if (cmd === 'AT' || cmd === 'ATI') return true;
+	if (cmd.charAt(cmd.length - 1) === '?') return true;
+	// 少数查询命令不带 '?'，单独放行
+	if (cmd === 'AT+CSQ' || cmd === 'AT^MONSC' || cmd === 'AT^MONNC' ||
+		cmd === 'AT^MONSSC' || cmd === 'AT^DSFLOWQRY') return true;
+	return false;
+}
+
+/* 模组把错误当普通文本返回时的判定（ERROR / +CME ERROR / +CMS ERROR） */
+function isErrorText(data) {
+	if (data == null) return false;
+	var txt = String(data);
+	return /(^|[\s\r\n])(ERROR|\+CME ERROR|\+CMS ERROR)/i.test(txt);
+}
+
+function delayMs(ms) {
+	return new Promise(function (resolve) { setTimeout(resolve, ms); });
+}
+
+ATClient.prototype.sendCommand = function (command, opts) {
 	var self = this;
+	var opt = opts || {};
+	var maxAttempts = opt.attempts != null
+		? opt.attempts
+		: (isRetryableRead(command) ? 3 : 1);
+
 	this.commandQueue = this.commandQueue.then(function () {
-		if (!self.connected) return { success: false, error: '未连接到调制解调器' };
-		return withTimeout(rpcAt(command), self.commandTimeout,
-			'命令执行超时（模组可能正忙或正在重连，请稍后重试）').then(function (resp) {
-			resp = resp || {};
-			if (resp.success === false) {
-				return { success: false, error: resp.error || '命令执行失败' };
-			}
-			return { success: true, data: resp.data };
-		}).catch(function (err) {
-			return { success: false, error: (err && err.message) || '命令执行失败' };
-		});
+		var attempt = 0;
+		var attemptOnce = function () {
+			attempt++;
+			if (!self.connected) return { success: false, error: '未连接到调制解调器' };
+			return withTimeout(rpcAt(command), self.commandTimeout,
+				'命令执行超时（模组可能正忙或正在重连，请稍后重试）').then(function (resp) {
+				resp = resp || {};
+				if (resp.success === false || isErrorText(resp.data)) {
+					if (attempt < maxAttempts) {
+						return delayMs(200 * attempt).then(attemptOnce);
+					}
+					return { success: false, error: resp.error || '命令执行失败' };
+				}
+				return { success: true, data: resp.data };
+			}).catch(function (err) {
+				var msg = (err && err.message) || '命令执行失败';
+				if (attempt < maxAttempts) {
+					return delayMs(200 * attempt).then(attemptOnce);
+				}
+				return { success: false, error: msg };
+			});
+		};
+		return attemptOnce();
 	});
 	return this.commandQueue;
 };
