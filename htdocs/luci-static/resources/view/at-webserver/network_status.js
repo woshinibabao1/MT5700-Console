@@ -170,7 +170,42 @@ return L.view.extend({
 
 		function renderCarriers() {
 			carrierBox.innerHTML = '';
-			var rows = (state.carriers || []).map(function (c) {
+			var list = state.carriers || [];
+
+			/*
+			 * 载波聚合语义（参考 luci-app-mt5700m 的 CA 模型）：
+			 *   count  = ^HFREQINFO 上报的载波数（手册 13.16：NR 多 CC，最多 4 个）
+			 *   caActive = 载波数 > 1，即真正的载波聚合
+			 *   dcActive = ^LENDC? 报 EN-DC 双连接已建立
+			 * 三者分开表达，避免把「EN-DC 双连接」与「NR 载波聚合」混为一谈。
+			 */
+			var count = list.length;
+			var caActive = count > 1;
+			var endc = state.diag && state.diag.endc;
+			var dcActive = !!(endc && endc.established);
+			var badge = !count ? '不可用'
+				: caActive ? (count + 'CA 聚合中')
+				: dcActive ? 'EN-DC 双连接'
+				: '单载波';
+			var headline = !count ? '—'
+				: caActive ? (count + 'CA')
+				: dcActive ? (endc.mode || 'EN-DC')
+				: (list[0].band != null ? AtWs.bandName(list[0].kind || list[0].sysMode, list[0].band) : '单载波');
+
+			var head = E('div', { 'class': 'mt5700-carrier-head' });
+			head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (caActive || dcActive ? ' is-on' : '') }, badge));
+			head.appendChild(E('span', { 'class': 'mt5700-carrier-headline' }, headline));
+			head.appendChild(E('span', { 'class': 'mt5700-hint' },
+				'载波数取自 ^HFREQINFO（NR 多 CC 上报）；载波聚合需在 RRC 连接态（有数据业务）才会激活'));
+			carrierBox.appendChild(head);
+
+			if (!count) {
+				carrierBox.appendChild(E('div', { 'class': 'mt5700-hint' }, '未读到载波信息。'));
+				renderSecondary();
+				return;
+			}
+
+			var rows = list.map(function (c) {
 				var kind = c.kind || c.sysMode || '—';
 				return [
 					kind,
@@ -197,9 +232,17 @@ return L.view.extend({
 			secondaryBox.innerHTML = '';
 			var nr = state.secondaryNR || [];
 			var lte = state.secondaryLTE || [];
-			if (!nr.length && !lte.length) {
+			var hasSecondarySig = nr.length > 0 || lte.length > 0;
+			/*
+			 * 载波列表的唯一可靠来源是 ^HFREQINFO（手册 13.16：NR 支持多 CC 上报，
+			 * 每载波 7 个字段 <band>,<dl_fcn>,<dl_freq>,<dl_bw>,<ul_fcn>,<ul_freq>,<ul_bw>，
+			 * 最多 4 个载波）。而 ^MONSSC 在 NSA 未建立时回 NONE，
+			 * ^CASCELLINFO 在部分固件（实测 V200R001C20B025）直接回 ERROR。
+			 * 所以这里**不能**在没有辅载波信号数据时整段隐藏，否则多载波也看不到。
+			 */
+			if (!state.carriers.length) {
 				secondaryBox.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'未查询到辅载波（非 NSA / 未配置 CA 时 ^MONSSC 与 ^CASCELLINFO 正常失败，属预期情况）'));
+					'未读到载波信息（AT^HFREQINFO? 无有效数据）。'));
 				return;
 			}
 			// 按下行频点把信号质量对到 ^HFREQINFO 载波上
@@ -236,6 +279,13 @@ return L.view.extend({
 				rows,
 				{ striped: true }
 			));
+			if (!hasSecondarySig) {
+				secondaryBox.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'当前 ^HFREQINFO 上报 ' + state.carriers.length + ' 个载波（判定单/双载波的依据）。' +
+					'本固件未提供「按载波」的信号质量：^MONSSC 返回 ' + (state.monsscRaw || 'NONE') +
+					'，^CASCELLINFO 不被支持，故辅载波信号列显示「—」。' +
+					'载波聚合仅在 RRC 连接态（有数据业务时）才会激活，空闲态通常只报主载波。'));
+			}
 			// 没能对上任何载波的辅小区单独列出，不丢数据
 			if (orphan.nr.length || orphan.lte.length) {
 				secondaryBox.appendChild(E('div', { 'class': 'mt5700-hint' },
@@ -267,17 +317,21 @@ return L.view.extend({
 				else endcTag = '支持但未建立';
 			}
 			var regVal = d.reg ? (d.reg.statText + (d.reg.act ? ' · ' + d.reg.act : '')) : '未注册 5GC';
-			var txVal = d.tx ? (dash(d.tx.pusch, ' dBm') + ' / ' + dash(d.tx.pucch, ' dBm')) : '—';
-			var txVal2 = d.tx ? (dash(d.tx.srs, ' dBm') + ' / ' + dash(d.tx.prach, ' dBm')) : '—';
 			var rows = [
 				['ENDC 双连接', endcTag],
 				['5G 核心网注册', regVal],
 				['TAC / 小区', d.reg && d.reg.tac ? (d.reg.tac + ' / ' + (d.reg.ci || '—')) : '—'],
-				['网络切片', d.reg && d.reg.nssai ? d.reg.nssai : '—'],
-				['LTE PUSCH / PUCCH', txVal],
-				['LTE SRS / PRACH', txVal2]
+				['网络切片', d.reg && d.reg.nssai ? d.reg.nssai : '—']
 			];
-			if (d.tx && d.tx.total != null) rows.push(['2G/3G 总功率', dash(d.tx.total, ' dBm')]);
+			/*
+			 * AT^TXPOWER? 在部分固件不被支持（实测 V200R001C20B025 连续 6 次全回 ERROR）。
+			 * 拿不到数据时直接隐藏这几行，而不是显示一排「—」占版面。
+			 */
+			if (d.tx) {
+				rows.push(['LTE PUSCH / PUCCH', dash(d.tx.pusch, ' dBm') + ' / ' + dash(d.tx.pucch, ' dBm')]);
+				rows.push(['LTE SRS / PRACH', dash(d.tx.srs, ' dBm') + ' / ' + dash(d.tx.prach, ' dBm')]);
+				if (d.tx.total != null) rows.push(['2G/3G 总功率', dash(d.tx.total, ' dBm')]);
+			}
 			(d.nrTx || []).forEach(function (c, i) {
 				rows.push(['NR CC' + (i + 1) + ' PUSCH', dash(c.pusch, ' dBm') + (c.freq ? ' · ' + (c.freq / 1000).toFixed(1) + ' MHz' : '')]);
 			});
@@ -642,6 +696,9 @@ return L.view.extend({
 
 		function loadSecondary() {
 			return AtWs.client.sendCommand('AT^MONSSC').then(function (monssc) {
+				state.monsscRaw = monssc.success && monssc.data
+					? (String(monssc.data).match(/\^MONSSC:\s*([^\r\n]*)/) || [null, 'NONE'])[1].trim()
+					: 'NONE';
 				state.secondaryNR = monssc.success && monssc.data ? Parse.parseMonsscAll(String(monssc.data)) : [];
 				return AtWs.client.sendCommand('AT^CASCELLINFO?');
 			}).then(function (cascell) {
