@@ -21,7 +21,10 @@ PKG_PROVIDES:=at-webserver-rust
 define Build/Prepare
 	$(call Build/Prepare/Default)
 	chmod 0755 $(PKG_BUILD_DIR)/root/etc/init.d/at-webserver 2>/dev/null || true
+	chmod 0755 $(PKG_BUILD_DIR)/root/etc/init.d/mt5700-watchdog 2>/dev/null || true
 	chmod 0755 $(PKG_BUILD_DIR)/root/etc/uci-defaults/at-webserver 2>/dev/null || true
+	chmod 0755 $(PKG_BUILD_DIR)/root/usr/share/mt5700/watchdog.sh 2>/dev/null || true
+	chmod 0755 $(PKG_BUILD_DIR)/root/etc/hotplug.d/net/99-mt5700-renew 2>/dev/null || true
 endef
 
 include $(TOPDIR)/feeds/luci/luci.mk

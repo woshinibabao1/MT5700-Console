@@ -935,29 +935,70 @@ return L.view.extend({
 		rateTimer = setInterval(sampleRate, 1000);
 		sampleRate();
 
-		/* ---------- 刷新 ---------- */
+		/* ---------- 刷新（分级） ----------
+		 *
+		 * 串口是独占资源，实测「每 5 秒把所有项目轮一遍」会稳定产生 ~5.5 次 AT 往返/秒，
+		 * 已接近 115200 波特率下串口的吞吐上限，既拖慢界面也让模组持续被打扰。
+		 * 因此按数据变化速度分档，只按需要快的项目走快档：
+		 *
+		 *   快档 5s  ：注册状态、实时流量、信号与载波
+		 *   慢档 30s ：运营商、签约速率(AMBR)、QCI、DHCP/IP、温度、MCS、
+		 *              辅载波查询、连接诊断(ENDC/5GC/发射功率/PDP)
+		 *   超慢 60s ：SIM 与设备信息（loadDeviceInfo 自带 60s 节流）
+		 *
+		 * 运营商 / 签约速率 / QCI 都是「会话级」静态值，注册成功后基本不变，
+		 * 放到快档纯属浪费串口往返，因此归入慢档。
+		 *
+		 * 另外 rpc.js 的只读缓存（2.5s TTL）会吃掉同一轮里重复的查询
+		 * （例如 ^HFREQINFO? 同时被「载波与聚合」和「SIM 与设备」用到）。
+		 */
+		var FAST_MS = 5000;
+		var SLOW_MS = 30000;
 
 		var refreshing = false;
-		function refreshAll() {
+		function refreshFast() {
 			if (refreshing) return Promise.resolve();
 			refreshing = true;
-			loadDeviceInfo();
 			var chain = Promise.resolve();
-			[getPSReg, getOperator, getAMBR, getQCI, getDHCP, getFlow, getTemp, getMCS, updateNetworkInfo, loadSecondary, loadDiagnostics]
+			[getPSReg, getFlow, updateNetworkInfo]
 				.forEach(function (fn) { chain = chain.then(fn); });
 			return chain.catch(function (err) {
-				console.warn('刷新失败', err);
+				console.warn('快速刷新失败', err);
 			}).then(function () { refreshing = false; });
+		}
+
+		var slowRefreshing = false;
+		function refreshSlow() {
+			if (slowRefreshing) return Promise.resolve();
+			slowRefreshing = true;
+			var chain = Promise.resolve();
+			[getOperator, getAMBR, getQCI, getDHCP, getTemp, getMCS, loadSecondary, loadDiagnostics]
+				.forEach(function (fn) { chain = chain.then(fn); });
+			return chain.catch(function (err) {
+				console.warn('慢速刷新失败', err);
+			}).then(function () { slowRefreshing = false; });
+		}
+
+		/* 手动点「刷新」时全量拉一次（含设备信息，绕过 60s 节流） */
+		function refreshAll() {
+			loadDeviceInfo(true);
+			return refreshFast().then(refreshSlow);
 		}
 
 		/* ---------- 自动刷新 ---------- */
 
-		var timer = null;
-		var ar = Ui.autoRefresh(function (enabled, interval) {
+		var timer = null, slowTimer = null;
+		function resetTimers(enabled, interval) {
 			if (timer) { clearInterval(timer); timer = null; }
-			if (enabled) timer = setInterval(refreshAll, interval * 1000);
-		});
-		timer = setInterval(refreshAll, 5000);
+			if (slowTimer) { clearInterval(slowTimer); slowTimer = null; }
+			if (!enabled) return;
+			var fast = (interval || 5) * 1000;
+			timer = setInterval(refreshFast, fast);
+			/* 慢档跟随快档倍数，但不少于 30 秒，避免小间隔下把慢档也拉成高频 */
+			slowTimer = setInterval(refreshSlow, Math.max(SLOW_MS, fast * 6));
+		}
+		var ar = Ui.autoRefresh(resetTimers);
+		resetTimers(true, 5);
 
 		var extra = Mt5700.panelActions(
 			ar.el,
@@ -994,8 +1035,12 @@ return L.view.extend({
 		});
 
 		self._dispose = function () {
+			/* 离开页面必须清干净：三个定时器 + 只读缓存，否则反复进出会叠加倍轮询 */
 			if (timer) clearInterval(timer);
+			if (slowTimer) clearInterval(slowTimer);
 			if (rateTimer) clearInterval(rateTimer);
+			timer = slowTimer = rateTimer = null;
+			if (AtWs.client && AtWs.client.clearReadCache) AtWs.client.clearReadCache();
 		};
 
 		return page;

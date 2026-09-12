@@ -24,6 +24,16 @@ config at-webserver 'config'
 	option websocket_auth_key ''            # RPC 访问密钥（留空则不验证；LuCI 登录态由 rpcd 会话保证）
 	option cellscan_timeout '180'           # 一次 ^CELLSCAN 全网扫频允许运行的秒数（下限 10）
 
+	# 连接看门狗（默认关闭，避免未确认前自行改动网络）
+	# 解决的场景：模组 USB 重新枚举后 DHCP 租约未续期，路由器持有失效地址，
+	# 表现为「路由器能进但完全没网」，且默认网关 ARP 一直 INCOMPLETE。
+	option watch_enabled '0'                 # 1=启用看门狗
+	option watch_iface 'MT5700M'             # 受监控的网络接口
+	option watch_device 'eth2'               # 该接口对应的网口（模组 USB 网口）
+	option watch_interval '60'               # 检查间隔（秒，下限 15）
+	option watch_fail_threshold '3'          # 连续异常多少次后触发模组复位
+	option watch_reset_modem '0'             # 1=达阈值时复位模组协议栈（AT+CFUN=1,1）
+
 	# 通知配置
 	option wechat_webhook ''
 	option log_file '/tmp/at-notifications.log'

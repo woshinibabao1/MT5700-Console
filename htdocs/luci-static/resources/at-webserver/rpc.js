@@ -242,9 +242,66 @@ function delayMs(ms) {
 	return new Promise(function (resolve) { setTimeout(resolve, ms); });
 }
 
+/*
+ * 只读命令结果短时缓存
+ * ----------------------------------------------------------------------------
+ * 串口是独占资源，同一条只读查询被打两次（同一刷新周期内多个卡片各查一遍）
+ * 或页面短时间来回切换时，缓存能直接省掉整条 AT 往返。
+ *
+ * 只缓存「只读查询」——由 isRetryableRead() 判定（AT/ATI、以 ? 结尾、
+ * 以及少数不带 ? 的查询命令）。写命令、终端手动执行的命令一律不缓存。
+ *
+ * 默认 2500ms：比 5 秒的自动刷新略短，保证每轮刷新至少拿到一次新值，
+ * 又足以吃掉同一轮里重复的查询。调用方可用 { fresh: true } 强制绕过。
+ */
+const READ_CACHE_TTL = 2500;
+const READ_CACHE_MAX = 64;
+ATClient.prototype._readCache = null;
+
+ATClient.prototype._cacheGet = function (command) {
+	var c = this._readCache;
+	if (!c) return null;
+	var hit = c[command];
+	if (!hit) return null;
+	if (Date.now() - hit.t > READ_CACHE_TTL) {
+		delete c[command];
+		return null;
+	}
+	hit.hits = (hit.hits || 0) + 1;
+	return hit.value;
+};
+
+ATClient.prototype._cachePut = function (command, value) {
+	if (!value || value.success !== true) return;   /* 只缓存成功结果 */
+	if (!this._readCache) this._readCache = {};
+	var keys = Object.keys(this._readCache);
+	if (keys.length >= READ_CACHE_MAX) {
+		/* 简单淘汰：清掉最旧的一半，避免无限增长 */
+		keys.sort(function (a, b) { return this._readCache[a].t - this._readCache[b].t; }.bind(this));
+		for (var i = 0; i < keys.length / 2; i++) delete this._readCache[keys[i]];
+	}
+	this._readCache[command] = { t: Date.now(), value: value, hits: 0 };
+};
+
+ATClient.prototype.cacheStats = function () {
+	var c = this._readCache || {};
+	var n = 0, h = 0;
+	Object.keys(c).forEach(function (k) { n++; h += (c[k].hits || 0); });
+	return { entries: n, hits: h };
+};
+
+ATClient.prototype.clearReadCache = function () {
+	this._readCache = null;
+};
+
 ATClient.prototype.sendCommand = function (command, opts) {
 	var self = this;
 	var opt = opts || {};
+	var cacheable = !opt.fresh && isRetryableRead(command);
+	if (cacheable) {
+		var cached = this._cacheGet(command);
+		if (cached) return Promise.resolve(cached);
+	}
 	var maxAttempts = opt.attempts != null
 		? opt.attempts
 		: (isRetryableRead(command) ? 3 : 1);
@@ -274,7 +331,18 @@ ATClient.prototype.sendCommand = function (command, opts) {
 		};
 		return attemptOnce();
 	});
+	if (cacheable) {
+		return this.commandQueue.then(function (res) {
+			self._cachePut(command, res);
+			return res;
+		});
+	}
 	return this.commandQueue;
+};
+
+/* 写命令之后，之前的只读缓存很可能已经过期，主动清掉避免读到陈旧值 */
+ATClient.prototype.invalidateReadCache = function () {
+	this.clearReadCache();
 };
 
 ATClient.prototype.clearPendingCommands = function (err) {

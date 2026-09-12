@@ -1,0 +1,41 @@
+#!/bin/sh
+# ============================================================================
+# 模组网口重新注册时立即续约
+# ----------------------------------------------------------------------------
+# 背景（2026-09-13 实测的断网根因）：
+#   MT5700 模组 USB 重新枚举后，cdc_ncm 会重新注册 eth2（MAC 不变）。
+#   netifd 只看到「link up」，认为接口正常，不会重跑 DHCP
+#   —— 接口配了 force_link=1，而且 DHCP 租约长达 6 天（518400s）。
+#   可重枚举后模组改为直接下发运营商地址，路由器仍持有旧地址，
+#   导致默认网关在链路上根本不存在 → ARP 永远 INCOMPLETE → 静默断网。
+#
+# 本脚本在网口重新注册时主动续一次租约，把断网窗口从「直到被人工发现」
+# 缩短到几秒；看门狗（mt5700-watchdog）作为兜底继续轮询兜住其他情况。
+# ============================================================================
+
+[ "$ACTION" = "add" ] || exit 0
+[ "$INTERFACE" = "eth2" ] || exit 0
+
+# 防抖：60 秒内只处理一次，避免模组枚举抖动导致反复续约
+STAMP=/var/run/mt5700-renew.stamp
+now=$(date +%s)
+if [ -f "$STAMP" ]; then
+	last=$(cat "$STAMP" 2>/dev/null)
+	case "$last" in ''|*[!0-9]*) last=0;; esac
+	[ $((now - last)) -lt 60 ] && exit 0
+fi
+echo "$now" > "$STAMP"
+
+(
+	# 等模组把数据面准备好（USB 枚举完成后网口还需要一点时间）
+	sleep 6
+	iface=MT5700M
+	if ubus -S call network.interface."$iface" renew >/dev/null 2>&1; then
+		logger -t mt5700-hotplug "eth2 重新注册，已触发 $iface 续约"
+	else
+		ifdown "$iface" >/dev/null 2>&1
+		sleep 2
+		ifup "$iface" >/dev/null 2>&1
+		logger -t mt5700-hotplug "eth2 重新注册，renew 不可用，已重启 $iface"
+	fi
+) &
