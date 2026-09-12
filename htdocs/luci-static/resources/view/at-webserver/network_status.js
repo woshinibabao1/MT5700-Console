@@ -24,9 +24,35 @@ return L.view.extend({
 		var page = Mt5700.page('网络状态', '实时网络信息与信号质量');
 		var body = page._body;
 
-		var connBar = E('div');
-		body.appendChild(connBar);
-		Mt5700.renderConnectionBar(connBar);
+		/* ---------- 顶部状态条（页面唯一的"记忆点"）----------
+		 * 原来是三块竖着叠：连接状态卡 / 刷新工具条 / 各卡里的读数磁贴，要滚动才看得全。
+		 * 现在合成一条满宽状态条：
+		 *   上行：连接状态（左） + 自动刷新与「刷新」按钮（右）
+		 *   下行：7 项关键读数，横向铺满
+		 * 分块由 CSS 的 grid 行列指定，DOM 顺序不影响观感。
+		 */
+		var topbar = E('div', { 'class': 'mt5700-topbar' });
+		var topStatus = E('div', { 'class': 'mt5700-topbar-status' });
+		topbar.appendChild(topStatus);
+		Mt5700.renderConnectionBar(topStatus);
+
+		/* 读数带：元素一次建好，之后只改文字（不重建 DOM，避免每秒刷新时抖动） */
+		var strip = (function () {
+			var el = E('div', { 'class': 'mt5700-strip' });
+			var refs = {};
+			[['信号', 'sig'], ['运营商', 'op'], ['制式', 'mode'], ['载波', 'cc'],
+			 ['下行', 'down'], ['上行', 'up'], ['温度', 'temp']].forEach(function (it) {
+				var box = E('div', { 'class': 'mt5700-strip-item' });
+				var v = E('div', { 'class': 'mt5700-strip-value' }, '—');
+				box.appendChild(v);
+				box.appendChild(E('div', { 'class': 'mt5700-strip-label' }, it[0]));
+				el.appendChild(box);
+				refs[it[1]] = v;
+			});
+			return { el: el, refs: refs };
+		})();
+		topbar.appendChild(strip.el);
+		body.appendChild(topbar);
 
 		/* ---------- 面板骨架（按「一个主题一张卡片」组织，避免信息重叠） ---------- */
 
@@ -515,6 +541,27 @@ return L.view.extend({
 		 *   - renderSpeed() 连「实时速率」面板，取接口实时速率（字节/秒）
 		 * 早期版本两者共用一组变量，导致签约速率会盖掉实时速率、反之亦然。
 		 */
+		/* 刷新顶部读数带：只改文字，不重建节点 */
+		function renderStrip() {
+			var r = strip.refs, c = state.cell || {}, t = state.temps || {};
+			r.sig.textContent = c.signalPercent ? (c.signalPercent + '%')
+				: (c.rsrp != null ? c.rsrp + ' dBm' : '—');
+			r.op.textContent = state.operator || '—';
+			r.mode.textContent = c.sysMode || '—';
+			r.cc.textContent = (state.carriers && state.carriers.length)
+				? (state.carriers.length + ' 载波') : '—';
+			var d = splitSpeedUI(state.rtDown, 'bytes');
+			var u = splitSpeedUI(state.rtUp, 'bytes');
+			r.down.textContent = d.value + ' ' + d.unit;
+			r.up.textContent = u.value + ' ' + u.unit;
+			var mx = 0;
+			['sub3GPA', 'sub6GPA', 'mimoPa', 'tcxo', 'ap1', 'ap2', 'modem1'].forEach(function (k) {
+				var v = Number(t[k]) || 0;
+				if (v > mx) mx = v;
+			});
+			r.temp.textContent = mx ? (mx + ' ℃') : '—';
+		}
+
 		function renderSpeed() {
 			speedRow.innerHTML = '';
 			var d = splitSpeedUI(state.rtDown, 'bytes');
@@ -522,6 +569,7 @@ return L.view.extend({
 			speedRow.appendChild(Mt5700.speedBox('↓ 下行', d.value + ' ' + d.unit));
 			speedRow.appendChild(Mt5700.speedBox('↑ 上行', u.value + ' ' + u.unit));
 			renderChart();
+			renderStrip();
 		}
 
 		/*
@@ -1041,7 +1089,8 @@ return L.view.extend({
 			Mt5700.primaryButton('刷新', function () { refreshAll(); })
 		);
 		// 放到页面顶部（连接状态条之后），避免在页面末尾单独占一整行
-		body.insertBefore(extra, connBar.nextSibling);
+		/* 刷新控制并入状态条右上角，不再单独占一整行 */
+		topbar.insertBefore(extra, strip.el);
 
 		/* ---------- 初始化 ---------- */
 
