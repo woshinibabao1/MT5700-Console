@@ -30,6 +30,15 @@ const MAX_RPC_LINE: usize = 8192;
 const CELLSCAN_ABORT_TOKEN: &str = "abcd";
 const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// 短信数据命令（`AT+CMGS` / `AT+CMGW`）的应答预算。
+///
+/// 普通 AT 命令 2 秒足够，但短信要把 PDU 交给模组、再由模组提交到网络侧，
+/// 应答（`+CMGS: <mr>` / `OK` / `+CMS ERROR`）实测要好几秒。
+/// 沿用 2s 会在模组真正应答之前先返回「模组无响应」，前端据此判定发送失败，
+/// 但短信可能已经提交成功——表现为「提示发送失败，对方却收到了」。
+/// 这里给足预算，让失败与成功的判定都以模组真实应答为准。
+const SMS_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// 发给前端的命令应答。字段名与原实现严格一致。
 #[derive(Serialize)]
 pub struct AtCommandResponse {
@@ -305,14 +314,21 @@ impl RpcServer {
 
         let command = normalize_syscfgex(command);
 
+        // 短信数据命令（AT+CMGS / AT+CMGW）要等模组把消息提交到网络侧，
+        // 实测耗时远超普通命令的 2s 预算；沿用 COMMAND_TIMEOUT 会在模组真正
+        // 应答之前先判定「模组无响应」，前端据此报发送失败。
+        let cmd_timeout = if is_sms_data_command(&command) {
+            SMS_SEND_TIMEOUT
+        } else {
+            crate::atclient::COMMAND_TIMEOUT
+        };
+
         // 外层超时 = 排队预算 + 应答预算 + 余量。
         // 排队预算单独给足，避免初始化/重连期间用户的终端命令被外层提前掐断，
         // 从而出现「模组无响应」的假失败（终端页只有 ATI 有回复的根因）。
         let result = tokio::time::timeout(
-            crate::atclient::QUEUE_WAIT_TIMEOUT
-                + crate::atclient::COMMAND_TIMEOUT
-                + Duration::from_secs(3),
-            self.client.send_command(&self.ctx, &command, crate::atclient::COMMAND_TIMEOUT, None),
+            crate::atclient::QUEUE_WAIT_TIMEOUT + cmd_timeout + Duration::from_secs(3),
+            self.client.send_command(&self.ctx, &command, cmd_timeout, None),
         )
         .await;
 
@@ -552,6 +568,26 @@ pub fn err_response(msg: &str) -> AtCommandResponse {
 }
 
 /// 修补前端发来的 AT^SYSCFGEX：把频段参数重新加上引号，并补齐末尾两个空参数。
+/// 判断是否为「短信数据命令」：`AT+CMGS` / `AT+CMGW`。
+///
+/// 这两条命令在 PDU 模式下需要先把 PDU 数据交给模组，再由模组提交到网络侧，
+/// 应答耗时远大于普通命令，必须单独给足超时预算。
+/// 同时兼容两步下发：第二步只发一串十六进制 PDU 数据（不带 `AT` 前缀）。
+fn is_sms_data_command(command: &str) -> bool {
+    let head = command.trim_start();
+    if let Some(prefix) = head.get(..7) {
+        let upper = prefix.to_ascii_uppercase();
+        if upper == "AT+CMGS" || upper == "AT+CMGW" {
+            return true;
+        }
+    }
+    // 两步下发的第二步：整行都是十六进制字符（可能以 0x1A 结束后跟换行）。
+    let payload = head.trim_end_matches(['\r', '\n', '\u{1a}']).trim();
+    !payload.is_empty()
+        && payload.len() >= 20
+        && payload.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn normalize_syscfgex(command: &str) -> String {
     if !command.starts_with("AT^SYSCFGEX") {
         return command.to_string();
