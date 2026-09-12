@@ -33,13 +33,34 @@ start_service() {
 	fi
 
 	# 先清残留进程，再立刻拉起 procd，避免防火墙/串口探测拖死 start。
-	# 严重警告：这里绝不能 `killall at-webserver`——init.d 被直接执行时（开机
+	# 严重警告一：这里绝不能 `killall at-webserver`——init.d 被直接执行时（开机
 	# /etc/rc.d/S*、`/etc/init.d/at-webserver start`、service 命令都是直接 exec 本脚本），
 	# 脚本自身的进程名(comm)就是 "at-webserver"，killall 会把脚本自己一起 SIGTERM，
 	# start 会在 procd_open_instance 之前被打断（exit 143），服务永远起不来。
-	# 旧实例交给 procd 处理（reload_service 已这么做），这里只清遗留二进制。
+	#
+	# 严重警告二：也绝不能 `killall at-webserver-rust`——它是 procd 托管的进程，
+	# 杀掉会被 procd 记成一次「崩溃」。respawn 的重试次数用尽后
+	# （默认 retry=5 / threshold=3600，即一小时内 5 次）procd 会永久放弃重启，
+	# 此时实例仍然注册在 procd 里但再也不会被拉起，表现为 LuCI 提示
+	# 「实例已在 procd 注册但进程未运行，可能启动失败或被反复重启」。
+	# 日志特征：procd: Instance at-webserver::instance1 in a crash loop ... crashes
+	# 旧实例一律交给 procd 处理（见下方实例状态自愈）。
 	killall -q at-server.py 2>/dev/null
-	killall -q "$PROG_NAME" 2>/dev/null
+
+	# procd 实例自愈：
+	#   已在运行       → 直接返回，避免重复拉起与竞态
+	#   已注册但未运行 → 说明处于崩溃循环的「放弃态」，先摘掉注册再重新登记，
+	#                    否则 start 只更新注册信息、进程永远不会被拉起
+	if ubus -q call service list '{"name":"at-webserver"}' >/dev/null 2>&1; then
+		if ubus -q call service list '{"name":"at-webserver"}' 2>/dev/null | grep -q '"running": true'; then
+			logger -t at-webserver "服务已在运行，跳过重复启动"
+			echo "AT WebServer is already running"
+			return 0
+		fi
+		logger -t at-webserver "发现已注册但未运行的 procd 实例（崩溃循环放弃态），先清除注册状态"
+		ubus call service delete '{"name":"at-webserver"}' >/dev/null 2>&1 || true
+		sleep 1
+	fi
 
 	logger -t at-webserver "配置 procd 实例..."
 	procd_open_instance
@@ -226,7 +247,9 @@ stop_service() {
 	logger -t at-webserver "停止服务..."
 	echo "Stopping AT WebServer..."
 
-	killall -q "$PROG_NAME" 2>/dev/null
+	# 不在此 killall：进程由 procd 托管，stop 时 procd 已按 term_timeout 发送终止信号；
+	# 额外 killall 会被记成一次「崩溃」，反复 stop/start 会攒满 respawn 重试次数，
+	# 最终让 procd 永久放弃重启（见 start_service 的「严重警告二」）。
 	rm -f /var/run/at-webserver-rust.pid
 
 	# 清理防火墙规则（幂等）
@@ -256,8 +279,8 @@ reload_service() {
 		ubus call service delete '{"name":"at-webserver"}' >/dev/null 2>&1 || true
 		sleep 1
 	fi
-	# 兜底清理残留（仅一次，不依赖 killall 反复拉起）
-	killall -q "$PROG_NAME" 2>/dev/null
+	# 不 killall：先摘掉 procd 注册，旧进程的退出就不会被记成「崩溃」，
+	# 也不会因为已处于崩溃循环放弃态而永远起不来。
 	rm -f /var/run/at-webserver-rust.pid
 	sleep 1
 

@@ -751,23 +751,64 @@ function parseMONSC(data) {
 	return d;
 }
 
-/* ---- HFREQINFO 载波 ---- */
+/* ---- HFREQINFO 载波 ----
+ *
+ * 手册 13.16.1 语法结构 / 13.16.3 参数说明：
+ *   ^HFREQINFO:<n>,<sysmode>,[<band>,<dl_fcn>,<dl_freq>,<dl_bw>,<ul_fcn>,<ul_freq>,<ul_bw>] ×1..4
+ *   <n>        0 禁止主动上报 / 1 使能主动上报  —— **不是载波数**
+ *   <sysmode>  1 GSM / 3 WCDMA（均不支持）/ 6 LTE / 7 NR
+ *   每载波固定 7 个字段，NR 最多 4 个载波；LTE 只报主小区
+ *   <dl_freq>/<ul_freq>：NR 单位 kHz，LTE 单位 100kHz；<dl_bw>/<ul_bw> 单位 kHz；无效值取 0
+ *   TDD（如 n41）下 <dl_fcn> 与 <ul_fcn> 相同；辅载波常只报下行，上行字段为 0
+ *
+ * 真实应答示例（本机 NR 双载波聚合）：
+ *   ^HFREQINFO: 0,7,41,528960,2644800,60000,528960,2644800,60000,41,513000,2565000,100000,0,0,1400
+ *   = n=0, sysmode=7(NR)，随后 14 个字段 = 2 个载波 × 7
+ *
+ * 注意：本命令**不含** RSRP/RSRQ/SINR。按载波的信号质量要另取 ^MONSSC / ^CASCELLINFO
+ * （本固件分别返回 NONE / ERROR，故按载波信号不可得）。
+ *
+ * 历史 bug：早期实现把应答当作「每行 8 字段（kind,band,channel,bandwidth,pci,rsrp,rsrq,sinr）」，
+ * 既没跳过头两个字段、也没按 7 字段分组，导致整行右移、载波数算成 1（误判单载波），
+ * 还把带宽/频点当信号原始值送进 convertRsrp/convertRsrq/convertSinr，
+ * 凭空造出 -44 dBm / -3 dB / 30 dB 这种假信号值。
+ */
+
+var HFREQ_SYS_MODE = { 1: 'GSM', 3: 'WCDMA', 6: 'LTE', 7: 'NR' };
 
 function parseHFREQINFO(data) {
 	var out = [];
 	var lines = extractATDataMultiline(data, '^HFREQINFO');
 	for (var i = 0; i < lines.length; i++) {
-		var p = lines[i].split(',');
-		out.push({
-			kind: p[0] ? p[0].replace(/"/g, '').trim() : '',
-			band: p[1] ? p[1].trim() : '',
-			channel: p[2] ? p[2].trim() : '',
-			bandwidth: p[3] ? p[3].trim() : '',
-			pci: p[4] ? parseInt(p[4], 10) : 0,
-			rsrp: p[5] !== undefined ? convertRsrp(parseInt(p[5], 10)) : null,
-			rsrq: p[6] !== undefined ? convertRsrq(parseInt(p[6], 10)) : null,
-			sinr: p[7] !== undefined ? convertSinr(parseInt(p[7], 10)) : null
-		});
+		var f = lines[i].split(',').map(function (s) { return s.trim().replace(/^"|"$/g, ''); });
+		if (f.length < 3) continue;
+		var sysMode = HFREQ_SYS_MODE[Number(f[1])] || ('模式 ' + f[1]);
+		var rest = f.slice(2).filter(function (x) { return x !== ''; });
+		var n = Math.floor(rest.length / 7);
+		for (var k = 0; k < n; k++) {
+			var c = rest.slice(k * 7, k * 7 + 7);
+			var int = function (v) { var x = parseInt(v, 10); return isFinite(x) ? x : 0; };
+			var band = int(c[0]);
+			var dlFreq = int(c[2]);
+			var ulFcn = int(c[4]);
+			var ulFreq = int(c[5]);
+			/* NR 频率单位 kHz，LTE 单位 100kHz */
+			var toMHz = function (v) { return v ? (sysMode === 'LTE' ? v / 10 : v / 1000) : null; };
+			out.push({
+				index: k,
+				kind: sysMode,
+				sysMode: sysMode,
+				band: band || null,
+				dlFcn: int(c[1]),
+				dlFreqMHz: toMHz(dlFreq),
+				dlBwKHz: int(c[3]) || null,
+				ulFcn: ulFcn,
+				ulFreqMHz: toMHz(ulFreq),
+				ulBwKHz: int(c[6]) || null,
+				/* 上行频点与带宽都为 0 → 该载波只报了下行（常见于辅载波 SCell） */
+				downlinkOnly: !ulFcn && !ulFreq
+			});
+		}
 	}
 	return out;
 }
