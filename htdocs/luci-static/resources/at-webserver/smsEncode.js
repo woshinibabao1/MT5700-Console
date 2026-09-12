@@ -80,18 +80,26 @@ var SmsEncode = (function () {
 		return octets.map(function (b) { return b.toString(16).padStart(2, '0'); }).join('').toUpperCase();
 	}
 
-	// SMSC 地址编码：+8613800755500 -> 91 683108700555F0
-	function encodeAddress(number) {
-		var digits = number.replace(/[^\d]/g, '');
+	// SMSC 地址编码：+8613800755500 -> 08 91 683108705505F0
+	// 目的地址编码：10086 -> 05 81 0180F6
+	//
+	// 两种地址的「长度」字段语义不同，必须分开计算（此前统一按字节数算，导致 PDU 错位）：
+	//   - SMSC（SCA）：长度 = 后续字节总数 = 地址字节数 + TOA 自身 1 字节
+	//   - 目的/源地址（TP-DA/TP-OA）：长度 = 号码的数字位数（3GPP 23.040 第 9.1.2.5 节）
+	// 例：+8613800755500 有 13 位数字 -> 半字节补齐后 7 字节 -> SCA 长度 8 (0x08)；
+	//     10086 有 5 位数字 -> TP-DA 长度 5 (0x05)，而非字节数 3。
+	function encodeAddress(number, isSmsc) {
+		var raw = number.replace(/[^\d]/g, '');
 		var hasPlus = number.indexOf('+') === 0;
-		if (!digits.length) return '';
+		if (!raw.length) return isSmsc ? '00' : '';
 		var tonNpi = hasPlus ? 0x91 : 0x81;
+		var digits = raw;
 		if (digits.length % 2 !== 0) digits += 'F';
 		var packed = '';
 		for (var i = 0; i < digits.length; i += 2) {
 			packed += digits[i + 1] + digits[i];
 		}
-		var len = digits.length / 2; // 半字节数/2
+		var len = isSmsc ? (digits.length / 2 + 1) : raw.length;
 		return len.toString(16).padStart(2, '0') + tonNpi.toString(16).padStart(2, '0') + packed.toUpperCase();
 	}
 
@@ -233,8 +241,8 @@ var SmsEncode = (function () {
 				encoding: part.encoding,
 				udhi: part.udhi
 			});
-			// SMSC 部分：有 smsc 时编码；没有则 00
-			var sca = opts.smsc ? encodeAddress(opts.smsc) : '00';
+			// SMSC 部分：有 smsc 时编码（长度含 TOA 字节）；没有则 00（使用 SIM 卡默认中心）
+			var sca = opts.smsc ? encodeAddress(opts.smsc, true) : '00';
 			var fullPdu = sca + pdu;
 			var scaOctets = sca.length / 2;
 			return { pdu: fullPdu, tpduLength: pdu.length / 2 };

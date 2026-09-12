@@ -319,13 +319,40 @@ return L.view.extend({
 					}
 					var formatted = target.replace(/^\+/, '');
 					var parts = SmsEncode.buildSubmitParts({ smsc: smsc, destination: formatted, message: content });
-					var chain2 = Promise.resolve();
-					for (var i = 0; i < parts.length; i++) {
-						chain2 = chain2.then(function (part) {
-							return AtWs.client.sendCommand('AT+CMGS=' + part.tpduLength + '\r' + part.pdu);
-						}.bind(null, parts[i]));
-					}
-					return chain2;
+				var chain2 = Promise.resolve();
+				for (var i = 0; i < parts.length; i++) {
+					chain2 = chain2.then(function (part) {
+						/*
+						 * 按鼎桥《MT5700M-CN 5G 系列模组 AT 命令手册》9.14 节，PDU 模式
+						 * 发送为一次性下发：
+						 *     AT+CMGS=<TPDU 字节数><CR><完整 PDU>
+						 * 模组依据 <length> 读够字节数后自动提交到网络侧，
+						 * 不需要、也不应追加 Ctrl-Z(0x1A) 结束符。
+						 * 返回 +CMGS: <mr> 与 OK 表示发送成功。
+						 */
+						return AtWs.client.sendCommand('AT+CMGS=' + part.tpduLength + '\r' + part.pdu)
+							.then(function (res) {
+								if (!res || res.success === false) {
+									throw new Error(String((res && res.error) || '发送失败'));
+								}
+								var txt = String(res.data == null ? '' : res.data);
+								if (/\bERROR\b/i.test(txt)) {
+									throw new Error('模组返回错误：' + txt.replace(/\s+/g, ' ').trim());
+								}
+								/*
+								 * 必须看到 +CMGS: <mr> 或 OK 才算提交成功。
+								 * 若模组只回显命令与数据输入提示符（形如 "AT+CMGS=15" 后跟 0x1A）
+								 * 而没有确认码，说明 PDU 数据未被接受——此时不能报「发送成功」，
+								 * 否则会出现「界面提示成功、短信其实没发出去」。
+								 */
+								if (!/(\+CMGS:|\bOK\b)/.test(txt)) {
+									throw new Error('模组未确认短信提交（无 +CMGS/OK 应答，短信未发出）');
+								}
+								return res;
+							});
+					}.bind(null, parts[i]));
+				}
+				return chain2;
 				});
 
 			chain.then(function (lastRes) {
