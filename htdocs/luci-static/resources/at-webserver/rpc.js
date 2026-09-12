@@ -592,11 +592,22 @@ function parseHCSQ(data) {
 	return result;
 }
 
+/* 从 CSS 变量取色，使信号配色随浅色 / 深色主题自动切换 */
+function cssColor(name, fallback) {
+	try {
+		var v = window.getComputedStyle(document.documentElement).getPropertyValue(name);
+		v = (v || '').trim();
+		return v || fallback;
+	} catch (e) {
+		return fallback;
+	}
+}
+
 function signalColor(rsrp) {
-	if (rsrp == null || rsrp >= 0) return '#8f8f8f';
-	if (rsrp >= -90) return '#2e7d32';
-	if (rsrp >= -105) return '#f9a825';
-	return '#c62828';
+	if (rsrp == null || rsrp >= 0) return cssColor('--mt5700-text-muted', '#8a93a0');
+	if (rsrp >= -90) return cssColor('--mt5700-sig-exc', '#0c7a54');
+	if (rsrp >= -105) return cssColor('--mt5700-sig-fair', '#9a5c00');
+	return cssColor('--mt5700-sig-bad', '#c62828');
 }
 
 /* ---- PS 注册状态 ---- */

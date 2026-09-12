@@ -11,7 +11,7 @@
  */
 
 // 注入新样式
-var MT5700_CSS_VERSION = '2.0.2';
+var MT5700_CSS_VERSION = '3.0.0';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -114,8 +114,32 @@ var Mt5700 = (function () {
 
 	/* ================= 环形仪表 (Circular Gauge) ================= */
 
-	// 信号等级色 (绿→青→黄→橙→红)
-	var GAUGE_COLORS = { exc: '#10b981', good: '#06b6d4', fair: '#f59e0b', poor: '#f97316', bad: '#ef4444' };
+	/*
+	 * 信号等级色 (绿→青→琥珀→橙→红) 直接从 CSS 变量读取，
+	 * 这样仪表与图表会随浅色 / 深色主题自动切换：
+	 * 深色下若沿用浅色的深绿（#0c7a54 之类），在深底上对比度只有 3.7:1，几乎糊在一起。
+	 */
+	function cssColor(name, fallback) {
+		try {
+			var v = window.getComputedStyle(document.documentElement).getPropertyValue(name);
+			v = (v || '').trim();
+			return v || fallback;
+		} catch (e) {
+			return fallback;
+		}
+	}
+
+	var GAUGE_COLOR_VARS = {
+		exc: '--mt5700-sig-exc', good: '--mt5700-sig-good', fair: '--mt5700-sig-fair',
+		poor: '--mt5700-sig-poor', bad: '--mt5700-sig-bad'
+	};
+	var GAUGE_COLOR_FALLBACK = {
+		exc: '#0c7a54', good: '#0b7a70', fair: '#9a5c00', poor: '#c05621', bad: '#c62828'
+	};
+	function gaugeColor(level) {
+		var key = GAUGE_COLOR_VARS[level] ? level : 'fair';
+		return cssColor(GAUGE_COLOR_VARS[key], GAUGE_COLOR_FALLBACK[key]);
+	}
 	var GAUGE_CAPTIONS = { exc: '优秀', good: '良好', fair: '一般', poor: '较差', bad: '极差' };
 
 	/*
@@ -207,7 +231,7 @@ var Mt5700 = (function () {
 				}
 				valueEl.textContent = String(value);
 				var level = spec ? spec.level(value) : 'fair';
-				var color = GAUGE_COLORS[level] || GAUGE_COLORS.fair;
+				var color = gaugeColor(level);
 				var pct = 0;
 				if (spec) {
 					pct = (value - spec.min) / (spec.max - spec.min);
@@ -504,8 +528,9 @@ var Mt5700 = (function () {
 		var w = options.width || 600;
 		var h = options.height || 160;
 		var max = options.max || 1;
-		var downColor = options.downColor || '#3b82f6';
-		var upColor = options.upColor || '#10b981';
+		// 图表颜色同样跟随主题（深色下用更亮的蓝 / 青，否则深底上几乎看不见）
+		var downColor = options.downColor || cssColor('--mt5700-accent', '#2563eb');
+		var upColor = options.upColor || cssColor('--mt5700-sig-good', '#0b7a70');
 
 		// 外层容器（tooltip 需要 relative 定位与 L4 浮层）
 		var wrap = E('div', { style: 'position:relative;width:100%;height:100%;' });
@@ -546,7 +571,7 @@ var Mt5700 = (function () {
 			var gy = 10 + (h - 30) * i / gridCount;
 			svg.appendChild(svgEl('line', {
 				x1: 2, y1: gy, x2: w - 2, y2: gy,
-				stroke: 'rgba(127, 127, 127, 0.14)',
+				stroke: cssColor('--mt5700-border-strong', 'rgba(138, 147, 160, 0.4)'),
 				'stroke-width': 1
 			}));
 		}
