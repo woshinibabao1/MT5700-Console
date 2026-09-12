@@ -43,12 +43,12 @@
   --mt5700-radius-xl: 20px;
   --mt5700-radius-full: 9999px;
 
-  /* 间距 */
-  --mt5700-space-xs: 4px;
-  --mt5700-space-sm: 8px;
-  --mt5700-space-md: 16px;
-  --mt5700-space-lg: 24px;
-  --mt5700-space-xl: 32px;
+  /* 间距（随视口流式缩放：小屏紧凑、大屏舒展） */
+  --mt5700-space-xs: clamp(3px, 0.15vw + 2px, 6px);
+  --mt5700-space-sm: clamp(6px, 0.3vw + 4px, 12px);
+  --mt5700-space-md: clamp(11px, 0.55vw + 7px, 20px);
+  --mt5700-space-lg: clamp(16px, 0.85vw + 10px, 32px);
+  --mt5700-space-xl: clamp(22px, 1.2vw + 13px, 44px);
 
   /* 状态色 */
   --mt5700-accent: #3b82f6;
@@ -68,16 +68,16 @@
   --mt5700-sig-poor: #f97316;
   --mt5700-sig-bad: #ef4444;
 
-  /* 字体 */
+  /* 字体（流式字号：以视口宽度驱动，避免大屏上内容「小小的」） */
   --mt5700-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
   --mt5700-font-mono: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
-  --mt5700-font-size-xs: 12px;
-  --mt5700-font-size-sm: 13px;
-  --mt5700-font-size-base: 14px;
-  --mt5700-font-size-lg: 16px;
-  --mt5700-font-size-xl: 18px;
-  --mt5700-font-size-2xl: 22px;
-  --mt5700-font-size-3xl: 28px;
+  --mt5700-font-size-xs: clamp(11px, 0.45vw + 5.5px, 15px);
+  --mt5700-font-size-sm: clamp(12px, 0.5vw + 6px, 16px);
+  --mt5700-font-size-base: clamp(13px, 0.55vw + 6.5px, 18px);
+  --mt5700-font-size-lg: clamp(15px, 0.6vw + 7.5px, 21px);
+  --mt5700-font-size-xl: clamp(17px, 0.7vw + 8.5px, 24px);
+  --mt5700-font-size-2xl: clamp(20px, 0.95vw + 11px, 30px);
+  --mt5700-font-size-3xl: clamp(24px, 1.25vw + 13px, 38px);
 
   /* 动画 */
   --mt5700-transition-fast: 150ms ease;
@@ -144,9 +144,11 @@
   }
 }
 
-/* ---------- 页面容器 ---------- */
+/* ---------- 页面容器 ----------
+   宽度跟随 LuCI 内容区自适应：上限定得足够大，避免宽屏下两侧留白、看起来「小」。 */
 .mt5700-page {
-  max-width: 1400px;
+  width: 100%;
+  max-width: min(1800px, 100%);
   margin: 0 auto;
 }
 
@@ -238,7 +240,7 @@
 .mt5700-grid {
   display: grid;
   gap: var(--mt5700-space-lg);
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
 }
 
 .mt5700-grid-2 { grid-template-columns: repeat(2, 1fr); }
@@ -305,8 +307,8 @@
 
 .mt5700-metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  gap: var(--mt5700-space-md);
 }
 
 /* ==========================================================================
@@ -335,8 +337,9 @@
 
 .mt5700-gauge-dial {
   position: relative;
-  width: 120px;
-  height: 120px;
+  /* 仪表盘随视口等比缩放，宽屏下不显得小 */
+  width: clamp(112px, 2.6vw + 78px, 190px);
+  height: clamp(112px, 2.6vw + 78px, 190px);
   max-width: 100%;
 }
 
@@ -370,7 +373,7 @@
 }
 
 .mt5700-gauge-value {
-  font-size: 22px;
+  font-size: clamp(19px, 1vw + 14px, 32px);
   font-weight: 700;
   color: var(--mt5700-text);
   line-height: 1.1;
@@ -378,7 +381,7 @@
 }
 
 .mt5700-gauge-unit {
-  font-size: 11px;
+  font-size: clamp(10px, 0.4vw + 5px, 14px);
   color: var(--mt5700-text-muted);
 }
 
@@ -417,7 +420,7 @@
 .mt5700-chart {
   position: relative;
   width: 100%;
-  height: 170px;
+  height: clamp(150px, 9vw + 60px, 260px);
   background: var(--mt5700-glass-bg);
   border: 1px solid var(--mt5700-border);
   border-radius: var(--mt5700-radius-md);
@@ -1816,19 +1819,24 @@
 }
 
 /* ---------- 响应式 ---------- */
+/* 小屏：紧凑排布（尺寸下限由上面的 clamp() 统一保证，这里只调结构） */
 @media (max-width: 768px) {
   .mt5700-app { padding: var(--mt5700-space-md); }
   .mt5700-page-title { font-size: var(--mt5700-font-size-2xl); }
   .mt5700-card-body { padding: var(--mt5700-space-md); }
   .mt5700-grid { gap: var(--mt5700-space-md); }
-  .mt5700-metric-value { font-size: var(--mt5700-font-size-xl); }
-  .mt5700-gauge-dial { width: 100px; height: 100px; }
-  .mt5700-gauge-value { font-size: 19px; }
-  .mt5700-chart { height: 140px; }
   .mt5700-btn-group { width: 100%; }
   .mt5700-btn-group .mt5700-btn { flex: 1; }
   .at-status-card { flex-direction: row; flex-wrap: wrap; }
   .mt5700-modal { max-width: 100%; }
+}
+
+/* 宽屏（≥1600px）：充分利用横向空间，避免内容被挤在中间显得小 */
+@media (min-width: 1600px) {
+  .mt5700-app { padding: var(--mt5700-space-xl); }
+  .mt5700-grid { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+  .mt5700-grid-4 { grid-template-columns: repeat(4, 1fr); }
+  .mt5700-metrics { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
 }
 
 /* ---------- 工具类 ---------- */
