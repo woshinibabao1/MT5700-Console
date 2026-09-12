@@ -1,0 +1,43 @@
+#!/bin/sh /etc/rc.common
+# ============================================================================
+# MT5700 连接看门狗服务
+# ----------------------------------------------------------------------------
+# 常驻循环检查「接口是否 up」「默认网关邻居是否可达」，发现问题自动续约 DHCP；
+# 细节与故障背景见 /usr/share/mt5700/watchdog.sh 头部注释。
+#
+# 注意：不要用 killall 清理本服务托管的进程（会被 procd 记成崩溃，
+# respawn 重试用尽后永久不再拉起 —— 见 at-webserver init 脚本里的同类教训）。
+# ============================================================================
+
+START=98
+STOP=11
+
+USE_PROCD=1
+PROG=/usr/share/mt5700/watchdog.sh
+
+start_service() {
+	[ -x "$PROG" ] || { logger -t mt5700-watchdog "错误：找不到 $PROG"; return 1; }
+
+	procd_open_instance
+	procd_set_param command /bin/sh "$PROG" daemon
+	procd_set_param respawn 3600 5 10
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+
+	logger -t mt5700-watchdog "连接看门狗已启动"
+}
+
+stop_service() {
+	logger -t mt5700-watchdog "连接看门狗已停止"
+}
+
+reload_service() {
+	# 脚本每轮都会重新读 UCI，重载只需重启实例
+	stop
+	start
+}
+
+service_triggers() {
+	procd_add_reload_trigger "at-webserver"
+}

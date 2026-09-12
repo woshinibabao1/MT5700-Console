@@ -320,6 +320,37 @@ return L.view.extend({
 		var webhookInput = Mt5700.input('text', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx', '');
 		notifBody.appendChild(Mt5700.formGroup('企业微信 WebHook', webhookInput, '通知将推送到该 WebHook 地址'));
 
+		/* ---------- 连接看门狗 ---------- */
+		var wdCard = Mt5700.card('连接看门狗',
+			'模组掉线或 DHCP 租约失效时自动续约，避免「路由能进但完全没网」');
+		var wdBody = E('div');
+		wdCard._body.appendChild(wdBody);
+		body.appendChild(wdCard);
+
+		var wdSwitch = E('div', { 'class': 'mt5700-switch' });
+		var wdChk = E('input', { type: 'checkbox' });
+		wdSwitch.appendChild(wdChk);
+		wdBody.appendChild(Mt5700.formGroup('启用看门狗', wdSwitch,
+			'检查接口状态与默认网关的邻居可达性，异常时自动续约 DHCP'));
+
+		var wdIntervalInput = Mt5700.input('number', '60', '');
+		wdBody.appendChild(Mt5700.formGroup('检查间隔（秒）', wdIntervalInput, '下限 15 秒，默认 60'));
+
+		var wdThresholdInput = Mt5700.input('number', '3', '');
+		wdBody.appendChild(Mt5700.formGroup('连续异常阈值', wdThresholdInput,
+			'连续异常达到该次数后才触发下方的复位动作'));
+
+		var wdResetSwitch = E('div', { 'class': 'mt5700-switch' });
+		var wdResetChk = E('input', { type: 'checkbox' });
+		wdResetSwitch.appendChild(wdResetChk);
+		wdBody.appendChild(Mt5700.formGroup('达阈值时复位模组', wdResetSwitch,
+			'向模组下发 AT+CFUN=1,1 复位协议栈（最后手段，会短暂断网约 30 秒）'));
+
+		wdBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+			'看门狗每轮都会重新读取配置，保存后最多一个检查间隔即生效，无需重启服务。' +
+			'查看它的处置记录：SSH 执行 logread -e mt5700-watchdog，' +
+			'或查看日志文件 /tmp/at-notifications.log 里带 [watchdog] 的行。'));
+
 		/* ---------- 载入 UCI（单 section `config` + 扁平键，与 Rust/ucode 一致） ---------- */
 		var get = function (key, def) {
 			var v = L.uci.get('at-webserver', 'config', key);

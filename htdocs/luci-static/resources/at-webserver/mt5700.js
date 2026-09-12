@@ -11,7 +11,7 @@
  */
 
 // 注入新样式
-var MT5700_CSS_VERSION = '3.1.0';
+var MT5700_CSS_VERSION = '3.3.0';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');

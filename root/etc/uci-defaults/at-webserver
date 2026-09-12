@@ -9,4 +9,29 @@ uci -q get at-webserver.config >/dev/null || {
 # 确保日志目录存在
 mkdir -p /tmp
 
+# 老版本升级上来的配置里没有看门狗选项：补齐默认值（仅补缺失项，不覆盖用户设置）。
+# 看门狗默认**关闭**，需要用户在「服务配置 → 连接看门狗」里显式开启。
+for kv in \
+	watch_enabled=0 \
+	watch_iface=MT5700M \
+	watch_device=eth2 \
+	watch_interval=60 \
+	watch_fail_threshold=3 \
+	watch_reset_modem=0
+do
+	key=${kv%%=*}
+	val=${kv#*=}
+	uci -q get "at-webserver.config.$key" >/dev/null || uci -q set "at-webserver.config.$key=$val"
+done
+uci -q commit at-webserver
+
+# 关键脚本可执行（包管理器偶发丢失 +x）
+chmod 0755 /usr/share/mt5700/watchdog.sh 2>/dev/null
+chmod 0755 /etc/hotplug.d/net/99-mt5700-renew 2>/dev/null
+chmod 0755 /etc/init.d/mt5700-watchdog 2>/dev/null
+
+# 让 hotplug 与看门狗在本次安装后立即生效（无需重启）
+[ -x /etc/init.d/mt5700-watchdog ] && /etc/init.d/mt5700-watchdog enable 2>/dev/null
+[ -x /etc/init.d/mt5700-watchdog ] && /etc/init.d/mt5700-watchdog start 2>/dev/null
+
 exit 0

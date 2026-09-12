@@ -9,7 +9,7 @@ LUCI_DEPENDS:=
 LUCI_PKGARCH:=
 
 PKG_NAME:=luci-app-mt5700
-PKG_VERSION:=1.6.3
+PKG_VERSION:=1.6.4
 PKG_RELEASE:=1
 
 # 兼容旧版：已安装 at-webserver-rust 的系统升级到单包后，声明提供同名能力，
@@ -21,7 +21,10 @@ PKG_PROVIDES:=at-webserver-rust
 define Build/Prepare
 	$(call Build/Prepare/Default)
 	chmod 0755 $(PKG_BUILD_DIR)/root/etc/init.d/at-webserver 2>/dev/null || true
+	chmod 0755 $(PKG_BUILD_DIR)/root/etc/init.d/mt5700-watchdog 2>/dev/null || true
 	chmod 0755 $(PKG_BUILD_DIR)/root/etc/uci-defaults/at-webserver 2>/dev/null || true
+	chmod 0755 $(PKG_BUILD_DIR)/root/usr/share/mt5700/watchdog.sh 2>/dev/null || true
+	chmod 0755 $(PKG_BUILD_DIR)/root/etc/hotplug.d/net/99-mt5700-renew 2>/dev/null || true
 endef
 
 include $(TOPDIR)/feeds/luci/luci.mk
