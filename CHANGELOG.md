@@ -5,6 +5,45 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.6.2] - 2026-09-13
+
+### 修复 - 网络状态页整页崩溃（P0，严重）
+
+打开「网络状态」页面会直接报 `ReferenceError: renderConn is not defined`，内容全空白。
+
+根因：此前一次**脚本化编辑**在替换代码块时锚点跨越范围过大，把 `network_status.js`
+中一整块内容静默删除，并随 v1.6.0 一起发布。丢失内容包括：
+
+- **5 个函数**：`dash`、`renderConn`、`renderSignal`、`renderCarriers`、`renderSecondary`
+- **`render()` 内几乎所有卡片骨架声明**：`carrierCard/carrierBox`、
+  `secondaryCard/secondaryBox`、`diagCard`、`speedCard`、`historyCard`、
+  `flowCard`、`tempCard`、`dhcpCard`、`mcsCard`
+- `var state = {...}`、`var history = []`、`HISTORY_POINTS`、`var sigGauges`
+- 设备卡片的 `var devCard` / `var devBody`
+
+已按最后一个完好版本重建该文件，并把此前有意的改动（SIM 与设备卡片、
+载波聚合标签、辅载波渲染修正等）合并回位。
+
+### 变更 - 小区标识改为十进制显示
+
+「连接状态」中的 `TAC / 小区` 原先直接显示 `AT+C5GREG?` 上报的十六进制字符串
+（实测如 `14225C` / `0000000C027F5065`），不便与运营商工参对照，
+现统一转换为十进制显示；超出 JS 安全整数范围的超长值原样保留。
+
+### 验证
+
+- **真实浏览器（CDP）逐页验证**：12/12 页面 **0 个 JS 异常**；
+  网络状态页渲染出 12 张卡片、23 个指标、6 张表格
+- **静态审计**：语法、被误删符号（与改动前基线比对）、跨模块 API、逐视图 render 全绿
+- **性能实测**：路由器 loadavg 0.14 → 0.15，后端 `at-webserver-rust` RSS 基本不变，
+  确认本次修复未引入性能退化
+
+### 工程改进
+
+- 新增改动验收门（skill `luci-app-verify-gate`）：语法 / 误删符号 / 跨模块 API /
+  逐视图 render / 真实浏览器逐页 / 性能实测，六项全绿方可提交
+- 该验收门已用**已知缺陷反向验证**（能准确报出 `renderConn is not defined`）
+
 ## [1.6.1] - 2026-09-13
 
 ### 优化 - SIM 卡状态标签按手册语义写明确
