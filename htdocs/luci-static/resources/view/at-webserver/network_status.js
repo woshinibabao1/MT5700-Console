@@ -72,6 +72,13 @@ return L.view.extend({
 		devCard._body.appendChild(tempGrid);
 		body.appendChild(devCard);
 
+		/* 顺序与配对（与原版顺序一致，也让宽屏双列的两列高度接近）：
+		     信号质量（满宽）
+		     连接状态 | SIM 与设备
+		     载波与聚合 | 速率与流量
+		   原先 SIM 与设备排在最后，双列时右侧会空出一大片。 */
+		body.insertBefore(devCard, carrierCard);
+
 		/* ---------- 状态 ---------- */
 
 		var state = {
