@@ -14,7 +14,7 @@
 	--at-space-sm: clamp(6px, 0.3vw + 4px, 12px);
 	--at-space-md: clamp(11px, 0.55vw + 7px, 20px);
 }
-.at-page-head { margin-bottom: 14px; }
+.at-page-head { margin-bottom: 8px; }
 .at-page-title { margin: 0 0 4px; font-size: var(--at-fs-xl); font-weight: 600; }
 .at-page-subtitle { color: #888; font-size: var(--at-fs-base); }
 .at-page-body { }
@@ -31,19 +31,21 @@
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: 10px 14px;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 6px 10px;
 	border-bottom: 1px solid #f0f2f5;
 	background: #fafbfc;
 }
 .at-panel-title { margin: 0; font-size: var(--at-fs-lg); font-weight: 600; }
 .at-panel-hint { color: #999; font-size: var(--at-fs-sm); }
 .at-panel-extra { font-size: var(--at-fs-sm); color: #666; }
-.at-panel-body { padding: 12px 14px; }
-.at-panel-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.at-panel-body { padding: 8px 10px; }
+.at-panel-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
 
 /* ---------- 字段 ---------- */
-.at-field { display: flex; align-items: flex-start; margin-bottom: 10px; }
-.at-field-label { flex: 0 0 clamp(110px, 11vw, 190px); padding-top: 6px; font-weight: 500; color: #333; }
+.at-field { display: flex; align-items: flex-start; margin-bottom: 6px; }
+.at-field-label { flex: 0 0 clamp(96px, 10vw, 170px); padding-top: 4px; font-weight: 500; color: #333; }
 .at-field-control { flex: 1 1 auto; }
 /* 输入控件覆盖层：表单控件保留了 cbi-input-* 类名，部分视图（dial.js 等）按类名查找控件，
    不能改类名；此处以 .at-field-control 作用域统一覆盖主题对 input/select 的默认外观，
@@ -88,7 +90,7 @@
 
 /* ---------- 键值表 ---------- */
 .at-kv { width: 100%; border-collapse: collapse; }
-.at-kv td { padding: 6px 10px; border-bottom: 1px solid #f4f5f7; font-size: var(--at-fs-base); }
+.at-kv td { padding: 4px 8px; border-bottom: 1px solid #f4f5f7; font-size: var(--at-fs-base); }
 .at-kv-label { color: #666; white-space: nowrap; width: 1%; }
 .at-kv-value { color: #222; word-break: break-all; }
 
@@ -109,12 +111,12 @@
 	color: #555;
 	font-weight: 600;
 	text-align: left;
-	padding: 8px 10px;
+	padding: 5px 8px;
 	border-bottom: 1px solid #e5e8ec;
 	white-space: nowrap;
 }
 .at-panel .at-table td {
-	padding: 8px 10px;
+	padding: 5px 8px;
 	border-bottom: 1px solid #f0f2f5;
 	vertical-align: middle;
 	word-break: break-all;
