@@ -14,7 +14,7 @@
 // uhttpd 给静态资源的 Last-Modified 为 1970，浏览器会长期复用缓存；LuCI 主题同样
 // 采用「css?v=版本」的做法（aurora: main.css?v=1.3.1）。样式版本随包版本递增，
 // 保证升级/修复样式后用户刷新即可生效。
-var AT_CSS_VERSION = '1.5.0';
+var AT_CSS_VERSION = '2.0.0';
 
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/at.css?v=' + AT_CSS_VERSION;
@@ -82,8 +82,8 @@ var Ui = (function () {
 
 	api.tag = function (text, color) {
 		var colors = {
-			green: '#1b6b2f', blue: '#1a5eab', orange: '#b36b00', red: '#b3261e',
-			grey: '#5f6368', violet: '#6a3fb5'
+			green: '#0e8a5f', blue: '#2563eb', orange: '#b26a00', red: '#c62828',
+			grey: '#6e7784', violet: '#6a3fb5'
 		};
 		var tag = E('span', {
 			'class': 'at-tag',
