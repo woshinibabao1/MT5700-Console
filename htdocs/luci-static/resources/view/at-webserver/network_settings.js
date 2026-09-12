@@ -30,7 +30,14 @@ return L.view.extend({
 			option5g: null
 		};
 
-		var lteCard = Mt5700.card('LTE 锁频', '锁定频段/频点/小区；应用时会自动切换飞行模式使配置生效');
+		/*
+		 * 控件归位：此前「扫描邻区」「自动刷新」「刷新锁频」被塞进同一行，
+		 * 三个不相关的操作挤在一起，窄屏会换行错位。
+		 * 现在：自动刷新+扫描邻区 放「邻区扫描」卡头部；刷新锁频状态 放「LTE 锁频」卡头部。
+		 */
+		var refreshLockBtn = Mt5700.button('刷新锁频状态', function () { fetchCurrent(); });
+
+		var lteCard = Mt5700.card('LTE 锁频', '锁定频段/频点/小区；应用时会自动切换飞行模式使配置生效', refreshLockBtn);
 		var lteBody = E('div');
 		lteCard._body.appendChild(lteBody);
 		body.appendChild(lteCard);
@@ -40,7 +47,17 @@ return L.view.extend({
 		nrCard._body.appendChild(nrBody);
 		body.appendChild(nrCard);
 
-		var neighCard = Mt5700.card('邻区扫描', 'AT^MONNC 查询当前邻区，可自动刷新');
+		var autoTimer = null;
+		var scanBtn = Mt5700.primaryButton('扫描邻区', scanNeighbors);
+		var ar = Ui.autoRefresh(function (enabled, interval) {
+			if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+			if (enabled) autoTimer = Ui.interval(interval * 1000, scanNeighbors);
+		});
+		var neighTools = E('div', { 'class': 'mt5700-toolbar' });
+		neighTools.appendChild(ar.el);
+		neighTools.appendChild(scanBtn);
+
+		var neighCard = Mt5700.card('邻区扫描', 'AT^MONNC 查询当前邻区，可自动刷新', neighTools);
 		var neighBody = E('div');
 		neighCard._body.appendChild(neighBody);
 		body.appendChild(neighCard);
@@ -491,17 +508,6 @@ return L.view.extend({
 				if (radioOff) Ui.setFlightMode(false).catch(function () {});
 			}).then(function () { busy = false; });
 		}
-
-		var autoTimer = null;
-		var scanBtn = Mt5700.primaryButton('扫描邻区', scanNeighbors);
-		var autoRow = Mt5700.panelActions(scanBtn);
-		var ar = Ui.autoRefresh(function (enabled, interval) {
-			if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
-			if (enabled) autoTimer = Ui.interval(interval * 1000, scanNeighbors);
-		});
-		autoRow.appendChild(ar.el);
-		autoRow.appendChild(Mt5700.primaryButton('刷新锁频', function () { fetchCurrent(); }));
-		body.appendChild(autoRow);
 
 		/* ---------- 初始化 ---------- */
 

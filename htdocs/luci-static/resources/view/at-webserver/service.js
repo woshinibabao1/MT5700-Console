@@ -276,6 +276,10 @@ return L.view.extend({
 		], '127.0.0.1');
 		wsBody.appendChild(Mt5700.formGroup('RPC 监听范围', wsBindSel, '对外监听时请务必设置认证密钥'));
 
+		var phoneNoteInput = Mt5700.input('text', '例如 13800138000', '');
+		wsBody.appendChild(Mt5700.formGroup('本机号码备注', phoneNoteInput,
+			'SIM 卡未写入 MSISDN 时（AT+CNUM 返回 not found），用于「网络状态 / 设备信息」显示'));
+
 		var authKeyInput = Mt5700.input('text', '留空表示无需认证', '');
 		wsBody.appendChild(Mt5700.formGroup('认证密钥', authKeyInput, 'ucode 代理自动附带该密钥；LuCI 登录态由 rpcd 会话保证'));
 
@@ -327,6 +331,7 @@ return L.view.extend({
 		fillSerialOptions(String(get('serial_port', 'auto')));
 		baudInput.value = String(get('serial_baudrate', '115200'));
 		wsPortInput.value = String(get('websocket_port', '8765'));
+		phoneNoteInput.value = String(get('phone_note', ''));
 		var bindCur = get('websocket_bind', '');
 		if (!bindCur) {
 			bindCur = get('websocket_allow_wan', '0') === '1' ? '0.0.0.0' : '127.0.0.1';
@@ -355,6 +360,7 @@ return L.view.extend({
 			};
 			set('connection_type', connTypeSel.value);
 			set('network_host', hostInput.value.trim() || '192.168.8.1');
+			set('phone_note', phoneNoteInput.value.trim());
 			set('network_port', String(parseInt(netPortInput.value, 10) || 20249));
 			var serialVal = serialSel.value;
 			if (serialVal === '__custom__') {

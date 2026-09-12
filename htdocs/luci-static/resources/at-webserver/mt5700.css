@@ -113,7 +113,7 @@
 .mt5700-app {
   position: relative;
   min-height: 100%;
-  padding: var(--mt5700-space-lg);
+  padding: var(--mt5700-space-md);
   font-family: var(--mt5700-font-sans);
   color: var(--mt5700-text);
   font-size: var(--mt5700-font-size-base);
@@ -156,12 +156,12 @@
 .mt5700-page-body {
   display: flex;
   flex-direction: column;
-  gap: var(--mt5700-space-lg);
+  gap: var(--mt5700-space-md);
   min-width: 0;
 }
 
 .mt5700-page-header {
-  margin-bottom: var(--mt5700-space-xl);
+  margin-bottom: var(--mt5700-space-lg);
 }
 
 .mt5700-page-title {
@@ -205,12 +205,12 @@
   gap: var(--mt5700-space-sm) var(--mt5700-space-md);
   /* 允许换行：标题过长或右上角带控件（自动刷新、按钮组）时不会挤出卡片外 */
   flex-wrap: wrap;
-  padding: var(--mt5700-space-md) var(--mt5700-space-lg) var(--mt5700-space-sm) var(--mt5700-space-lg);
+  padding: var(--mt5700-space-sm) var(--mt5700-space-md);
   border-bottom: 1px solid var(--mt5700-divider);
 }
 
 .mt5700-card-title {
-  font-size: var(--mt5700-font-size-lg);
+  font-size: var(--mt5700-font-size-base);
   font-weight: 600;
   color: var(--mt5700-text);
   margin: 0;
@@ -227,11 +227,11 @@
 }
 
 .mt5700-card-body {
-  padding: var(--mt5700-space-lg);
+  padding: var(--mt5700-space-md);
 }
 
 .mt5700-card-footer {
-  padding: var(--mt5700-space-md) var(--mt5700-space-lg);
+  padding: var(--mt5700-space-sm) var(--mt5700-space-md);
   border-top: 1px solid var(--mt5700-divider);
   background: rgba(0, 0, 0, 0.02);
 }
@@ -241,7 +241,7 @@
    ========================================================================== */
 .mt5700-grid {
   display: grid;
-  gap: var(--mt5700-space-lg);
+  gap: var(--mt5700-space-md);
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
 }
 
@@ -277,7 +277,7 @@
   border: 1px solid var(--mt5700-border);
   border-radius: var(--mt5700-radius-md);
   box-shadow: var(--mt5700-sh-1), var(--mt5700-sh-inset);
-  padding: var(--mt5700-space-md);
+  padding: var(--mt5700-space-sm) var(--mt5700-space-md);
   text-align: center;
   transition: transform var(--mt5700-transition-base), box-shadow var(--mt5700-transition-base);
 }
@@ -309,8 +309,8 @@
 
 .mt5700-metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
-  gap: var(--mt5700-space-md);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  gap: var(--mt5700-space-sm);
 }
 
 /* ==========================================================================
@@ -322,7 +322,7 @@
   flex-direction: column;
   align-items: center;
   gap: var(--mt5700-space-sm);
-  padding: var(--mt5700-space-md) var(--mt5700-space-sm);
+  padding: var(--mt5700-space-sm);
   background: var(--mt5700-glass-bg);
   backdrop-filter: var(--mt5700-glass);
   -webkit-backdrop-filter: var(--mt5700-glass);
