@@ -259,14 +259,12 @@ return L.view.extend({
 		connBody.appendChild(Mt5700.formGroup('波特率', baudInput));
 
 		/* ---------- RPC 服务 ---------- */
-		var wsCard = Mt5700.card('RPC 服务', 'LuCI 经 rpcd/ucode 代理连接后端使用的端口与密钥（仅回环监听，不对外暴露）');
+		var wsCard = Mt5700.card('RPC 服务', 'LuCI 经 rpcd/ucode 代理连接后端使用的端口、监听范围与密钥');
 		var wsBody = E('div');
 		wsCard._body.appendChild(wsBody);
 		body.appendChild(wsCard);
 
-		var wsHostInput = Mt5700.input('text', '留空表示本机', '');
-		wsBody.appendChild(Mt5700.formGroup('监听地址', wsHostInput, '保留兼容：RPC 固定监听 127.0.0.1，该键不再生效'));
-
+		/* 监听地址已移除：与下方「监听范围」功能重叠（RPC 只会是 127.0.0.1 或 0.0.0.0） */
 		var wsPortInput = Mt5700.input('number', '8765', '');
 		wsPortInput.min = 1;
 		wsPortInput.max = 65535;
@@ -328,7 +326,6 @@ return L.view.extend({
 		netPortInput.value = String(get('network_port', '20249'));
 		fillSerialOptions(String(get('serial_port', 'auto')));
 		baudInput.value = String(get('serial_baudrate', '115200'));
-		wsHostInput.value = '';
 		wsPortInput.value = String(get('websocket_port', '8765'));
 		var bindCur = get('websocket_bind', '');
 		if (!bindCur) {
