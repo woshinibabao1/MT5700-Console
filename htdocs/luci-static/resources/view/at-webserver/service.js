@@ -375,6 +375,11 @@ return L.view.extend({
 		notifySignal.input.checked = get('notify_signal', '1') === '1';
 		notifyMem.input.checked = get('notify_memory_full', '1') === '1';
 		webhookInput.value = String(get('wechat_webhook', ''));
+		/* 连接看门狗（此前这排控件已渲染但没接 UCI：既读不到当前配置，改了也存不下去） */
+		wdChk.checked = get('watch_enabled', '0') === '1';
+		wdIntervalInput.value = String(get('watch_interval', '60'));
+		wdThresholdInput.value = String(get('watch_fail_threshold', '3'));
+		wdResetChk.checked = get('watch_reset_modem', '1') === '1';
 
 		/* ---------- 保存（OpenWrt 标准「保存并应用」流程） ----------
 		 *
@@ -410,6 +415,11 @@ return L.view.extend({
 			set('notify_signal', notifySignal.input.checked ? '1' : '0');
 			set('notify_memory_full', notifyMem.input.checked ? '1' : '0');
 			set('wechat_webhook', webhookInput.value.trim());
+			/* 看门狗：间隔下限 15 秒（与 watchdog.sh 一致），阈值至少 1 次 */
+			set('watch_enabled', wdChk.checked ? '1' : '0');
+			set('watch_interval', String(Math.max(15, parseInt(wdIntervalInput.value, 10) || 60)));
+			set('watch_fail_threshold', String(Math.max(1, parseInt(wdThresholdInput.value, 10) || 3)));
+			set('watch_reset_modem', wdResetChk.checked ? '1' : '0');
 
 			// 写内存后立刻标脏，未点保存就离开会被浏览器拦截
 			AtWs.uci.markDirty();

@@ -250,7 +250,8 @@ return L.view.extend({
 
 			devBody.appendChild(Mt5700.table(['项目', '值'], [
 				['手机号', phone],
-				['电话本', st.pb || '—'],
+				/* 「电话本」原显示 "ON 0/2"（存储位置 ON、0 条记录、容量 2），既不直观
+				   也与上方 SIM 状态重复，已移除；电话本能否接入见该行提示。 */
 				['SIM 热插拔', st.hotplug == null ? '—' : (st.hotplug ? '已开启' : '已关闭')],
 				['IMSI', maskNum(st.imsi)],
 				['ICCID', maskNum(st.iccid)],
@@ -287,7 +288,7 @@ return L.view.extend({
 				{ label: '网络状态', value: state.networkStatus, color: 'info' },
 				{ label: '运营商', value: state.operator },
 				{ label: '网络模式', value: c.sysMode || '未知' },
-				{ label: '信号强度', value: c.signalPercent || '—' },
+				/* 信号强度不在此重复：上方环形仪表与顶部状态条已各有一处 */
 				{ label: 'APN', value: state.apn },
 				{ label: 'QCI', value: state.qci },
 				/* 连接状态面板展示的是签约速率（AT^DSAMBR），不是瞬时速率 */
@@ -299,8 +300,12 @@ return L.view.extend({
 			connBody.appendChild(grid);
 
 			connBody.appendChild(Mt5700.table(
-				['PLMN', 'LAC / 小区', 'PCI / 频点'],
-				[[(c.mcc || '—') + ' / ' + (c.mnc || '—'), (c.lac || '—') + ' / ' + (c.cid || '—'), (c.pci || '—') + ' / ' + (c.channel || '—')]]
+				['PLMN', 'TAC / 小区', 'PCI / 频点'],
+				[[(c.mcc || '—') + ' / ' + (c.mnc || '—'),
+					/* ^MONSSC 的 lac/cid 与频点同为十六进制字符串（实测 "C027F5065"、"14225C"），
+					   与 +C5GREG 的 tac/ci 同源；统一转十进制，便于与运营商工参对照。 */
+					(hexToDec(c.lac) || '—') + ' / ' + (hexToDec(c.cid) || '—'),
+					(c.pci || '—') + ' / ' + (hexToDec(c.channel) || '—')]]
 			));
 		}
 
@@ -466,9 +471,12 @@ return L.view.extend({
 			var rows = [
 				['ENDC 双连接', endcTag],
 				['5G 核心网注册', regVal],
-				['TAC / 小区', d.reg && d.reg.tac ? (hexToDec(d.reg.tac) + ' / ' + hexToDec(d.reg.ci || '—')) : '—'],
+				/* TAC / 小区 / PCI / 频点 已在「注册与运营商」表里给出，此处不再重复 */
 				['网络切片', d.reg && d.reg.nssai ? d.reg.nssai : '—']
-			];
+			].filter(function (r) {
+				/* 取不到数据的项直接不显示：一排「—」「不适用」只占版面、没有信息量 */
+				return r[1] && r[1] !== '—' && r[1] !== '不适用';
+			});
 			/*
 			 * AT^TXPOWER? 在部分固件不被支持（实测 V200R001C20B025 连续 6 次全回 ERROR）。
 			 * 拿不到数据时直接隐藏这几行，而不是显示一排「—」占版面。
@@ -558,13 +566,34 @@ return L.view.extend({
 		function renderTemp() {
 			tempGrid.innerHTML = '';
 			var t = state.temps;
-			[
+			var items = [
 				{ label: 'Sub3G PA', value: t.sub3GPA }, { label: 'Sub6G PA', value: t.sub6GPA },
 				{ label: 'MIMO PA', value: t.mimoPa }, { label: 'TCXO', value: t.tcxo },
 				{ label: 'AP1', value: t.ap1 }, { label: 'AP2', value: t.ap2 }, { label: 'Modem1', value: t.modem1 }
-			].forEach(function (it) {
-				tempGrid.appendChild(Mt5700.metric(it.label, it.value ? it.value + ' ℃' : '—'));
-			});
+			].filter(function (it) { return it.value; });
+
+			if (!items.length) {
+				tempGrid.appendChild(Mt5700.metric('温度', '—'));
+				return;
+			}
+			/*
+			 * 原来 7 路传感器各占一个磁贴，一屏全是温度数字，真正的信息只有「最高那一路」。
+			 * 现在：最高温单独成磁贴（判断是否过热看的就是它），其余收成一行细字备查。
+			 */
+			items.sort(function (a, b) { return Number(b.value) - Number(a.value); });
+			var top = Number(items[0].value);
+			tempGrid.appendChild(Mt5700.metric(
+				'最高温 · ' + items[0].label, items[0].value + ' ℃',
+				top >= 75 ? 'danger' : (top >= 65 ? 'warning' : null)));
+
+			if (items.length > 1) {
+				tempGrid.appendChild(E('div', {
+					'class': 'mt5700-hint',
+					'style': 'grid-column:1/-1;margin-top:6px'
+				}, '其他传感器：' + items.slice(1).map(function (it) {
+					return it.label + ' ' + it.value + ' ℃';
+				}).join(' · ')));
+			}
 		}
 
 		function renderDHCP() {
@@ -585,7 +614,7 @@ return L.view.extend({
 				rows.push(['IPv6 网关', v6.gateway]);
 				rows.push(['IPv6 DNS', v6.primaryDNS + ' / ' + v6.secondaryDNS]);
 			}
-			if (state.ipv6Cap) rows.push(['IPv6 能力', state.ipv6Cap.description]);
+			if (state.ipv6Cap) rows.push(['IPv6 支持', state.ipv6Cap.description]);
 			if (!rows.length) rows.push(['信息', '暂无数据']);
 			dhcpBox.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
 		}
