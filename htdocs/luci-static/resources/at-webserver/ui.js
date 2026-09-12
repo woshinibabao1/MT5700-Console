@@ -10,29 +10,14 @@
  * 保持与原 WebUI（Semi Design）一致的交互语义：加载态、错误提示、确认弹窗、自动刷新。
  */
 
-// 注入公共样式（at.css 与 ui.js 同目录）。
-// uhttpd 给静态资源的 Last-Modified 为 1970，浏览器会长期复用缓存；LuCI 主题同样
-// 采用「css?v=版本」的做法（aurora: main.css?v=1.3.1）。样式版本随包版本递增，
-// 保证升级/修复样式后用户刷新即可生效。
-var AT_CSS_VERSION = '2.0.0';
-
-(function () {
-	var cssPath = '/luci-static/resources/at-webserver/at.css?v=' + AT_CSS_VERSION;
-	var links = document.querySelectorAll('link[rel="stylesheet"]');
-	for (var i = 0; i < links.length; i++) {
-		if (links[i].getAttribute('href') === cssPath) return;
-	}
-	var link = document.createElement('link');
-	link.rel = 'stylesheet';
-	link.href = cssPath;
-	document.head.appendChild(link);
-})();
+/* 样式统一由 mt5700.css 提供（mt5700.js 负责注入），本文件不再注入任何样式表。
+   所有页面都会 require at-webserver/mt5700，因此 mt5700.css 一定已加载。 */
 
 var Ui = (function () {
 	var api = {};
 
 	api.panel = function (title, hint, extra) {
-		// 容器使用本项目自有的 at-panel 类：外观完全由 at.css 控制，与任意 LuCI 主题解耦。
+		// 容器使用本项目自有的 at-panel 类：外观完全由 mt5700.css 控制，与任意 LuCI 主题解耦。
 		var cbi = E('div', { 'class': 'at-panel' });
 		var head = E('div', { 'class': 'at-panel-head' });
 		var h = E('h3', { 'class': 'at-panel-title' }, title || '');
@@ -94,7 +79,7 @@ var Ui = (function () {
 	};
 
 	// 所有按钮都经由此卡口创建。cls 接收视图传入的 cbi-button-* 变体，
-	// 通过映射附加 at-btn-* 系列类：外观完全由 at.css 决定，不受 LuCI 主题影响。
+	// 通过映射附加 at-btn-* 系列类：外观完全由 mt5700.css 决定，不受 LuCI 主题影响。
 	api.button = function (label, cls, onClick) {
 		var map = {
 			'cbi-button-positive': 'at-btn-primary',

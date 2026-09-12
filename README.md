@@ -285,7 +285,7 @@ luci-app-mt5700/                     # 仓库根 = OpenWrt 单包
 ├── .github/workflows/build-openwrt.yml
 ├── scripts/sdk-build.sh             # Actions 容器内：SDK + zig + cargo + 校验
 ├── htdocs/luci-static/resources/
-│   ├── at-webserver/                # rpc.js · parse.js · ui.js · smsEncode.js · at.css
+│   ├── at-webserver/                # rpc.js · parse.js · ui.js · smsEncode.js · mt5700.css
 │   └── view/at-webserver/           # 12 个页面
 ├── po/                              # 中文翻译
 ├── root/
