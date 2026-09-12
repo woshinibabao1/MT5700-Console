@@ -288,8 +288,34 @@ return L.view.extend({
 				}
 			}).catch(function () { Mt5700.error('载波聚合设置失败'); });
 		});
-		nrBody.appendChild(Mt5700.formGroup('NR 载波聚合', caSwitch));
+		nrBody.appendChild(Mt5700.formGroup('NR 载波聚合', caSwitch,
+			'下发 AT^NRRCCAPCFG=3,<0|1>；读回用 AT^NRRCCAPQRY=3（已在本机验证可用）'));
 		var caChk = caSwitch.querySelector('input');
+
+		/*
+		 * 开关与状态是两件事：开关 = 是否允许聚合；
+		 * 实际聚合到几个载波看 ^HFREQINFO（NR 支持多 CC，最多 4 个）。
+		 */
+		var caStateBox = E('div', { 'class': 'mt5700-hint' }, '正在读取载波状态…');
+		nrBody.appendChild(caStateBox);
+
+		function refreshCaState() {
+			return send('AT^HFREQINFO?').then(function (res) {
+				var txt = atText(res) || '';
+				var m = txt.match(/HFREQINFO:\s*([\d,]+)/);
+				var cc = 0;
+				if (m) {
+					var parts = m[1].split(',').filter(function (x) { return x !== ''; });
+					cc = Math.max(0, Math.floor((parts.length - 2) / 7));
+				}
+				caStateBox.textContent = cc
+					? ('当前载波数：' + cc + ' 个' + (cc > 1 ? '（载波聚合已激活）'
+						: '（单载波；聚合只在 RRC 连接态、有数据业务时才激活）'))
+					: '当前未读到载波信息（AT^HFREQINFO? 无数据）';
+			}).catch(function () {
+				caStateBox.textContent = '读取载波状态失败';
+			});
+		}
 
 		var vonrSel = Mt5700.select([
 			{ label: '关闭', value: '0' },
@@ -335,7 +361,8 @@ return L.view.extend({
 					var m = atText(res).match(/\^NRRCCAPQRY:\s*5,(\d+),(\d+)/);
 					if (m) dssChk.checked = m[1] === '1';
 				}
-			}).catch(function () {});
+			}).catch(function () {
+			}).then(function () { return refreshCaState(); });
 		}
 
 		/* ================= 网络系统配置 SYSCFGEX ================= */

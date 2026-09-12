@@ -35,272 +35,166 @@ return L.view.extend({
 		connCard._body.appendChild(connBody);
 		body.appendChild(connCard);
 
-		var carrierCard = Mt5700.card('载波聚合', '当前所有激活载波');
-		var carrierBox = E('div');
-		carrierCard._body.appendChild(carrierBox);
-		body.appendChild(carrierCard);
+		/* ---------- SIM 与设备（全信息，单卡片） ---------- */
 
-		var secondaryCard = Mt5700.card('辅载波信号', '^MONSSC（NSA 辅站）与 ^CASCELLINFO（LTE CA）按下行频点对上 ^HFREQINFO 载波');
-		var secondaryBox = E('div');
-		secondaryCard._body.appendChild(secondaryBox);
-		body.appendChild(secondaryCard);
-
-		var diagCard = Mt5700.card('连接诊断', 'ENDC 双连接、5G 核心网注册、发射功率与 PDP 地址');
-		var diagBox = E('div');
-		diagCard._body.appendChild(diagBox);
-		body.appendChild(diagCard);
-
-		var speedCard = Mt5700.card('实时速率', '接口实时上下行速率，每秒采样一次');
-		var speedRow = E('div', { 'class': 'mt5700-speed-row' });
-		speedCard._body.appendChild(speedRow);
-		body.appendChild(speedCard);
-
-		var historyCard = Mt5700.card('速率曲线', '最近 60 个采样点');
-		var chart = E('div', { 'class': 'mt5700-chart' });
-		historyCard._body.appendChild(chart);
-		body.appendChild(historyCard);
-
-		var flowCard = Mt5700.card('流量统计', '上行/下行累计流量与时长');
-		var flowGrid = E('div', { 'class': 'mt5700-metrics' });
-		flowCard._body.appendChild(flowGrid);
-		body.appendChild(flowCard);
-
-		var tempCard = Mt5700.card('模组温度', '各芯片温度，单位 ℃');
-		var tempGrid = E('div', { 'class': 'mt5700-metrics' });
-		tempCard._body.appendChild(tempGrid);
-		body.appendChild(tempCard);
-
-		var dhcpCard = Mt5700.card('IP 与 DNS', 'DHCP 分配与 IPv6 能力');
-		var dhcpBox = E('div');
-		dhcpCard._body.appendChild(dhcpBox);
-		body.appendChild(dhcpCard);
-
-		var mcsCard = Mt5700.card('调制方式', '上下行 MCS 与层数');
-		var mcsGrid = E('div', { 'class': 'mt5700-metrics' });
-		mcsCard._body.appendChild(mcsGrid);
-		body.appendChild(mcsCard);
-
-		/* ---------- 状态 ---------- */
-
-		var state = {
-			cell: {
-				mcc: '', mnc: '', lac: '', cid: '', channel: '', pci: 0,
-				rsrp: null, rsrq: null, sinr: null, sysMode: '未知', signalPercent: ''
-			},
-			carriers: [],
-			secondaryNR: [], secondaryLTE: [],
-			diag: { endc: null, reg: null, tx: null, nrTx: [], addrs: [] },
-			temps: { sub3GPA: 0, sub6GPA: 0, mimoPa: 0, tcxo: 0, ap1: 0, ap2: 0, modem1: 0 },
-			flow: { lastDsTime: 0, lastTxFlow: 0, lastRxFlow: 0, totalDsTime: 0, totalTxFlow: 0, totalRxFlow: 0 },
-			dhcpv4: null, dhcpv6: null, ipv6Cap: null,
-			uplinkMCS: null, downlinkMCS: null,
-			activeCid: null,
-			networkStatus: '等待状态中',
-			operator: '未知运营商',
-			apn: '未知',
-			qci: '未知',
-			/*
-			 * 两个面板的数据源与单位都不同，必须各自独立存放，不可共用：
-			 *   - ambrDown / ambrUp：签约速率，AT^DSAMBR，单位 kbps（本身即比特）
-			 *   - rtDown  / rtUp  ：实时速率，OpenWrt 接口统计采样差分，单位字节/秒
-			 * 共用同一组变量会导致两面板互相覆盖、数值与语义双双错乱。
-			 */
-			ambrDown: 0, ambrUp: 0,
-			rtDown: 0, rtUp: 0
+		/*
+		 * 全部信息直接铺在一张卡片里，不做跳转页。
+		 * 命令均已在本机（V200R001C20B025）逐条验证可用；
+		 * 不支持的（AT^CASCELLINFO? / AT^TXPOWER? / AT+CCID）不在此使用。
+		 */
+		var SIM_STATE = {
+			0: ['未插卡', true], 1: ['已插卡', true], 2: ['PIN 锁定', true], 3: ['SIM 锁定', true],
+			10: ['初始化中', true], 11: ['已初始化（短信未接入）', true], 12: ['就绪', false],
+			98: ['卡失效', true], 99: ['已移除', true], 100: ['卡错误', true]
 		};
 
-		var history = [];
-		var HISTORY_POINTS = 60;
-
-		/* ---------- 渲染 ---------- */
-
-		function dash(v, unit) { return v == null ? '—' : v + unit; }
-
-		function renderConn() {
-			connBody.innerHTML = '';
-			var c = state.cell;
-			var ambrD = splitSpeedUI(state.ambrDown, 'kbps');
-			var ambrU = splitSpeedUI(state.ambrUp, 'kbps');
-			var grid = E('div', { 'class': 'mt5700-metrics' });
-			[
-				{ label: '网络状态', value: state.networkStatus, color: 'info' },
-				{ label: '运营商', value: state.operator },
-				{ label: '网络模式', value: c.sysMode || '未知' },
-				{ label: '信号强度', value: c.signalPercent || '—' },
-				{ label: 'APN', value: state.apn },
-				{ label: 'QCI', value: state.qci },
-				/* 连接状态面板展示的是签约速率（AT^DSAMBR），不是瞬时速率 */
-				{ label: '下行速率（签约）', value: ambrD.value + ' ' + ambrD.unit },
-				{ label: '上行速率（签约）', value: ambrU.value + ' ' + ambrU.unit }
-			].forEach(function (it) {
-				grid.appendChild(Mt5700.metric(it.label, it.value, it.color));
-			});
-			connBody.appendChild(grid);
-
-			connBody.appendChild(Mt5700.table(
-				['PLMN', 'LAC / 小区', 'PCI / 频点'],
-				[[(c.mcc || '—') + ' / ' + (c.mnc || '—'), (c.lac || '—') + ' / ' + (c.cid || '—'), (c.pci || '—') + ' / ' + (c.channel || '—')]]
-			));
+		/* 敏感号段打码：只保留前 4 位与后 4 位 */
+		function maskNum(v) {
+			var t = String(v == null ? '' : v).replace(/[^0-9]/g, '');
+			if (!t) return '—';
+			if (t.length <= 8) return t;
+			return t.slice(0, 4) + ' **** ' + t.slice(-4);
 		}
 
-		/* 环形仪表实例只创建一次，之后每次刷新仅更新数值与弧线 */
-		var sigGauges = null;
-
-		function renderSignal() {
-			var c = state.cell;
-			if (!sigGauges) {
-				sigGrid.innerHTML = '';
-				sigGauges = {
-					rsrp: Mt5700.gauge('RSRP', 'dBm', 'rsrp'),
-					rsrq: Mt5700.gauge('RSRQ', 'dB', 'rsrq'),
-					sinr: Mt5700.gauge('SINR', 'dB', 'sinr'),
-					pct: Mt5700.gauge('信号百分比', '%', 'pct')
-				};
-				sigGrid.appendChild(sigGauges.rsrp.el);
-				sigGrid.appendChild(sigGauges.rsrq.el);
-				sigGrid.appendChild(sigGauges.sinr.el);
-				sigGrid.appendChild(sigGauges.pct.el);
+		function firstValueLine(data) {
+			var lines = String(data == null ? '' : data).split('\n');
+			for (var i = 0; i < lines.length; i++) {
+				var t = lines[i].replace(/\s+/g, ' ').trim();
+				if (!t || t === 'OK') continue;
+				return t;
 			}
-			sigGauges.rsrp.set(c.rsrp);
-			sigGauges.rsrq.set(c.rsrq);
-			sigGauges.sinr.set(c.sinr);
-			var pct = parseInt(c.signalPercent, 10);
-			sigGauges.pct.set(isNaN(pct) ? null : pct);
+			return '';
 		}
 
-		function renderCarriers() {
-			carrierBox.innerHTML = '';
-			var list = state.carriers || [];
-
-			/*
-			 * 载波聚合语义（参考 luci-app-mt5700m 的 CA 模型）：
-			 *   count  = ^HFREQINFO 上报的载波数（手册 13.16：NR 多 CC，最多 4 个）
-			 *   caActive = 载波数 > 1，即真正的载波聚合
-			 *   dcActive = ^LENDC? 报 EN-DC 双连接已建立
-			 * 三者分开表达，避免把「EN-DC 双连接」与「NR 载波聚合」混为一谈。
-			 */
-			var count = list.length;
-			var caActive = count > 1;
-			var endc = state.diag && state.diag.endc;
-			var dcActive = !!(endc && endc.established);
-			var badge = !count ? '不可用'
-				: caActive ? (count + 'CA 聚合中')
-				: dcActive ? 'EN-DC 双连接'
-				: '单载波';
-			var headline = !count ? '—'
-				: caActive ? (count + 'CA')
-				: dcActive ? (endc.mode || 'EN-DC')
-				: (list[0].band != null ? AtWs.bandName(list[0].kind || list[0].sysMode, list[0].band) : '单载波');
-
-			var head = E('div', { 'class': 'mt5700-carrier-head' });
-			head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (caActive || dcActive ? ' is-on' : '') }, badge));
-			head.appendChild(E('span', { 'class': 'mt5700-carrier-headline' }, headline));
-			head.appendChild(E('span', { 'class': 'mt5700-hint' },
-				'载波数取自 ^HFREQINFO（NR 多 CC 上报）；载波聚合需在 RRC 连接态（有数据业务）才会激活'));
-			carrierBox.appendChild(head);
-
-			if (!count) {
-				carrierBox.appendChild(E('div', { 'class': 'mt5700-hint' }, '未读到载波信息。'));
-				renderSecondary();
-				return;
-			}
-
-			var rows = list.map(function (c) {
-				var kind = c.kind || c.sysMode || '—';
-				return [
-					kind,
-					c.band != null ? AtWs.bandName(kind, c.band) : '—',
-					c.channel || '—',
-					c.bandwidth || '—',
-					c.pci != null ? String(c.pci) : '—',
-					c.rsrp != null ? c.rsrp + ' dBm' : '—',
-					c.rsrq != null ? c.rsrq + ' dB' : '—',
-					c.sinr != null ? c.sinr + ' dB' : '—'
-				];
-			});
-			carrierBox.appendChild(Mt5700.table(
-				['制式', '频段', '频点', '带宽', 'PCI', 'RSRP', 'RSRQ', 'SINR'],
-				rows,
-				{ striped: true }
-			));
-			renderSecondary();
+		function manualPhoneNote() {
+			try { return String(L.uci.get('at-webserver', 'config', 'phone_note') || '').trim(); }
+			catch (e) { return ''; }
 		}
 
-		/* ---------- 辅载波信号 ---------- */
+		/* ^NWTIME: 26/09/12,17:18:47+32,00 —— 时区以 15 分钟为单位（+32 → UTC+8） */
+		function parseNetTime(txt) {
+			var m = String(txt == null ? '' : txt).match(
+				/(\d{2})\/(\d{2})\/(\d{2}),(\d{2}):(\d{2}):(\d{2})([+-]\d+)/);
+			if (!m) return null;
+			var qh = parseInt(m[7], 10) / 4;
+			var tz = (qh >= 0 ? '+' : '-') + String(Math.floor(Math.abs(qh))).padStart(2, '0') + ':00';
+			return '20' + m[1] + '-' + m[2] + '-' + m[3] + ' ' +
+				m[4] + ':' + m[5] + ':' + m[6] + ' (UTC' + tz + ')';
+		}
 
-		function renderSecondary() {
-			secondaryBox.innerHTML = '';
-			var nr = state.secondaryNR || [];
-			var lte = state.secondaryLTE || [];
-			var hasSecondarySig = nr.length > 0 || lte.length > 0;
-			/*
-			 * 载波列表的唯一可靠来源是 ^HFREQINFO（手册 13.16：NR 支持多 CC 上报，
-			 * 每载波 7 个字段 <band>,<dl_fcn>,<dl_freq>,<dl_bw>,<ul_fcn>,<ul_freq>,<ul_bw>，
-			 * 最多 4 个载波）。而 ^MONSSC 在 NSA 未建立时回 NONE，
-			 * ^CASCELLINFO 在部分固件（实测 V200R001C20B025）直接回 ERROR。
-			 * 所以这里**不能**在没有辅载波信号数据时整段隐藏，否则多载波也看不到。
-			 */
-			if (!state.carriers.length) {
-				secondaryBox.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'未读到载波信息（AT^HFREQINFO? 无有效数据）。'));
-				return;
-			}
-			// 按下行频点把信号质量对到 ^HFREQINFO 载波上
-			var merged = [];
-			state.carriers.forEach(function (c, i) {
-				var sig = Parse.carrierSignalFor({ sysMode: c.sysMode === 'NR' ? 'NR' : 'LTE', dlFcn: String(c.channel) }, nr, lte);
-				merged.push({
-					title: i === 0 ? '主载波' : '辅载波 ' + i,
-					kind: c.kind || c.sysMode, band: c.band, channel: c.channel, bandwidth: c.bandwidth,
-					sig: sig
-				});
+		function maxTemp(txt) {
+			var nums = String(txt == null ? '' : txt).match(/\d+/g);
+			var vals = nums ? nums.map(function (v) { return parseInt(v, 10); })
+				.filter(function (v) { return v > 0; }) : [];
+			return vals.length ? (Math.max.apply(Math, vals) / 10).toFixed(1) + ' °C' : null;
+		}
+
+		var _devInfoAt = 0;
+
+		function loadDeviceInfo(force) {
+			// 设备信息变化很慢：首次加载与每 60s 刷新一次，避免每轮都打十几条查询
+			var now = Date.now();
+			if (!force && _devInfoAt && now - _devInfoAt < 60000) return;
+			_devInfoAt = now;
+
+			var st = {};
+			var q = function (cmd) {
+				return AtWs.client.sendCommand(cmd).catch(function () { return { success: false }; });
+			};
+			return q('AT^SIMSQ?').then(function (r) {
+				var m = String(r && r.data ? r.data : '').match(/SIMSQ:\s*(\d+)\s*,\s*(\d+)/);
+				st.sim = m ? parseInt(m[2], 10) : null;
+				return q('AT+CPIN?');
+			}).then(function (r) {
+				st.pin = (String(r && r.data ? r.data : '').match(/CPIN:\s*(\S+)/) || [])[1] || '';
+				return q('AT+CNUM');
+			}).then(function (r) {
+				var m = String(r && r.data ? r.data : '').match(/"([+\d]{5,20})"/);
+				st.phone = m ? m[1] : '';
+				return q('AT+CPBS?');
+			}).then(function (r) {
+				var m = String(r && r.data ? r.data : '').match(/CPBS:\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)/);
+				st.pb = m ? (m[1] + ' ' + m[2] + '/' + m[3]) : '';
+				return q('AT^TDSIMHP?');
+			}).then(function (r) {
+				var m = String(r && r.data ? r.data : '').match(/TDSIMHP:\s*(\d+)/);
+				st.hotplug = m ? parseInt(m[1], 10) : null;
+				return q('AT+CIMI');
+			}).then(function (r) {
+				st.imsi = (String(r && r.data ? r.data : '').match(/\d{10,}/) || [''])[0];
+				return q('AT^ICCID?');
+			}).then(function (r) {
+				st.iccid = (String(r && r.data ? r.data : '').match(/ICCID:\s*([0-9A-Fa-f]+)/) || [])[1] || '';
+				return q('AT+CGMM');
+			}).then(function (r) {
+				st.model = firstValueLine(r && r.data);
+				return q('AT+CGMR');
+			}).then(function (r) {
+				st.fw = firstValueLine(r && r.data);
+				return q('AT+CGSN');
+			}).then(function (r) {
+				st.imei = (String(r && r.data ? r.data : '').match(/\d{10,}/) || [''])[0];
+				return q('AT^NWTIME?');
+			}).then(function (r) {
+				st.time = parseNetTime(r && r.data);
+				return q('AT^CHIPTEMP?');
+			}).then(function (r) {
+				st.temp = maxTemp(r && r.data);
+				return q('AT^HFREQINFO?');
+			}).then(function (r) {
+				var mm = String(r && r.data ? r.data : '').match(/HFREQINFO:\s*([\d,]+)/);
+				var cc = 0;
+				if (mm) {
+					var parts = mm[1].split(',').filter(function (x) { return x !== ''; });
+					cc = Math.max(0, Math.floor((parts.length - 2) / 7));
+				}
+				st.cc = cc;
+				return q('AT^NRRCCAPQRY=3');
+			}).then(function (r) {
+				st.ca = (String(r && r.data ? r.data : '').match(/NRRCCAPQRY:\s*3,(\d+)/) || [])[1];
+				renderDeviceInfo(st);
 			});
-			var orphan = Parse.unmatchedSecondaries(
-				state.carriers.map(function (c) { return { sysMode: c.sysMode === 'NR' ? 'NR' : 'LTE', dlFcn: String(c.channel) }; }),
-				nr, lte
-			);
-			var rows = merged.map(function (m) {
-				if (!m.sig) return [m.title, m.kind || '—', '—', m.channel || '—', m.bandwidth || '—', '—', '—', '—', '—', '—'];
-				return [
-					m.title,
-					m.kind || '—',
-					m.band != null ? AtWs.bandName(m.kind, m.band) : '—',
-					m.channel || '—',
-					m.bandwidth || '—',
-					String(m.sig.pci),
-					dash(m.sig.rsrp, ' dBm'),
-					dash(m.sig.rsrq, ' dB'),
-					m.sig.sinr != null ? dash(m.sig.sinr, ' dB') : dash(m.sig.rssi != null ? m.sig.rssi : null, ' dBm'),
-					m.sig.measType || '—'
-				];
-			});
-			secondaryBox.appendChild(Mt5700.table(
-				['载波', '制式', '频段', '下行频点', '带宽', 'PCI', 'RSRP', 'RSRQ', 'SINR/RSSI', '测量'],
-				rows,
-				{ striped: true }
-			));
-			if (!hasSecondarySig) {
-				secondaryBox.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'当前 ^HFREQINFO 上报 ' + state.carriers.length + ' 个载波（判定单/双载波的依据）。' +
-					'本固件未提供「按载波」的信号质量：^MONSSC 返回 ' + (state.monsscRaw || 'NONE') +
-					'，^CASCELLINFO 不被支持，故辅载波信号列显示「—」。' +
-					'载波聚合仅在 RRC 连接态（有数据业务时）才会激活，空闲态通常只报主载波。'));
+		}
+
+		function renderDeviceInfo(st) {
+			if (!devBody) return;
+			devBody.innerHTML = '';
+			var simRow = SIM_STATE[st.sim];
+			var simText = simRow ? simRow[0] : (st.sim == null ? '未知' : ('状态 ' + st.sim));
+			var warn = simRow ? simRow[1] : true;
+
+			var head = E('div', { 'class': 'mt5700-toolbar' });
+			head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (warn ? '' : ' is-on') },
+				'SIM：' + simText));
+			if (st.pin) head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' }, 'PIN：' + st.pin));
+			head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' },
+				'载波：' + (st.cc ? (st.cc + ' 个' + (st.cc > 1 ? '（聚合中）' : '（单载波）')) : '—')));
+			if (st.ca != null) head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' },
+				'CA 能力：' + (st.ca === '1' ? '已开启' : '已关闭')));
+			devBody.appendChild(head);
+
+			if (warn) {
+				devBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'尚未到「就绪」：AT^SIMSQ? 返回 12 才表示「短信与电话本可以接入」；' +
+					'长期停在 11「已初始化」时短信可能发不出去。'));
 			}
-			// 没能对上任何载波的辅小区单独列出，不丢数据
-			if (orphan.nr.length || orphan.lte.length) {
-				secondaryBox.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'以下小区来自 ^MONSSC / ^CASCELLINFO 上报，但频点没和 ^HFREQINFO 载波对上（两条命令上报时机可能不同步），单独列出以免数据丢失：'));
-				var ul = E('ul', { 'class': 'mt5700-agree-list' });
-				orphan.nr.forEach(function (c) {
-					ul.appendChild(E('li', {}, 'NR 频点 ' + c.arfcn + ' · PCI ' + c.pci + '：' +
-						dash(c.rsrp, ' dBm') + ' / ' + dash(c.rsrq, ' dB') + ' / ' + dash(c.sinr, ' dB')));
-				});
-				orphan.lte.forEach(function (c) {
-					ul.appendChild(E('li', {}, 'LTE B' + c.band + ' · PCI ' + c.pci + '：' +
-						dash(c.rsrp, ' dBm') + ' / ' + dash(c.rsrq, ' dB') + ' / ' + dash(c.rssi, ' dBm')));
-				});
-				secondaryBox.appendChild(ul);
-			}
+
+			var note = manualPhoneNote();
+			var phone = st.phone ? (maskNum(st.phone) + '（SIM 卡）')
+				: (note ? (maskNum(note) + '（手动备注）')
+					: '未写入（AT+CNUM → not found，可在「服务配置」手动备注）');
+
+			devBody.appendChild(Mt5700.table(['项目', '值'], [
+				['手机号', phone],
+				['电话本', st.pb || '—'],
+				['SIM 热插拔', st.hotplug == null ? '—' : (st.hotplug ? '已开启' : '已关闭')],
+				['IMSI', maskNum(st.imsi)],
+				['ICCID', maskNum(st.iccid)],
+				['IMEI', maskNum(st.imei)],
+				['模块 / 固件', (st.model || '—') + ' / ' + (st.fw || '—')],
+				['网络时间', st.time || '—'],
+				['芯片温度', st.temp || '—']
+			], { striped: true }));
 		}
 
 		/* ---------- 连接诊断 ---------- */
@@ -786,6 +680,7 @@ return L.view.extend({
 
 		var refreshing = false;
 		function refreshAll() {
+			loadDeviceInfo(true);
 			if (refreshing) return Promise.resolve();
 			refreshing = true;
 			var chain = Promise.resolve();
@@ -809,7 +704,8 @@ return L.view.extend({
 			ar.el,
 			Mt5700.primaryButton('刷新', function () { refreshAll(); })
 		);
-		body.appendChild(extra);
+		// 放到页面顶部（连接状态条之后），避免在页面末尾单独占一整行
+		body.insertBefore(extra, connBar.nextSibling);
 
 		/* ---------- 初始化 ---------- */
 
@@ -822,6 +718,7 @@ return L.view.extend({
 		renderTemp();
 		renderDHCP();
 		renderMCS();
+		loadDeviceInfo();
 
 		AtWs.client.connect().catch(function (err) {
 			if (err && err.message === 'REQUIRE_AUTH_KEY') {
