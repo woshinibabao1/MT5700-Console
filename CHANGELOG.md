@@ -5,6 +5,100 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.0.1] - 2026-09-13
+
+> **本版是重做版**：v1.0 之后曾发布过 1.0.1 / 1.0.2 / 1.0.3 三个版本，真机实测发现它们的
+> 修复**方向对了但落地错了**（其中最严重的是看门狗的「AT 命令」分支从结构上就不可能成功）。
+> 因此代码与仓库已整体回退到 v1.0（`aab65de`），旧的 1.0.1 / 1.0.2 / 1.0.3 标签与 Release
+> 一并删除，本版自 v1.0 起**重做**。此前的三版内容不再有对应提交，也不再维护。
+
+### 修复 - 看门狗的「AT 命令」从来没下发过（通道用错传输层）
+
+看门狗允许把复位动作写成多条自定义命令，逐条执行。但 v1.0 的实现是**把每一行都当作 AT 命令，
+用 `wget --post-file=-` 发一个 HTTP POST 到 `http://127.0.0.1:8765/`**。而 8765 端口根本不是 HTTP：
+
+```
+src/rust/src/rpcserver.rs:1
+    //! LuCI RPC 服务：TCP newline-JSON（127.0.0.1:8765）
+    //! 请求: {"id":1,"method":"at","params":{"cmd":"AT+CSQ","auth_key":"..."}}
+    //! 应答: {"id":1,"result":{"success":true,"data":"..."}}
+```
+
+它是**裸 TCP 上「每行一个 JSON」**。wget 发的 HTTP 报文会被当成非法 JSON 丢掉（`-32700`），
+所以「复位命令」这条路径**一条 AT 指令也没真正下发过**——配置界面里写得有模有样，日志只报
+「下发失败」，从日志上看不出是通道用错了。
+
+| # | 缺陷 | 后果 | 修法 |
+| --- | --- | --- | --- |
+| 1 | AT 通道用 `wget` 打 HTTP，而 8765 是裸 TCP newline-JSON | AT 分支 100% 失败，且失败原因不可读 | 改用 `nc` 按行收发 JSON（`printf … \| nc 127.0.0.1 <port>`） |
+| 2 | 只判断「连得上」，不解析应答 | 模组回 `ERROR` 也会记成「已下发」 | 校验应答里的 `"success":true`，失败时把服务端 `error`/`message` 文案写进日志 |
+| 3 | 请求不带 `auth_key` | 配置了 `websocket_auth_key` 时一律 `-32001 认证失败` | 从 UCI 读 `websocket_auth_key` 并附在 `params` 里 |
+| 4 | 固定连 `127.0.0.1` | `websocket_bind` 绑到具体本机地址时连不上 | 读 `websocket_bind`，非 `0.0.0.0` 就按该地址连 |
+
+### 新增 - 复位命令支持 AT 与本机 Shell 两类，按行首自动分流
+
+看门狗要能同时干两类事：给模组发 AT（如 `AT^HVSST=1,0`）、在本机跑命令（如 `ifdown MT5700M`）。
+现在一条多行列表里可以混排，逐条按顺序执行，**按行首分流**：
+
+- 行首是 **`AT` / `at`** → 作为 AT 指令经本机 RPC 下发给模组，并校验应答；
+- **其余任意行** → 作为本机 shell 命令执行（`/bin/sh -c`，带 30 秒超时）。
+
+判据用「AT 开头」而不是「`AT+` / `AT^` 开头」：AT 指令族还包括裸 `AT`、`ATI`、`ATE0`、`ATZ`、
+`AT&F` 等，用窄判据会把它们误判成 shell 命令去执行（本机没有这些命令，只会静默失败）。
+OpenWrt/busybox 上没有以 `at` 开头的系统命令，因此该前缀无误判风险。
+
+同时修掉三个会静默出错的执行细节：
+
+| # | 缺陷 | 后果 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `command -v timeout && timeout … \|\| /bin/sh -c …` | 命令本身非 0 退出时会**被再执行一遍** | 改成显式 `if/else`，分开捕获退出码 |
+| 2 | 用 `printf '%b'` 还原多行 | 会顺带解释 `\t`/`\c`/`\\`，把 `printf 'a\tb'` 这类合法命令改坏 | 只用 `gsub(/\\n/, "\n")` 翻译字面 `\n`，其余反斜杠原样保留 |
+| 3 | `while read` 直接读命令列表 | 列表里的命令若读 stdin，会把**剩余待执行命令吃掉** | 循环改用独立 fd `3<` |
+
+### 变更 - 看门狗默认开启，默认复位动作改为「重拉 MT5700M 接口」
+
+- `watch_enabled` 默认 **1**（v1.0 是 0）。它只做 DHCP 续约，不主动复位模组，误判代价仅是白续约一次。
+- `watch_reset_cmds` 默认由 `AT+CFUN=1,1` 改为三条 shell 命令：
+  ```
+  ifdown MT5700M
+  sleep 2
+  ifup MT5700M
+  ```
+  本机实测的故障形态是模组 USB 重枚举后 DHCP 租约失效，重拉接口即可拿到新地址；
+  `AT+CFUN=1,1` 会让 eth2 数据面挂死，只宜作兜底而非默认。
+- **升级迁移（重要）**：v1.0 的 AT 通道是坏的，所以旧默认值 `AT+CFUN=1,1` 一直空转；
+  通道修好后它会**真的**去复位协议栈。因此 `uci-defaults` 会在升级时把它换成新默认值
+  （仅当取值恰好等于旧版随包默认值时才改，用户自定义内容不动），`watch_enabled` 同理。
+
+### 修复 - `parse-extra-test.js` 长期「0 项通过」地静默挂着
+
+`tests/mock-modem/parse-extra-test.js` 从 v1.0 起就是**一条断言都没跑到**的状态，两个原因叠加：
+
+1. **测试桩缺 `L.Class`**：项目里 6 个前端库（parse/rpc/ui/mt5700/compat/smsEncode）末尾都用
+   `var XxxClass = L.Class.extend(Xxx)` 收尾，而桩只给了 `view`/`rpc`/`uci`，
+   于是 `parse.js:1045` 一执行就 `TypeError`，文件直接崩在装载阶段；
+2. **`window` 没传进沙箱**：库是 `if (typeof window !== 'undefined') window.Parse = new ParseClass()`，
+   node 里 `typeof window === 'undefined'`，不传就永远挂不上实例；而且不能靠 `new Function` 的
+   返回值取值——库顶层 `return <Class>` 会先返回，拼在后面的 `return` 是死代码。
+
+修完桩之后又暴露出第三处：文件里有一整块断言调用 `parseMonsscAll` / `parseCascellAll` /
+`carrierSignalFor` / `unmatchedSecondaries` 四个函数，而「辅载波信号」这条路已改为 `^NRSSBID`，
+这些函数**在解析层里都不存在**。该块删除（`NRSSBID` / `MONNC` 的覆盖在 `parse-contract.test.js`，
+含服务波束、邻区、ARFCN→MHz、PCI 十六进制、无效码转 null、LTE 分支），并补上两处库实例可用性
+自检，避免同类「桩坏了却看着有测试」的情况再次静默。
+
+### 新增 - `tests/watchdog-routing.test.js` / `.sh`：看门狗分流的契约与行为测试
+
+- **静态守卫**（`*.test.js`，纯文本，任何平台可跑）：禁止 `wget`/`curl`/`http://` 回到 AT 通道、
+  必须用 `nc`、必须校验 `"success":true`、必须带 `auth_key`、禁止 `printf '%b'`、
+  禁止 `命令 && … || /bin/sh -c` 双执行写法、必须用 fd 3 读列表、AT 判据必须是 `[Aa][Tt]*`，
+  以及**默认值在 watchdog.sh / config / uci-defaults / service.js 四处口径一致**。
+- **行为测试**（`*.test.sh`，需要 `sh`）：把 `is_at_cmd` / `split_cmds` / `json_escape` /
+  `run_sh_cmd` / `send_at` / `reset_modem` 真正跑一遍，**51 项**。其中三项是针对性回归：
+  失败命令只允许执行一次、列表里的命令读 stdin 不能吃掉后续行、混排顺序完全保真。
+  接受一个参数用于指定被测脚本，便于「拿旧版本验证这组测试抓不抓得住 bug」——
+  实测 v1.0.3 的实现在这 51 项里失败 35 项。
+
 ## [1.0] - 2026-09-13
 
 > **版本号说明**：本项目自本日起更名为 **MT5700 Console**（仓库 `MT5700-Console`），

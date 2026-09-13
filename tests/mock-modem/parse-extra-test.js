@@ -11,10 +11,21 @@ const path = require('path');
 const libDir = path.join(__dirname, '..', '..', 'htdocs', 'luci-static', 'resources', 'at-webserver');
 
 // 用 Function 模拟 LuCI 全局环境加载两个库文件
+// 注意：必须提供 L.Class.extend —— 项目里 6 个库（parse/rpc/ui/mt5700/compat/smsEncode）
+// 末尾都用 `var XxxClass = L.Class.extend(Xxx)` 收尾（LuCI 要求模块返回 Class 子类）。
+// 早期这个桩只给了 view/rpc/uci，于是 parse.js:1045 一执行就 TypeError，
+// 整个文件的用例一条都没跑到（v1.0 起就是这样，属于「测试看着有、其实没跑」）。
 const sandbox = {
 	window: {}, AtWs: undefined, Parse: undefined,
 	L: {
 		view: { extend: function (o) { return o; } },
+		Class: {
+			extend: function (proto) {
+				function Klass() {}
+				Klass.prototype = proto;
+				return Klass;
+			}
+		},
 		rpc: { declare: function () { return function () { return Promise.resolve({}); }; } },
 		uci: { load: function () { return Promise.resolve(); }, get: function () { return ''; } }
 	}
@@ -28,8 +39,13 @@ function loadLib(name) {
 		.split('\n')
 		.filter(function (l) { return l.indexOf("'require ") !== 0; })
 		.join('\n');
-	const fn = new Function('AtWs', 'Parse', 'E', 'L', cleaned + '\n;return { AtWs: AtWs, Parse: Parse };');
-	return fn(sandbox.AtWs, sandbox.Parse, function () { return { appendChild: function () {} }; }, sandbox.L);
+	// 库文件按 LuCI 约定「顶层 return <Class>」，且把实例挂到 window.<Name> 上。
+	// 所以不能靠 new Function 的返回值取值（顶层 return 会先返回，拼在后面的 return 是死代码）——
+	// 必须把 window 传进去（`typeof window !== 'undefined'` 在 node 里为假，不传就不挂实例），
+	// 执行完再从 sandbox 上取。
+	const fn = new Function('AtWs', 'Parse', 'E', 'L', 'window', cleaned);
+	fn(sandbox.AtWs, sandbox.Parse, function () { return { appendChild: function () {} }; }, sandbox.L, sandbox);
+	return { Parse: sandbox.Parse, AtWs: sandbox.AtWs };
 }
 
 let results = [];
@@ -39,51 +55,24 @@ function check(name, cond, detail) {
 }
 
 try {
-	// 先加载 parse.js（rpc.js 的 parseRawData 运行时引用全局 Parse）
+	// 先加载 parse.js（rpc.js 的 parseRawData 运行时引用全局 Parse），两者都把实例挂在 window 上
 	const parse = loadLib('parse.js');
-	sandbox.Parse = parse.Parse;
-	const ws = loadLib('rpc.js');
-	sandbox.AtWs = ws.AtWs;
 	const Parse = parse.Parse;
+	check('parse.js 实例可用', !!Parse && typeof Parse.parseSimsq === 'function',
+		Parse ? 'ok' : 'sandbox.Parse 未挂上');
+	const ws = loadLib('rpc.js');
 	const AtWs = ws.AtWs;
+	check('rpc.js 实例可用', !!AtWs && typeof AtWs.parseRawData === 'function',
+		AtWs ? 'ok' : 'sandbox.AtWs 未挂上');
+	if (!Parse || !AtWs) throw new Error('库未能实例化，后续断言无意义');
 
-	/* ---- 辅载波聚合 ---- */
-	const monsscLines = '^MONSSC: "NR",2360,86,-70,-10,15,0\r\n^MONSSC: NONE';
-	const nr = Parse.parseMonsscAll(monsscLines);
-	check('parseMonsscAll 解析 1 条 NR 辅站', nr.length === 1, 'count=' + nr.length);
-	check('MONSSC arfcn/pci', nr[0].arfcn === 2360 && nr[0].pci === 134, 'arfcn=' + nr[0].arfcn + ' pci=' + nr[0].pci);
-	check('MONSSC 信号与测量方式', nr[0].rsrp === -70 && nr[0].rsrq === -10 && nr[0].sinr === 15 && nr[0].measType === 'SSB',
-		'nr[0].rsrp=' + nr[0].rsrp + ' measType=' + nr[0].measType);
-
-	// 无效值 -1256 应还原为 null（8 倍放大值判定）
-	const monsscInvalid = '^MONSSC: "NR",2360,86,-1256,-348,-188,1';
-	const nrInv = Parse.parseMonssc(monsscInvalid);
-	check('MONSSC 无效值处理', nrInv.rsrp === null && nrInv.rsrq === null && nrInv.sinr === null,
-		'rsrp=' + nrInv.rsrp + ' rsrq=' + nrInv.rsrq + ' sinr=' + nrInv.sinr);
-	// 8 倍放大值（-560 = -70*8）应还原
-	const monsscScaled = '^MONSSC: "NR",2360,86,-560,1,1,0';
-	const nrScaled = Parse.parseMonssc(monsscScaled);
-	check('MONSSC 8 倍值还原', nrScaled.rsrp === -70, 'rsrp=' + nrScaled.rsrp);
-
-	const cascell = '^CASCELLINFO: 0,120,-75,-95,-12,3,1650,1750,16500,17500,3,3\r\n^CASCELLINFO: 1,121,-80,-100,-14,3,1651,1751,16510,17510,5,5';
-	const lte = Parse.parseCascellAll(cascell);
-	check('parseCascellAll 解析 2 条 LTE CA 辅小区', lte.length === 2, 'count=' + lte.length);
-	check('CASCELL 字段换算', lte[0].dlArfcn === 1750 && lte[0].dlFreq === 1750.0 && lte[0].dlBandwidth === 10 && lte[0].pci === 120,
-		'dlArfcn=' + lte[0].dlArfcn + ' dlFreq=' + lte[0].dlFreq + ' bw=' + lte[0].dlBandwidth);
-	check('CASCELL 带宽表 5→20MHz', lte[1].dlBandwidth === 20, 'dlBandwidth=' + lte[1].dlBandwidth);
-
-	// 载波合并：HFREQINFO 报 2360（NR）与 1750（LTE），应能对上
-	const carriers = [
-		{ sysMode: 'NR', dlFcn: '2360' },
-		{ sysMode: 'LTE', dlFcn: '1750' }
-	];
-	const sigNr = Parse.carrierSignalFor(carriers[0], nr, lte);
-	const sigLte = Parse.carrierSignalFor(carriers[1], nr, lte);
-	check('carrierSignalFor NR 对齐', sigNr && sigNr.pci === 134 && sigNr.rsrp === -70, sigNr ? 'pci=' + sigNr.pci : 'null');
-	check('carrierSignalFor LTE 对齐', sigLte && sigLte.pci === 120 && sigLte.rssi === -75, sigLte ? 'pci=' + sigLte.pci + ' rssi=' + sigLte.rssi : 'null');
-	const orphan = Parse.unmatchedSecondaries(carriers, nr, lte);
-	check('unmatchedSecondaries 不丢数据', orphan.nr.length === 0 && orphan.lte.length === 1,
-		'nr=' + orphan.nr.length + ' lte=' + orphan.lte.length);
+	/* ---- 辅载波聚合：本文件此前的这一整块已删除 ----
+	 * 它断言的是 parseMonsscAll / parseMonssc / parseCascellAll / carrierSignalFor /
+	 * unmatchedSecondaries 五个函数，而「辅载波信号」这条路线已改为 ^NRSSBID，
+	 * 这五个函数在解析层里**都不存在**。也就是说这一块断言早就调不到任何东西了——
+	 * 再加上上面 loadLib 的两个桩缺陷，整份文件长期是「0 项通过」地静默挂着。
+	 * NRSSBID / MONNC 的覆盖现在在 parse-contract.test.js（含服务波束、邻区、
+	 * ARFCN→MHz、PCI 十六进制、无效码转 null、LTE 分支），不在这里重复。 */
 
 	/* ---- REJINFO ---- */
 	const rejLine = '^REJINFO:46000,1,40,2,3,40,"0026F8","FF","0A444202"';
@@ -99,8 +88,19 @@ try {
 	check('REJINFO USIM 原因', Parse.rejectCauseText(65537) === 'USIM 鉴权失败（#65537）', Parse.rejectCauseText(65537));
 
 	/* ---- SIMSQ ---- */
-	const sq = Parse.parseSimsq('^SIMSQ: 0,12');
-	check('parseSimsq 就绪', !!sq && sq.label === '卡就绪，短信与电话本可用' && sq.present === true, sq ? sq.label : 'null');
+	/* 标签文案以 parse.js 的 SIM_STATUS（全项目唯一一份码表）为准：
+	 *   12 = 卡初始化完成，短信与电话本可接入
+	 *   11 = 卡初始化完成，可接入网络（短信与电话本未接入）  ← 本卡长期停在这一档
+	 *   98 = 卡已失效（PUK 锁死或物理损坏） */
+	const sqReady = Parse.parseSimsq('^SIMSQ: 0,12');
+	check('parseSimsq 完全就绪（12）', !!sqReady && sqReady.present === true && sqReady.dead === false
+		&& sqReady.label === '卡初始化完成，短信与电话本可接入', sqReady ? sqReady.label : 'null');
+
+	const sq11 = Parse.parseSimsq('^SIMSQ: 1,11');
+	check('parseSimsq 仅可接入网络（11）', !!sq11 && sq11.status === 11 && sq11.present === true && sq11.dead === false,
+		sq11 ? sq11.label : 'null');
+	check('11 与 12 的文案必须可区分', sq11.label !== sqReady.label, sq11.label + ' vs ' + sqReady.label);
+
 	const sqDead = Parse.parseSimsq('^SIMSQ: 0,98');
 	// 原版语义：present 只排除 0/99，98（失效）依然 present=true
 	check('parseSimsq 失效', sqDead.dead === true && sqDead.present === true, sqDead ? sqDead.label : 'null');

@@ -324,7 +324,7 @@ return L.view.extend({
 		var wdChk = E('input', { type: 'checkbox' });
 		wdSwitch.appendChild(wdChk);
 		wdBody.appendChild(Mt5700.formGroup('启用看门狗', wdSwitch,
-			'检查接口状态与默认网关的邻居可达性，异常时自动续约 DHCP'));
+			'默认开启。检查接口状态与默认网关的邻居可达性，异常时自动续约 DHCP，不会主动复位模组'));
 
 		var wdIntervalInput = Mt5700.input('number', '60', '');
 		wdBody.appendChild(Mt5700.formGroup('检查间隔（秒）', wdIntervalInput, '下限 15 秒，默认 60'));
@@ -339,14 +339,25 @@ return L.view.extend({
 		wdBody.appendChild(Mt5700.formGroup('达阈值时执行复位', wdResetSwitch,
 			'连续异常达到阈值后，按下方命令逐条下发（最后手段，会短暂断网）'));
 
-		/* 复位命令：多行、自定义、按顺序执行（watchdog.sh 逐条下发，每条间隔 1 秒） */
+		/* 复位命令：多行、自定义、按顺序执行。
+		 * 两类命令**按行首自动分流**（与 watchdog.sh::is_at_cmd 同一口径）：
+		 *   行首 AT / at → 经本机 RPC 下发给模组，并校验应答里的 success；
+		 *   其余任意行   → 本机 shell 执行（带 30s 超时）。
+		 * 默认值是纯 shell 的「重拉 MT5700M 接口」：ifdown → sleep 2 → ifup。
+		 * 刻意没把 AT+CFUN=1,1 放进默认值——协议栈复位会让 eth2 数据面挂死，
+		 * 本机实测的故障（USB 重枚举后 DHCP 租约失效）重拉接口就能恢复，不必动模组。 */
+		var WATCH_RESET_CMDS_DEFAULT = 'ifdown MT5700M\nsleep 2\nifup MT5700M';
 		var wdCmdsArea = E('textarea', { 'class': 'mt5700-input', 'rows': '4',
-			'placeholder': '每行一条 AT 命令，按顺序执行' });
+			'placeholder': 'ifdown MT5700M\nsleep 2\nifup MT5700M' });
 		wdCmdsArea.style.width = '100%';
 		wdCmdsArea.style.fontFamily = 'var(--mt5700-font-mono)';
 		wdCmdsArea.style.minHeight = '84px';
 		wdBody.appendChild(Mt5700.formGroup('复位命令（每行一条，按顺序执行）', wdCmdsArea,
-			'空行与 # 开头的行会被忽略；可写多步，例如先关射频再开：AT+CFUN=4 换行 AT+CFUN=1'));
+			'行首是 AT / at 的行当 AT 指令下发给模组（ATE0、ATI、AT+CFUN=1,1、AT^HVSST=1,0…都算）；' +
+			'其余行作为本机 shell 命令执行（ifdown MT5700M、sleep 2、ifup MT5700M）。' +
+			'空行与 # 开头的行会被忽略，每条之间间隔 1 秒；' +
+			'AT 指令会校验模组应答，回 ERROR 会被记进日志而不是当成成功。' +
+			'注意 AT 复位会让数据面短暂中断，想加协议栈级兜底再补 AT+CFUN=1,1。'));
 
 		wdBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 			'看门狗每轮都会重新读取配置，保存后最多一个检查间隔即生效，无需重启服务。' +
@@ -377,12 +388,12 @@ return L.view.extend({
 		notifyMem.input.checked = get('notify_memory_full', '1') === '1';
 		webhookInput.value = String(get('wechat_webhook', ''));
 		/* 连接看门狗（此前这排控件已渲染但没接 UCI：既读不到当前配置，改了也存不下去） */
-		wdChk.checked = get('watch_enabled', '0') === '1';
+		wdChk.checked = get('watch_enabled', '1') === '1';
 		wdIntervalInput.value = String(get('watch_interval', '60'));
 		wdThresholdInput.value = String(get('watch_fail_threshold', '3'));
 		wdResetChk.checked = get('watch_reset_modem', '0') === '1';
 		/* UCI 里以字面 \n 存多行命令，这里还原成换行显示 */
-		wdCmdsArea.value = String(get('watch_reset_cmds', 'AT+CFUN=1,1')).replace(/\\n/g, '\n');
+		wdCmdsArea.value = String(get('watch_reset_cmds', WATCH_RESET_CMDS_DEFAULT)).replace(/\\n/g, '\n');
 
 		/* ---------- 保存（OpenWrt 标准「保存并应用」流程） ----------
 		 *
@@ -422,10 +433,14 @@ return L.view.extend({
 			set('watch_interval', String(Math.max(15, parseInt(wdIntervalInput.value, 10) || 60)));
 			set('watch_fail_threshold', String(Math.max(1, parseInt(wdThresholdInput.value, 10) || 3)));
 			set('watch_reset_modem', wdResetChk.checked ? '1' : '0');
-			/* 多行 → 字面 \n（UCI 值不能带真实换行），看门狗侧用 printf %b 还原 */
-			set('watch_reset_cmds', wdCmdsArea.value.replace(/\r/g, '')
-				.replace(/^\s*|\s*$/g, '').split('\n')
-				.map(function (x) { return x.replace(/\s+$/, ''); }).join('\\n'));
+			/* 多行 → 字面 \n（UCI 值不能带真实换行），看门狗侧只翻译 \n、不动其它反斜杠。
+			 * 逐行去首尾空白 + 丢掉空行 + 用字面 \n 连接；**不做反斜杠转义**——
+			 * 命令里合法出现的反斜杠要原样保留。
+			 * （旧实现用 /^\s*|\s*$/g，少了 m 标志，只能裁整串首尾，行首空白没裁掉。） */
+			var wdCmdLines = wdCmdsArea.value.replace(/\r\n?/g, '\n').split('\n')
+				.map(function (x) { return x.replace(/^\s+|\s+$/g, ''); })
+				.filter(function (x) { return x !== ''; });
+			set('watch_reset_cmds', wdCmdLines.join('\\n'));
 
 			// 写内存后立刻标脏，未点保存就离开会被浏览器拦截
 			AtWs.uci.markDirty();

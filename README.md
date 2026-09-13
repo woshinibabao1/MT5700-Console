@@ -206,12 +206,15 @@ MT5700-Console/                      # 仓库根 = OpenWrt 单包
 ### 契约测试（**不需要真机**）
 
 ```sh
-node tests/parse-contract.test.js    # 45 项 · AT 应答 → 解析结果
-node tests/ui-contract.test.js       # 207 项 · 类名↔样式、mock↔真机、AT 通道不变量
-node tests/sms-pdu.test.js           # 90 项 · 短信 PDU 编码 ↔ pdu.rs 口径 往返一致
+node tests/parse-contract.test.js          # 45 项 · AT 应答 → 解析结果
+node tests/ui-contract.test.js             # 207 项 · 类名↔样式、mock↔真机、AT 通道不变量
+node tests/sms-pdu.test.js                 # 90 项 · 短信 PDU 编码 ↔ pdu.rs 口径 往返一致
+node tests/watchdog-routing.test.js        # 36 项 · 看门狗 AT/Shell 分流契约（静态守卫）
+node tests/mock-modem/parse-extra-test.js  # 12 项 · REJINFO / SIMSQ / parseRawData 拆分
+sh tests/watchdog-routing.test.sh          # 51 项 · 真跑分流与执行逻辑（上面那条会自动调用）
 ```
 
-三套测试共 **342 项**，全部基于真实设备实测样本或厂商手册条文：
+五套测试共 **441 项**，全部基于真实设备实测样本或厂商手册条文：
 
 - `parse-contract`：MONSC / NRSSBID / MONNC / 注册状态 / `^SYSCFGEX` 回读 /
   `^CGPADDR` 的「16 段十进制点分 IPv6」/ `^NRRCCAPQRY` 三种 mode / COPS / VERSION。
@@ -222,6 +225,13 @@ node tests/sms-pdu.test.js           # 90 项 · 短信 PDU 编码 ↔ pdu.rs �
   「编码 → 参考解码 → 与原文比对」的闭环；覆盖首字节位序（手册附录表 20-6）、
   GSM7 单条/含扩展字符/长短信、160↔161 边界、UCS2 与 emoji 代理对、
   SMSC 与 TP-DA 地址编码、国际/国内 TOA、以及「输入框提示条数 = 实际分片数」。
+- `watchdog-routing`：看门狗的复位命令支持 AT 指令与本机 shell 命令两类、按行首自动分流。
+  静态守卫禁止那条曾经「一条 AT 都没下发过」的 wget/HTTP 通道复活，也禁止
+  `命令 && … || /bin/sh -c` 这类会把命令**执行两次**的写法；行为测试真跑分流、
+  超时包装、退出码、JSON 转义与逐条顺序，并断言默认值在四处（watchdog.sh /
+  `etc/config` / `uci-defaults` / `service.js`）口径一致。
+- `parse-extra`：`^REJINFO` 拒绝原因、`^SIMSQ` 的 11/12/98 语义（11 与 12 的文案必须可区分）、
+  以及 `rpc.js` 的 `parseRawData` 拆分。
 
 ### Rust
 
@@ -289,9 +299,37 @@ CI 会校验主包体积（>500KB，排除「只有前端」），并检查 4 �
 | `websocket_auth_key` | 空 | 由 ucode 自动附带；空则不校验密钥 |
 | `read_cache_static_ttl` | `300` | 不变类只读命令的缓存秒数（型号/固件/IMEI/ICCID…） |
 | `read_cache_ttl` | `0` | 状态类缓存秒数，默认关闭（宁可取实时值） |
-| `watch_enabled` | `0` | 连接看门狗总开关（默认不开） |
+| `watch_enabled` | `1` | 连接看门狗总开关（默认开：只做 DHCP 续约，不动模组） |
+| `watch_interval` | `60` | 检查间隔（秒，下限 15） |
+| `watch_fail_threshold` | `3` | 连续异常多少次后触发复位动作 |
+| `watch_reset_modem` | `0` | `1`=达阈值时执行 `watch_reset_cmds`（默认不启用） |
+| `watch_reset_cmds` | 见下方说明 | 复位动作，多行自定义，按行首自动分流 |
 | `notify_*` / `wechat_webhook` | 见默认文件 | 通知 |
 | `schedule_*` | 见默认文件 | 定时锁频 |
+
+`watch_reset_cmds` 是**多行自定义命令，按行首自动分流**（UCI 里以字面 `\n` 分隔）：
+
+| 行首 | 走向 |
+| --- | --- |
+| `AT` / `at` | 作为 AT 指令经本机 RPC 下发给模组，并校验应答里的 `success`（`ATI` / `ATE0` / `AT+CFUN=1,1` / `AT^HVSST=1,0` 都算） |
+| 其余任意内容 | 作为本机 shell 命令执行（`/bin/sh -c`，带 30 秒超时） |
+
+默认值是纯 shell 的三条，先重拉接口:
+
+```
+ifdown MT5700M
+sleep 2
+ifup MT5700M
+```
+
+注意：AT 通道走的是后端 `127.0.0.1:8765` 的**裸 TCP newline-JSON**（不是 HTTP），
+所以外部脚本要下发 AT 时不能用 `wget`/`curl` 发 HTTP POST —— 正确姿势是：
+
+```sh
+printf '%s\n' '{"id":1,"method":"at","params":{"cmd":"AT+CSQ"}}' | nc 127.0.0.1 8765
+```
+
+（配置了 `websocket_auth_key` 时，请求里要带上 `"auth_key":"…"`。）
 
 改配置后：
 
@@ -315,7 +353,9 @@ ifstatus MT5700M | grep -E '"up"|"autostart"'
 uci show network.MT5700M | grep auto      # 期望 auto='1'
 
 # 2) 模组是否开了自动拨号？不开则网口不会下发 DHCP，接口必然没有地址
-printf 'AT^SETAUTODIAL?\r\n' | nc 127.0.0.1 8765
+#    注意 8765 是裸 TCP newline-JSON，必须发 JSON，不能直接发 AT 文本（否则回 -32700）
+printf '%s\n' '{"id":1,"method":"at","params":{"cmd":"AT^SETAUTODIAL?"}}' | nc 127.0.0.1 8765
+# 期望：{"id":1,"result":{"success":true,"data":"^SETAUTODIAL: 1,1,…","error":null}}
 ```
 
 `/etc/init.d/at-webserver` 的 `ensure_modem_interface()` 会幂等地把接口 `auto` 置 1

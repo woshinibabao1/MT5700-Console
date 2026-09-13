@@ -9,16 +9,23 @@ uci -q get at-webserver.config >/dev/null || {
 # 确保日志目录存在
 mkdir -p /tmp
 
+# 复位命令默认值：先重拉 MT5700M 接口（纯 shell，不碰模组协议栈）
+DEF_RESET_CMDS='ifdown MT5700M\nsleep 2\nifup MT5700M'
+# v1.0 随包发出的旧默认值（本次要迁移掉，见下方说明）
+LEGACY_RESET_CMDS='AT+CFUN=1,1'
+
 # 老版本升级上来的配置里没有看门狗选项：补齐默认值（仅补缺失项，不覆盖用户设置）。
-# 看门狗默认**关闭**，需要用户在「服务配置 → 连接看门狗」里显式开启。
+# 注意：下面这段是带 \ 续行的词表，中间不能插注释——续行会把 # 吞进词里。
+# watch_reset_cmds 的值含空格，必须加引号；单引号内 \n 保持字面量（UCI 多行就是这么存的，
+# watchdog.sh 只翻译 \n、service.js 用 replace(/\\n/g) 还原）。
 for kv in \
-	watch_enabled=0 \
+	watch_enabled=1 \
 	watch_iface=MT5700M \
 	watch_device=eth2 \
 	watch_interval=60 \
 	watch_fail_threshold=3 \
 	watch_reset_modem=0 \
-	watch_reset_cmds=AT+CFUN=1,1 \
+	watch_reset_cmds="$DEF_RESET_CMDS" \
 	read_cache_ttl=0 \
 	read_cache_static_ttl=300
 do
@@ -26,6 +33,31 @@ do
 	val=${kv#*=}
 	uci -q get "at-webserver.config.$key" >/dev/null || uci -q set "at-webserver.config.$key=$val"
 done
+
+# ---------------------------------------------------------------------------
+# v1.0 → v1.0.1 迁移：把「随包发出的旧默认值」换成新默认值
+# ---------------------------------------------------------------------------
+# 为什么必须迁移 watch_reset_cmds：
+#   v1.0 的 AT 下发通道是坏的（用 wget 打 HTTP，而 8765 是裸 TCP newline-JSON），
+#   所以旧默认值 AT+CFUN=1,1 一直是**空转**的——看着配了，其实一条都没下发。
+#   v1.0.1 把通道修好之后，这个残留值会**真的**去复位模组协议栈，进而让 eth2
+#   数据面挂死。所以必须把它换成安全的「重拉接口」，不能留着。
+# 只在「值恰好等于我们旧版随包默认值」时才改，用户自己填过的内容一律不动。
+# （判据是「等于旧默认值」，不是「非空」——避免覆盖用户的真实自定义。）
+_cur_cmds=$(uci -q get at-webserver.config.watch_reset_cmds)
+if [ "$_cur_cmds" = "$LEGACY_RESET_CMDS" ]; then
+	uci -q set "at-webserver.config.watch_reset_cmds=$DEF_RESET_CMDS"
+	logger -t mt5700-uci "watch_reset_cmds 由旧默认 AT+CFUN=1,1 迁移为「重拉 MT5700M 接口」（通道已修好，旧值现在会真的复位协议栈）"
+fi
+
+# 看门狗默认开启：它只做 DHCP 续约，不动模组、不断网，风险极低，
+# 而它要防的「模组在、路由器在、就是没网」恰恰是用户完全无从下手的故障。
+# 同样只在「等于旧版随包默认值 0」时才改。
+_cur_en=$(uci -q get at-webserver.config.watch_enabled)
+if [ "$_cur_en" = "0" ]; then
+	uci -q set at-webserver.config.watch_enabled=1
+fi
+
 uci -q commit at-webserver
 
 # 关键脚本可执行（包管理器偶发丢失 +x）
