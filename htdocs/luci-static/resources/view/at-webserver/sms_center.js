@@ -135,8 +135,32 @@ return L.view.extend({
 			return result;
 		}
 
+		// 合并后的「逻辑消息」条数（只算接收类；本地缓存的已发消息不占模组存储）
+		function countReceivedMessages() {
+			var n = 0;
+			for (var i = 0; i < state.contacts.length; i++) {
+				var msgs = state.contacts[i].messages || [];
+				for (var j = 0; j < msgs.length; j++) {
+					if (msgs[j].type === 'received') n++;
+				}
+			}
+			return n;
+		}
+
+		/*
+		 * 存储条数存在两个口径，必须同时给出，否则会被误读成「短信丢了」：
+		 *   · used / total —— SIM 实际占用的槽位数（长短信的每个分片各占 1 个槽位）
+		 *   · N 条消息      —— 长短信分片合并后的逻辑消息数
+		 * 两者不等时补注「· N 条消息」；两者相等说明没有长短信，无需赘述。
+		 */
 		function renderStorage() {
-			storageEl.textContent = '存储：' + state.storage.used + ' / ' + state.storage.total;
+			if (!state.storage.total) { storageEl.textContent = '存储：—'; return; }
+			var text = '存储：' + state.storage.used + ' / ' + state.storage.total;
+			var n = countReceivedMessages();
+			if (n > 0 && n !== state.storage.used) {
+				text += ' · ' + n + ' 条消息';
+			}
+			storageEl.textContent = text;
 		}
 
 		function renderContacts() {
@@ -173,9 +197,13 @@ return L.view.extend({
 				var bubble = E('div', { 'class': 'mt5700-sms-bubble ' + (isSent ? 'mt5700-sms-bubble-sent' : 'mt5700-sms-bubble-recv') });
 				bubble.appendChild(E('div', {}, m.content || '(空消息)'));
 				bubble.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' }, m.time || ''));
-				if (m.partsExpected != null && m.partsCount != null && m.partsCount < m.partsExpected) {
-					bubble.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' },
-						'长短信已合并 ' + m.partsCount + '/' + m.partsExpected + ' 段（部分缺失）'));
+				/* 凡是合并过的长短信都标注段数（不必等到"缺片"才提示），
+				   让用户能一眼看出这条消息由几个分片拼成。 */
+				if (m.partsCount != null && m.partsCount > 1) {
+					var segExpected = (m.partsExpected != null) ? m.partsExpected : m.partsCount;
+					var segLabel = '长短信已合并 ' + m.partsCount + '/' + segExpected + ' 段';
+					if (m.partsCount < segExpected) segLabel += '（部分缺失）';
+					bubble.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' }, segLabel));
 				}
 				var del = Mt5700.button('删除', function (mm) {
 					return function () {
@@ -271,6 +299,7 @@ return L.view.extend({
 			}
 			renderContacts();
 			renderConversation();
+			renderStorage();   // 合并后消息数已确定，同步刷新「存储：X/Y · N 条消息」
 		}
 
 		function selectContact(num) {
@@ -439,8 +468,12 @@ return L.view.extend({
 						chain = chain.then(function () { return AtWs.client.sendCommand('AT+CMGD=' + ix); });
 					}
 				});
-				chain.then(function () { Mt5700.success('删除成功'); refresh(); })
-					.catch(function () { Mt5700.error('删除失败'); });
+				chain.then(function () {
+					Mt5700.success(storedIndices.length > 1
+						? '已删除该长短信的全部 ' + storedIndices.length + ' 个分片'
+						: '删除成功');
+					refresh();
+				}).catch(function () { Mt5700.error('删除失败'); });
 			} else {
 				// 缓存中的已发消息
 				var updated = Parse.getCachedSentMessages().filter(function (m) { return m.index !== msg.index; });
@@ -481,12 +514,14 @@ return L.view.extend({
 				if (mask.parentNode) mask.parentNode.removeChild(mask);
 				if (!checked.length) { Mt5700.warning('请先选择要删除的短信'); return; }
 				var chain = Promise.resolve();
+				var slotCount = 0;   // 实际删掉的 SIM 槽位数（长短信每个分片各占 1 个槽位）
 				checked.forEach(function (m) {
 					var idxs = (m.partIndices && m.partIndices.length)
 						? m.partIndices
 						: (m.index != null && m.index >= 0 ? [m.index] : []);
 					idxs.forEach(function (ix) {
 						if (ix != null && ix >= 0) {
+							slotCount++;
 							chain = chain.then(function () { return AtWs.client.sendCommand('AT+CMGD=' + ix); });
 						}
 					});
@@ -497,7 +532,9 @@ return L.view.extend({
 						var updated = Parse.getCachedSentMessages().filter(function (m) { return cachedIds.indexOf(m.index) < 0; });
 						try { localStorage.setItem(Parse.SMS_CACHE_KEY, JSON.stringify(updated)); } catch (e) {}
 					}
-					Mt5700.success('成功删除 ' + checked.length + ' 条短信');
+					var doneMsg = '成功删除 ' + checked.length + ' 条消息';
+					if (slotCount > checked.length) doneMsg += '（共 ' + slotCount + ' 个分片）';
+					Mt5700.success(doneMsg);
 					refresh();
 				}).catch(function () { Mt5700.error('批量删除失败'); });
 			}));
