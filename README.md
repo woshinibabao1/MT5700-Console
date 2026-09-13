@@ -194,8 +194,10 @@ MT5700-Console/                      # 仓库根 = OpenWrt 单包
 │   └── rust/                        # tokio 后端
 └── tests/
     ├── parse-contract.test.js       # AT 应答解析契约（45 项）
-    ├── ui-contract.test.js          # 样式 / 类名 / mock 保真 / AT 通道不变量（207 项）
+    ├── ui-contract.test.js          # 样式 / 类名 / mock 保真 / AT 通道不变量（206 项）
     ├── sms-pdu.test.js              # 短信 PDU 编解码闭环（90 项）
+    ├── watchdog-routing.test.js     # 看门狗 AT/Shell 分流 + 探测目标契约（52 项）
+    ├── sim-heal-contract.test.js    # SIM 自愈 / 「AT 只走 Rust」契约（58 项）
     └── mock-modem/                  # 无硬件 e2e（mock AT 模组 + 真机应答样本）
 ```
 
@@ -207,14 +209,19 @@ MT5700-Console/                      # 仓库根 = OpenWrt 单包
 
 ```sh
 node tests/parse-contract.test.js          # 45 项 · AT 应答 → 解析结果
-node tests/ui-contract.test.js             # 207 项 · 类名↔样式、mock↔真机、AT 通道不变量
+node tests/ui-contract.test.js             # 206 项 · 类名↔样式、mock↔真机、AT 通道不变量
 node tests/sms-pdu.test.js                 # 90 项 · 短信 PDU 编码 ↔ pdu.rs 口径 往返一致
-node tests/watchdog-routing.test.js        # 36 项 · 看门狗 AT/Shell 分流契约（静态守卫）
-node tests/mock-modem/parse-extra-test.js  # 12 项 · REJINFO / SIMSQ / parseRawData 拆分
+node tests/watchdog-routing.test.js        # 52 项 · 看门狗 AT/Shell 分流 + 探测目标契约
+node tests/sim-heal-contract.test.js       # 58 项 · SIM 自愈「每次开机一次」+ AT 只走 Rust
+node tests/mock-modem/parse-extra-test.js  # 14 项 · REJINFO / SIMSQ / parseRawData 拆分
 sh tests/watchdog-routing.test.sh          # 51 项 · 真跑分流与执行逻辑（上面那条会自动调用）
 ```
 
-五套测试共 **441 项**，全部基于真实设备实测样本或厂商手册条文：
+六套测试共 **465 项**，全部基于真实设备实测样本或厂商手册条文：
+
+注：`sim-heal-contract` 与看门狗契约里的「默认值四处一致」都是**静态守卫**——
+本机没有 `cargo`/`rustc`，Rust 侧的行为测试（假模组集成测试）在 CI 上跑，
+但源码里那些「少一行就出事」的写法在这里就能钉住。
 
 - `parse-contract`：MONSC / NRSSBID / MONNC / 注册状态 / `^SYSCFGEX` 回读 /
   `^CGPADDR` 的「16 段十进制点分 IPv6」/ `^NRRCCAPQRY` 三种 mode / COPS / VERSION。
@@ -230,8 +237,16 @@ sh tests/watchdog-routing.test.sh          # 51 项 · 真跑分流与执行逻�
   `命令 && … || /bin/sh -c` 这类会把命令**执行两次**的写法；行为测试真跑分流、
   超时包装、退出码、JSON 转义与逐条顺序，并断言默认值在四处（watchdog.sh /
   `etc/config` / `uci-defaults` / `service.js`）口径一致。
-- `parse-extra`：`^REJINFO` 拒绝原因、`^SIMSQ` 的 11/12/98 语义（11 与 12 的文案必须可区分）、
-  以及 `rpc.js` 的 `parseRawData` 拆分。
+  另含「探测目标可自定义」一节：默认必须是 `119.29.29.29`（腾讯 DNS）、判定收敛到
+  `connectivity_ok` 单一入口、没有 `ping` 时要有回退与明示、界面必须暴露三个可编辑项。
+- `sim-heal-contract`：SIM 自愈的三条硬约束都不许回退 ——
+  ① **每次开机最多执行一次**（tmpfs 标记文件用 `create_new`，跨服务重启也拦得住）；
+  ② **一切 AT 都走 Rust**（看门狗脚本里不许再出现 `HVSST`，也没有任何 shell 用
+  `microcom`/`stty` 碰串口）；③ **`HVSST` 配对必须闭合**（`=1,0` 与 `=1,1` 之间
+  不许有提前 `return`，等待也不许响应 ctx 取消）。同时钉住「卡已就绪 / 非 USB 网口模式 /
+  卡不在位或已失效时跳过且**不消耗**唯一一次机会」，以及界面文案不写「电话本」。
+- `parse-extra`：`^REJINFO` 拒绝原因、`^SIMSQ` 的 11/12/98 语义（11 与 12 的文案必须可区分、
+  且统一写「短信与电话」不写「电话本」）、以及 `rpc.js` 的 `parseRawData` 拆分。
 
 ### Rust
 
@@ -294,12 +309,16 @@ CI 会校验主包体积（>500KB，排除「只有前端」），并检查 4 �
 | `serial_baudrate` | `115200` | 波特率 |
 | `autodial_enable` | `1` | 连上模组后确保自动拨号开启（关掉则接口拿不到 IP） |
 | `autodial_mode` | `1` | `1`=USB 网络接口，`2`=转网口模式 |
+| `sim_heal_enable` | `1` | SIM 卡状态自愈：`AT^SETMODE?`=4 且 `AT^SIMSQ?`≠12 时用 `HVSST` 推一次，**每次开机最多执行一次** |
 | `network_host` / `network_port` | `192.168.8.1` / `20249` | 网络通道 |
 | `websocket_port` | `8765` | 后端 RPC 端口（仅回环） |
 | `websocket_auth_key` | 空 | 由 ucode 自动附带；空则不校验密钥 |
 | `read_cache_static_ttl` | `300` | 不变类只读命令的缓存秒数（型号/固件/IMEI/ICCID…） |
 | `read_cache_ttl` | `0` | 状态类缓存秒数，默认关闭（宁可取实时值） |
-| `watch_enabled` | `1` | 连接看门狗总开关（默认开：只做 DHCP 续约，不动模组） |
+| `watch_enabled` | `1` | 连接看门狗总开关（默认开：只做续约，不动模组协议栈） |
+| `watch_iface` | `MT5700M` | 受监控的 netifd 逻辑接口名 |
+| `watch_device` | `eth2` | 该接口对应的网口（模组 USB 网口） |
+| `watch_gateway` | `119.29.29.29` | 连通性探测目标（腾讯 DNS / DNSPod）；填 `none` 改为探测默认网关的邻居状态 |
 | `watch_interval` | `60` | 检查间隔（秒，下限 15） |
 | `watch_fail_threshold` | `3` | 连续异常多少次后触发复位动作 |
 | `watch_reset_modem` | `0` | `1`=达阈值时执行 `watch_reset_cmds`（默认不启用） |
@@ -330,6 +349,40 @@ printf '%s\n' '{"id":1,"method":"at","params":{"cmd":"AT+CSQ"}}' | nc 127.0.0.1 
 ```
 
 （配置了 `websocket_auth_key` 时，请求里要带上 `"auth_key":"…"`。）
+
+### 看门狗的连通性判据（`watch_gateway`）
+
+判定「到底有没有网」的目标默认是 **`119.29.29.29`（腾讯 DNS / DNSPod）**：
+
+- **非空** → 用 ICMP（`ping -c 1 -W 2`）探测该地址 —— 最贴近实际上网体验的判据。
+  刻意用**公网 IP 而不是域名**：本机有过 mosdns + OpenClash 的 DNS 劫持历史，
+  用域名探测会被本地解析器误导，得出「能上网」的错误结论。
+  该地址必须**回 ICMP**：不回 ping 的公共 DNS 会让看门狗永远判为「不通」。
+- **填 `none`** → 回退为旧行为：自动取 `watch_device` 上默认路由的网关，查它的邻居(ARP)状态。
+  （用哨兵而不是留空，是因为 `config_get` 是 `:-` 语义，空值会落回默认值，区分不出来。）
+- 系统没有 `ping` 时自动回退到邻居判定，并在启动日志里明确写出。
+
+### SIM 卡状态自愈（`sim_heal_enable`，默认开）
+
+`AT^SIMSQ?` 只有 `<sim_status>` = 12 才算完全就绪（短信与电话可接入）；
+本卡实测长期停在 `1,11`（网络可用，但短信与电话未接入）。判定与动作：
+
+| 情况 | 行为 |
+| --- | --- |
+| `AT^SETMODE?` = 4 且 `AT^SIMSQ?` ≠ 12 | `AT^HVSST=1,0` → 等待 3 秒 → `AT^HVSST=1,1`，随后复核一次 |
+| 卡已是 12 / 非 USB 网口模式 / 卡不在位(0)·已失效(98)·已移除(99) | 跳过，且**不消耗**「本次开机唯一一次」的机会 |
+
+三条硬约束：
+
+1. **每次开机最多执行一次** —— 靠 `/tmp/mt5700-simheal.done`（tmpfs）标记文件：
+   服务重启、模组反复重连都不会重跑，只有设备重启（tmpfs 清空）后才重新获得一次机会。
+   条件检查本身每次连上都做（纯只读，代价可忽略），但真正下发 `HVSST` 前必须先取走这次机会。
+2. **一切 AT 都走 Rust** —— 命令全部经后端 `AtClient::send_command`（`/dev/ttyUSB1` 的唯一持有者）下发；
+   shell 与前端都不碰串口，也没有第二条通道。
+3. **`HVSST` 配对必须闭合** —— `=1,0` 之后无论应答如何都必须把 `=1,1` 发出去，
+   否则 SIM 检测会一直停在关闭状态。因此两发之间的 3 秒等待刻意**不**响应服务关闭信号。
+
+处置记录：`logread -e at-webserver | grep "SIM 自愈"`。
 
 改配置后：
 
@@ -367,6 +420,7 @@ printf '%s\n' '{"id":1,"method":"at","params":{"cmd":"AT^SETAUTODIAL?"}}' | nc 1
 | `network.MT5700M.auto` | `1` | 开机自启接口 |
 | `at-webserver.config.autodial_enable` | `1` | 连上模组后确保自动拨号开启 |
 | `at-webserver.config.autodial_mode` | `1` | 1=USB 网络接口，2=转网口模式 |
+| `at-webserver.config.sim_heal_enable` | `1` | 连上模组后按需执行一次 SIM 自愈（每次开机最多一次） |
 
 手动触发一次对齐：
 

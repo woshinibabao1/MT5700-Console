@@ -324,7 +324,23 @@ return L.view.extend({
 		var wdChk = E('input', { type: 'checkbox' });
 		wdSwitch.appendChild(wdChk);
 		wdBody.appendChild(Mt5700.formGroup('启用看门狗', wdSwitch,
-			'默认开启。检查接口状态与默认网关的邻居可达性，异常时自动续约 DHCP，不会主动复位模组'));
+			'默认开启。先看接口是否 up，再探测下方「默认网关」，异常时自动续约 DHCP，不会主动复位模组'));
+
+		var wdIfaceInput = Mt5700.input('text', 'MT5700M');
+		wdBody.appendChild(Mt5700.formGroup('监控接口', wdIfaceInput,
+			'netifd 里的逻辑接口名，默认 MT5700M。改这里之后，复位命令里的接口名要一起改'));
+
+		var wdDevInput = Mt5700.input('text', 'eth2');
+		wdBody.appendChild(Mt5700.formGroup('网口设备', wdDevInput,
+			'模组的 USB 网口，默认 eth2。用于推断默认网关与查邻居状态'));
+
+		/* 连通性探测目标（界面名沿用用户习惯的「默认网关」）。 */
+		var WATCH_GATEWAY_DEFAULT = '119.29.29.29';
+		var wdGwInput = Mt5700.input('text', WATCH_GATEWAY_DEFAULT);
+		wdBody.appendChild(Mt5700.formGroup('默认网关（探测目标）', wdGwInput,
+			'默认 119.29.29.29 —— 腾讯 DNS / DNSPod。看门狗用 ICMP 探测它来判断「到底有没有网」，' +
+			'这是最贴近实际上网体验的判据。刻意用 IP 不用域名：本机有过 DNS 劫持，' +
+			'域名探测会被本地解析器误导。填 none 则不做 ICMP 探测，改为自动推断默认网关并查其邻居状态。'));
 
 		var wdIntervalInput = Mt5700.input('number', '60', '');
 		wdBody.appendChild(Mt5700.formGroup('检查间隔（秒）', wdIntervalInput, '下限 15 秒，默认 60'));
@@ -364,6 +380,28 @@ return L.view.extend({
 			'查看它的处置记录：SSH 执行 logread -e mt5700-watchdog，' +
 			'或查看日志文件 /tmp/at-notifications.log 里带 [watchdog] 的行。'));
 
+		/* ---------- SIM 卡状态自愈 ---------- */
+		var simHealCard = Mt5700.card('SIM 卡状态自愈',
+			'USB 网口模式下卡状态不是 12 时，自动用 HVSST 推一次');
+		var simHealBody = E('div');
+		simHealCard._body.appendChild(simHealBody);
+		body.appendChild(simHealCard);
+
+		var shSwitch = E('div', { 'class': 'mt5700-switch' });
+		var shChk = E('input', { type: 'checkbox' });
+		shSwitch.appendChild(shChk);
+		simHealBody.appendChild(Mt5700.formGroup('启用 SIM 卡状态自愈', shSwitch,
+			'默认开启。判定条件：AT^SETMODE? 为 4（USB 网口模式）且 AT^SIMSQ? 不是 12 —— ' +
+			'本卡实测长期停在 1,11（网络可用，但短信与电话未接入）。' +
+			'命中时按 AT^HVSST=1,0 → 等待 3 秒 → AT^HVSST=1,1 推一手。'));
+
+		simHealBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+			'★ 每次开机最多执行一次：服务重启、模组反复重连都不会重跑，' +
+			'只有设备重启（清空 /tmp 标记）后才重新获得一次机会；' +
+			'卡已就绪、非 USB 网口模式、卡不在位或已失效时都不消耗这次机会。' +
+			'所有 AT 指令一律由后端服务下发，界面与看门狗都不直接碰串口。' +
+			'处置记录：SSH 执行 logread -e at-webserver | grep "SIM 自愈"。'));
+
 		/* ---------- 载入 UCI（单 section `config` + 扁平键，与 Rust/ucode 一致） ---------- */
 		var get = function (key, def) {
 			var v = L.uci.get('at-webserver', 'config', key);
@@ -392,6 +430,14 @@ return L.view.extend({
 		wdIntervalInput.value = String(get('watch_interval', '60'));
 		wdThresholdInput.value = String(get('watch_fail_threshold', '3'));
 		wdResetChk.checked = get('watch_reset_modem', '0') === '1';
+		wdIfaceInput.value = String(get('watch_iface', 'MT5700M'));
+		wdDevInput.value = String(get('watch_device', 'eth2'));
+		/* 探测目标要读**原始值**：config_get 是 `:-` 语义，空值与未设置都会落回默认，
+		 * 所以这里也把空值一并按默认值展示（与保存侧一致），但用户显式填的 none 要原样保留。 */
+		var gwRaw = L.uci.get('at-webserver', 'config', 'watch_gateway');
+		wdGwInput.value = (gwRaw == null || String(gwRaw) === '')
+			? WATCH_GATEWAY_DEFAULT : String(gwRaw);
+		shChk.checked = get('sim_heal_enable', '1') === '1';
 		/* UCI 里以字面 \n 存多行命令，这里还原成换行显示 */
 		wdCmdsArea.value = String(get('watch_reset_cmds', WATCH_RESET_CMDS_DEFAULT)).replace(/\\n/g, '\n');
 
@@ -433,6 +479,12 @@ return L.view.extend({
 			set('watch_interval', String(Math.max(15, parseInt(wdIntervalInput.value, 10) || 60)));
 			set('watch_fail_threshold', String(Math.max(1, parseInt(wdThresholdInput.value, 10) || 3)));
 			set('watch_reset_modem', wdResetChk.checked ? '1' : '0');
+			set('watch_iface', wdIfaceInput.value.trim() || 'MT5700M');
+			set('watch_device', wdDevInput.value.trim() || 'eth2');
+			/* 空白视为「用默认值」——config_get 本来就分不出空值和未设置，统一成显式默认值。 */
+			var gwVal = wdGwInput.value.trim();
+			set('watch_gateway', gwVal === '' ? WATCH_GATEWAY_DEFAULT : gwVal);
+			set('sim_heal_enable', shChk.checked ? '1' : '0');
 			/* 多行 → 字面 \n（UCI 值不能带真实换行），看门狗侧只翻译 \n、不动其它反斜杠。
 			 * 逐行去首尾空白 + 丢掉空行 + 用字面 \n 连接；**不做反斜杠转义**——
 			 * 命令里合法出现的反斜杠要原样保留。

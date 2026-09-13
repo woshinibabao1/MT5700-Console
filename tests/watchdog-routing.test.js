@@ -139,6 +139,47 @@ ok('service.js 逐行裁首尾空白（带 g 或逐行处理）', /replace\(\/\^
 ok('service.js 丢弃空行后再拼接', /filter\(function \(x\) \{ return x !== ''; \}\)/.test(svc));
 ok('service.js 提示文案说明了分流规则', /行首是 AT \/ at/.test(svc));
 
+console.log('== A7. 探测目标（默认网关）可自定义，默认腾讯 DNS ==');
+
+/* 用户 2026-09-13 追加要求：看门狗监控什么、拿什么当「默认网关」都要能自己改；
+ * 且默认用腾讯 DNS（DNSPod）当探测目标 —— 用公网 IP 而不是域名，
+ * 因为本机有过 mosdns / OpenClash 劫持，域名探测会被本地解析器误导。 */
+const GW_DEFAULT = '119.29.29.29';
+
+ok('watchdog.sh 默认探测目标是腾讯 DNS', wd.indexOf("DEF_GATEWAY='" + GW_DEFAULT + "'") >= 0,
+	'找不到 DEF_GATEWAY=' + GW_DEFAULT);
+ok('config 随包默认值一致', uciCfg.indexOf("option watch_gateway '" + GW_DEFAULT + "'") >= 0);
+ok('uci-defaults 升级补齐一致',
+	uciDef.indexOf("DEF_WATCH_GATEWAY='" + GW_DEFAULT + "'") >= 0 &&
+	uciDef.indexOf('watch_gateway="$DEF_WATCH_GATEWAY"') >= 0,
+	'老版本升级上来的配置里没有这个键，必须补默认值');
+ok('service.js 前端默认值一致', svc.indexOf("WATCH_GATEWAY_DEFAULT = '" + GW_DEFAULT + "'") >= 0);
+
+ok('用 ICMP 探测（ping -c/-W）', /ping -c "\$PROBE_COUNT" -W "\$PROBE_TIMEOUT"/.test(wdCode),
+	'目标是公网地址、不在二层邻居表里，邻居状态判定对它无效');
+ok('系统没有 ping 时有回退与明示',
+	/else\s+W_PROBE_MODE='gw-neigh'/.test(wdCode) && /系统没有 ping/.test(wdCode),
+	'否则看门狗会静默地永远判为「不通」');
+
+ok('连通性判定收敛到单一入口 connectivity_ok', /^connectivity_ok\(\)/m.test(wdCode));
+ok('check_once 只调 connectivity_ok，不再直接调 gw_ok',
+	/if ! connectivity_ok; then/.test(wdCode) && !/if ! gw_ok; then/.test(wdCode));
+ok('回退分支（网关邻居判定）仍在', /^gw_ok\(\)/m.test(wdCode) && /^gw_neigh_state\(\)/m.test(wdCode));
+
+ok('config_get 的 `:-` 语义有处理：用 none 当「关掉 ICMP」的哨兵',
+	/none\|NONE\|None\) W_GATEWAY=''/.test(wdCode),
+	'config_get 在值为空时会落回默认值，留空分不出「未设置」和「要回退」');
+
+ok('界面暴露「监控接口」', /formGroup\('监控接口'/.test(svc));
+ok('界面暴露「网口设备」', /formGroup\('网口设备'/.test(svc));
+ok('界面暴露「默认网关（探测目标）」', /formGroup\('默认网关（探测目标）'/.test(svc));
+ok('界面会保存 watch_iface / watch_device / watch_gateway',
+	/set\('watch_iface'/.test(svc) && /set\('watch_device'/.test(svc) && /set\('watch_gateway'/.test(svc),
+	'UCI 早就有这三个键的读取，但界面从来不给入口，等于用户改不了');
+ok('界面会回填 watch_iface / watch_device / watch_gateway',
+	/get\('watch_iface'/.test(svc) && /get\('watch_device'/.test(svc) &&
+	/set\('watch_gateway'|watch_gateway'\)/.test(svc) && /watch_gateway/.test(svc));
+
 /* ---------------------------------------------------------------------------
  * B. 行为测试（需要 sh）
  * ------------------------------------------------------------------------- */

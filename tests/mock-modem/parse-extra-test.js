@@ -89,17 +89,22 @@ try {
 
 	/* ---- SIMSQ ---- */
 	/* 标签文案以 parse.js 的 SIM_STATUS（全项目唯一一份码表）为准：
-	 *   12 = 卡初始化完成，短信与电话本可接入
-	 *   11 = 卡初始化完成，可接入网络（短信与电话本未接入）  ← 本卡长期停在这一档
-	 *   98 = 卡已失效（PUK 锁死或物理损坏） */
+	 *   12 = 卡初始化完成，短信与电话可接入
+	 *   11 = 卡初始化完成，可接入网络（短信与电话未接入）  ← 本卡长期停在这一档
+	 *   98 = 卡已失效（PUK 锁死或物理损坏）
+	 * ★ 文案用「短信与电话」，**不写「电话本」**（用户拍板）——见下方断言。 */
 	const sqReady = Parse.parseSimsq('^SIMSQ: 0,12');
 	check('parseSimsq 完全就绪（12）', !!sqReady && sqReady.present === true && sqReady.dead === false
-		&& sqReady.label === '卡初始化完成，短信与电话本可接入', sqReady ? sqReady.label : 'null');
+		&& sqReady.label === '卡初始化完成，短信与电话可接入', sqReady ? sqReady.label : 'null');
 
 	const sq11 = Parse.parseSimsq('^SIMSQ: 1,11');
 	check('parseSimsq 仅可接入网络（11）', !!sq11 && sq11.status === 11 && sq11.present === true && sq11.dead === false,
 		sq11 ? sq11.label : 'null');
 	check('11 与 12 的文案必须可区分', sq11.label !== sqReady.label, sq11.label + ' vs ' + sqReady.label);
+	check('文案不出现「电话本」，统一写「电话」',
+		sq11.label.indexOf('电话本') < 0 && sqReady.label.indexOf('电话本') < 0,
+		sq11.label + ' / ' + sqReady.label);
+	check('11 的文案标明「短信与电话未接入」', sq11.label.indexOf('短信与电话未接入') >= 0, sq11.label);
 
 	const sqDead = Parse.parseSimsq('^SIMSQ: 0,98');
 	// 原版语义：present 只排除 0/99，98（失效）依然 present=true

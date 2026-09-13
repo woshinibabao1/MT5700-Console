@@ -11,6 +11,8 @@ mkdir -p /tmp
 
 # 复位命令默认值：先重拉 MT5700M 接口（纯 shell，不碰模组协议栈）
 DEF_RESET_CMDS='ifdown MT5700M\nsleep 2\nifup MT5700M'
+# 连通性探测目标默认值：腾讯 DNS / DNSPod（公网 IP，回 ICMP）
+DEF_WATCH_GATEWAY='119.29.29.29'
 # v1.0 随包发出的旧默认值（本次要迁移掉，见下方说明）
 LEGACY_RESET_CMDS='AT+CFUN=1,1'
 
@@ -22,10 +24,12 @@ for kv in \
 	watch_enabled=1 \
 	watch_iface=MT5700M \
 	watch_device=eth2 \
+	watch_gateway="$DEF_WATCH_GATEWAY" \
 	watch_interval=60 \
 	watch_fail_threshold=3 \
 	watch_reset_modem=0 \
 	watch_reset_cmds="$DEF_RESET_CMDS" \
+	sim_heal_enable=1 \
 	read_cache_ttl=0 \
 	read_cache_static_ttl=300
 do

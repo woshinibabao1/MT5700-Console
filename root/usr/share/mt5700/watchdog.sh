@@ -9,8 +9,17 @@
 #
 # 判定与动作：
 #   1) 接口未 up            → ubus renew（失败则 ifdown/ifup）
-#   2) 网关邻居不可达        → ubus renew 续约（失败则 ifdown/ifup）
+#   2) 探测目标不可达        → ubus renew 续约（失败则 ifdown/ifup）
 #   3) 连续失败达阈值        → 按「复位命令」逐条执行（UCI watch_reset_cmds，可多行自定义）
+#
+# 「探测目标」由 UCI watch_gateway 决定（界面里可改）：
+#   · 非空（**默认 119.29.29.29 = 腾讯 DNS / DNSPod**）→ 直接 ICMP 探测该地址。
+#     这是最贴近「用户到底能不能上网」的判据，而且用的是**公网 IP**，
+#     不依赖本地解析器 —— 本机有过 mosdns / OpenClash 劫持的历史，
+#     拿域名做探测会被本地解析器误导，得出「能上网」的错误结论。
+#   · 填 `none` → 回退为旧行为：自动取 watch_device 上的默认路由网关，查它的邻居(ARP)状态。
+#     （用哨兵而不是留空，是因为 config_get 是 `:-` 语义，空值会落回默认值，区分不出来。）
+#     目标多半是公网地址、不在二层邻居表里，所以「有目标」时不能用邻居状态判定，必须 ICMP。
 #
 # 复位命令支持**两类**，按行首自动分流（详见文件末尾 is_at_cmd / run_sh_cmd）：
 #   · AT 指令     —— 行首是 AT / at（AT+CFUN=1,1、AT^HVSST=1,0、ATE0、ATI…）
@@ -41,6 +50,12 @@
 DEF_IFACE='MT5700M'
 DEF_DEV='eth2'
 
+# 探测目标默认值：腾讯 DNS（DNSPod）的公开地址。
+# 国内可达性与稳定性都好，且**必须回 ICMP**（很多公共 DNS 是不回 ping 的，
+# 拿那种地址当探测目标会让看门狗永远判为「不通」）。
+# ★ 用 IP 而非域名：见文件头关于 DNS 劫持的说明。
+DEF_GATEWAY='119.29.29.29'
+
 # 复位命令默认值：先重拉 MT5700M 接口（纯 shell，不碰模组协议栈）。
 # 刻意**不**用 AT+CFUN=1,1 作默认 —— 协议栈复位会让 eth2 数据面挂死，只宜作兜底。
 DEF_RESET_CMDS='ifdown MT5700M\nsleep 2\nifup MT5700M'
@@ -49,10 +64,17 @@ DEF_RESET_CMDS='ifdown MT5700M\nsleep 2\nifup MT5700M'
 CMD_TIMEOUT=30
 # 每条复位命令之间的间隔（秒），给模组/接口反应时间。
 CMD_GAP=1
+# ICMP 探测的超时与重试（秒/次）。宁可判得快一点，也不要让探测拖住整个循环。
+PROBE_TIMEOUT=2
+PROBE_COUNT=1
 
 W_ENABLED=1
 W_IFACE="$DEF_IFACE"
 W_DEV="$DEF_DEV"
+W_GATEWAY="$DEF_GATEWAY"
+# icmp     = 探测 W_GATEWAY（默认模式）
+# gw-neigh = 回退：自动推断默认网关 + 查邻居状态（W_GATEWAY 留空、或系统没有 ping）
+W_PROBE_MODE='icmp'
 W_INTERVAL=60
 W_THRESHOLD=3
 W_RESET_MODEM=0
@@ -62,6 +84,10 @@ W_RPC_HOST='127.0.0.1'
 W_RPC_PORT=8765
 W_RPC_KEY=''
 AT_LAST_ERR=''
+
+have_ping() {
+	command -v ping >/dev/null 2>&1
+}
 
 load_cfg() {
 	config_load at-webserver
@@ -74,6 +100,13 @@ load_cfg() {
 	# 复位命令：多行文本，UCI 里以字面 \n 存储（UCI 值不能带真实换行）
 	config_get W_RESET_CMDS config watch_reset_cmds "$DEF_RESET_CMDS"
 	config_get W_LOG     config log_file '/tmp/at-notifications.log'
+	# 探测目标。界面里填 none 表示「不做 ICMP 探测」，回退为默认网关邻居判定。
+	# 注意 config_get 用的是 `:-` 语义：UCI 里存空值时也会落回默认值，
+	# 所以「想关掉 ICMP 探测」只能靠 none 这个哨兵，不能靠留空。
+	config_get W_GATEWAY config watch_gateway "$DEF_GATEWAY"
+	case "$W_GATEWAY" in
+		''|none|NONE|None) W_GATEWAY='' ;;
+	esac
 	# AT 下发通道：与 Rust 服务（src/rust/src/rpcserver.rs）的监听地址保持一致。
 	# websocket_bind 为空时服务默认只监听 127.0.0.1（allow_wan=0）；
 	# 若显式绑到了某个本机地址，就按那个地址连，否则会连不上。
@@ -93,6 +126,14 @@ load_cfg() {
 	[ "$W_THRESHOLD" -lt 1 ] && W_THRESHOLD=1
 	case "$W_RPC_PORT" in ''|*[!0-9]*) W_RPC_PORT=8765;; esac
 	[ "$W_RPC_PORT" -lt 1 ] && W_RPC_PORT=8765
+
+	# 决定连通性判定模式。每轮 load_cfg 都重算 —— 界面上改完最多一个检查间隔就生效。
+	# 目标非空且系统有 ping → ICMP 探测；否则回退为「默认网关 + 邻居状态」。
+	if [ -n "$W_GATEWAY" ] && have_ping; then
+		W_PROBE_MODE='icmp'
+	else
+		W_PROBE_MODE='gw-neigh'
+	fi
 }
 
 log_msg() {
@@ -119,6 +160,58 @@ gw_ok() {
 		REACHABLE|STALE|DELAY|PROBE|PERMANENT|NOARP) return 0 ;;
 		*) return 1 ;;
 	esac
+}
+
+# ICMP 探测「探测目标」。
+# 只认「真的收到回应」—— ping 命令能跑起来不算成功，退出码才是判据。
+probe_target() {
+	[ -n "$W_GATEWAY" ] || return 1
+	ping -c "$PROBE_COUNT" -W "$PROBE_TIMEOUT" "$W_GATEWAY" >/dev/null 2>&1
+}
+
+# 连通性总判据（check_once 只用这一个入口，避免两套判据打架）。
+connectivity_ok() {
+	case "$W_PROBE_MODE" in
+		icmp) probe_target ;;
+		*)    gw_ok ;;
+	esac
+}
+
+# 启动横幅里用的探测方式描述（把「装了没装 ping」这类前置条件明确写出来，
+# 免得看门狗一直用回退判据却没人知道）。
+probe_banner() {
+	if [ "$W_PROBE_MODE" = "icmp" ]; then
+		printf 'ICMP %s' "$W_GATEWAY"
+	elif [ -n "$W_GATEWAY" ]; then
+		printf '网关邻居（系统没有 ping，忽略目标 %s）' "$W_GATEWAY"
+	else
+		printf '网关邻居（未设置探测目标）'
+	fi
+}
+
+# 「通」的时候写日志用的目标描述。
+target_label() {
+	if [ "$W_PROBE_MODE" = "icmp" ]; then
+		printf '探测目标 %s' "$W_GATEWAY"
+	else
+		gw=$(gw_of)
+		printf '默认网关 %s' "${gw:-未知}"
+	fi
+}
+
+# 「不通」时的描述：ICMP 模式下顺带把接口/路由网关/邻居状态带出来，
+# 一眼能看出到底是二层不通、还是只是外网不通。
+target_fail_desc() {
+	if [ "$W_PROBE_MODE" = "icmp" ]; then
+		gw=$(gw_of)
+		st=$(gw_neigh_state)
+		printf 'ICMP 探测 %s 无回应（路由网关 %s 邻居=%s）' \
+			"$W_GATEWAY" "${gw:-无}" "${st:-无}"
+	else
+		gw=$(gw_of)
+		st=$(gw_neigh_state)
+		printf '默认网关 %s 邻居状态=%s' "${gw:-未知}" "${st:-无}"
+	fi
 }
 
 # 续约：优先用 ubus 的 renew（只续 DHCP 租约，不打断接口），失败再退回 ifdown/ifup
@@ -291,18 +384,16 @@ check_once() {
 		return 2
 	fi
 
-	# 接口 up，但网关邻居不可达 —— 正是「静默断网」的特征
-	if ! gw_ok; then
-		gw=$(gw_of)
-		st=$(gw_neigh_state)
-		log_msg "网关 ${gw:-未知} 邻居状态=${st:-无}（不通），续约 $W_IFACE"
+	# 接口 up，但不通 —— 正是「静默断网」的特征
+	if ! connectivity_ok; then
+		log_msg "不通：$(target_fail_desc)，续约 $W_IFACE"
 		renew_lease
 		sleep 4
-		if gw_ok; then
-			log_msg "续约成功，网关 $(gw_of) 已可达"
+		if connectivity_ok; then
+			log_msg "续约成功，$(target_label) 已可达"
 			return 1
 		fi
-		log_msg "续约后网关仍不可达（$(gw_of) 邻居=$(gw_neigh_state)）"
+		log_msg "续约后仍不通：$(target_fail_desc)"
 		return 2
 	fi
 
@@ -327,7 +418,7 @@ daemon)
 	[ "$W_ENABLED" = "1" ] || { log_msg '看门狗未启用，退出'; exit 0; }
 	_cmds_n=$(split_cmds | grep -c -v '^[[:space:]]*$' 2>/dev/null)
 	[ -n "$_cmds_n" ] || _cmds_n=0
-	log_msg "看门狗启动：接口=$W_IFACE 设备=$W_DEV 间隔=${W_INTERVAL}s 阈值=$W_THRESHOLD 复位模组=$W_RESET_MODEM 复位命令=${_cmds_n}条（AT/SH 自动分流，RPC=$W_RPC_HOST:$W_RPC_PORT）"
+	log_msg "看门狗启动：接口=$W_IFACE 设备=$W_DEV 探测=$(probe_banner) 间隔=${W_INTERVAL}s 阈值=$W_THRESHOLD 复位模组=$W_RESET_MODEM 复位命令=${_cmds_n}条（AT/SH 自动分流，RPC=$W_RPC_HOST:$W_RPC_PORT）"
 	fails=0
 	while :; do
 		sleep "$W_INTERVAL"

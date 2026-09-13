@@ -121,8 +121,8 @@ return L.view.extend({
 		var SIM_STATE = {
 			0: ['未插卡', true], 1: ['已插卡', true], 2: ['PIN 锁定', true], 3: ['SIM 锁定', true],
 			10: ['初始化中', true],
-			11: ['已初始化 · 可接入网络（短信/电话本未接入）', true],
-			12: ['就绪 · 短信与电话本可接入', false],
+			11: ['已初始化 · 可接入网络（短信/电话未接入）', true],
+			12: ['就绪 · 短信与电话可接入', false],
 			98: ['卡失效', true], 99: ['已移除', true], 100: ['卡错误', true]
 		};
 
@@ -221,7 +221,7 @@ return L.view.extend({
 
 			if (warn) {
 				devBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'短信与电话本要等 SIM 到「就绪」；长期停在「已初始化」时短信可能发不出去。'));
+					'短信与电话要等 SIM 到「就绪」；长期停在「已初始化」时短信可能发不出去。'));
 			}
 
 			var note = manualPhoneNote();
@@ -231,8 +231,8 @@ return L.view.extend({
 
 			var rows = [
 				['手机号', phone],
-				/* 「电话本」原显示 "ON 0/2"（存储位置 ON、0 条记录、容量 2），既不直观
-				   也与上方 SIM 状态重复，已移除；电话本能否接入见该行提示。 */
+				/* 手机号存储位置原来显示 "ON 0/2"（存储位置 ON、0 条记录、容量 2），
+				   既不直观也与上方 SIM 状态重复，已移除；短信与电话能否接入见上方提示。 */
 				['SIM 热插拔', st.hotplug == null ? '—' : (st.hotplug ? '已开启' : '已关闭')],
 				['IMSI', fullNum(st.imsi)],
 				['ICCID', fullNum(st.iccid)],

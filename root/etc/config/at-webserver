@@ -18,6 +18,13 @@ config at-webserver 'config'
 	# 服务每次连上模组后会按此配置对齐一次（已在目标状态则不重复下发）。
 	option autodial_enable '1'                 # 1=开启自动拨号（默认），0=关闭
 	option autodial_mode '1'                   # 1=USB网络接口，2=转网口模式
+	# SIM 卡状态自愈（默认**开启**）：AT^SETMODE? 为 4（USB 网口模式）且 AT^SIMSQ? 不是 12 时，
+	# 按 AT^HVSST=1,0 → 等待 3 秒 → AT^HVSST=1,1 推一手，把卡从 11 推到 12。
+	# ★ **每次开机最多执行一次**：靠 /tmp（tmpfs）里的标记文件，
+	#   服务重启/模组重连都不会重跑，只有设备重启后才重新获得一次机会。
+	# ★ 所有 AT 一律由前端服务（Rust）下发，界面与 shell 都不直接碰串口。
+	# 卡已就绪、非 USB 网口模式、卡不在位或已失效时都会跳过，且**不消耗**这一次机会。
+	option sim_heal_enable '1'                 # 1=启用（默认），0=关闭
 	option websocket_port '8765'           # LuCI RPC 监听端口
 	option websocket_allow_wan '0'          # 1=RPC 监听 0.0.0.0 可被外部访问（建议同时设置 auth_key）
 	option websocket_bind ''               # 可选：覆盖监听地址，如 0.0.0.0 或 192.168.10.1
@@ -38,6 +45,12 @@ config at-webserver 'config'
 	option watch_enabled '1'                 # 1=启用看门狗（默认），0=关闭
 	option watch_iface 'MT5700M'             # 受监控的网络接口
 	option watch_device 'eth2'               # 该接口对应的网口（模组 USB 网口）
+	# 连通性探测目标（界面「默认网关」）——默认 **119.29.29.29 = 腾讯 DNS / DNSPod**。
+	# 用**公网 IP** 而不是域名：本机有过 mosdns + OpenClash 的 DNS 劫持历史，
+	# 拿域名探测会被本地解析器误导，得出「能上网」的错误结论。
+	# 该地址必须**回 ICMP**：不回 ping 的公共 DNS 会让看门狗永远判为不通。
+	# 填 none 则回退为旧行为：自动取 watch_device 上默认路由的网关，查它的邻居(ARP)状态。
+	option watch_gateway '119.29.29.29'
 	option watch_interval '60'               # 检查间隔（秒，下限 15）
 	option watch_fail_threshold '3'          # 连续异常多少次后触发复位动作
 	option watch_reset_modem '0'             # 1=达阈值时执行下方复位命令（默认不启用）

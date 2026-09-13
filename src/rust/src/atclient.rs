@@ -118,10 +118,34 @@ pub struct AtClient {
     last_cmd_at: Arc<Mutex<Instant>>,
 
     pending: Arc<Mutex<Option<PendingCmd>>>,
+
+    /// 是否启用 SIM 卡状态自愈（UCI `sim_heal_enable`，默认开）。
+    sim_heal_enable: bool,
+    /// 「本次开机只允许执行一次」的守卫（tmpfs 标记文件 + 进程内原子标志）。
+    sim_heal_guard: crate::simheal::BootGuard,
 }
 
 impl AtClient {
     pub fn new(cfg: AtConfig, urc_tx: mpsc::Sender<Unsolicited>) -> Arc<Self> {
+        Self::build(cfg, urc_tx, crate::simheal::marker_path())
+    }
+
+    /// 测试专用：注入独立的标记文件路径，避免动到真机上的 `/tmp/mt5700-simheal.done`。
+    #[cfg(test)]
+    pub fn new_with_marker(
+        cfg: AtConfig,
+        urc_tx: mpsc::Sender<Unsolicited>,
+        marker: std::path::PathBuf,
+    ) -> Arc<Self> {
+        Self::build(cfg, urc_tx, marker)
+    }
+
+    fn build(
+        cfg: AtConfig,
+        urc_tx: mpsc::Sender<Unsolicited>,
+        sim_heal_marker: std::path::PathBuf,
+    ) -> Arc<Self> {
+        let sim_heal_enable = cfg.sim_heal_enable;
         Arc::new(AtClient {
             cfg,
             conn: Arc::new(Mutex::new(None)),
@@ -132,6 +156,8 @@ impl AtClient {
             long_cmd_end: Arc::new(AtomicI64::new(0)),
             last_cmd_at: Arc::new(Mutex::new(Instant::now())),
             pending: Arc::new(Mutex::new(None)),
+            sim_heal_enable,
+            sim_heal_guard: crate::simheal::BootGuard::new(sim_heal_marker),
         })
     }
 
@@ -247,6 +273,10 @@ impl AtClient {
             log_warn!("开启来电号码显示失败: {}", e);
         }
 
+        // SIM 卡状态自愈：SETMODE=4 且卡状态非 12 时，用 HVSST 成对推一次。
+        // 放在拨号对齐**之前**：万一推卡让模组重读 SIM，随后的拨号对齐才是在最终状态下做的。
+        self.ensure_sim_ready(ctx).await;
+
         // 自动拨号默认开启（UCI autodial_enable 默认 1）。
         // 放在最后：前面的设置类命令失败不应阻止拨号，否则设备会一直没有 IP。
         self.ensure_autodial(ctx).await;
@@ -307,6 +337,126 @@ impl AtClient {
         }
     }
 
+
+    /// SIM 卡状态自愈：把长期停在 11 的卡用 `HVSST` 成对推一把。
+    ///
+    /// 触发条件（全部经本客户端的 `send_command` 读取，**不经任何 shell**）：
+    ///   `AT^SETMODE?` = 4（USB 网口模式）且 `AT^SIMSQ?` 的 `<sim_status>` 不是 12。
+    ///
+    /// 三条硬约束：
+    ///   1. **一切 AT 都走 Rust** —— `send_command` 是 `/dev/ttyUSB1` 的唯一持有者，
+    ///      这里不开第二条通道、不用 microcom、不落 shell。
+    ///   2. **每次开机最多执行一次** —— 条件检查每次连上都做（纯只读，代价可忽略），
+    ///      但真正下发 `HVSST` 之前必须先向 [`crate::simheal::BootGuard`] 取走
+    ///      「本次开机唯一一次」的机会；取不到就跳过。于是模组反复重连、
+    ///      procd 反复拉起服务，`HVSST` 也只会被推一次。
+    ///   3. **配对必须闭合** —— `AT^HVSST=1,0` 之后一定要把 `AT^HVSST=1,1` 发出去，
+    ///      否则 SIM 检测会一直停在关闭状态。所以中间的等待刻意不响应 ctx 取消。
+    async fn ensure_sim_ready(self: &Arc<Self>, ctx: &tokio::sync::watch::Receiver<bool>) {
+        use crate::simheal;
+
+        if !self.sim_heal_enable {
+            return; // 未启用：一条命令都不发
+        }
+
+        // ① 只认 USB 网口模式（4），其它模式下推 HVSST 会打断正在建立的拨号。
+        let setmode = match self.send_command(ctx, "AT^SETMODE?", COMMAND_TIMEOUT, None).await {
+            Ok(resp) => simheal::parse_setmode(&resp.text()),
+            Err(e) => {
+                log_warn!("SIM 自愈：查询 AT^SETMODE? 失败（{}），本次跳过", e);
+                return;
+            }
+        };
+        match setmode {
+            Some(m) if m == simheal::EXPECTED_SETMODE => {}
+            Some(m) => {
+                log_info!(
+                    "SIM 自愈：连接模式为 {}（非 {}），跳过",
+                    m,
+                    simheal::EXPECTED_SETMODE
+                );
+                return;
+            }
+            None => {
+                log_warn!("SIM 自愈：无法解析 AT^SETMODE? 应答，跳过");
+                return;
+            }
+        }
+
+        // ② 读卡状态。只有 12 才算「完全就绪」。
+        let status = match self.send_command(ctx, "AT^SIMSQ?", COMMAND_TIMEOUT, None).await {
+            Ok(resp) => simheal::parse_simsq_status(&resp.text()),
+            Err(e) => {
+                log_warn!("SIM 自愈：查询 AT^SIMSQ? 失败（{}），本次跳过", e);
+                return;
+            }
+        };
+        let Some(status) = status else {
+            log_warn!("SIM 自愈：无法解析 AT^SIMSQ? 应答，跳过");
+            return;
+        };
+
+        if status == simheal::SIM_STATUS_READY {
+            log_info!("SIM 自愈：卡状态已是 12（完全就绪），无需处理");
+            return;
+        }
+        // 卡不在位（0）/ 已失效（98）/ 已移除（99）：推 HVSST 毫无意义，
+        // 不能在卡根本没插的情况下白耗掉本次开机的唯一一次机会。
+        if matches!(status, 0 | 98 | 99) {
+            log_warn!(
+                "SIM 自愈：卡状态 {} 属于「不在位 / 已失效 / 已移除」，跳过",
+                status
+            );
+            return;
+        }
+
+        // ③ 到这里才取走机会 —— 前面任何一次提前返回都不消耗它。
+        //    这样即使开机瞬间模组还没就绪（SIMSQ 读不出来），后面的重连仍有机会补上。
+        if !self.sim_heal_guard.claim() {
+            log_info!(
+                "SIM 自愈：本次开机已执行过，跳过（当前卡状态 {}）",
+                status
+            );
+            return;
+        }
+
+        log_warn!(
+            "SIM 自愈：卡状态 {}（非 12），执行一次 HVSST 推卡 —— 本卡长期停在 11 属已知现象",
+            status
+        );
+
+        // ④ 成对下发。第一发无论成功与否都要把第二发打完，配对不能半途而废。
+        match self.send_command(ctx, "AT^HVSST=1,0", COMMAND_TIMEOUT, None).await {
+            Ok(resp) if resp.ok() => log_info!("SIM 自愈：AT^HVSST=1,0 已确认"),
+            Ok(resp) => log_warn!("SIM 自愈：AT^HVSST=1,0 未返回 OK：{}", resp.text()),
+            Err(e) => log_warn!("SIM 自愈：AT^HVSST=1,0 未收到应答（{}），仍继续闭合配对", e),
+        }
+
+        // 这里**不**用 ctx 感知的 sleep：配对必须闭合，宁可多等 3 秒，
+        // 也不能因为服务正在关闭就把卡留在 HVSST=0（SIM 检测关闭）的状态上。
+        tokio::time::sleep(simheal::HVSST_PAIR_WAIT).await;
+
+        match self.send_command(ctx, "AT^HVSST=1,1", COMMAND_TIMEOUT, None).await {
+            Ok(resp) if resp.ok() => log_info!("SIM 自愈：AT^HVSST=1,1 已确认，配对闭合"),
+            Ok(resp) => log_warn!("SIM 自愈：AT^HVSST=1,1 未返回 OK：{}", resp.text()),
+            Err(e) => log_warn!("SIM 自愈：AT^HVSST=1,1 未收到应答：{}", e),
+        }
+
+        // ⑤ 复核一次，只写日志。机会已经用掉，不论结果本次开机都不再重试。
+        match self.send_command(ctx, "AT^SIMSQ?", COMMAND_TIMEOUT, None).await {
+            Ok(resp) => match simheal::parse_simsq_status(&resp.text()) {
+                Some(v) if v == simheal::SIM_STATUS_READY => {
+                    log_info!("SIM 自愈：推卡后卡状态已到 12（完全就绪）")
+                }
+                Some(v) => log_warn!(
+                    "SIM 自愈：推卡后卡状态仍为 {}（本卡长期如此属预期，本次开机不再重试）",
+                    v
+                ),
+                None => log_warn!("SIM 自愈：推卡后无法解析 AT^SIMSQ? 应答"),
+            },
+            Err(e) => log_warn!("SIM 自愈：推卡后复核 AT^SIMSQ? 失败：{}", e),
+        }
+    }
 
     /// 串行发送一条 AT 命令并等待结束码。
     pub async fn send_command(
@@ -892,5 +1042,293 @@ mod tests {
         );
 
         holder.abort();
+    }
+
+    /* ---------- SIM 卡状态自愈（每次开机只跑一次 / AT 全走 Rust 客户端） ---------- */
+
+    /// 假模组 + 已接线完成的 `AtClient`。
+    ///
+    /// 与生产路径的唯一差别是注入了一个临时标记文件，避免动到真机上的
+    /// `/tmp/mt5700-simheal.done`。
+    struct SimHealHarness {
+        client: Arc<AtClient>,
+        sent: Arc<Mutex<Vec<String>>>,
+        ctx: tokio::sync::watch::Receiver<bool>,
+        _ctx_tx: tokio::sync::watch::Sender<bool>,
+        _reader: tokio::task::JoinHandle<()>,
+        _device: tokio::task::JoinHandle<()>,
+    }
+
+    impl SimHealHarness {
+        async fn sent_cmds(&self) -> Vec<String> {
+            self.sent.lock().await.clone()
+        }
+    }
+
+    fn count_cmd(cmds: &[String], cmd: &str) -> usize {
+        cmds.iter().filter(|c| c.as_str() == cmd).count()
+    }
+
+    /// 按命令文本作答的假模组；返回「已接线」的客户端与该模组收到的命令列表。
+    async fn sim_heal_harness(
+        marker: std::path::PathBuf,
+        enable: bool,
+        responder: impl Fn(&str) -> String + Send + 'static,
+    ) -> SimHealHarness {
+        let mut at = crate::config::default_config().at;
+        at.sim_heal_enable = enable;
+        let (urc_tx, _urc_rx) = mpsc::channel::<Unsolicited>(64);
+        let client = AtClient::new_with_marker(at, urc_tx, marker);
+        let (ctx_tx, ctx) = tokio::sync::watch::channel(false);
+
+        let (host_side, device_side) = tokio::io::duplex(1024);
+        let (dev_rd, mut dev_wr) = tokio::io::split(device_side);
+        let (host_rd, host_wr) = tokio::io::split(host_side);
+
+        {
+            let mut guard = client.conn.lock().await;
+            *guard = Some(Connection {
+                writer: Arc::new(Mutex::new(Box::new(host_wr))),
+                describe: "fake-modem".into(),
+            });
+        }
+        client.connected_flag.store(true, Ordering::Relaxed);
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sent_dev = sent.clone();
+        let device = tokio::spawn(async move {
+            let mut rd = dev_rd;
+            let mut buf = [0u8; 512];
+            let mut acc: Vec<u8> = Vec::new();
+            loop {
+                match rd.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        acc.extend_from_slice(&buf[..n]);
+                        while let Some(i) = acc.iter().position(|&b| b == b'\r' || b == b'\n') {
+                            let line = String::from_utf8_lossy(&acc[..i]).trim().to_string();
+                            acc.drain(..=i);
+                            if line.is_empty() {
+                                continue;
+                            }
+                            sent_dev.lock().await.push(line.clone());
+                            let reply = responder(&line);
+                            if !reply.is_empty() {
+                                let _ = dev_wr.write_all(reply.as_bytes()).await;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let c = client.clone();
+        let ctx_r = ctx.clone();
+        let reader = tokio::spawn(async move { c.read_loop(&ctx_r, Box::new(host_rd)).await });
+
+        SimHealHarness {
+            client,
+            sent,
+            ctx,
+            _ctx_tx: ctx_tx,
+            _reader: reader,
+            _device: device,
+        }
+    }
+
+    /// 本卡真机形态：SETMODE=4、SIMSQ=1,11。
+    fn sim_heal_reply(cmd: &str) -> String {
+        match cmd {
+            "AT^SETMODE?" => "4\r\nOK\r\n".to_string(),
+            "AT^SIMSQ?" => "^SIMSQ: 1,11\r\nOK\r\n".to_string(),
+            _ => "OK\r\n".to_string(),
+        }
+    }
+
+    /// ★ 核心约束：每次开机 HVSST 只会被推一次，重连多少次都不例外。
+    #[tokio::test]
+    async fn sim_heal_pushes_hvsst_exactly_once_per_boot() {
+        let marker = crate::simheal::temp_marker("atc-once");
+        let h = sim_heal_harness(marker.clone(), true, sim_heal_reply).await;
+
+        h.client.ensure_sim_ready(&h.ctx).await;
+        let first = h.sent_cmds().await;
+        assert_eq!(
+            count_cmd(&first, "AT^HVSST=1,0"),
+            1,
+            "首次应推一次 HVSST=1,0，实际 {first:?}"
+        );
+        assert_eq!(
+            count_cmd(&first, "AT^HVSST=1,1"),
+            1,
+            "配对必须闭合，实际 {first:?}"
+        );
+
+        // 再跑两次，模拟模组重连 / 服务被 procd 重新拉起后的初始化
+        h.client.ensure_sim_ready(&h.ctx).await;
+        h.client.ensure_sim_ready(&h.ctx).await;
+        let all = h.sent_cmds().await;
+        assert_eq!(
+            count_cmd(&all, "AT^HVSST=1,0"),
+            1,
+            "每次开机只能推一次，实际 {all:?}"
+        );
+        assert_eq!(
+            count_cmd(&all, "AT^HVSST=1,1"),
+            1,
+            "每次开机只能推一次，实际 {all:?}"
+        );
+
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// 卡已经是 12 时不推，而且**不能**消耗掉本次开机唯一的一次机会。
+    #[tokio::test]
+    async fn sim_heal_skips_when_ready_and_keeps_the_single_shot() {
+        use std::sync::atomic::{AtomicU8, Ordering as O};
+
+        let phase = Arc::new(AtomicU8::new(0));
+        let p = phase.clone();
+        let marker = crate::simheal::temp_marker("atc-ready");
+        let h = sim_heal_harness(marker.clone(), true, move |cmd: &str| match cmd {
+            "AT^SETMODE?" => "4\r\nOK\r\n".to_string(),
+            "AT^SIMSQ?" if p.load(O::SeqCst) == 0 => "^SIMSQ: 0,12\r\nOK\r\n".to_string(),
+            "AT^SIMSQ?" => "^SIMSQ: 1,11\r\nOK\r\n".to_string(),
+            _ => "OK\r\n".to_string(),
+        })
+        .await;
+
+        h.client.ensure_sim_ready(&h.ctx).await;
+        let a = h.sent_cmds().await;
+        assert_eq!(count_cmd(&a, "AT^HVSST=1,0"), 0, "卡已就绪不该推，实际 {a:?}");
+
+        // 之后卡掉回 11：机会还在，必须能推一次
+        p.store(1, O::SeqCst);
+        h.client.ensure_sim_ready(&h.ctx).await;
+        let b = h.sent_cmds().await;
+        assert_eq!(
+            count_cmd(&b, "AT^HVSST=1,0"),
+            1,
+            "「卡已就绪」不该消耗唯一一次机会，实际 {b:?}"
+        );
+
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// 非 USB 网口模式（SETMODE≠4）不推，机会同样保留。
+    #[tokio::test]
+    async fn sim_heal_skips_when_not_usb_mode() {
+        use std::sync::atomic::{AtomicU8, Ordering as O};
+
+        let phase = Arc::new(AtomicU8::new(0));
+        let p = phase.clone();
+        let marker = crate::simheal::temp_marker("atc-mode");
+        let h = sim_heal_harness(marker.clone(), true, move |cmd: &str| match cmd {
+            "AT^SETMODE?" if p.load(O::SeqCst) == 0 => "1\r\nOK\r\n".to_string(),
+            "AT^SETMODE?" => "4\r\nOK\r\n".to_string(),
+            "AT^SIMSQ?" => "^SIMSQ: 1,11\r\nOK\r\n".to_string(),
+            _ => "OK\r\n".to_string(),
+        })
+        .await;
+
+        h.client.ensure_sim_ready(&h.ctx).await;
+        let a = h.sent_cmds().await;
+        assert_eq!(
+            count_cmd(&a, "AT^HVSST=1,0"),
+            0,
+            "SETMODE=1 时不该推 HVSST，实际 {a:?}"
+        );
+
+        p.store(1, O::SeqCst);
+        h.client.ensure_sim_ready(&h.ctx).await;
+        let b = h.sent_cmds().await;
+        assert_eq!(
+            count_cmd(&b, "AT^HVSST=1,0"),
+            1,
+            "模式不符不该消耗唯一一次机会，实际 {b:?}"
+        );
+
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// 卡不在位 / 已失效（0 / 98 / 99）时推 HVSST 毫无意义，机会要保留。
+    #[tokio::test]
+    async fn sim_heal_skips_dead_sim_and_keeps_the_single_shot() {
+        use std::sync::atomic::{AtomicU8, Ordering as O};
+
+        for dead in [0_u8, 98, 99] {
+            let phase = Arc::new(AtomicU8::new(dead));
+            let p = phase.clone();
+            let marker = crate::simheal::temp_marker("atc-dead");
+            let h = sim_heal_harness(marker.clone(), true, move |cmd: &str| match cmd {
+                "AT^SETMODE?" => "4\r\nOK\r\n".to_string(),
+                "AT^SIMSQ?" if p.load(O::SeqCst) != 11 => {
+                    format!("^SIMSQ: 0,{}\r\nOK\r\n", p.load(O::SeqCst))
+                }
+                "AT^SIMSQ?" => "^SIMSQ: 1,11\r\nOK\r\n".to_string(),
+                _ => "OK\r\n".to_string(),
+            })
+            .await;
+
+            h.client.ensure_sim_ready(&h.ctx).await;
+            let a = h.sent_cmds().await;
+            assert_eq!(
+                count_cmd(&a, "AT^HVSST=1,0"),
+                0,
+                "卡状态 {} 时不该推 HVSST，实际 {a:?}",
+                dead
+            );
+
+            // 卡恢复到 11 → 机会仍在
+            p.store(11, O::SeqCst);
+            h.client.ensure_sim_ready(&h.ctx).await;
+            let b = h.sent_cmds().await;
+            assert_eq!(
+                count_cmd(&b, "AT^HVSST=1,0"),
+                1,
+                "卡状态 {} 时不该消耗唯一一次机会，实际 {b:?}",
+                dead
+            );
+
+            let _ = std::fs::remove_file(&marker);
+        }
+    }
+
+    /// `AT^HVSST=1,0` 回 ERROR 时，`=1,1` 也必须补上 —— 否则 SIM 检测会一直关着。
+    #[tokio::test]
+    async fn sim_heal_always_closes_the_hvsst_pair() {
+        let marker = crate::simheal::temp_marker("atc-pair");
+        let h = sim_heal_harness(marker.clone(), true, |cmd: &str| match cmd {
+            "AT^SETMODE?" => "4\r\nOK\r\n".to_string(),
+            "AT^SIMSQ?" => "^SIMSQ: 1,11\r\nOK\r\n".to_string(),
+            "AT^HVSST=1,0" => "ERROR\r\n".to_string(),
+            _ => "OK\r\n".to_string(),
+        })
+        .await;
+
+        h.client.ensure_sim_ready(&h.ctx).await;
+        let cmds = h.sent_cmds().await;
+        assert_eq!(count_cmd(&cmds, "AT^HVSST=1,0"), 1, "实际 {cmds:?}");
+        assert_eq!(
+            count_cmd(&cmds, "AT^HVSST=1,1"),
+            1,
+            "=1,0 回 ERROR 也必须补上 =1,1，否则 SIM 检测会一直处于关闭状态，实际 {cmds:?}"
+        );
+
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// 关闭开关后连状态查询都不做 —— 一条命令都不发。
+    #[tokio::test]
+    async fn sim_heal_disabled_sends_nothing() {
+        let marker = crate::simheal::temp_marker("atc-off");
+        let h = sim_heal_harness(marker.clone(), false, sim_heal_reply).await;
+
+        h.client.ensure_sim_ready(&h.ctx).await;
+        let cmds = h.sent_cmds().await;
+        assert!(cmds.is_empty(), "未启用时不该发任何命令，实际 {cmds:?}");
+
+        let _ = std::fs::remove_file(&marker);
     }
 }
