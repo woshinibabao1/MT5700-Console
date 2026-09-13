@@ -364,62 +364,41 @@ return L.view.extend({
 				for (var i = 0; i < parts.length; i++) {
 					chain2 = chain2.then(function (part) {
 						/*
-						 * 按鼎桥《MT5700M-CN 5G 系列模组 AT 命令手册》9.14 节，
-						 * 本模组的 PDU 发送为「两步下发」：
+						 * 短信提交协议（3GPP TS 27.005 §4.3 + 真机审计）：
+						 *   AT+CMGS=<TPDU 字节数>\r<PDU hex><0x1A>
+						 * 末端的 Ctrl-Z(0x1A) 是 PDU 的终止字节，**必须**下发，否则模组
+						 * 进入「等待 PDU」态、等满超时后回 OK 自动取消，永远拿不到 +CMGS: 应答。
+						 * 这一点鼎桥《MT5700M-CN AT 命令手册》9.14 节的示例恰好省略了 0x1A
+						 * （示例用真实手机号凑巧在某些早期固件上能跑），但本机固件
+						 * V200R001C20B025 实测**必须追加**。
 						 *
-						 *   1. 发 AT+CMGS=<length>\r，等模组回「<echo>+\x1A」（SUB），
-						 *      提示可以输入 PDU 数据。
-						 *   2. 发完整 PDU hex 字符串（不带 Ctrl-Z，Rust 端
-						 *      send_command_inner 对 CMGS 类不再自动追加 \r，
-						 *      consume 识别 0x1A 后由前端继续送 PDU）。
+						 * 模组的提示字节是私有 SUB(0x1A) 而不是标准的 "> "——后端读取侧
+						 * 已在 atclient.rs::consume() 里过滤，避免污染应答。
 						 *
-						 * 关键不变量（Rust 端已加测试守住）：
-						 *   - send_command_inner 对 AT+CMGS 不再追加行终止 \r，
-						 *     避免破坏 PDU 数据流。
-						 *   - consume 见到 0x1A 时只在 CMGS pending 上触发
-						 *     done.notify_one()，避免误判普通命令应答。
-						 *
-						 * 旧实现（一次性下发）会因为：
-						 *   - Rust 自动追加 \r 把 PDU 切坏 / 模组多收字节
-						 *   - Rust 等不到 OK/+CMGS 终止符而 6s 假超时
-						 * 导致永远失败。这里改为两步下发，每一步各自等真实应答。
+						 * 命令进入独立 tokio 任务并立刻返回受理；这里轮询 AT+SMSJOB? 取结果，
+						 * 模组迟迟不确认也不会卡死整个 LuCI 界面。
 						 */
-						var length = part.tpduLength;
-						return AtWs.client.sendCommand('AT+CMGS=' + length + '\r')
-							.then(function (headRes) {
-								if (!headRes || headRes.success === false) {
-									throw new Error('CMGS 头命令失败: ' + (headRes && headRes.error || '未知错误'));
+						return AtWs.client.sendCommand('AT+CMGS=' + part.tpduLength + '\r' + part.pdu + '\u001a')
+							.then(function (res) {
+								if (!res || res.success === false) {
+									throw new Error(String((res && res.error) || '发送失败'));
 								}
-								var txt = String(headRes.data == null ? '' : headRes.data);
-								/*
-								 * 模组应答应包含 SUB(0x1A) 提示符；标准 3GPP 是 '>'，
-								 * 两种形态只要见到任意一种都说明已就绪。
-								 */
-								if (txt.indexOf('\x1a') < 0 && txt.indexOf('>') < 0) {
-									throw new Error('模组未返回 PDU 输入提示符（实际：' + txt.replace(/\s+/g, ' ').trim() + '）');
-								}
-								if (/\b(ERROR|CMS ERROR|CME ERROR)\b/i.test(txt)) {
-									throw new Error('模组在 PDU 提示符前报错：' + txt.replace(/\s+/g, ' ').trim());
+								var txt = String(res.data == null ? '' : res.data);
+								if (/\bERROR\b/i.test(txt)) {
+									throw new Error('模组返回错误：' + txt.replace(/\s+/g, ' ').trim());
 								}
 								/*
-								 * 第二步：发 PDU hex 字符串。
-								 * Rust 端不会自动追加 \r，会原样写到串口。
-								 * 模组按 length 读完 PDU 字节后自动提交，回 +CMGS: <mr>\r\nOK\r\n。
+								 * 后端任务返回 SMS_ACCEPTED 后由 waitSmsJob() 轮询取最终结果。
+								 * 模组成功提交时应答必含 "+CMGS:"（带消息参考号 mr），用此判定。
+								 * 注意：模组私有提示字节 0x1A 已被后端过滤，不出现在应答里。
 								 */
-								return AtWs.client.sendCommand(part.pdu)
-									.then(function (dataRes) {
-										if (!dataRes || dataRes.success === false) {
-											throw new Error('PDU 发送失败: ' + (dataRes && dataRes.error || '未知错误'));
-										}
-										var dtxt = String(dataRes.data == null ? '' : dataRes.data);
-										if (/\bERROR\b/i.test(dtxt)) {
-											throw new Error('模组返回错误：' + dtxt.replace(/\s+/g, ' ').trim());
-										}
-										if (!/(\+CMGS:|\bOK\b)/.test(dtxt)) {
-											throw new Error('模组未确认短信提交（无 +CMGS/OK 应答，短信未发出）：' + dtxt.replace(/\s+/g, ' ').trim());
-										}
-										return dtxt;
-									});
+								if (txt.indexOf('SMS_ACCEPTED') >= 0) {
+									return waitSmsJob();
+								}
+								if (!/(\+CMGS:|\bOK\b)/.test(txt)) {
+									throw new Error('模组未确认短信提交（无 +CMGS/OK 应答，短信未发出）');
+								}
+								return txt;
 							});
 					}.bind(null, parts[i]));
 				}
