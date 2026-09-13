@@ -252,7 +252,8 @@ fn rotate_if_oversized(path: &Path, max: u64) -> std::io::Result<()> {
     let mut f = std::fs::File::open(path)?;
     f.seek(SeekFrom::End(-(keep as i64)))?;
     let mut tail: Vec<u8> = Vec::with_capacity(keep);
-    f.take(keep as u64).read_to_end(&mut tail)?;
+    // 必须借 &mut f：Read::take 按值取走 self，直接 f.take() 会把文件句柄 move 掉。
+    (&mut f).take(keep as u64).read_to_end(&mut tail)?;
     drop(f);
 
     // 尾部开头多半是半条记录，丢掉第一个换行之前的内容。

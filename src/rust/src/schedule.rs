@@ -41,6 +41,13 @@ pub struct SchedState {
     pub last_applied: LockPair,
     pub applied: bool,
     pub announced: bool,
+    /// 上一次锁频下发是否失败。
+    ///
+    /// 下发失败时 `applied` 会保持 false，于是**每个**检测周期都会重试一次。
+    /// 若每次重试都推一条通知（并往通知日志追加一条），配置有误时就是
+    /// 每 `check_interval` 一条——日志落在 tmpfs 上会持续膨胀。
+    /// 用它把通知收敛成「只在失败状态翻转时推一条」。
+    pub apply_failed: bool,
 }
 
 impl Scheduler {

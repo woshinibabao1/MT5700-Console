@@ -1073,7 +1073,8 @@ mod tests {
         sent: Arc<Mutex<Vec<String>>>,
         ctx: tokio::sync::watch::Receiver<bool>,
         _ctx_tx: tokio::sync::watch::Sender<bool>,
-        _reader: tokio::task::JoinHandle<()>,
+        /// read_loop 返回 Result，句柄类型必须是 JoinHandle<Result<..>>
+        _reader: tokio::task::JoinHandle<Result<(), String>>,
         _device: tokio::task::JoinHandle<()>,
     }
 
@@ -1231,10 +1232,12 @@ mod tests {
 
         let phase = Arc::new(AtomicU8::new(0));
         let p = phase.clone();
+        // 闭包要 move 一份：外层还要用 p 把卡状态推到下一阶段。
+        let pv = p.clone();
         let marker = crate::simheal::temp_marker("atc-ready");
         let h = sim_heal_harness(marker.clone(), true, move |cmd: &str| match cmd {
             "AT^SETMODE?" => "4\r\nOK\r\n".to_string(),
-            "AT^SIMSQ?" if p.load(O::SeqCst) == 0 => "^SIMSQ: 0,12\r\nOK\r\n".to_string(),
+            "AT^SIMSQ?" if pv.load(O::SeqCst) == 0 => "^SIMSQ: 0,12\r\nOK\r\n".to_string(),
             "AT^SIMSQ?" => "^SIMSQ: 1,11\r\nOK\r\n".to_string(),
             _ => "OK\r\n".to_string(),
         })
@@ -1264,9 +1267,10 @@ mod tests {
 
         let phase = Arc::new(AtomicU8::new(0));
         let p = phase.clone();
+        let pv = p.clone();
         let marker = crate::simheal::temp_marker("atc-mode");
         let h = sim_heal_harness(marker.clone(), true, move |cmd: &str| match cmd {
-            "AT^SETMODE?" if p.load(O::SeqCst) == 0 => "1\r\nOK\r\n".to_string(),
+            "AT^SETMODE?" if pv.load(O::SeqCst) == 0 => "1\r\nOK\r\n".to_string(),
             "AT^SETMODE?" => "4\r\nOK\r\n".to_string(),
             "AT^SIMSQ?" => "^SIMSQ: 1,11\r\nOK\r\n".to_string(),
             _ => "OK\r\n".to_string(),
@@ -1301,11 +1305,12 @@ mod tests {
         for dead in [0_u8, 98, 99] {
             let phase = Arc::new(AtomicU8::new(dead));
             let p = phase.clone();
+            let pv = p.clone();
             let marker = crate::simheal::temp_marker("atc-dead");
             let h = sim_heal_harness(marker.clone(), true, move |cmd: &str| match cmd {
                 "AT^SETMODE?" => "4\r\nOK\r\n".to_string(),
-                "AT^SIMSQ?" if p.load(O::SeqCst) != 11 => {
-                    format!("^SIMSQ: 0,{}\r\nOK\r\n", p.load(O::SeqCst))
+                "AT^SIMSQ?" if pv.load(O::SeqCst) != 11 => {
+                    format!("^SIMSQ: 0,{}\r\nOK\r\n", pv.load(O::SeqCst))
                 }
                 "AT^SIMSQ?" => "^SIMSQ: 1,11\r\nOK\r\n".to_string(),
                 _ => "OK\r\n".to_string(),
