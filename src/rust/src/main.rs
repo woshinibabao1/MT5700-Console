@@ -150,11 +150,19 @@ async fn run(verbose: bool) -> Result<(), String> {
 
 #[cfg(unix)]
 async fn shutdown_signal() {
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("注册 SIGTERM 失败");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = sigterm.recv() => {}
+    // 注册失败不 panic：SIGTERM 收不到时 procd 最终会 SIGKILL，
+    // 但注册失败就 panic 会让服务在启动阶段直接 abort，连 Ctrl-C 都顾不上。
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut sigterm) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        Err(e) => {
+            log_warn!("注册 SIGTERM 失败，仅响应 Ctrl-C: {}", e);
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 

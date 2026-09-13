@@ -3,14 +3,30 @@
 
 use crate::{log_error, log_info, log_warn};
 use crate::config::NotificationConfig;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 const NOTIFY_INTERVAL: Duration = Duration::from_secs(60);
 const NOTIFY_QUEUE_SIZE: usize = 256;
 const NOTIFY_MAX_PENDING: usize = 1000;
 const NOTIFY_MAX_RETRIES: u32 = 3;
+
+/// 通知日志文件上限。超过后保留尾部一半。
+///
+/// 默认配置 `log_file '/tmp/at-notifications.log'`（见 root/etc/config/at-webserver）
+/// 落在 tmpfs 上，而 tmpfs 吃的是内存。锁频下发失败时每个检测周期都会追加一条，
+/// 长年运行下无轮转会把 /tmp 写满，进而影响路由器上依赖 /tmp 的其它服务。
+const NOTIFY_LOG_MAX_BYTES: u64 = 256 * 1024;
+
+/// 写日志失败时的报错节流间隔。
+/// /tmp 满时每条通知都会失败，不节流就会每条再刷一条错误日志，雪上加霜。
+const LOG_ERROR_THROTTLE_SECS: u64 = 60;
+
+/// 上次上报「写日志失败」的 epoch 秒（0 = 从未上报）。
+static LAST_LOG_ERROR_AT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifyKind {
@@ -91,8 +107,15 @@ impl Notifier {
         }
 
         if let Some(path) = &self.log_file {
-            if let Err(e) = append_log(path, &msg) {
-                log_error!("写入通知日志失败: {}", e);
+            // 同步 std::fs 会卡住整条 tokio worker 线程，而 notify() 是在 URC 分发
+            // 与定时锁频路径上被 await 的。丢进 blocking 线程池，只阻塞当前任务。
+            let path = path.clone();
+            let msg = msg.clone();
+            let outcome = tokio::task::spawn_blocking(move || append_log(&path, &msg)).await;
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => report_log_error(&e.to_string()),
+                Err(e) => report_log_error(&e.to_string()),
             }
         }
 
@@ -172,7 +195,28 @@ fn prepare_log_file(path: &str) -> Result<String, String> {
     Ok(abs.to_string_lossy().into_owned())
 }
 
+/// 上报写日志失败，按 [`LOG_ERROR_THROTTLE_SECS`] 节流。
+fn report_log_error(detail: &str) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_LOG_ERROR_AT.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < LOG_ERROR_THROTTLE_SECS {
+        return;
+    }
+    LAST_LOG_ERROR_AT.store(now, Ordering::Relaxed);
+    log_error!(
+        "写入通知日志失败: {}（{} 秒内不再重复上报）",
+        detail,
+        LOG_ERROR_THROTTLE_SECS
+    );
+}
+
 fn append_log(path: &str, msg: &Notification) -> std::io::Result<()> {
+    let path = Path::new(path);
+    rotate_if_oversized(path, NOTIFY_LOG_MAX_BYTES)?;
+
     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let mut b = String::new();
     if msg.memory_full {
@@ -183,9 +227,41 @@ fn append_log(path: &str, msg: &Notification) -> std::io::Result<()> {
     b.push_str(&"-".repeat(50));
     b.push('\n');
 
-    let mut f = std::fs::OpenOptions::new().append(true).create(true).write(true).open(Path::new(path))?;
-    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().append(true).create(true).write(true).open(path)?;
     f.write_all(b.as_bytes())
+}
+
+/// 日志文件超过 `max` 字节时保留尾部一半，从第一个完整行开始，避免留下半条记录。
+///
+/// 直接写回原路径而不是新建文件：通知日志是调试用的历史记录，不值得为它
+/// 额外占用一份 tmpfs 空间（`.old` 副本会让峰值占用变成两倍）。
+fn rotate_if_oversized(path: &Path, max: u64) -> std::io::Result<()> {
+    let size = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        // 文件还不存在：下面的 append 会创建它
+        Err(_) => return Ok(()),
+    };
+    if size <= max {
+        return Ok(());
+    }
+    let keep = (max / 2) as usize;
+    if keep == 0 {
+        return Ok(());
+    }
+
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::End(-(keep as i64)))?;
+    let mut tail: Vec<u8> = Vec::with_capacity(keep);
+    f.take(keep as u64).read_to_end(&mut tail)?;
+    drop(f);
+
+    // 尾部开头多半是半条记录，丢掉第一个换行之前的内容。
+    let skip = tail.iter().position(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    let truncated = &tail[skip..];
+
+    let tmp = path.with_extension("rotating");
+    std::fs::write(&tmp, truncated)?;
+    std::fs::rename(&tmp, path)
 }
 
 async fn send_webhook(hook: &str, content: &str) {

@@ -305,16 +305,30 @@ impl SchedConfigDto {
 }
 
 /// 落盘配置。用 exec 直接传参，不经过 shell，避免值里的引号被解释。
+///
+/// 逐键 `uci set` 会在 staging 里累积改动，只有最后的 `commit` 才落盘。
+/// 因此中途失败时**必须 revert**：否则这些残缺的 staging 会一直挂着，
+/// 被之后任意一次 `uci commit at-webserver`（本服务的下一次保存，或用户
+/// 在命令行提交）连带落盘，形成半套配置。
 pub async fn write_schedule_uci(d: &SchedConfigDto) -> Result<(), String> {
+    let revert = async {
+        let _ = tokio::process::Command::new("uci")
+            .args(["revert", "at-webserver"])
+            .output()
+            .await;
+    };
+
     for (k, v) in d.uci_entries() {
         let arg = format!("at-webserver.config.{k}={v}");
         let out = tokio::process::Command::new("uci").args(["set", &arg]).output().await.map_err(|e| e.to_string())?;
         if !out.status.success() {
+            revert.await;
             return Err(format!("写入 {k} 失败: {}", String::from_utf8_lossy(&out.stderr)));
         }
     }
     let out = tokio::process::Command::new("uci").args(["commit", "at-webserver"]).output().await.map_err(|e| e.to_string())?;
     if !out.status.success() {
+        revert.await;
         return Err(format!("提交配置失败: {}", String::from_utf8_lossy(&out.stderr)));
     }
     Ok(())

@@ -62,6 +62,7 @@ impl Scheduler {
                 last_applied: LockPair { lte: BandLock { type_: -1, ..Default::default() }, nr: BandLock { type_: -1, ..Default::default() } },
                 applied: false,
                 announced: false,
+                apply_failed: false,
             })),
         })
     }
@@ -104,6 +105,11 @@ impl Scheduler {
                 (s.cfg.enabled, self.client.connected())
             };
             if !enabled || !connected {
+                // 断连期间也要推进「最近有服务」的计时起点。
+                // 否则掉线几小时后的重连第一拍，`down` 会是整段断线时长，
+                // 而此刻模组往往还没注册完，会被下面的「无服务超时」分支
+                // 当成锁频锁死，直接把用户配置的锁频擦掉。
+                self.state.write().await.last_service_at = Instant::now();
                 continue;
             }
 
@@ -269,7 +275,14 @@ impl Scheduler {
                         return false;
                     }
                 }
-                _ => log_warn!("进入飞行模式失败"),
+                _ => {
+                    // 进入飞行模式失败仍继续下发锁频命令（模组此刻是全功能态，
+                    // 部分锁频命令依然能生效），但本次必须记为失败：
+                    // 否则若后续命令恰好全 OK，就会把「没按预期切飞行模式」
+                    // 记成一次成功切换，用户永远看不到异常。
+                    log_warn!("进入飞行模式失败，本次切换记为失败");
+                    lock_ok = false;
+                }
             }
         }
 
@@ -303,7 +316,13 @@ impl Scheduler {
                     log_info!("已退出飞行模式");
                     done.push("切飞行模式".into());
                 }
-                _ => log_warn!("退出飞行模式失败"),
+                _ => {
+                    // 必须记为失败：模组停在 CFUN=0 就是「完全离线」，
+                    // 而 applied=true 会让调度器认为已下发成功、永不再试，
+                    // 设备就会一直没信号直到人为重启。
+                    log_warn!("退出飞行模式失败，模组可能停在飞行模式");
+                    lock_ok = false;
+                }
             }
             if !sleep_ctx(&self.ctx, Duration::from_secs(3)).await {
                 return false;
@@ -317,6 +336,24 @@ impl Scheduler {
         }
 
         let actions = if done.is_empty() { "未执行任何操作".to_string() } else { done.join("、") };
+
+        // 通知只在「状态翻转」时推一条。
+        // 下发失败后 applied 保持 false，下一周期必然重试；若每次重试都推一条
+        // 通知并往通知日志里追加一条，配置有误（如 type=3 但 bands 为空）时就是
+        // 每 check_interval 一条——日志在 tmpfs 上会持续膨胀，推送也会被刷屏。
+        // 于是：成功→总推；失败→只在「首次失败」时推，连续失败期间保持静默。
+        let mut s = self.state.write().await;
+        let should_notify = lock_ok || !s.apply_failed;
+        s.apply_failed = !lock_ok;
+        drop(s);
+
+        log_info!("定时锁频切换完成: {}（{}）", actions, if lock_ok { "成功" } else { "失败" });
+
+        if !should_notify {
+            log_warn!("锁频下发仍失败，处于连续失败状态，本周期不再推送通知");
+            return lock_ok;
+        }
+
         let notifier = self.notifier.clone();
         let content = format!(
             "🔄 定时锁频切换\n时间: {}\n模式: {}\nLTE: {}\nNR: {}\n执行操作: {}\n切换次数: 第 {} 次\n结果: {}",
