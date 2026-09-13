@@ -5,6 +5,32 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.0.3] - 2026-09-13
+
+### 修复 - `HVSST` 配对在服务关闭时可能断在半路
+
+1.0.2 把「配对必须闭合」写进了注释，但实现上漏了一条路径：两发 `AT^HVSST` 都是用
+调用方的 `ctx` 下发的，而 `AtClient::send_command_inner` 在**「等命令锁」**与
+**「命令间隔」**两处都会因 `ctx.changed()` 直接 `return Err("上下文取消")`
+——这两处都在命令字节写进串口**之前**。服务恰好在配对窗口里收到停止信号时，
+第二发根本没发出去，SIM 检测被留在 `HVSST=0`（关闭）状态，要等下次开机才重跑。
+
+修法：给配对单独一个**永不取消**的上下文（`simheal::pair_context()`），两发都改用它
+下发。这样配对窗口内的取消点全部失效，与「那 3 秒等待刻意不响应取消」的取舍前后一致。
+
+⚠️ 一个隐蔽的坑已固化成单测：`watch::Receiver::changed()` 在 **sender 被 drop** 后会
+**立刻**返回 `Err(RecvError)`，而 `send_command_inner` 的 `select!` 对 `Ok`/`Err`
+一视同仁——提前 drop sender 会把「永不取消」直接反转成「立刻取消」。所以
+`pair_context()` 把 `Sender` 与 `Receiver` 绑在同一个元组里返回，调用方无法只取其一。
+
+| 层次 | 新增测试 |
+| --- | --- |
+| `simheal.rs` 单测 | `pair_context_never_cancels_while_sender_is_alive`（保活时不报取消）、`dropping_the_pair_sender_inverts_the_semantics`（drop 后语义反转） |
+| `atclient.rs` 行为测试 | `pair_context_drives_a_normal_round_trip`（配对上下文能完成一次完整往返） |
+| `tests/sim-heal-contract.test.js` | 新增 7 项静态守卫：配对两发必须用 `pair_ctx`、不许用会取消的 `ctx`、`_pair_tx` 必须与 `pair_ctx` 绑定保活、两条语义单测必须存在 |
+
+Rust 侧的编译与单测/行为测试由 CI 执行（本机无 Rust 工具链）；新增的静态守卫在本地即可跑。
+
 ## [1.0.2] - 2026-09-13
 
 ### 新增 - SIM 卡状态自愈（`AT^SIMSQ?` 长期停在 11 的自动处置）

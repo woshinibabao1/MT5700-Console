@@ -161,6 +161,27 @@ ok('有「非 USB 模式不消耗唯一机会」的行为测试', /sim_heal_skip
 ok('有「卡不在位/已失效不消耗唯一机会」的行为测试', /sim_heal_skips_dead_sim_and_keeps_the_single_shot/.test(atclient));
 ok('有「关闭开关一条命令都不发」的行为测试', /sim_heal_disabled_sends_nothing/.test(atclient));
 
+// ★ 配对两发必须用「永不取消」的上下文。用调用方的 ctx 下发时，
+//   `send_command_inner` 的「等命令锁」与「命令间隔」两处取消点都在
+//   **写入串口之前** —— 服务恰好在配对窗口里关闭，配对就真的断在半路，
+//   卡会留在 HVSST=0（SIM 检测关闭）。这是 1.0.2 留下的缺口。
+ok('simheal.rs 提供 pair_context（永不取消的上下文）',
+	/pub fn pair_context\(\) -> \(watch::Sender<bool>, watch::Receiver<bool>\)/.test(simheal));
+ok('配对两发都用 pair_ctx',
+	/send_command\(\s*&pair_ctx\s*,\s*"AT\^HVSST=1,0"/.test(atclientCode) &&
+	/send_command\(\s*&pair_ctx\s*,\s*"AT\^HVSST=1,1"/.test(atclientCode));
+ok('没有任何一发 HVSST 用会取消的 ctx 下发',
+	!/send_command\(\s*ctx\s*,\s*"AT\^HVSST/.test(atclientCode),
+	'用 ctx 下发会让「服务正在关闭」把配对断在半路');
+ok('_pair_tx 与 pair_ctx 绑定保活（sender 一旦 drop 会反转成「立刻取消」）',
+	/let \(_pair_tx, pair_ctx\) = simheal::pair_context\(\);/.test(atclientCode));
+ok('有「pair_context 保活时不报取消」的单测',
+	/pair_context_never_cancels_while_sender_is_alive/.test(simheal));
+ok('有「sender 被 drop 会反转语义」的单测（把这个坑固化下来）',
+	/dropping_the_pair_sender_inverts_the_semantics/.test(simheal));
+ok('有「配对上下文能完成一次往返」的行为测试',
+	/pair_context_drives_a_normal_round_trip/.test(atclient));
+
 /* ---------------------------------------------------------------------------
  * 4. ★ 一切 AT 都走 Rust（不许 shell / 前端抄一份）
  * ------------------------------------------------------------------------- */
@@ -186,8 +207,9 @@ ok('前端不出现 microcom / navigator.serial',
 ok('自愈用的 AT 全部经 AtClient::send_command',
 	/self\.send_command\(ctx, "AT\^SETMODE\?"/.test(atclientCode) &&
 	/self\.send_command\(ctx, "AT\^SIMSQ\?"/.test(atclientCode) &&
-	/self\.send_command\(ctx, "AT\^HVSST=1,0"/.test(atclientCode) &&
-	/self\.send_command\(ctx, "AT\^HVSST=1,1"/.test(atclientCode));
+	/send_command\(\s*&pair_ctx\s*,\s*"AT\^HVSST=1,0"/.test(atclientCode) &&
+	/send_command\(\s*&pair_ctx\s*,\s*"AT\^HVSST=1,1"/.test(atclientCode),
+	'查询走调用方的 ctx；配对两发走永不取消的 pair_ctx');
 
 /* ---------------------------------------------------------------------------
  * 5. 挂在初始化链路里，且时机正确
