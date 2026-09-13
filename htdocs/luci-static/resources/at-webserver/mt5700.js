@@ -467,8 +467,10 @@ var Mt5700 = (function () {
 			});
 		}
 
-		// 定期刷新 SIM 状态（卡插拔、初始化进度都会变）
-		api.interval(15000, refreshSimStatus);
+		// 定期刷新 SIM 状态（卡插拔、初始化进度都会变）。
+		// 传 card 作为作用域：卡片随视图卸载离开文档后，定时器自动停止，
+		// 不会在切页后继续占着串口发 AT^SIMSQ?。
+		api.interval(15000, refreshSimStatus, card);
 		return card;
 	};
 
@@ -575,14 +577,44 @@ var Mt5700 = (function () {
 
 	var _timers = [];
 
-	api.interval = function (ms, fn) {
-		var id = setInterval(fn, ms);
-		_timers.push(function () { clearInterval(id); });
+	/**
+	 * setInterval 包装：句柄记进 _timers，便于 Mt5700.clearAll() 统一清理。
+	 *
+	 * 传了 scopeEl 时额外启用「自动停止」：每次触发前先确认这个节点还在文档里，
+	 * 不在就清掉自己。
+	 *
+	 * 为什么需要它：状态卡的 15s SIM 轮询是「画了卡片就起」的，而 LuCI 切页只是
+	 * 换掉视图的 DOM，定时器本身不会停 —— 进一次页面多一个，切几次页就有几个
+	 * 定时器在后台各发各的 `AT^SIMSQ?`。串口是独占的，这些无人消费的轮询会和
+	 * 用户操作抢通道。
+	 *
+	 * 用「节点是否还在文档里」判断，比监听 hashchange 更稳：不依赖路由实现顺序，
+	 * 也不会把新页面刚注册的定时器误清掉。
+	 */
+	api.interval = function (ms, fn, scopeEl) {
+		var stopped = false;
+		var id = null;
+		var stop = function () {
+			if (stopped) return;
+			stopped = true;
+			if (id !== null) clearInterval(id);
+			var i = _timers.indexOf(stop);
+			if (i >= 0) _timers.splice(i, 1);
+		};
+		id = setInterval(function () {
+			var doc = scopeEl ? scopeEl.ownerDocument : null;
+			if (doc && !doc.contains(scopeEl)) {
+				stop();
+				return;
+			}
+			fn();
+		}, ms);
+		_timers.push(stop);
 		return id;
 	};
 
 	api.clearAll = function () {
-		_timers.forEach(function (fn) { try { fn(); } catch (e) { /* ignore */ } });
+		_timers.slice().forEach(function (fn) { try { fn(); } catch (e) { /* ignore */ } });
 		_timers = [];
 	};
 

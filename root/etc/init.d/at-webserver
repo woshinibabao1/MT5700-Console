@@ -7,6 +7,13 @@ USE_PROCD=1
 PROG=/usr/bin/at-webserver-rust
 PROG_NAME="at-webserver-rust"
 
+# 本插件写进 /etc/config/firewall 的规则名。
+#
+# 启动与停止必须共用这一份清单：两者各写一份时，新增规则很容易只加在一边，
+# 结果 stop 漏删 —— 服务已经停了，放行 8765 的规则却还留在防火墙里。
+# 真机就出现过这种情况：服务停止后 at_rpc_wan_allow 仍在 nft 规则集里。
+FW_RULE_NAMES="at_webserver_wan_block at_webserver_wan_allow at_module_restrict at_module_wan_block at_module_wan_allow at_rpc_wan_allow at_rpc_wan_block"
+
 # 加载 UCI 函数库
 . /lib/functions.sh
 
@@ -116,7 +123,7 @@ at_webserver_post_start() {
 	config_get rpc_port config websocket_port 8765
 
 	local rule_name rule_idx
-	for rule_name in at_webserver_wan_block at_webserver_wan_allow at_module_restrict at_module_wan_block at_module_wan_allow at_rpc_wan_allow at_rpc_wan_block; do
+	for rule_name in $FW_RULE_NAMES; do
 		rule_idx=$(uci show firewall 2>/dev/null | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
 		[ -n "$rule_idx" ] && uci delete firewall.@rule[$rule_idx] 2>/dev/null
 	done
@@ -218,9 +225,19 @@ ensure_modem_interface() {
 	fi
 
 	# 模组网口可能还没枚举完成，先等设备出现（最多 15s）
+	#
+	# 设备名从 UCI 取，不写死 eth2：驱动/固件不同的机器上它可能叫别的名字，
+	# 写死的话这里会白等满 15s，ifup 在网口就绪之前就发出去了。
+	# 取不到再回退 eth2，老行为不变。device 允许是多值，只取第一个。
+	local modem_dev
+	modem_dev=$(uci -q get "network.$ifname_4g.device" 2>/dev/null)
+	[ -n "$modem_dev" ] || modem_dev=$(uci -q get "network.$ifname_4g.ifname" 2>/dev/null)
+	[ -n "$modem_dev" ] || modem_dev='eth2'
+	modem_dev=${modem_dev%% *}
+
 	local waited=0
 	while [ "$waited" -lt 15 ]; do
-		[ -e "/sys/class/net/eth2" ] && break
+		[ -e "/sys/class/net/$modem_dev" ] && break
 		sleep 1
 		waited=$((waited + 1))
 	done
@@ -252,9 +269,9 @@ stop_service() {
 	# 最终让 procd 永久放弃重启（见 start_service 的「严重警告二」）。
 	rm -f /var/run/at-webserver-rust.pid
 
-	# 清理防火墙规则（幂等）
-	for rule_name in at_webserver_wan_block at_webserver_wan_allow at_module_restrict at_module_wan_block at_module_wan_allow; do
-		local rule_idx=$(uci show firewall | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
+	# 清理防火墙规则（幂等）。清单与启动时共用 FW_RULE_NAMES，避免漏删。
+	for rule_name in $FW_RULE_NAMES; do
+		local rule_idx=$(uci show firewall 2>/dev/null | grep "\.name='$rule_name'" | cut -d'[' -f2 | cut -d']' -f1 | head -n1)
 		if [ -n "$rule_idx" ]; then
 			uci delete firewall.@rule[$rule_idx] 2>/dev/null
 		fi

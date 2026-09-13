@@ -5,6 +5,8 @@ name: Build OpenWrt packages (apk + ipk)
 #   - 老版本 23.05（opkg 包管理器）→ 产出 .ipk
 # 架构矩阵：x86_64 / aarch64_cortex-a53（主线 apk + 老版 23.05 ipk）
 # 触发：push 到 main、打 v* 标签、或手动 workflow_dispatch
+# 另加 pull_request：合并前先跑 rust-check（见该 job 的说明）。
+# 注意：PR 只跑检查，不跑打包、更不会发布 Release（build/release 两个 job 都有条件）。
 # 产物：**每次编译成功后自动发布 GitHub Release**
 #   - 标签推送 → 使用该标签名（如 v1.2.0）
 #   - main 推送 → 使用 Makefile 的 PKG_VERSION（如 v1.2.0），同名则覆盖更新
@@ -13,13 +15,38 @@ on:
   push:
     branches: [ main ]
     tags: [ 'v*' ]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # ---- 编译闸门 ----
+  # 为什么单独要这一条：打包编译只会构建 lib/bin，测试代码（#[cfg(test)]）平时根本
+  # 不参与，写错了 SDK 编译照样过 —— 曾经就有一批测试代码的编译错误这样进了 main。
+  # `cargo check --all-targets` 把测试目标也检查一遍，几十秒出结果，
+  # 不必等四个矩阵的 docker 打包跑完才知道挂了。
+  rust-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 准备 Rust 工具链
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          cargo --version
+
+      - name: cargo check（含测试代码）
+        working-directory: src/rust
+        run: cargo check --all-targets
+
   build:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -125,6 +152,9 @@ jobs:
   # 同名文件在同一 Release 内必然冲突。用 gh CLI 替代 softprops 避免元数据更新 404 竞态。
   release:
     needs: build
+    # 只在 push / 打标签时发布：PR 触发时 build 已被跳过，这里必须显式挡住，
+    # 否则每个 PR 都会去创建或覆盖同名的 Release。
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write

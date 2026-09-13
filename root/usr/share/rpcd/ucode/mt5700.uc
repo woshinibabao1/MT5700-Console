@@ -246,8 +246,24 @@ function rpcCall(method, params) {
 	f.close();
 
 	let p;
+	/*
+	 * 必须用 timeout 包住 nc。
+	 *
+	 * nc 连上后端、但后端迟迟不回包时会一直阻塞在读上（连接已被接受，对端既不
+	 * 关闭也不发数据）。rpcd 每来一次 mt5700.* 调用就占一个 ucode 工作线程，
+	 * 事件轮询每 1.5s 一发，几轮下来线程全被占住 —— 表现为「整个插件的页面
+	 * 一起卡死、点什么都没反应」，而且没有任何报错可查。
+	 *
+	 * 注意：本固件的 busybox nc 是精简版，**不认 -w 选项**（传 -w 只会打印
+	 * usage 并立刻退出，会让所有 RPC 全部失败），限时只能靠外部的 timeout。
+	 *
+	 * 上限取 20 秒而不是更短：后端最坏耗时是有上界的 ——
+	 * 普通命令 QUEUE_WAIT(8s) + COMMAND_TIMEOUT(2s) + 3s = 13s，
+	 * 短信后台任务 QUEUE_WAIT(8s) + SMS_SEND_TIMEOUT(6s) + 2s = 16s。
+	 * 20s 留了余量，只会兜住「真的不回包」，不会把正常的慢响应掐掉。
+	 */
 	try {
-		p = fs.popen('nc 127.0.0.1 ' + port + ' < ' + tmp, 'r');
+		p = fs.popen('timeout 20 nc 127.0.0.1 ' + port + ' < ' + tmp, 'r');
 	} catch (e) {
 		return { success: false, error: '无法连接 Rust 后端' };
 	}
@@ -259,7 +275,7 @@ function rpcCall(method, params) {
 	p.close();
 
 	if (!line) {
-		return { success: false, error: 'Rust 后端无应答' };
+		return { success: false, error: 'Rust 后端无应答（已限时 20 秒）' };
 	}
 
 	try {

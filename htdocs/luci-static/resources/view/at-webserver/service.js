@@ -300,7 +300,8 @@ return L.view.extend({
 			{ label: '仅本机（127.0.0.1，经 rpcd 代理）', value: '127.0.0.1' },
 			{ label: '所有接口（0.0.0.0，可被外部访问）', value: '0.0.0.0' }
 		], '127.0.0.1');
-		wsBody.appendChild(Mt5700.formGroup('RPC 监听范围', wsBindSel, '对外监听时请务必设置认证密钥'));
+		wsBody.appendChild(Mt5700.formGroup('RPC 监听范围', wsBindSel,
+			'对外监听请务必设置认证密钥；未设置密钥时后端会自动降回仅本机（127.0.0.1），LuCI 不受影响'));
 
 		var phoneNoteInput = Mt5700.input('text', '例如 13800138000', '');
 		wsBody.appendChild(Mt5700.formGroup('本机号码备注', phoneNoteInput,

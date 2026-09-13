@@ -73,8 +73,17 @@ pub struct WebSocketConfig {
     pub allow_wan: bool,
     /// RPC 监听地址：127.0.0.1（默认）或 0.0.0.0（allow_wan / websocket_bind）
     pub bind: String,
+    /// bind 是否因安全策略被从对外地址降回 127.0.0.1（见 load_config 的兜底）。
+    /// 仅用于启动日志把「为什么没按配置监听」说清楚。
+    pub bind_downgraded: bool,
     /// 一次 ^CELLSCAN 允许跑多久
     pub scan_timeout: Duration,
+}
+
+/// 是否只监听本机。
+pub fn is_loopback(addr: &str) -> bool {
+    let a = addr.trim();
+    a == "127.0.0.1" || a == "::1" || a.eq_ignore_ascii_case("localhost")
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +152,7 @@ pub fn default_config() -> Config {
             auth_key: String::new(),
             allow_wan: false,
             bind: "127.0.0.1".into(),
+            bind_downgraded: false,
             scan_timeout: Duration::from_secs(180),
         },
         schedule: ScheduleConfig {
@@ -305,6 +315,25 @@ pub async fn load_config() -> Config {
     } else {
         "127.0.0.1".into()
     };
+
+    /*
+     * 安全兜底：对外监听 + 没有访问密钥 = 任何能连到这个端口的人都能直接下发
+     * AT 命令（复位模组、改锁频、读短信，全都不要认证）。这不该是默认行为，
+     * 所以要求显式确认：设了 websocket_allow_insecure=1 才真的对外监听。
+     *
+     * 回退到回环**不影响 LuCI**：页面是经 rpcd/ucode 走 127.0.0.1 访问后端的，
+     * 只有「外部程序直连 8765」这一种用法会受影响，而它正是要被挡住的那一种。
+     * 真想要无认证对外监听，加一行 uci 即可，日志里会写明。
+     */
+    let allow_insecure = values.bool("websocket_allow_insecure", false);
+    cfg.websocket.bind_downgraded = false;
+    if !is_loopback(&cfg.websocket.bind)
+        && cfg.websocket.auth_key.is_empty()
+        && !allow_insecure
+    {
+        cfg.websocket.bind = "127.0.0.1".into();
+        cfg.websocket.bind_downgraded = true;
+    }
     // 下限 10 秒而不是默认 3 分钟：用户配置的小于 3 分钟的值不能被悄悄抬回。
     cfg.websocket.scan_timeout = values.seconds("cellscan_timeout", cfg.websocket.scan_timeout, Duration::from_secs(10));
 

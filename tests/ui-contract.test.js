@@ -146,6 +146,37 @@ for (const p of feFiles) {
 	}
 }
 
+/* ---------- 6b. ucode 代理的 nc 必须有超时、且不能用 -w ----------
+ * 真机实测（2026-09-14）：
+ *   · nc 连上后端但后端不回包时会一直阻塞在读上，rpcd 的 ucode 工作线程被永久占住，
+ *     表现为「插件所有页面一起卡死」，且日志里查不到任何报错 → 必须用 timeout 包住。
+ *   · 本固件的 busybox nc 是精简版（v1.38），**不认 -w**：传 `nc -w 3` 只会打印
+ *     usage 并立刻退出（rc=1）。照搬「nc -w 5」的写法会让所有 RPC 全部失败。
+ */
+const UCODE = path.join(ROOT, 'root', 'usr', 'share', 'rpcd', 'ucode', 'mt5700.uc');
+const ucodeSrc = fs.readFileSync(UCODE, 'utf8');
+ok('ucode 的 nc 调用被 timeout 包裹', /timeout\s+\d+\s+nc\s+127\.0\.0\.1/.test(ucodeSrc));
+ok('★ ucode 的 nc 不带 -w（本固件 busybox nc 不支持，会导致所有 RPC 失败）',
+	!/nc\s+-w|nc[^'\n]*\s-w\s+\d/.test(ucodeSrc));
+
+/* ---------- 7. 定时器生命周期：卡片离开页面后必须自动停 ----------
+ * 审计发现（2026-09-14）：renderConnectionBar 每画一次状态卡就起一个 15s 的
+ * AT^SIMSQ? 轮询，句柄记在全局 _timers；而唯一的清理入口 Mt5700.clearAll()
+ * 全仓库零调用、各页面 _dispose 也不清它 —— 进几次页面就有几个定时器在后台
+ * 各发各的 AT。串口由 Rust 服务独占，这些没人看的轮询会和用户操作抢通道。
+ * 修法：api.interval 接受 scopeEl，每次触发前确认节点还在文档里，不在就清掉自己。
+ */
+const intervalFn = (mt5700.match(/api\.interval\s*=\s*function[\s\S]{0,900}?\n\t\};/) || [''])[0];
+ok('api.interval 接受第三个参数 scopeEl',
+	/api\.interval\s*=\s*function\s*\([^)]*scopeEl/.test(mt5700));
+ok('api.interval 用 ownerDocument.contains 判断节点是否还在页面',
+	/ownerDocument/.test(intervalFn) && /contains\(scopeEl\)/.test(intervalFn));
+ok('节点脱离文档后清掉定时器', /clearInterval\(id\)/.test(intervalFn));
+ok('停止时把自己从 _timers 摘掉（避免数组无限增长）', /_timers\.splice\(/.test(intervalFn));
+ok('状态卡的 SIM 轮询把 card 作为作用域传入',
+	/api\.interval\(15000,\s*refreshSimStatus,\s*card\)/.test(mt5700));
+ok('clearAll 遍历副本（清理过程中会 splice 自身）', /_timers\.slice\(\)\.forEach/.test(mt5700));
+
 /* ---------- 汇总 ---------- */
 console.log('通过 ' + pass + ' 项，失败 ' + fails.length + ' 项');
 if (fails.length) {

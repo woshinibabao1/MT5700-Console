@@ -605,15 +605,17 @@ impl AtClient {
         };
 
         // 两条命令之间最小间隔。
-        {
+        // 先把要等多久算出来再放开锁：睡眠期间没必要占着 last_cmd_at。
+        // （串行化由上面的 cmd_mu 保证，不是靠这把锁，所以放开它不会引入并发。）
+        let gap = {
             let last = self.last_cmd_at.lock().await;
-            let gap = COMMAND_GAP.saturating_sub(last.elapsed());
-            if !gap.is_zero() {
-                let mut ctx_c = ctx.clone();
-                tokio::select! {
-                    _ = tokio::time::sleep(gap) => {}
-                    _ = ctx_c.changed() => return Err("上下文取消".into()),
-                }
+            COMMAND_GAP.saturating_sub(last.elapsed())
+        };
+        if !gap.is_zero() {
+            let mut ctx_c = ctx.clone();
+            tokio::select! {
+                _ = tokio::time::sleep(gap) => {}
+                _ = ctx_c.changed() => return Err("上下文取消".into()),
             }
         }
 
@@ -737,13 +739,20 @@ impl AtClient {
         }
 
         // AT+CMGS 的输入提示符 "> " 后面没有换行，单独识别成一次应答结束。
+        //
+        // 这里**只记录提示符，不结束命令**。模组回 ">" 只是说「可以把 PDU 发过来了」，
+        // 提交结果在它后面的 `+CMGS:` / `OK` / `ERROR` 里。以前在这里 notify_one()，
+        // 命令就带着 `[">"]` 提前返回了：等到 `+CMGS:` / `OK` 到达时 pending 已被取走，
+        // 它们只能被当成 URC 广播出去，上层（rpcserver 的短信后台任务）因此永远看不到
+        // `+CMGS:`，哪怕模组其实提交成功了也会被判成「模组未确认」，还要白等 60 秒冷却。
+        //
+        // 不 notify 的代价只有一种：模组回了 ">" 却再无任何应答时，要多等到本命令的超时
+        // （短信是 6 秒）才失败。失败后的兜底没变 —— 照样补发 ESC 清掉数据输入态、照样进
+        // 冷却，所以最坏情况也只是慢一点，不会更糟。
         if data.iter().all(|b| b.is_ascii_whitespace() || *b == b'>') && data.contains(&b'>') {
             let mut pending = self.pending.lock().await;
             if let Some(p) = pending.as_mut() {
                 p.lines.push(">".into());
-            }
-            if let Some(p) = pending.as_ref() {
-                p.done.notify_one();
             }
             return Vec::new();
         }

@@ -188,7 +188,13 @@ fn log_config(cfg: &Config) {
         cfg.websocket.port,
         if cfg.websocket.auth_key.is_empty() { "未设置" } else { "已设置" }
     );
-    if cfg.websocket.bind != "127.0.0.1" {
+    if cfg.websocket.bind_downgraded {
+        log_warn!(
+            "配置要求 RPC 对外监听，但未设置 websocket_auth_key —— 已回退到 {} 仅本机可访问。\
+             确实需要无认证对外监听时，设置 websocket_allow_insecure=1 后重启本服务",
+            cfg.websocket.bind
+        );
+    } else if !crate::config::is_loopback(&cfg.websocket.bind) {
         log_warn!(
             "RPC 对外监听 {}:{} —— 请确保防火墙已限制访问，并设置 websocket_auth_key",
             cfg.websocket.bind,

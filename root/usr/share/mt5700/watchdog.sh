@@ -136,9 +136,33 @@ load_cfg() {
 	fi
 }
 
+# 通知日志的行数上限，超过就只留尾部一半。
+#
+# 这个文件默认在 /tmp（tmpfs），吃的是内存；看门狗每次判定异常都会追加一行，
+# 长期不轮转会一直涨。Rust 侧对同一个文件已按字节数轮转（notify.rs），这里
+# 按行数兜住 shell 侧的增长 —— 两边都是「写之前先判断」，互不冲突（Rust 每次
+# 写都重新 open，不会因为这里 mv 换掉 inode 而写丢）。
+W_LOG_MAX_LINES=3000
+
+rotate_log() {
+	[ -n "$W_LOG" ] || return 0
+	[ -f "$W_LOG" ] || return 0
+	local lines
+	lines=$(wc -l < "$W_LOG" 2>/dev/null)
+	case "$lines" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$lines" -gt "$W_LOG_MAX_LINES" ] || return 0
+	tail -n $((W_LOG_MAX_LINES / 2)) "$W_LOG" > "$W_LOG.tmp" 2>/dev/null &&
+		mv "$W_LOG.tmp" "$W_LOG" 2>/dev/null
+	rm -f "$W_LOG.tmp" 2>/dev/null
+	return 0
+}
+
 log_msg() {
 	logger -t mt5700-watchdog "$1"
-	[ -n "$W_LOG" ] && echo "$(date '+%Y-%m-%d %H:%M:%S') [watchdog] $1" >> "$W_LOG" 2>/dev/null
+	[ -n "$W_LOG" ] || return 0
+	rotate_log
+	echo "$(date '+%Y-%m-%d %H:%M:%S') [watchdog] $1" >> "$W_LOG" 2>/dev/null
+	return 0
 }
 
 iface_up() {
