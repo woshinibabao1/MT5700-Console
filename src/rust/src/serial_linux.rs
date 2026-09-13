@@ -2,7 +2,6 @@
 //! 打开后拆成读写两半：读侧由 tokio AsyncFd 事件驱动，空闲不占 CPU。
 
 use crate::config::SerialConfig;
-use crate::log_error;
 use crate::transport::{Transport, TransportParts};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::pin::Pin;
@@ -133,8 +132,10 @@ impl AsyncWrite for SerialWriter {
 }
 
 pub struct SerialTransport {
-    reader_fd: Option<OwnedFd>,
-    writer_fd: Option<OwnedFd>,
+    /// 建连接时就注册好 AsyncFd，这样注册失败能在 [`open_serial`] 里返回 Err、
+    /// 交给上层的重连循环处理，而不是拖到 `into_parts` 里只能静默降级。
+    reader: Option<tokio::io::unix::AsyncFd<OwnedFd>>,
+    writer: Option<tokio::io::unix::AsyncFd<OwnedFd>>,
     port: String,
     write_timeout: Duration,
 }
@@ -147,7 +148,14 @@ pub async fn open_serial(cfg: &SerialConfig) -> Result<Box<dyn Transport>, Strin
         .ok_or_else(|| format!("不支持的波特率 {}", cfg.baudrate))?;
 
     let cpath = std::ffi::CString::new(cfg.port.as_str()).map_err(|e| e.to_string())?;
-    let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK) };
+    // O_CLOEXEC：本进程会 fork/exec `uci` 读写配置（config.rs / schedconfig.rs），
+    // 不带这个标志时每次 exec 都会把 ttyUSB1 的两个 fd 继承给子进程。
+    let fd = unsafe {
+        libc::open(
+            cpath.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return Err(format!("打开串口 {} 失败: {}", cfg.port, std::io::Error::last_os_error()));
     }
@@ -162,10 +170,19 @@ pub async fn open_serial(cfg: &SerialConfig) -> Result<Box<dyn Transport>, Strin
         unsafe { libc::close(fd) };
         return Err(format!("复制串口 fd 失败: {}", std::io::Error::last_os_error()));
     }
+    // dup 不继承 CLOEXEC 标志，必须单独给副本补上。
+    unsafe {
+        libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+
+    let reader = tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(fd) })
+        .map_err(|e| format!("注册串口读侧事件失败: {e}"))?;
+    let writer = tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(write_fd) })
+        .map_err(|e| format!("注册串口写侧事件失败: {e}"))?;
 
     Ok(Box::new(SerialTransport {
-        reader_fd: Some(unsafe { OwnedFd::from_raw_fd(fd) }),
-        writer_fd: Some(unsafe { OwnedFd::from_raw_fd(write_fd) }),
+        reader: Some(reader),
+        writer: Some(writer),
         port: cfg.port.clone(),
         write_timeout: cfg.timeout,
     }))
@@ -174,34 +191,11 @@ pub async fn open_serial(cfg: &SerialConfig) -> Result<Box<dyn Transport>, Strin
 #[async_trait::async_trait]
 impl Transport for SerialTransport {
     fn into_parts(mut self: Box<Self>) -> TransportParts {
-        // Option::take 避免 OwnedFd::from_raw_fd(-1)（该断言会 panic / abort）
-        let reader_fd = self
-            .reader_fd
-            .take()
-            .expect("SerialTransport reader_fd missing");
-        let writer_fd = self
-            .writer_fd
-            .take()
-            .expect("SerialTransport writer_fd missing");
-        let reader_afd = match tokio::io::unix::AsyncFd::new(reader_fd) {
-            Ok(a) => a,
-            Err(e) => {
-                log_error!("串口读侧 AsyncFd 失败: {e}");
-                // 用 /dev/null 退化，避免进程 abort
-                let null = std::fs::File::open("/dev/null").expect("open /dev/null");
-                let owned: OwnedFd = null.into();
-                tokio::io::unix::AsyncFd::new(owned).expect("null async fd")
-            }
-        };
-        let writer_afd = match tokio::io::unix::AsyncFd::new(writer_fd) {
-            Ok(a) => a,
-            Err(e) => {
-                log_error!("串口写侧 AsyncFd 失败: {e}");
-                let null = std::fs::File::open("/dev/null").expect("open /dev/null");
-                let owned: OwnedFd = null.into();
-                tokio::io::unix::AsyncFd::new(owned).expect("null async fd")
-            }
-        };
+        // Option::take 而不是 OwnedFd::from_raw_fd(-1)（该断言会 panic / abort）。
+        // AsyncFd 已在 open_serial 里构造完成，这里只是取出，取不到说明
+        // 本结构被用过一次，属于程序内部不变量被破坏，留 expect 让它显式暴露。
+        let reader_afd = self.reader.take().expect("SerialTransport reader missing");
+        let writer_afd = self.writer.take().expect("SerialTransport writer missing");
         TransportParts {
             reader: Box::new(SerialReader { afd: reader_afd }),
             writer: Box::new(SerialWriter {
