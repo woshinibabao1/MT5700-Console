@@ -13,11 +13,14 @@
 //!   用 `microcom`、或另开一条串口通道。
 //! ② **每次开机最多执行一次**，见 [`BootGuard`]。
 //! ③ `HVSST` 是**成对**操作：`=1,0` 之后必须闭合回 `=1,1`，
-//!    否则 SIM 检测会一直停在关闭状态上（这一点由调用方保证，见 `ensure_sim_ready`）。
+//!    否则 SIM 检测会一直停在关闭状态上。配对的两发必须用 [`pair_context`]
+//!    取得的「永不取消」上下文下发（调用方见 `atclient::AtClient::ensure_sim_ready`）。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use tokio::sync::watch;
 
 use crate::{log_info, log_warn};
 
@@ -26,6 +29,24 @@ use crate::{log_info, log_warn};
 /// 与 WTModem 的 `mt5700m.sh` 保持一致（`sleep 3`）：太短卡来不及重读，
 /// 太长会明显拖慢开机时的初始化序列。
 pub const HVSST_PAIR_WAIT: Duration = Duration::from_secs(3);
+
+/// 专供 `HVSST` 配对使用的「永不取消」上下文。
+///
+/// 为什么需要它：`AtClient::send_command_inner` 在「等命令锁」与「命令间隔」
+/// 两处都会因 `ctx.changed()` 直接 `return Err("上下文取消")` —— 那时命令字节
+/// **还没写进串口**，配对就真的断在半路了。服务正在关闭时宁可多等一个
+/// `COMMAND_TIMEOUT`，也不能把卡留在 `HVSST=0`（SIM 检测关闭）的状态上。
+///
+/// ⚠️ 返回的 `Sender` **必须与 `Receiver` 一起保活**，直到配对结束：
+/// `watch::Receiver::changed()` 在 sender 被 drop 后会**立刻**返回 `Err(RecvError)`，
+/// 而 `send_command_inner` 的 `select!` 对 `Ok`/`Err` 一视同仁 —— 提前 drop 会把
+/// 「永不取消」直接反转成「立刻取消」。把两者绑在同一个元组里返回，就是为了让
+/// 调用方没法只取其一；两条语义由单测
+/// `pair_context_never_cancels_while_sender_is_alive` 与
+/// `dropping_the_pair_sender_inverts_the_semantics` 钉死。
+pub fn pair_context() -> (watch::Sender<bool>, watch::Receiver<bool>) {
+    watch::channel(false)
+}
 
 /// 期望的连接模式：4 = USB 网口模式。
 /// 非该模式不做自愈 —— 别的形态（如转网口模式）下推 HVSST 会打断正在建立的拨号。
@@ -252,5 +273,35 @@ mod tests {
         assert!(BootGuard::new(b.clone()).claim());
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+
+    /* ---------- HVSST 配对用的「永不取消」上下文 ---------- */
+
+    #[tokio::test]
+    async fn pair_context_never_cancels_while_sender_is_alive() {
+        let (_keep_tx, pair_ctx) = pair_context();
+        let mut rx = pair_ctx.clone();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx.changed())
+                .await
+                .is_err(),
+            "sender 保活时，配对上下文不该报告任何「变化」—— 否则配对会被 ctx 取消打断"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_pair_sender_inverts_the_semantics() {
+        // 固化那个隐蔽的坑：sender 一旦被 drop，changed() 立刻返回 Err，而
+        // send_command_inner 的 select! 对 Ok/Err 一视同仁 —— 于是「永不取消」
+        // 会反转成「立刻取消」。这就是 `_pair_tx` 必须保活到配对结束的原因。
+        let (tx, pair_ctx) = pair_context();
+        drop(tx);
+        let mut rx = pair_ctx.clone();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx.changed())
+                .await
+                .is_ok(),
+            "sender 被 drop 后 changed() 必须立刻返回 —— 这正是不能提前 drop 的原因"
+        );
     }
 }

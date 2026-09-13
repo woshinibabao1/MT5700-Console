@@ -426,7 +426,22 @@ impl AtClient {
         );
 
         // ④ 成对下发。第一发无论成功与否都要把第二发打完，配对不能半途而废。
-        match self.send_command(ctx, "AT^HVSST=1,0", COMMAND_TIMEOUT, None).await {
+        //
+        // 这两发**刻意不响应 ctx 取消**：`send_command_inner` 在「等命令锁」与
+        // 「命令间隔」两处都会因 `ctx.changed()` 直接 `return Err` —— 那时字节
+        // 还没写进串口，配对就真的断在半路了（第三处取消点在写入之后，模组已经
+        // 收到，不算缺口）。服务正在关闭时宁可多等一个 `COMMAND_TIMEOUT`，
+        // 也不能把卡留在 `HVSST=0`（SIM 检测关闭）的状态上。
+        //
+        // ⚠️ `_pair_tx` 必须活到配对结束：sender 一旦被 drop，`changed()` 会立刻
+        // 返回 Err，而 `send_command_inner` 的 `select!` 对 Ok/Err 一视同仁 ——
+        // 提前 drop 会把「永不取消」反转成「立刻取消」。
+        let (_pair_tx, pair_ctx) = simheal::pair_context();
+
+        match self
+            .send_command(&pair_ctx, "AT^HVSST=1,0", COMMAND_TIMEOUT, None)
+            .await
+        {
             Ok(resp) if resp.ok() => log_info!("SIM 自愈：AT^HVSST=1,0 已确认"),
             Ok(resp) => log_warn!("SIM 自愈：AT^HVSST=1,0 未返回 OK：{}", resp.text()),
             Err(e) => log_warn!("SIM 自愈：AT^HVSST=1,0 未收到应答（{}），仍继续闭合配对", e),
@@ -436,7 +451,10 @@ impl AtClient {
         // 也不能因为服务正在关闭就把卡留在 HVSST=0（SIM 检测关闭）的状态上。
         tokio::time::sleep(simheal::HVSST_PAIR_WAIT).await;
 
-        match self.send_command(ctx, "AT^HVSST=1,1", COMMAND_TIMEOUT, None).await {
+        match self
+            .send_command(&pair_ctx, "AT^HVSST=1,1", COMMAND_TIMEOUT, None)
+            .await
+        {
             Ok(resp) if resp.ok() => log_info!("SIM 自愈：AT^HVSST=1,1 已确认，配对闭合"),
             Ok(resp) => log_warn!("SIM 自愈：AT^HVSST=1,1 未返回 OK：{}", resp.text()),
             Err(e) => log_warn!("SIM 自愈：AT^HVSST=1,1 未收到应答：{}", e),
@@ -1178,6 +1196,29 @@ mod tests {
             count_cmd(&all, "AT^HVSST=1,1"),
             1,
             "每次开机只能推一次，实际 {all:?}"
+        );
+
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// ★ 配对用的上下文能真正替代调用方的 `ctx` 完成一次往返 —— 这是
+    ///   「配对必须闭合」的前提（它不响应取消，见 `simheal::pair_context`）。
+    #[tokio::test]
+    async fn pair_context_drives_a_normal_round_trip() {
+        let marker = crate::simheal::temp_marker("atc-pair-ctx");
+        let h = sim_heal_harness(marker.clone(), true, sim_heal_reply).await;
+
+        let (_keep_tx, pair_ctx) = crate::simheal::pair_context();
+        let resp = h
+            .client
+            .send_command(&pair_ctx, "AT^HVSST=1,0", COMMAND_TIMEOUT, None)
+            .await
+            .expect("配对上下文不该被取消");
+        assert!(resp.ok(), "假模组应回 OK，实际 {:?}", resp.lines);
+        assert_eq!(
+            count_cmd(&h.sent_cmds().await, "AT^HVSST=1,0"),
+            1,
+            "配对上下文必须把命令写进串口"
         );
 
         let _ = std::fs::remove_file(&marker);
