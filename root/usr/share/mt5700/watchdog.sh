@@ -10,7 +10,12 @@
 # 判定与动作：
 #   1) 接口未 up            → ubus renew（失败则 ifdown/ifup）
 #   2) 网关邻居不可达        → ubus renew 续约（失败则 ifdown/ifup）
-#   3) 连续失败达阈值        → 按「复位命令」逐条下发（UCI watch_reset_cmds，可多行自定义）
+#   3) 连续失败达阈值        → 按「复位命令」逐条执行（UCI watch_reset_cmds，可多行自定义）
+#                             每行按前缀自动分流：AT+… / AT^… → 下发模组；
+#                             其余 → 本机 shell 命令（如 ifup MT5700M）
+#
+# 默认状态：**开启**（watch_enabled=1）。只做 DHCP 续约，不会主动复位模组，
+# 因此即便误判也只是白续约一次，不会造成断网。
 #
 # 用法：
 #   watchdog.sh once     只检查一次并尝试修复（给 LuCI「立即自检」用）
@@ -22,7 +27,7 @@
 DEF_IFACE='MT5700M'
 DEF_DEV='eth2'
 
-W_ENABLED=0
+W_ENABLED=1
 W_IFACE="$DEF_IFACE"
 W_DEV="$DEF_DEV"
 W_INTERVAL=60
@@ -33,14 +38,17 @@ W_LOG='/tmp/at-notifications.log'
 
 load_cfg() {
 	config_load at-webserver
-	config_get_bool W_ENABLED config watch_enabled 0
+	config_get_bool W_ENABLED config watch_enabled 1
 	config_get W_IFACE   config watch_iface "$DEF_IFACE"
 	config_get W_DEV     config watch_device "$DEF_DEV"
 	config_get W_INTERVAL config watch_interval 60
 	config_get W_THRESHOLD config watch_fail_threshold 3
 	config_get_bool W_RESET_MODEM config watch_reset_modem 0
 	# 复位命令：多行文本，UCI 里以字面 \n 存储（UCI 值不能带真实换行）
-	config_get W_RESET_CMDS config watch_reset_cmds 'AT+CFUN=1,1'
+	# 默认「ifdown → sleep 2 → ifup」重拉 MT5700M 接口：本机实测的故障形态
+	# 是模组 USB 重枚举后 DHCP 租约失效，重拉接口即可拿到新地址；
+	# 刻意不用 AT+CFUN=1,1 —— 协议栈复位会让 eth2 数据面挂死，只宜作最后的兜底。
+	config_get W_RESET_CMDS config watch_reset_cmds 'ifdown MT5700M\nsleep 2\nifup MT5700M'
 	config_get W_LOG     config log_file '/tmp/at-notifications.log'
 
 	[ -n "$W_IFACE" ] || W_IFACE="$DEF_IFACE"
@@ -100,10 +108,25 @@ send_at() {
 	return 1
 }
 
-# 复位动作：按 UCI watch_reset_cmds 的**多行、自定义**命令逐条下发（顺序执行）
+# 命令类型判定：以 AT+ / AT^ / at+ / at^ 开头（后面到行尾）视为 AT 指令；
+# 其余一律当作本机 shell 命令执行。这样一条 watch_reset_cmds 就能混排两类动作，
+# 默认的「先 ifdown 再 ifup 重拉接口」正是纯 shell：
+#     ifdown MT5700M
+#     sleep 2
+#     ifup MT5700M
+# 想换成协议栈级兜底时，在前面加一行 AT+CFUN=1,1 即可（注意它会让数据面短暂中断）。
+is_at_cmd() {
+	case "$1" in
+		[Aa][Tt][+^]*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# 复位动作：按 UCI watch_reset_cmds 的**多行、自定义**命令逐条执行（顺序执行）
 #   · 支持字面 \n 作为换行（LuCI 保存时会转义）
 #   · 空行与以 # 开头的行忽略（可写注释）
-#   · 每条之间等 1 秒，给模组反应时间
+#   · 以 AT+/AT^ 开头的行 → send_at 下发给模组；其余行 → 本机 shell 执行
+#   · 每条之间等 1 秒，给模组/接口反应时间
 reset_modem() {
 	[ -n "$W_RESET_CMDS" ] || return 1
 	printf '%b\n' "$W_RESET_CMDS" > /tmp/mt5700-reset-cmds.$$
@@ -114,11 +137,25 @@ reset_modem() {
 		[ -n "$line" ] || continue
 		case "$line" in \#*) continue ;; esac
 		_n=$((_n + 1))
-		if send_at "$line"; then
-			log_msg "复位命令 $_n 已下发：$line"
+		if is_at_cmd "$line"; then
+			if send_at "$line"; then
+				log_msg "复位命令 $_n（AT）已下发：$line"
+			else
+				_ok=0
+				log_msg "复位命令 $_n（AT）下发失败：$line"
+			fi
 		else
-			_ok=0
-			log_msg "复位命令 $_n 下发失败：$line"
+			# shell 命令：在同一条 sh 里执行，超时保护交给 busybox timeout（若可用）
+			_shout=$(command -v timeout >/dev/null 2>&1 \
+				&& timeout 30 /bin/sh -c "$line" 2>&1 \
+				|| /bin/sh -c "$line" 2>&1)
+			_rc=$?
+			if [ "$_rc" = "0" ]; then
+				log_msg "复位命令 $_n（SH）已执行：$line"
+			else
+				_ok=0
+				log_msg "复位命令 $_n（SH）执行失败(rc=$_rc)：$line${_shout:+ | $(printf '%s' "$_shout" | tr '\n' ' ' | cut -c1-200)}"
+			fi
 		fi
 		sleep 1
 	done < /tmp/mt5700-reset-cmds.$$
@@ -174,7 +211,7 @@ daemon)
 	load_cfg
 	[ "$W_ENABLED" = "1" ] || { log_msg '看门狗未启用，退出'; exit 0; }
 	_cmds_n=$(printf '%b\n' "$W_RESET_CMDS" | grep -c -v '^[[:space:]]*\(#\|$\)' 2>/dev/null || echo 0)
-	log_msg "看门狗启动：接口=$W_IFACE 设备=$W_DEV 间隔=${W_INTERVAL}s 阈值=$W_THRESHOLD 复位模组=$W_RESET_MODEM 复位命令=${_cmds_n}条"
+	log_msg "看门狗启动：接口=$W_IFACE 设备=$W_DEV 间隔=${W_INTERVAL}s 阈值=$W_THRESHOLD 复位模组=$W_RESET_MODEM 复位命令=${_cmds_n}条（AT/SH 混排）"
 	fails=0
 	while :; do
 		sleep "$W_INTERVAL"

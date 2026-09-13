@@ -30,19 +30,28 @@ config at-webserver 'config'
 	option read_cache_ttl '0'
 	option read_cache_static_ttl '300'           # 一次 ^CELLSCAN 全网扫频允许运行的秒数（下限 10）
 
-	# 连接看门狗（默认关闭，避免未确认前自行改动网络）
+	# 连接看门狗（默认开启：本机实测发生过两次「模组在、路由器在、就是没网」，
+	# 且症状是网关 ARP 永远 INCOMPLETE，用户侧完全看不出问题在哪。
+	# 看门狗只做「续约 DHCP 租约」，不主动复位模组，风险极低，因此默认开。）
 	# 解决的场景：模组 USB 重新枚举后 DHCP 租约未续期，路由器持有失效地址，
 	# 表现为「路由器能进但完全没网」，且默认网关 ARP 一直 INCOMPLETE。
-	option watch_enabled '0'                 # 1=启用看门狗
+	option watch_enabled '1'                 # 1=启用看门狗（默认），0=关闭
 	option watch_iface 'MT5700M'             # 受监控的网络接口
 	option watch_device 'eth2'               # 该接口对应的网口（模组 USB 网口）
 	option watch_interval '60'               # 检查间隔（秒，下限 15）
 	option watch_fail_threshold '3'          # 连续异常多少次后触发模组复位
-	option watch_reset_modem '0'             # 1=达阈值时复位模组协议栈（AT+CFUN=1,1）
-	# 复位动作：多行自定义 AT 命令，按顺序逐条下发（空行与 # 开头行忽略）。
-	# 默认 AT+CFUN=1,1（复位协议栈）；也可写多步，例如先关射频再开：
-	#   AT+CFUN=4\nAT+CFUN=1
-	option watch_reset_cmds 'AT+CFUN=1,1'
+	option watch_reset_modem '0'             # 1=达阈值时执行下方复位命令（默认不启用）
+	# 复位动作：多行自定义命令，按顺序逐条执行（空行与 # 开头行忽略）。
+	# 每行可以是两种命令之一，按前缀自动区分：
+	#   · AT+xxx / AT^xxx / at+xxx  → 通过本机 RPC 下发给模组（AT 指令）
+	#   · 其他任何内容              → 当作 shell 命令在本机执行（如 ifup MT5700M）
+	# UCI 值不能带真实换行，多行用字面 \n 表示。
+	# 默认动作是「先 ifdown 再 ifup 重拉接口」：
+	#   实测本机的故障形态是模组 USB 重枚举后 DHCP 租约失效，
+	#   MT5700M 这条 ifdown/ifup 就能拿到新地址；
+	#   默认 **不** 用 AT+CFUN=1,1 —— 协议栈复位会让 eth2 数据面挂死，属兜底中的兜底。
+	#   ifdown 后 sleep 2 给 netifd 收敛再 ifup；后续的等待交给看门狗下一轮复检。
+	option watch_reset_cmds 'ifdown MT5700M\nsleep 2\nifup MT5700M'
 
 	# 通知配置
 	option wechat_webhook ''

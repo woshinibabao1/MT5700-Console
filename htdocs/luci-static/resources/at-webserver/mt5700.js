@@ -377,18 +377,11 @@ var Mt5700 = (function () {
 		container.appendChild(card);
 
 		/*
-		 * SIM 卡状态（手册 6.6 AT^SIMSQ? 的 <sim_status>）：
-		 *   0 未插卡 / 1 已插卡 / 2 PIN·PUK 锁定 / 3 SIMLOCK
-		 *   10 卡文件初始化中 / 11 已初始化（可接入网络）/ 12 就绪（短信与电话本可接入）
-		 *   98 卡物理失效 / 99 卡已移除 / 100 卡错误
-		 * 11 与 12 的区别很实用：只到 11 时网络能用，但短信/电话本还没接入。
+		 * SIM 卡状态（AT^SIMSQ?）。
+		 * 码表在 Parse.parseSimsq 里，全项目只有一份（见 parse.js 的 SIM_STATUS 注释）：
+		 * 本芯片、网络状态页的「SIM 与设备」卡、模组设置页的「SIM 卡」卡都读它。
+		 * 这里不再自带码表 —— 之前三处各抄一份，连「已插卡(1)算不算正常」的判断都相反。
 		 */
-		var SIM_TEXT = {
-			0: '未插卡', 1: '已插卡', 2: 'PIN 锁定', 3: 'SIM 锁定',
-			10: '初始化中', 11: '已初始化 · 短信未就绪', 12: '就绪 · 短信可用',
-			98: '卡失效', 99: '已移除', 100: '卡错误'
-		};
-
 		function refreshSimStatus() {
 			if (!cl.connected) {
 				simValue.textContent = '—';
@@ -396,19 +389,16 @@ var Mt5700 = (function () {
 				return;
 			}
 			cl.sendCommand('AT^SIMSQ?').then(function (res) {
-				var txt = res && res.success && res.data
-					? (String(res.data).match(/\^SIMSQ:\s*(\d+)\s*,\s*(\d+)/) || null)
-					: null;
-				if (!txt) {
+				var sq = res && res.success && res.data ? Parse.parseSimsq(res.data) : null;
+				if (!sq) {
 					simValue.textContent = '未知';
 					simBox.classList.remove('is-warn');
 					return;
 				}
-				var st = parseInt(txt[2], 10);
-				var label = SIM_TEXT[st] || ('状态 ' + st);
-				simValue.textContent = label;
-				// 12 才算完全就绪；10/11 与异常状态给出提示色
-				simBox.classList.toggle('is-warn', st !== 12 && st !== 1);
+				simValue.textContent = sq.short;
+				// ready=12 才算完全就绪；未到 12 与各类异常都给提示色
+				simBox.classList.toggle('is-warn', !sq.healthy);
+				simBox.title = sq.detail;
 			}).catch(function () {
 				simValue.textContent = '未知';
 				simBox.classList.remove('is-warn');

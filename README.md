@@ -289,7 +289,8 @@ CI 会校验主包体积（>500KB，排除「只有前端」），并检查 4 �
 | `websocket_auth_key` | 空 | 由 ucode 自动附带；空则不校验密钥 |
 | `read_cache_static_ttl` | `300` | 不变类只读命令的缓存秒数（型号/固件/IMEI/ICCID…） |
 | `read_cache_ttl` | `0` | 状态类缓存秒数，默认关闭（宁可取实时值） |
-| `watch_enabled` | `0` | 连接看门狗总开关（默认不开） |
+| `watch_enabled` | `1` | 连接看门狗总开关（默认开启） |
+| `watch_reset_cmds` | `ifdown MT5700M` / `sleep 2` / `ifup MT5700M` | 多行（UCI 里用字面 `\n` 分隔），达阈值时逐条执行；`AT+`/`AT^` 开头为 AT 指令，其余按本机 shell 命令执行。默认只重拉接口；想加协议栈级兜底就在首行补 `AT+CFUN=1,1` |
 | `notify_*` / `wechat_webhook` | 见默认文件 | 通知 |
 | `schedule_*` | 见默认文件 | 定时锁频 |
 

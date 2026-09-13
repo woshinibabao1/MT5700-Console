@@ -163,7 +163,9 @@ return L.view.extend({
 				send(cmd).then(function (res) {
 					if (res.success) {
 						Mt5700.success('操作成功');
+						// PIN 解锁后 ^SIMSQ 会从 2 一路走到 12，两条状态一起重读
 						fetchPinStatus();
+						fetchSimSqStatus();
 					} else {
 						Mt5700.error(Ui.atErrorText(res, 'PIN 码操作失败'));
 					}
@@ -196,22 +198,39 @@ return L.view.extend({
 			}).catch(function () { Mt5700.error('SIM 卡热插拔设置失败'); });
 		}
 
+		/*
+		 * PIN 状态（AT+CPIN? → Parse.parseCpin，码表在 parse.js 的 CPIN_STATUS）。
+		 *
+		 * 修掉两处旧缺陷：
+		 *   1) 逻辑写反：旧代码在读到非 READY（SIMPIN / SIM PUK…）时，反而把文案
+		 *      盖成「PIN 状态：READY」—— 最该报警的状态被抹掉了。
+		 *      WTModem mt5700m.sh::sim_pin_chk 是逐分支处理的，这里是同一套语义。
+		 *   2) 正则 \w+ 会把「SIM PUK」截断成「SIM」；改由行级取值处理。
+		 */
 		function fetchPinStatus() {
+			var pinInfo = null;
 			return send('AT+CPIN?').then(function (res) {
-				var ready = false;
-				if (res.success && res.data) {
-					var m = atText(res).match(/\+CPIN:\s*(\w+)/);
-					if (m) { ready = m[1] === 'READY'; pinStatusEl.textContent = 'PIN 状态：' + m[1]; }
-				}
-				if (!ready) pinStatusEl.textContent = 'PIN 状态：READY';
+				pinInfo = (res && res.success && res.data) ? Parse.parseCpin(res.data) : null;
 				return send('AT+CLCK="SC",2');
 			}).then(function (res) {
-				if (res.success && res.data) {
+				var lockState = '';
+				if (res && res.success && res.data) {
 					var m = atText(res).match(/,(\d+)/);
-					if (m) {
-						var enabled = m[1] === '1';
-						pinStatusEl.textContent = 'PIN 状态：READY，' + (enabled ? '已启用' : '未启用');
-					}
+					if (m) lockState = m[1] === '1' ? 'PIN 锁已启用' : 'PIN 锁未启用';
+				}
+				pinStatusEl.textContent = 'PIN 状态：' + (pinInfo ? pinInfo.label : '未知')
+					+ (lockState ? '，' + lockState : '');
+			}).catch(function () {});
+		}
+
+		/* ^SIMSQ 的码表同样只在 parse.js 一份；单独抽出来，
+		   是为了 PIN 解锁后能连同 SIM 状态一起刷新（PIN 解锁后 ^SIMSQ 要从 2 走到 12，
+		   WTModem 也是 chkSimExt → sim_pin_chk 串行、各自重查）。 */
+		function fetchSimSqStatus() {
+			return send('AT^SIMSQ?').then(function (res) {
+				var sq = (res && res.success && res.data) ? Parse.parseSimsq(res.data) : null;
+				if (sq) {
+					simSqEl.textContent = 'SIM 状态：' + sq.label + (sq.dead ? '（卡已失效，无法恢复）' : '');
 				}
 			}).catch(function () {});
 		}
@@ -575,14 +594,8 @@ return L.view.extend({
 					var m = atText(res).match(/\^TDSIMHP:\s*(\d+)/);
 					if (m) hpChk.checked = m[1] === '1';
 				}
-				return send('AT^SIMSQ?');
-			}).then(function (res) {
-				if (res.success && res.data) {
-					var sq = Parse.parseSimsq(res.data);
-					if (sq) {
-						simSqEl.textContent = 'SIM 状态：' + sq.label + (sq.dead ? '（卡已失效，无法恢复）' : '');
-					}
-				}
+				return fetchSimSqStatus();
+			}).then(function () {
 				return fetchPinStatus();
 			}).catch(function () {});
 		}

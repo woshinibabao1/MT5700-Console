@@ -118,13 +118,10 @@ return L.view.extend({
 		var history = [];
 		var HISTORY_POINTS = 60;
 
-		var SIM_STATE = {
-			0: ['未插卡', true], 1: ['已插卡', true], 2: ['PIN 锁定', true], 3: ['SIM 锁定', true],
-			10: ['初始化中', true],
-			11: ['已初始化 · 可接入网络（短信/电话本未接入）', true],
-			12: ['就绪 · 短信与电话本可接入', false],
-			98: ['卡失效', true], 99: ['已移除', true], 100: ['卡错误', true]
-		};
+		/* SIM / PIN 的状态码解释全在 Parse 里（parse.js 的 SIM_STATUS / CPIN_STATUS），
+		 * 本页不再自带码表。此前本页有一份、mt5700.js 有一份、modem_settings.js 有一份，
+		 * 连「已插卡(1)」算不算正常都两处相反，已收敛为一处。
+		 * 参见 WTModem mt5700m.sh 的 chkSimExt / sim_pin_chk（同一套语义）。 */
 
 		/* 号段显示完整值（用户明确要求：本机状态页不打码） */
 		function fullNum(v) {
@@ -165,11 +162,10 @@ return L.view.extend({
 				return AtWs.client.sendCommand(cmd).catch(function () { return { success: false }; });
 			};
 			return q('AT^SIMSQ?').then(function (r) {
-				var m = String(r && r.data ? r.data : '').match(/SIMSQ:\s*(\d+)\s*,\s*(\d+)/);
-				st.sim = m ? parseInt(m[2], 10) : null;
+				st.sim = r && r.data ? Parse.parseSimsq(r.data) : null;
 				return q('AT+CPIN?');
 			}).then(function (r) {
-				st.pin = (String(r && r.data ? r.data : '').match(/CPIN:\s*(\S+)/) || [])[1] || '';
+				st.pin = r && r.data ? Parse.parseCpin(r.data) : null;
 				return q('AT+CNUM');
 			}).then(function (r) {
 				var m = String(r && r.data ? r.data : '').match(/"([+\d]{5,20})"/);
@@ -209,19 +205,22 @@ return L.view.extend({
 			var st = devState;
 			if (!st) return;
 			devBody.innerHTML = '';
-			var simRow = SIM_STATE[st.sim];
-			var simText = simRow ? simRow[0] : (st.sim == null ? '未知' : ('状态 ' + st.sim));
-			var warn = simRow ? simRow[1] : true;
+			var sq = st.sim;                       // Parse.parseSimsq 的结果（见 loadDeviceInfo）
+			var simText = sq ? sq.detail : '未知';
+			var warn = sq ? !sq.healthy : true;
 
 			var head = E('div', { 'class': 'mt5700-toolbar' });
 			head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (warn ? '' : ' is-on') },
 				'SIM：' + simText));
-			if (st.pin) head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' }, 'PIN：' + st.pin));
+			/* PIN 走 Parse.parseCpin：READY 之外还有等待 PIN / 等待 PUK 等状态，
+			   必须把模组原话翻成中文，不能直接吐 SIM PUK 让猜。 */
+			if (st.pin) head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (st.pin.ready ? ' is-on' : '') },
+				'PIN：' + st.pin.label));
 			devBody.appendChild(head);
 
 			if (warn) {
 				devBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'短信与电话本要等 SIM 到「就绪」；长期停在「已初始化」时短信可能发不出去。'));
+					'短信与电话要等 SIM 到「就绪」；长期停在「已初始化」时短信可能发不出去。'));
 			}
 
 			var note = manualPhoneNote();

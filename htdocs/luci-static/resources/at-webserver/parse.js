@@ -1014,24 +1014,102 @@ var Parse = (function () {
 		};
 	};
 
-	/* ================= SIM 信号质量 ^SIMSQ（sim.ts 等价迁移） ================= */
-	// 手册 6.6：^SIMSQ 能区分卡不在位 / 被锁 / PUK 锁死，+CPIN 看不出来。
+	/* ================= SIM 卡状态 ^SIMSQ（手册 6.6） =================
+	 * 手册 6.6：^SIMSQ 能区分卡不在位 / 被锁 / PUK 锁死，+CPIN 看不出来。
+	 *
+	 * 码表以鼎桥手册 6.6 <sim_status> 为准，并对照 WTModem 的 mt5700m.sh::chkSimExt
+	 * （akury/immortalwrt-mt798x，luci-app-WTModem）校准过语义。
+	 *
+	 * 全项目**只此一份**。此前 mt5700.js（顶部 SIM 芯片）、network_status.js
+	 * （「SIM 与设备」卡）、modem_settings.js（「SIM 卡」卡）各抄了一遍子类：
+	 *   · 同一个 2 号状态，一处叫「PIN 锁定」一处叫「卡被 PIN/PUK 锁定」；
+	 *   · 「已插卡(1)」在 mt5700.js 算正常、在 network_status.js 算警告，判定相反。
+	 * 现在三者统一走 parseSimsq，改动只需改这里。
+	 *
+	 * healthy 的判定：只有 12（短信与电话均已接入）算完全就绪。
+	 * 1「已插卡」只是物理到位、卡文件还没初始化完，不能算正常（WTModem 也只在 12 打印
+	 * 「SIM卡正常工作」）。
+	 */
 	var SIM_STATUS = {
-		0: '卡不在位', 1: '卡已插入', 2: '卡被 PIN/PUK 锁定', 3: 'SIMLOCK 锁定',
-		10: '卡文件初始化中', 11: '卡初始化完成，可接入网络（短信与电话本未接入）',
-		12: '卡初始化完成，短信与电话本可接入', 98: '卡已失效（PUK 锁死或物理损坏）',
-		99: '卡已移除', 100: '卡初始化失败'
+		0:   { short: '未插卡',        detail: '卡不在位',                                     healthy: false, dead: false },
+		1:   { short: '已插卡',        detail: '卡已插入，尚未完成初始化',                     healthy: false, dead: false },
+		2:   { short: 'PIN 锁定',      detail: '卡被 PIN/PUK 锁定，解锁后才能接入网络',         healthy: false, dead: false },
+		3:   { short: 'SIMLOCK 锁定',  detail: 'SIMLOCK 锁定（厂家锁，暂不支持上报）',          healthy: false, dead: false },
+		10:  { short: '初始化中',      detail: '卡文件正在初始化',                             healthy: false, dead: false },
+		11:  { short: '已初始化',      detail: '卡初始化完成，可接入网络；短信与电话尚未接入',   healthy: false, dead: false },
+		12:  { short: '就绪',          detail: 'SIM 卡正常工作，短信与电话可接入',              healthy: true,  dead: false },
+		98:  { short: '卡失效',        detail: '卡物理失效（PUK 锁死或卡片损坏）',              healthy: false, dead: true },
+		99:  { short: '已移除',        detail: '卡已移除',                                     healthy: false, dead: false },
+		100: { short: '卡错误',        detail: '初始化过程中出错（卡失败）',                    healthy: false, dead: false }
 	};
 
+	/*
+	 * 取一行应答里的 "^SIMSQ: <mode>,<sim_status>"。
+	 * 行锚定是为了避免把正文里别的 \r\n 抓进来；兼容不带 ^ 前缀与全角冒号的写法。
+	 */
+	function firstInfoLine(text, cmd) {
+		// 前缀要同时容 +CPIN 与 ^SIMSQ；行锚定避免把后面的 OK / 别的信息行一起抓进来
+		var re = new RegExp('(?:^|[\\r\\n])\\s*[+^]?' + cmd + '[:：]\\s*([^\\r\\n]+)');
+		var m = String(text).match(re);
+		return m ? m[1].trim() : '';
+	}
+
 	api.parseSimsq = function (text) {
-		var match = String(text).match(/\^SIMSQ:\s*(\d+)\s*,\s*(\d+)/);
-		if (!match) return null;
-		var status = Number(match[2]);
+		var line = firstInfoLine(text, 'SIMSQ');
+		var pair = line.match(/(\d+)\s*,\s*(\d+)/);
+		if (!pair) return null;
+		var status = Number(pair[2]);
+		var info = SIM_STATUS[status];
 		return {
 			status: status,
-			label: SIM_STATUS[status] != null ? SIM_STATUS[status] : '状态 ' + status,
-			dead: status === 98,
-			present: status !== 0 && status !== 99
+			// short：窄处用（顶部芯片、状态徽章）；label/detail：卡片里一行铺开用
+			short: info ? info.short : '状态 ' + status,
+			label: info ? info.detail : '状态 ' + status,
+			detail: info ? info.detail : '未知 SIM 卡状态（' + status + '）',
+			healthy: !!(info && info.healthy),
+			dead: !!(info && info.dead),
+			// 原版语义：present 只排除「不在位」的 0 与「已移除」的 99，
+			// 98（失效）卡物理上还在卡槽里，仍算 present
+			present: status !== 0 && status !== 99,
+			text: line
+		};
+	};
+
+	/* ================= PIN / PUK 状态 +CPIN（手册 + 27.007） =================
+	 * 参照 WTModem mt5700m.sh::sim_pin_chk 的分支建立。READY 之外都是「卡还没能用」，
+	 * 必须由界面如实呈现 —— 历史上这里把非 READY 反写成 READY，把最要命的
+	 * 「SIM PIN / SIM PUK」状态盖掉了。
+	 *
+	 * 注意写法差异：模组可能回 "+CPIN: SIM PUK"（标准 27.007，带空格），
+	 * 也可能回 "+CPIN: SIMPUK"（无空格）。统一先掐掉空格再查表。
+	 * WTModem 那边用 tr -d ' ' 抹掉空格后却只匹配 "SIM PUK"（留着空格），
+	 * 于是它的 PUK 分支永远进不去 —— 这个坑不要跟着抄。
+	 */
+	var CPIN_STATUS = {
+		READY:           { label: '已就绪',                ok: true },
+		SIMPIN:          { label: '等待输入 PIN',           needPin: true },
+		SIMPIN2:         { label: '等待输入 PIN2',          needPin: true },
+		SIMPUK:          { label: '等待输入 PUK（PIN 已锁死）', needPuk: true },
+		SIMPUK2:         { label: '等待输入 PUK2（PIN2 已锁死）', needPuk: true },
+		PHNETPIN:        { label: '等待网络个人码',          needPin: true },
+		PHNETSUBPIN:     { label: '等待网络子集个人码',      needPin: true },
+		PHSPPIN:         { label: '等待服务商个人码',        needPin: true },
+		PHCORPPIN:       { label: '等待企业个人码',          needPin: true }
+	};
+
+	api.parseCpin = function (text) {
+		var raw = firstInfoLine(text, 'CPIN');
+		if (!raw) return null;
+		// 去掉空格与连字符再查表：模组写 "+CPIN: PH-NET PIN"，标准名是 PH-NET PIN
+		var info = CPIN_STATUS[raw.replace(/[\s-]+/g, '')] || null;
+		return {
+			code: raw,
+			ready: !!(info && info.ok),
+			needPin: !!(info && info.needPin),
+			needPuk: !!(info && info.needPuk),
+			// 认不出来的状态码一律按「需要处理」对待，不再静默当成 READY
+			blocked: info ? !info.ok : true,
+			label: info ? info.label : raw
 		};
 	};
 

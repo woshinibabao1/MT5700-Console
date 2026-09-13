@@ -324,7 +324,7 @@ return L.view.extend({
 		var wdChk = E('input', { type: 'checkbox' });
 		wdSwitch.appendChild(wdChk);
 		wdBody.appendChild(Mt5700.formGroup('启用看门狗', wdSwitch,
-			'检查接口状态与默认网关的邻居可达性，异常时自动续约 DHCP'));
+			'默认开启。检查接口状态与默认网关的邻居可达性，异常时自动续约 DHCP，不会主动复位模组'));
 
 		var wdIntervalInput = Mt5700.input('number', '60', '');
 		wdBody.appendChild(Mt5700.formGroup('检查间隔（秒）', wdIntervalInput, '下限 15 秒，默认 60'));
@@ -337,16 +337,23 @@ return L.view.extend({
 		var wdResetChk = E('input', { type: 'checkbox' });
 		wdResetSwitch.appendChild(wdResetChk);
 		wdBody.appendChild(Mt5700.formGroup('达阈值时执行复位', wdResetSwitch,
-			'连续异常达到阈值后，按下方命令逐条下发（最后手段，会短暂断网）'));
+			'连续异常达到阈值后，按下方命令逐条执行（最后手段，AT 复位会短暂断网）'));
 
-		/* 复位命令：多行、自定义、按顺序执行（watchdog.sh 逐条下发，每条间隔 1 秒） */
+		/* 复位命令：多行、自定义、按顺序执行（watchdog.sh：AT 下发模组 / 其余走本机 shell）
+		 * 默认是纯 shell 的「重拉 MT5700M 接口」：ifdown → sleep 2 → ifup。
+		 * 刻意没把 AT+CFUN=1,1 放进默认值——协议栈复位会让 eth2 数据面挂死，
+		 * 本机实测的故障（USB 重枚举后 DHCP 租约失效）重拉接口就能恢复，不必动模组。 */
+		var WATCH_RESET_CMDS_DEFAULT = 'ifdown MT5700M\nsleep 2\nifup MT5700M';
 		var wdCmdsArea = E('textarea', { 'class': 'mt5700-input', 'rows': '4',
-			'placeholder': '每行一条 AT 命令，按顺序执行' });
+			'placeholder': 'AT+CFUN=1,1\nifup MT5700M' });
 		wdCmdsArea.style.width = '100%';
 		wdCmdsArea.style.fontFamily = 'var(--mt5700-font-mono)';
 		wdCmdsArea.style.minHeight = '84px';
 		wdBody.appendChild(Mt5700.formGroup('复位命令（每行一条，按顺序执行）', wdCmdsArea,
-			'空行与 # 开头的行会被忽略；可写多步，例如先关射频再开：AT+CFUN=4 换行 AT+CFUN=1'));
+			'AT+ / AT^ 开头的行下发给模组，其余行作为本机 shell 命令执行。' +
+			'空行与 # 开头的行会被忽略。默认已是「ifdown → sleep 2 → ifup」重拉接口，' +
+			'界面的接口名要跟着上面的「受监控的网络接口」一起改；' +
+			'想加协议栈级兜底就在首行补 AT+CFUN=1,1（它会让数据面短暂中断）。'));
 
 		wdBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 			'看门狗每轮都会重新读取配置，保存后最多一个检查间隔即生效，无需重启服务。' +
@@ -377,12 +384,11 @@ return L.view.extend({
 		notifyMem.input.checked = get('notify_memory_full', '1') === '1';
 		webhookInput.value = String(get('wechat_webhook', ''));
 		/* 连接看门狗（此前这排控件已渲染但没接 UCI：既读不到当前配置，改了也存不下去） */
-		wdChk.checked = get('watch_enabled', '0') === '1';
+		wdChk.checked = get('watch_enabled', '1') === '1';
 		wdIntervalInput.value = String(get('watch_interval', '60'));
 		wdThresholdInput.value = String(get('watch_fail_threshold', '3'));
 		wdResetChk.checked = get('watch_reset_modem', '0') === '1';
-		/* UCI 里以字面 \n 存多行命令，这里还原成换行显示 */
-		wdCmdsArea.value = String(get('watch_reset_cmds', 'AT+CFUN=1,1')).replace(/\\n/g, '\n');
+		wdCmdsArea.value = String(get('watch_reset_cmds', WATCH_RESET_CMDS_DEFAULT)).replace(/\\n/g, '\n');
 
 		/* ---------- 保存（OpenWrt 标准「保存并应用」流程） ----------
 		 *

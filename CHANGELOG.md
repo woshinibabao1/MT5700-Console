@@ -5,6 +5,129 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.0.3] - 2026-09-13
+
+> 对照 WTModem 的 mt5700m.sh 复查后的一批改动：**SIM/PIN 状态码收敛为单一真源**，
+> 并修掉两处会因之说谎的状态判定；同时把看门狗的默认救命命令换成本机实测有效的形式。
+> 本版**不涉及短信发送协议**（发送受阻已确证为模组固件裁掉 CMGS 命令族，非本应用可解），
+> 一次 AT 请求都没有新增。
+
+
+### 变更 - 连接看门狗改为默认开启
+
+**理由**：它要防的故障（模组 USB 重新枚举后 DHCP 租约未续期 → 网关 ARP 永远 INCOMPLETE →
+「路由器能进但完全没网」）本机 2026-09-13 一天内实测发生**两次**，而用户侧完全无从下手。
+看门狗只做「续约 DHCP 租约」，**不会主动复位模组**，误判代价仅是白续约一次，风险极低。
+
+四处默认值统一改为「开」：
+
+| 位置 | 改动 |
+| --- | --- |
+| `root/etc/config/at-webserver` | `option watch_enabled '1'`（原 `'0'`） |
+| `root/etc/uci-defaults/at-webserver` | 升级补齐默认 `watch_enabled=1`（仅补缺失项，**不覆盖用户已有设置**） |
+| `watchdog.sh` | `W_ENABLED=1` 与 `config_get_bool … watch_enabled 1`（缺键兜底） |
+| `service.js` | 回填 `get('watch_enabled', '1')`；卡片说明补「默认开启…不会主动复位模组」 |
+| `README.md` | 配置表 `watch_enabled` 由 `0`/「默认不开」改为 `1`/「默认开启」 |
+
+> 注：已装设备若曾把 `watch_enabled` 写过 UCI，升级时按「仅补缺失项」原则**保持原值**，不会被强制打开。
+
+### 新增 - 看门狗复位命令同时支持 AT 指令与 shell 指令
+
+此前 `watch_reset_cmds` 只能是 AT 命令。但真实场景下需要两类动作配合，
+例如「软复位模组协议栈 → 模组若没起来就兜底重拉接口」，后者是**本机 shell 命令**，原实现无法表达。
+
+现按**行首前缀自动分流**，一行一条，顺序执行：
+
+```
+AT+CFUN=1,1          # → 通过本机 RPC 下发给模组
+ifup MT5700M         # → 在本机 shell 执行
+```
+
+- `AT+` / `AT^` 开头（**大小写不敏感**）→ AT 指令，走原有 `send_at`
+- 其余任何内容 → `/bin/sh -c` 在本机执行，若有 `timeout` 则加 30 秒保护
+- 空行与 `#` 开头的行仍被忽略；每条之间等 1 秒
+- 单条失败不中断后续（故障兜底场景必须把剩余步骤跑完），但整体返回失败并逐条记日志
+- 日志区分类型与结果：`复位命令 2（SH）执行失败(rc=3)：… | <stderr 截断 200 字>`
+
+**真机验证**（`exp_phase117.py`，在 192.168.10.1 上跑真实 BusyBox）：
+
+- `timeout` / `tr` / `cut` / `sed` / `awk` 在此固件上**全部存在**（`timeout` 实跑返回 143）
+- 分流边界 14 个用例全对：`AT+CFUN=1,1`、`AT^SIMSQ?`、`at+cmgf=0`、`At+Z` → AT；
+  `ifup MT5700M`、`AT`、`ATC+`、`+AT+X`、`ATX+Y`、`/usr/bin/AT+foo` → SH
+- 端到端 8 条混合命令：AT 成功 / shell 成功 / shell 失败(rc=3) / AT 失败 / 失败后续命令仍执行，
+  返回码与 `touch` 副产物全部符合预期
+
+### 变更 - 看门狗默认救命命令：改为重拉 MT5700M 接口
+
+既然复位命令已经支持 shell，默认值就不该再是 `AT+CFUN=1,1`。本机两次「路由器能进但完全没网」
+的都是同一个形态：模组 USB 重新枚举后 DHCP 租约失效，路由器手里攥着旧地址，默认网关的 ARP
+永远停在 `INCOMPLETE`。`AT+CFUN=1,1` 是**协议栈级**复位，代价是 eth2 数据面会挂死
+（本项目的操作红线本来就禁止擅自 CFUN），放在默认值里属于「兜底中的兜底用错了场景」。
+
+默认的三行现在是：
+
+```
+ifdown MT5700M
+sleep 2
+ifup MT5700M
+```
+
+`ifdown` 后 `sleep 2` 给 netifd 收敛，再由 `ifup` 重新走一遍 DHCP 拿到新地址。
+
+五处默认值全部拉齐（`uci-defaults` 的值含空格，**必须加引号**，否则会被词分割；
+UCI 里不能用真实换行，多行统一用字面 `\n`，由 watchdog.sh 的 `printf '%b'` 还原）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `root/etc/config/at-webserver` | `option watch_reset_cmds 'ifdown MT5700M\nsleep 2\nifup MT5700M'` |
+| `root/etc/uci-defaults/at-webserver` | `watch_reset_cmds='ifdown MT5700M\nsleep 2\nifup MT5700M'`（带引号） |
+| `watchdog.sh` | `config_get … watch_reset_cmds '…'` 兜底同步 |
+| `service.js` | 抽出 `WATCH_RESET_CMDS_DEFAULT` 常量，读取与回填共用同一份，不再各写字面量 |
+| `README.md` | 配置表写明默认三行，并说明想加协议栈兜底就在首行补 `AT+CFUN=1,1` |
+
+> 注：这三行里写死了接口名 `MT5700M`，与 `watch_iface` 的默认值一致。
+> 若改了受监控的接口，`watch_reset_cmds` 要跟着改 —— 契约测试里加了这一致性断言。
+
+### 修复 - SIM / PIN 状态码三处各写一份，且 PIN 状态被反写成「READY」
+
+对照 WTModem 的 `mt5700m.sh`（akury/immortalwrt-mt798x，`luci-app-WTModem`）复查时发现：
+`AT^SIMSQ?` 的 `<sim_status>` 在本项目里被抄了**三份**码表，而且互相打架 ——
+
+| 状态码 | `mt5700.js` | `network_status.js` | `parse.js` |
+| --- | --- | --- | --- |
+| 2 | `PIN 锁定` | `PIN 锁定` | `卡被 PIN/PUK 锁定` |
+| 3 | `SIM 锁定` | `SIM 锁定` | `SIMLOCK 锁定` |
+| 100 | `卡错误` | `卡错误` | `卡初始化失败` |
+
+更麻烦的是**判定也相反**：「已插卡(1)」在 `mt5700.js` 算正常（`st !== 12 && st !== 1`），
+在 `network_status.js` 算警告 —— 同一张卡在两个页面一个显示正常色、一个显示警示色。
+WTModem 那边的口径是清楚的：只有 `12` 才打印「SIM卡正常工作」。
+
+同时 `modem_settings.js` 里有一处**逻辑写反**：
+
+```js
+if (!ready) pinStatusEl.textContent = 'PIN 状态：READY';
+```
+
+于是卡处在 `SIM PIN` / `SIM PUK` —— 恰恰最需要提示的状态 —— 界面反而显示「PIN 状态：READY」。
+另外它用的正则 `\+CPIN:\s*(\w+)` 会把 `SIM PUK` 截断成 `SIM`（`\w` 不匹配空格）。
+
+修法：
+
+- 码表收敛到 `parse.js` **一份**：`SIM_STATUS`（短标签 + 长描述 + healthy/dead）与
+  `CPIN_STATUS`（READY / SIM PIN / SIM PIN2 / SIM PUK / SIM PUK2 / 各类 PH-*-PIN）
+- 新增 `Parse.parseSimsq()` 返回 `{ short, detail, healthy, dead, present }`、
+  `Parse.parseCpin()` 返回 `{ ready, needPin, needPuk, blocked, label }`
+- `mt5700.js`、`network_status.js`、`modem_settings.js` 三处消费者全部改为调用它，自带码表删除
+- `parseCpin` 先掐掉空格与连字符再查表，兼容 `SIM PUK` 与 `SIMPUK` 两种写法；
+  认不出的状态码一律按「需要处理」对待，不再静默当成 READY
+- PIN 解锁成功后同时重读 `^SIMSQ`（它会从 2 一路走到 12，WTModem 也是先 `chkSimExt` 再 `sim_pin_chk`）
+- 顺带修好 `tests/mock-modem/parse-extra-test.js`：它缺 `L.Class` 桩、`window` 也没作为参数传进去，
+  从某个版本起一直是「0 项通过」地静默挂着；其中 MONSSC / CASCELLINFO 那批断言调用的
+  四个函数早在辅载波改用 `^NRSSBID` 时就删了，一并清理
+
+**不新增任何 AT 请求**：改的只是同一份应答的解释方式。
+
 ## [1.0.2] - 2026-09-13
 
 > 修复「短信条数」显示口径不一致：存储行给的是**物理分片数**，消息列表给的是
