@@ -583,16 +583,18 @@ return L.view.extend({
 
 		// 直接经 ubus 注册并拉起实例。即使 /etc/init.d/at-webserver 缺失
 		// （overlay 白化等），这条路径依然能把服务跑起来。
+		//
+		// ★ 传参必须用位置参数。LuCI 的 rpc.declare 只在 options.params 是「对象」
+		//   时才支持命名参数；本文件用的是数组 ['name','instances']，此时它按
+		//   params 数组顺序取 arguments，写成 rpcServiceSet({name:.., instances:..})
+		//   会把整个对象塞进 name 字段——调用不报错，但 ubus 侧什么都做不了。
 		function startViaUbus() {
-			return rpcServiceSet({
-				name: SERVICE,
-				instances: {
-					instance1: {
-						command: [BINARY],
-						respawn: ['3600', '5', '5'],
-						stdout: true,
-						stderr: true
-					}
+			return rpcServiceSet(SERVICE, {
+				instance1: {
+					command: [BINARY],
+					respawn: ['3600', '5', '5'],
+					stdout: true,
+					stderr: true
 				}
 			});
 		}
@@ -646,7 +648,7 @@ return L.view.extend({
 
 		function reloadService() {
 			reloadBtn.disabled = true;
-			return rpcServiceDelete({ name: SERVICE }).catch(function () {
+			return rpcServiceDelete(SERVICE).catch(function () {
 				/* 实例可能不存在，删除失败不致命 */
 			}).then(function () {
 				return startViaUbus();
@@ -681,48 +683,77 @@ return L.view.extend({
 		}
 
 		/*
-		 * 停止服务。按序尝试两条路径，都是「注销」而非「杀进程」：
-		 *   1) /etc/init.d/at-webserver stop（file.exec）——语义最干净，走 init 脚本的
-		 *      stop_service()：删 pidfile、清理本服务添加的防火墙规则。
-		 *   2) ubus service delete ——兜底。服务若是由 startViaUbus 直接注册、
-		 *      procd 里没有对应实例脚本，init stop 就停不动，只能删实例。
-		 *      delete 是注销实例，同样不会被记成崩溃。
-		 * 刻意不用 killall：它会被 procd 记成崩溃，反复 stop/start 攒满 respawn
-		 * 重试次数后，procd 将永久放弃拉起（见 init 脚本里的「严重警告二」）。
+		 * 停止服务。三步走，每步都允许失败、都往控制台留痕（便于 F12 排查）：
+		 *   1) /etc/init.d/at-webserver stop（file.exec）—— 正规路径：stop_service()
+		 *      删 pidfile、清防火墙规则，随后 rc.common 会 ubus service delete 掉实例。
+		 *   2) ubus service.delete —— 保险。init stop 若因实例名没匹配上而没杀掉进程，
+		 *      这一步兜底注销实例（delete 是注销，不会被 procd 记成崩溃）。
+		 *   3) 轮询复核最多 12 秒 —— procd 的 term_timeout 是 5 秒，从发 SIGTERM 到
+		 *      进程真正消失有延迟。固定等待（曾设 1 秒）会把「正在退出」误判成
+		 *      「没停掉」，这是本功能第一版的真实 bug：明明停了却报失败。
+		 *
+		 * 注意：rc.common 会把 init 脚本命令行里 stop 之后的参数当成 instance 名，
+		 * 拼进 ubus service delete 的 instance 字段。所以 params 只能是 ['stop']，
+		 * 多传一个参数就会 delete 到不存在的实例、进程原地不动。
+		 *
+		 * 绝不用 killall：会被 procd 记成崩溃，攒满 respawn 重试后永久不再拉起
+		 * （见 init 脚本里的「严重警告二」）。
 		 */
+		function waitUntilStopped(maxMs) {
+			var deadline = Date.now() + maxMs;
+			function step() {
+				return fetchRunning().then(function (st) {
+					if (!st.running || Date.now() >= deadline) return st;
+					return new Promise(function (resolve) { window.setTimeout(resolve, 1000); }).then(step);
+				});
+			}
+			return step();
+		}
+
 		function stopService() {
 			Mt5700.confirm('确定停止 AT 服务？停止后所有页面的 AT 功能（状态、短信、网络信息）' +
 				'将立即不可用，并会清理由本服务添加的防火墙规则。需要恢复时点击「重载服务」。', function () {
 				stopBtn.disabled = true;
-				rpcFileExec({ command: '/etc/init.d/' + SERVICE, params: ['stop'] }).catch(function () {
-					/* init 脚本缺失或 file.exec 被拒时失败，交由下面的兜底路径处理 */
-				}).then(function () {
-					// stop_service 内含一次 firewall reload，且 procd 还有 5 秒 term_timeout，
-					// 留足时间再复核，避免误判成「没停掉」而多走一次 delete
-					return new Promise(function (resolve) { window.setTimeout(resolve, 2500); });
-				}).then(fetchRunning).then(function (st) {
-					if (!st.running) return st;
-					return rpcServiceDelete({ name: SERVICE }).catch(function () {
-						return null;
-					}).then(function () {
-						return new Promise(function (resolve) { window.setTimeout(resolve, 1000); });
-					}).then(fetchRunning);
-				}).then(function (st) {
-					state.userStopped = !st.running;
-					if (st.running) {
-						Mt5700.error('停止失败：进程仍在运行（PID ' + (st.pid || '未知') +
-							'），请查看系统日志 logread -e at-webserver');
-					} else {
-						Mt5700.success('AT 服务已停止。需要恢复时点击「重载服务」。');
-					}
-					return refreshStatus();
-				}).catch(function (err) {
-					Mt5700.error('停止失败：' + ((err && err.message) || '未知错误'));
-				}).then(function () {
-					stopBtn.disabled = false;
-					// 由真实状态决定按钮可用性（停止后应自动置灰）
-					renderStatus(resolveStatus(state));
-				});
+				var tried = [];
+				rpcFileExec('/etc/init.d/' + SERVICE, ['stop'])
+					.then(function (res) {
+						tried.push('init stop（返回 ' + JSON.stringify(res || {}) + '）');
+					})
+					.catch(function (err) {
+						tried.push('init stop 调用失败');
+					})
+					.then(function () {
+						// stop_service 内含一次 firewall reload，等它跑完再复核
+						return new Promise(function (resolve) { window.setTimeout(resolve, 2000); });
+					})
+					.then(fetchRunning)
+					.then(function (st) {
+						if (!st.running) return st;
+						return rpcServiceDelete(SERVICE)
+							.then(function () { tried.push('service.delete'); })
+							.catch(function (err) {
+								tried.push('service.delete 失败');
+							})
+							.then(function () { return waitUntilStopped(12000); });
+					})
+					.then(function (st) {
+						state.userStopped = !st.running;
+						if (st.running) {
+							Mt5700.error('停止失败：进程仍在运行（PID ' + (st.pid || '未知') + '）。' +
+								'已尝试：' + (tried.join('、') || '无') + '。请查看系统日志 logread -e at-webserver');
+						} else {
+							Mt5700.success('AT 服务已停止。需要恢复时点击「重载服务」。');
+						}
+						return refreshStatus();
+					})
+					.catch(function (err) {
+						Mt5700.error('停止失败：' + ((err && err.message) || '未知错误'));
+					})
+					.then(function () {
+						stopBtn.disabled = false;
+						// 由真实状态决定按钮可用性（停止后应自动置灰）
+						renderStatus(resolveStatus(state));
+					});
 			}, '停止服务');
 		}
 
