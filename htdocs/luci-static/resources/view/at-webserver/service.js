@@ -563,15 +563,22 @@ return L.view.extend({
 			params: ['name'],
 			expect: { '': {} }
 		});
-		// 经 rpcd 的 luci 插件执行 /etc/init.d/at-webserver <action>。
-		// 停止必须走 init 脚本而不是直接杀进程：脚本的 stop_service() 会删 pidfile
-		// 并清理防火墙规则，且「不 killall」——killall 会被 procd 记成崩溃，攒满
-		// respawn 重试次数后 procd 将永久放弃拉起（见 init 脚本里的警告）。
-		var rpcInitAction = L.rpc.declare({
-			object: 'luci',
-			method: 'setInitAction',
-			params: ['name', 'action'],
-			expect: { result: '' }
+		/*
+		 * 执行 /etc/init.d/at-webserver <action>（rpcd file.exec，ACL 已授权该脚本 exec）。
+		 *
+		 * 停止必须走 init 脚本而不是直接杀进程：stop_service() 会删 pidfile、清理本服务
+		 * 添加的防火墙规则，且刻意「不 killall」——killall 会被 procd 记成崩溃，攒满
+		 * respawn 重试次数后 procd 将永久放弃拉起（见 init 脚本里的「严重警告二」）。
+		 *
+		 * 不用 luci.setInitAction：真机 rpcd 的 luci 对象里根本没这个方法
+		 * （ubus -v list luci 只有 getInitList / setPassword 等），调了必失败。
+		 * 也不用 rc.init：它的 ACL 尚未开放，file.exec 这条已经是现成授权。
+		 */
+		var rpcFileExec = L.rpc.declare({
+			object: 'file',
+			method: 'exec',
+			params: ['command', 'params'],
+			expect: { code: 0, stdout: '', stderr: '' }
 		});
 
 		// 直接经 ubus 注册并拉起实例。即使 /etc/init.d/at-webserver 缺失
@@ -675,10 +682,10 @@ return L.view.extend({
 
 		/*
 		 * 停止服务。按序尝试两条路径，都是「注销」而非「杀进程」：
-		 *   1) /etc/init.d/at-webserver stop（luci.setInitAction）—— 语义最干净，
-		 *      走 init 脚本的 stop_service()：删 pidfile、清理本服务添加的防火墙规则。
-		 *   2) ubus service delete —— 兜底。服务若是由 startViaUbus 直接注册、
-		 *      procd 里没有对应 init 脚本，init stop 就停不动，只能删实例。
+		 *   1) /etc/init.d/at-webserver stop（file.exec）——语义最干净，走 init 脚本的
+		 *      stop_service()：删 pidfile、清理本服务添加的防火墙规则。
+		 *   2) ubus service delete ——兜底。服务若是由 startViaUbus 直接注册、
+		 *      procd 里没有对应实例脚本，init stop 就停不动，只能删实例。
 		 *      delete 是注销实例，同样不会被记成崩溃。
 		 * 刻意不用 killall：它会被 procd 记成崩溃，反复 stop/start 攒满 respawn
 		 * 重试次数后，procd 将永久放弃拉起（见 init 脚本里的「严重警告二」）。
@@ -687,11 +694,12 @@ return L.view.extend({
 			Mt5700.confirm('确定停止 AT 服务？停止后所有页面的 AT 功能（状态、短信、网络信息）' +
 				'将立即不可用，并会清理由本服务添加的防火墙规则。需要恢复时点击「重载服务」。', function () {
 				stopBtn.disabled = true;
-				rpcInitAction({ name: SERVICE, action: 'stop' }).catch(function () {
-					/* init 脚本缺失或 luci 插件不可用时失败，交由下面的兜底路径处理 */
+				rpcFileExec({ command: '/etc/init.d/' + SERVICE, params: ['stop'] }).catch(function () {
+					/* init 脚本缺失或 file.exec 被拒时失败，交由下面的兜底路径处理 */
 				}).then(function () {
-					// stop_service 内含一次 firewall reload，多留些时间再复核
-					return new Promise(function (resolve) { window.setTimeout(resolve, 1500); });
+					// stop_service 内含一次 firewall reload，且 procd 还有 5 秒 term_timeout，
+					// 留足时间再复核，避免误判成「没停掉」而多走一次 delete
+					return new Promise(function (resolve) { window.setTimeout(resolve, 2500); });
 				}).then(fetchRunning).then(function (st) {
 					if (!st.running) return st;
 					return rpcServiceDelete({ name: SERVICE }).catch(function () {
