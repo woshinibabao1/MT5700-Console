@@ -30,7 +30,7 @@ var BINARY = '/usr/bin/at-webserver-rust';
 
 /**
  * 由多源状态推导服务状态标签、颜色与原因提示。
- * 优先级：运行中 > 已禁用 > 未安装 > 未注册 > 已停止
+ * 优先级：运行中 > 本次已停止 > 已禁用 > 未安装 > 未注册 > 已停止
  */
 function resolveStatus(state) {
 	var running = !!state.running;
@@ -40,6 +40,19 @@ function resolveStatus(state) {
 
 	if (running) {
 		return { label: '运行中', variant: 'success', pid: state.pid || null, hint: '' };
+	}
+	/*
+	 * 用户刚点过「停止服务」。
+	 * 必须排在其他分支之前：init 脚本 stop 后 procd 会注销实例，registered 变成
+	 * false，若按常规判定会落到「未注册」，并把「init 脚本缺失/被 overlay 覆盖」
+	 * 这个错误原因甩给用户——而实际只是他刚亲手停掉的。
+	 */
+	if (state.userStopped) {
+		return {
+			label: '已停止', variant: 'neutral', pid: null,
+			hint: '服务由你在本页手动停止，所有 AT 功能（状态、短信、网络信息）当前不可用。' +
+				'需要恢复请点击右上角「重载服务」。'
+		};
 	}
 	if (!enabled) {
 		return {
@@ -184,12 +197,10 @@ return L.view.extend({
 		var status = resolveStatus(state);
 
 		/* 服务操作按钮归位到卡片头部 */
-		var actions = Mt5700.panelActions(
-			Mt5700.button('重载服务', function () { reloadService(); }, 'primary'),
-			Mt5700.button('重启服务', function () { restartService(); }, 'primary')
-		);
-		var reloadBtn = actions.firstChild;
-		var restartBtn = actions.lastChild;
+		var reloadBtn = Mt5700.button('重载服务', function () { reloadService(); }, 'primary');
+		var restartBtn = Mt5700.button('重启服务', function () { restartService(); }, 'primary');
+		var stopBtn = Mt5700.button('停止服务', function () { stopService(); }, 'danger');
+		var actions = Mt5700.panelActions(reloadBtn, restartBtn, stopBtn);
 
 		var statusCard = Mt5700.card('服务状态', '后端进程、监听端口与安装状态', actions);
 		var statusBody = E('div');
@@ -197,14 +208,25 @@ return L.view.extend({
 		body.appendChild(statusCard);
 
 		var statusRow = E('div', { 'class': 'mt5700-inline' });
-		statusRow.appendChild(Mt5700.badge(status.label, status.variant));
-		if (status.pid) statusRow.appendChild(Mt5700.badge('PID ' + status.pid, 'neutral'));
 		statusBody.appendChild(statusRow);
 
-		// 非「运行中」时给出可读的原因与建议，避免只有一个红色标签
-		if (status.hint) {
-			statusBody.appendChild(E('div', { 'class': 'mt5700-hint' }, status.hint));
+		// 非「运行中」时给出可读的原因与建议，避免只有一个红色标签。
+		// 提示节点常驻并由 renderStatus 统一更新：状态变化后（停止/重载）文案要跟着变，
+		// 否则会停留在上一次的旧原因上。
+		var statusHint = E('div', { 'class': 'mt5700-hint' });
+		statusHint.style.display = 'none';
+		statusBody.appendChild(statusHint);
+
+		function renderStatus(st) {
+			statusRow.innerHTML = '';
+			statusRow.appendChild(Mt5700.badge(st.label, st.variant));
+			if (st.pid) statusRow.appendChild(Mt5700.badge('PID ' + st.pid, 'neutral'));
+			statusHint.textContent = st.hint || '';
+			statusHint.style.display = st.hint ? '' : 'none';
+			// 只在真的跑着的时候才允许点「停止服务」
+			stopBtn.disabled = !state.running;
 		}
+		renderStatus(status);
 
 		/* ---------- 连接配置 ---------- */
 		var connCard = Mt5700.card('调制解调器连接', '后端连接模组的通道');
@@ -541,6 +563,16 @@ return L.view.extend({
 			params: ['name'],
 			expect: { '': {} }
 		});
+		// 经 rpcd 的 luci 插件执行 /etc/init.d/at-webserver <action>。
+		// 停止必须走 init 脚本而不是直接杀进程：脚本的 stop_service() 会删 pidfile
+		// 并清理防火墙规则，且「不 killall」——killall 会被 procd 记成崩溃，攒满
+		// respawn 重试次数后 procd 将永久放弃拉起（见 init 脚本里的警告）。
+		var rpcInitAction = L.rpc.declare({
+			object: 'luci',
+			method: 'setInitAction',
+			params: ['name', 'action'],
+			expect: { result: '' }
+		});
 
 		// 直接经 ubus 注册并拉起实例。即使 /etc/init.d/at-webserver 缺失
 		// （overlay 白化等），这条路径依然能把服务跑起来。
@@ -601,9 +633,7 @@ return L.view.extend({
 				state.enabled = (en === null || en === undefined) ? '1' : String(en);
 
 				var st = resolveStatus(state);
-				statusRow.innerHTML = '';
-				statusRow.appendChild(Mt5700.badge(st.label, st.variant));
-				if (st.pid) statusRow.appendChild(Mt5700.badge('PID ' + st.pid, 'neutral'));
+				renderStatus(st);
 			});
 		}
 
@@ -620,6 +650,8 @@ return L.view.extend({
 				return fetchRunning();
 			}).then(function (st) {
 				if (st.running) {
+					// 无论此前是手动停止还是崩溃，能起来就不该再显示「已手动停止」的提示
+					state.userStopped = false;
 					Mt5700.success('服务已重载' + (st.pid ? '（PID ' + st.pid + '）' : ''));
 				} else {
 					Mt5700.warning('已下发启动指令，但未检测到运行中的进程，请查看系统日志确认原因');
@@ -639,6 +671,51 @@ return L.view.extend({
 					restartBtn.disabled = false;
 				});
 			});
+		}
+
+		/*
+		 * 停止服务。按序尝试两条路径，都是「注销」而非「杀进程」：
+		 *   1) /etc/init.d/at-webserver stop（luci.setInitAction）—— 语义最干净，
+		 *      走 init 脚本的 stop_service()：删 pidfile、清理本服务添加的防火墙规则。
+		 *   2) ubus service delete —— 兜底。服务若是由 startViaUbus 直接注册、
+		 *      procd 里没有对应 init 脚本，init stop 就停不动，只能删实例。
+		 *      delete 是注销实例，同样不会被记成崩溃。
+		 * 刻意不用 killall：它会被 procd 记成崩溃，反复 stop/start 攒满 respawn
+		 * 重试次数后，procd 将永久放弃拉起（见 init 脚本里的「严重警告二」）。
+		 */
+		function stopService() {
+			Mt5700.confirm('确定停止 AT 服务？停止后所有页面的 AT 功能（状态、短信、网络信息）' +
+				'将立即不可用，并会清理由本服务添加的防火墙规则。需要恢复时点击「重载服务」。', function () {
+				stopBtn.disabled = true;
+				rpcInitAction({ name: SERVICE, action: 'stop' }).catch(function () {
+					/* init 脚本缺失或 luci 插件不可用时失败，交由下面的兜底路径处理 */
+				}).then(function () {
+					// stop_service 内含一次 firewall reload，多留些时间再复核
+					return new Promise(function (resolve) { window.setTimeout(resolve, 1500); });
+				}).then(fetchRunning).then(function (st) {
+					if (!st.running) return st;
+					return rpcServiceDelete({ name: SERVICE }).catch(function () {
+						return null;
+					}).then(function () {
+						return new Promise(function (resolve) { window.setTimeout(resolve, 1000); });
+					}).then(fetchRunning);
+				}).then(function (st) {
+					state.userStopped = !st.running;
+					if (st.running) {
+						Mt5700.error('停止失败：进程仍在运行（PID ' + (st.pid || '未知') +
+							'），请查看系统日志 logread -e at-webserver');
+					} else {
+						Mt5700.success('AT 服务已停止。需要恢复时点击「重载服务」。');
+					}
+					return refreshStatus();
+				}).catch(function (err) {
+					Mt5700.error('停止失败：' + ((err && err.message) || '未知错误'));
+				}).then(function () {
+					stopBtn.disabled = false;
+					// 由真实状态决定按钮可用性（停止后应自动置灰）
+					renderStatus(resolveStatus(state));
+				});
+			}, '停止服务');
 		}
 
 		return page;
