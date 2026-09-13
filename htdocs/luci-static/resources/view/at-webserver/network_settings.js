@@ -8,7 +8,7 @@
 /**
  * 网络设置 - 新 UI 视觉 + 基准 v1.3.4 功能
  *
- * 等价迁移原 WebUI network/Settings.tsx：LTE/NR 锁频、邻区扫描（MONNC）、
+ * 等价迁移原 WebUI network/Settings.tsx：LTE/NR 锁频、5G 选项、网络拒绝。
  * 5G 选项（C5GOPTION）、网络拒绝原因（^REJINFO 主动上报）。
  * 锁频应用流程与基准一致：飞行模式 → 下发锁频命令 → 关闭飞行模式 → 重新查询。
  */
@@ -16,7 +16,7 @@
 return L.view.extend({
 	render: function () {
 		var self = this;
-		var page = Mt5700.page('网络设置', '锁频、邻区与 5G 选项');
+		var page = Mt5700.page('网络设置', 'LTE / NR 锁频、5G 选项与网络拒绝');
 		var body = page._body;
 
 		var connBar = E('div');
@@ -31,41 +31,49 @@ return L.view.extend({
 		};
 
 		/*
-		 * 控件归位：此前「扫描邻区」「自动刷新」「刷新锁频」被塞进同一行，
-		 * 三个不相关的操作挤在一起，窄屏会换行错位。
-		 * 现在：自动刷新+扫描邻区 放「邻区扫描」卡头部；刷新锁频状态 放「LTE 锁频」卡头部。
+		 * 结构：接入模式 → 锁频设置 → 邻区扫描 → SSB 信息 → 网络拒绝。
+		 * 锁频的 4G/5G 由「制式」分段切换共用一套编辑器（不再并排两块重复表单）。
 		 */
+
+		/* ---------- 5G 接入模式设置（放在最上：改完要重启，属于前置决策） ---------- */
+		var optCard = Mt5700.card('5G 接入模式设置', '设置前自动切飞行模式；切换后需软重启生效');
+		var optBody = E('div');
+		optCard._body.appendChild(optBody);
+		body.appendChild(optCard);
+
+		/* ---------- 锁频设置（4G / 5G 合并到一处） ---------- */
 		var refreshLockBtn = Mt5700.button('刷新锁频状态', function () { fetchCurrent(); });
+		var saveLockBtn = Mt5700.primaryButton('保存设置', function () { saveActiveLock(); });
+		var lockTools = E('div', { 'class': 'mt5700-toolbar' });
+		lockTools.appendChild(refreshLockBtn);
+		lockTools.appendChild(saveLockBtn);
 
-		var lteCard = Mt5700.card('LTE 锁频', '锁定频段/频点/小区；应用时会自动切换飞行模式使配置生效', refreshLockBtn);
-		var lteBody = E('div');
-		lteCard._body.appendChild(lteBody);
-		body.appendChild(lteCard);
+		var lockCard = Mt5700.card('锁频设置', '先选制式，再设锁频类型与参数；「保存设置」下发当前制式的配置', lockTools);
+		var lockBody = E('div');
+		lockCard._body.appendChild(lockBody);
+		body.appendChild(lockCard);
+		var lockCardSub = lockCard.querySelector('.mt5700-card-subtitle');
+		var lockEditorBox = E('div');
+		lockBody.appendChild(lockEditorBox);
 
-		var nrCard = Mt5700.card('NR 锁频', 'NR 锁频需单板支持 NR，SCS 未指定时按频段自动推断');
-		var nrBody = E('div');
-		nrCard._body.appendChild(nrBody);
-		body.appendChild(nrCard);
-
-		var autoTimer = null;
-		var scanBtn = Mt5700.primaryButton('扫描邻区', scanNeighbors);
-		var ar = Ui.autoRefresh(function (enabled, interval) {
-			if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
-			if (enabled) autoTimer = Ui.interval(interval * 1000, scanNeighbors);
+		/* ---------- 邻区扫描（^MONNC + ^NRSSBID 的 SSB 邻区，合并去重） ---------- */
+		var neighAutoTimer = null;
+		var neighRefreshBtn = Mt5700.primaryButton('扫描邻区', function () { loadNeighbors(); });
+		var neighAr = Ui.autoRefresh(function (enabled, interval) {
+			if (neighAutoTimer) { clearInterval(neighAutoTimer); neighAutoTimer = null; }
+			if (enabled) neighAutoTimer = Ui.interval(interval * 1000, loadNeighbors);
 		});
+		neighAr.setInterval(15);
 		var neighTools = E('div', { 'class': 'mt5700-toolbar' });
-		neighTools.appendChild(ar.el);
-		neighTools.appendChild(scanBtn);
+		neighTools.appendChild(neighAr.el);
+		neighTools.appendChild(neighRefreshBtn);
 
-		var neighCard = Mt5700.card('邻区扫描', 'AT^MONNC 查询当前邻区，可自动刷新', neighTools);
+		var neighCard = Mt5700.card('邻区扫描',
+			'SSB 服务小区与波束 + 邻区表（^MONNC 含 RSRQ、^NRSSBID 的 SSB 邻区），按强度排序、可就地锁定', neighTools);
 		var neighBody = E('div');
 		neighCard._body.appendChild(neighBody);
 		body.appendChild(neighCard);
 
-		var optCard = Mt5700.card('5G 选项', 'NR SA 支持 / DC 模式 / 接入模式');
-		var optBody = E('div', { 'class': 'mt5700-metrics' });
-		optCard._body.appendChild(optBody);
-		body.appendChild(optCard);
 
 		/* ---------- 网络拒绝原因（^REJINFO 主动上报） ---------- */
 
@@ -111,124 +119,171 @@ return L.view.extend({
 			return kind === 'lte' ? Parse.LTE_BANDS : Parse.NR_BANDS;
 		}
 
-		function lockEditor(kind) {
-			var wrap = E('div', { 'class': 'mt5700-lock-editor' });
-			var typeSel = Mt5700.select(TYPE_OPTIONS.map(function (o) {
-				return { label: o.label, value: String(o.value) };
-			}), String(lockState[kind + 'Type']));
-			typeSel.addEventListener('change', function () {
-				lockState[kind + 'Type'] = parseInt(typeSel.value, 10);
+		/*
+		 * 4G / 5G 合并到一处：顶部「制式」分段切换，下面共用同一套
+		 * 「锁频类型 + 移动性 + 参数条目」编辑器（原先并排两块重复表单，同一件事写两遍）。
+		 * 各自的取值仍按制式分别存在 lockState[kind + 'Type' | 'Mobility' | 'Items']。
+		 */
+		var LOCK_RATS = [{ label: '4G LTE', value: 'lte' }, { label: '5G NR', value: 'nr' }];
+		if (lockState.activeRat !== 'lte' && lockState.activeRat !== 'nr') lockState.activeRat = 'lte';
+
+		function ratLabel(kind) { return kind === 'nr' ? '5G' : '4G'; }
+
+		function renderLockEditor() {
+			var kind = lockState.activeRat;
+			lockEditorBox.innerHTML = '';
+
+			var ratSeg = Mt5700.segmented(LOCK_RATS, kind, function (v) {
+				lockState.activeRat = v;
+				renderLockEditor();
+			});
+			lockEditorBox.appendChild(Mt5700.formGroup('制式', ratSeg.el,
+				'两制式分别保存；切换后点「保存设置」只下发当前制式'));
+
+			var typeSeg = Mt5700.segmented(TYPE_OPTIONS.map(function (o) {
+				return { label: o.label, value: o.value };
+			}), lockState[kind + 'Type'], function (v) {
+				lockState[kind + 'Type'] = v;
 				renderItems();
 			});
-			wrap.appendChild(Mt5700.formGroup('锁频类型', typeSel));
+			lockEditorBox.appendChild(Mt5700.formGroup('锁频类型', typeSeg.el));
 
 			var mobWrap = E('div');
-			wrap.appendChild(mobWrap);
+			lockEditorBox.appendChild(mobWrap);
 
 			var itemsWrap = E('div', { 'class': 'mt5700-lock-items' });
-			wrap.appendChild(itemsWrap);
+			lockEditorBox.appendChild(itemsWrap);
 
 			var addBtn = Mt5700.button('+ 添加', function () {
 				var items = lockState[kind + 'Items'];
 				if (items.length >= Parse.MAX_LOCK_ITEMS) {
-					Mt5700.warning(kind.toUpperCase() + ' 最多只能锁 ' + Parse.MAX_LOCK_ITEMS + ' 组');
+					Mt5700.warning(ratLabel(kind) + '最多只能锁 ' + Parse.MAX_LOCK_ITEMS + ' 组');
 					return;
 				}
 				items.push({});
 				renderItems();
 			}, 'ghost');
-			wrap.appendChild(addBtn);
+
+			function bandSelect(item, onChange) {
+				var opts = [{ label: '（未选择）', value: '' }].concat(bandOptionsFor(kind).map(function (b) {
+					return { label: b.label, value: String(b.value) };
+				}));
+				var sel = Mt5700.select(opts, String(item.band == null ? '' : item.band));
+				sel.addEventListener('change', function () { onChange(sel.value ? Number(sel.value) : null); });
+				return sel;
+			}
 
 			function rowFor(item, index) {
 				var row = E('div', { 'class': 'mt5700-lock-item' });
+				row.appendChild(bandSelect(item, function (v) { item.band = v; }));
 
-				var bandOpts = [{ label: '（未选择）', value: '' }].concat(bandOptionsFor(kind).map(function (b) {
-					return { label: b.label, value: String(b.value) };
-				}));
-				var bandSel = Mt5700.select(bandOpts, String(item.band == null ? '' : item.band));
-				bandSel.addEventListener('change', function () {
-					item.band = bandSel.value ? Number(bandSel.value) : null;
-				});
-				row.appendChild(bandSel);
+				if (lockState[kind + 'Type'] !== 3) {
+					var arfcn = Mt5700.input('text', '频点 ARFCN', item.arfcn != null ? String(item.arfcn) : '');
+					arfcn.addEventListener('input', function () { item.arfcn = arfcn.value.trim(); });
+					row.appendChild(arfcn);
 
-				var arfcn = Mt5700.input('text', '频点 ARFCN', item.arfcn != null ? String(item.arfcn) : '');
-				arfcn.addEventListener('input', function () { item.arfcn = arfcn.value.trim(); });
-				row.appendChild(arfcn);
+					if (kind === 'nr') {
+						var scsOpts = [{ label: '（自动）', value: '' }].concat(SCS_OPTIONS.map(function (o) {
+							return { label: o.label, value: String(o.value) };
+						}));
+						var scs = Mt5700.select(scsOpts, String(item.scs == null ? '' : item.scs));
+						scs.addEventListener('change', function () { item.scs = scs.value ? Number(scs.value) : null; });
+						row.appendChild(scs);
+					}
 
-				if (kind === 'nr') {
-					var scsOpts = [{ label: '（自动）', value: '' }].concat(SCS_OPTIONS.map(function (o) {
-						return { label: o.label, value: String(o.value) };
-					}));
-					var scs = Mt5700.select(scsOpts, String(item.scs == null ? '' : item.scs));
-					scs.addEventListener('change', function () {
-						item.scs = scs.value ? Number(scs.value) : null;
-					});
-					row.appendChild(scs);
+					var pci = Mt5700.input('text', 'PCI', item.pci != null ? String(item.pci) : '');
+					pci.addEventListener('input', function () { item.pci = pci.value.trim(); });
+					row.appendChild(pci);
 				}
 
-				var pci = Mt5700.input('text', 'PCI', item.pci != null ? String(item.pci) : '');
-				pci.addEventListener('input', function () { item.pci = pci.value.trim(); });
-				row.appendChild(pci);
-
-				var del = Mt5700.button('删除', function () {
-					lockState[kind + 'Items'].splice(index, 1);
-					if (!lockState[kind + 'Items'].length) lockState[kind + 'Items'].push({});
+				row.appendChild(Mt5700.button('删除', function () {
+					var items = lockState[kind + 'Items'];
+					items.splice(index, 1);
+					if (!items.length) items.push({});
 					renderItems();
-				}, 'danger');
-				row.appendChild(del);
+				}, 'danger'));
 				return row;
 			}
 
 			function renderItems() {
 				itemsWrap.innerHTML = '';
+				mobWrap.innerHTML = '';
 				var type = lockState[kind + 'Type'];
 				var items = lockState[kind + 'Items'];
-				mobWrap.innerHTML = '';
+				itemsWrap.classList.toggle('is-hidden', type === 0);
+				addBtn.style.display = type === 0 ? 'none' : '';
+
 				if (type !== 0) {
 					var mobSel = Mt5700.select([
 						{ label: '低移动性', value: '0' },
 						{ label: '中移动性', value: '1' },
 						{ label: '高移动性', value: '2' }
 					], String(lockState[kind + 'Mobility']));
-					mobSel.addEventListener('change', function () { lockState[kind + 'Mobility'] = parseInt(mobSel.value, 10); });
-					mobWrap.appendChild(Mt5700.formGroup('移动性', mobSel));
-				}
-				if (type === 1 || type === 2) {
+					mobSel.addEventListener('change', function () {
+						lockState[kind + 'Mobility'] = parseInt(mobSel.value, 10);
+					});
+					mobWrap.appendChild(Mt5700.formGroup('移动性', mobSel,
+						type === 3 ? '锁定 Band 时按组下发频段号' : '锁定频点/小区时按组下发频段、频点与 PCI'));
 					for (var i = 0; i < items.length; i++) itemsWrap.appendChild(rowFor(items[i], i));
-				} else if (type === 3) {
-					for (var j = 0; j < items.length; j++) {
-						var row = E('div', { 'class': 'mt5700-lock-item' });
-						var bandOpts2 = [{ label: '（未选择）', value: '' }].concat(bandOptionsFor(kind).map(function (b) {
-							return { label: b.label, value: String(b.value) };
-						}));
-						var bandSel2 = Mt5700.select(bandOpts2, String(items[j].band == null ? '' : items[j].band));
-						bandSel2.addEventListener('change', function (idx) {
-							return function () { items[idx].band = bandSel2.value ? Number(bandSel2.value) : null; };
-						}(j));
-						row.appendChild(bandSel2);
-						var del2 = Mt5700.button('删除', function (idx) {
-							return function () {
-								lockState[kind + 'Items'].splice(idx, 1);
-								if (!lockState[kind + 'Items'].length) lockState[kind + 'Items'].push({});
-								renderItems();
-							};
-						}(j), 'danger');
-						row.appendChild(del2);
-						itemsWrap.appendChild(row);
-					}
 				} else {
 					itemsWrap.appendChild(Mt5700.empty('锁频类型为「关闭」时不需配置参数'));
 				}
 			}
 
-			var applyBtn = Mt5700.primaryButton('应用 ' + kind.toUpperCase() + ' 锁频', function () { applyLock(kind); });
-			wrap.appendChild(Mt5700.panelActions(applyBtn));
+			lockEditorBox.appendChild(addBtn);
 			renderItems();
-			return wrap;
+			updateSaveLabel();
 		}
 
-		lteBody.appendChild(lockEditor('lte'));
-		nrBody.appendChild(lockEditor('nr'));
+		/* 「保存设置」只下发当前制式（按钮文案随制式变化，避免误以为一次写两制式） */
+		function updateSaveLabel() {
+			lockCardSub.textContent = '当前制式：' + ratLabel(lockState.activeRat)
+				+ '；先选制式，再设锁频类型与参数，「保存设置」只下发当前制式';
+		}
+
+		/* 保存当前制式的锁频配置 */
+		function saveActiveLock() {
+			if (busy) return;
+			var kind = lockState.activeRat;
+			var type = lockState[kind + 'Type'];
+			var cmd;
+			try {
+				cmd = type === 0
+					? (kind === 'lte' ? 'AT^LTEFREQLOCK=0' : 'AT^NRFREQLOCK=0')
+					: Parse.buildLockCommand(kind, type, lockState[kind + 'Mobility'], lockState[kind + 'Items']);
+			} catch (err) {
+				Mt5700.error(err.message || '锁频参数错误');
+				return;
+			}
+			busy = true;
+			saveLockBtn.disabled = true;
+			var radioOff = false;
+			Mt5700.info('正在保存 ' + ratLabel(kind) + ' 锁频（先切飞行模式）…');
+			Ui.setFlightMode(true).then(function (ok) {
+				if (!ok) throw new Error('开启飞行模式失败');
+				radioOff = true;
+				return Ui.sleep(1000);
+			}).then(function () {
+				return AtWs.client.sendCommand(cmd);
+			}).then(function (res) {
+				if (!res.success) throw new Error(Ui.atErrorText(res, ratLabel(kind) + ' 锁频设置失败'));
+				Mt5700.success(ratLabel(kind) + ' 锁频设置成功');
+				return Ui.setFlightMode(false);
+			}).then(function (off) {
+				if (!off) throw new Error('关闭飞行模式失败');
+				Mt5700.info('锁频已保存，等待模组重新驻网…');
+				return Ui.sleep(2000);
+			}).then(function () {
+				return fetchCurrent();
+			}).catch(function (err) {
+				Mt5700.error((err && err.message) || '保存锁频设置失败');
+				if (radioOff) Ui.setFlightMode(false).catch(function () {});
+			}).then(function () {
+				busy = false;
+				saveLockBtn.disabled = false;
+			});
+		}
+
 
 		/* ---------- 锁频响应解析 ---------- */
 
@@ -261,49 +316,6 @@ return L.view.extend({
 		/* ---------- 应用锁频 ---------- */
 
 		var busy = false;
-		function applyLock(kind) {
-			if (busy) return;
-			busy = true;
-			var label = kind.toUpperCase();
-			var cmd;
-			try {
-				var items = lockState[kind + 'Items'];
-				var type = lockState[kind + 'Type'];
-				var mobility = lockState[kind + 'Mobility'];
-				if (type === 0) {
-					cmd = (kind === 'lte' ? 'AT^LTEFREQLOCK=0' : 'AT^NRFREQLOCK=0');
-				} else {
-					cmd = Parse.buildLockCommand(kind, type, mobility, items);
-				}
-			} catch (err) {
-				Mt5700.error(err.message || '锁频参数错误');
-				busy = false;
-				return;
-			}
-			Mt5700.info('正在应用 ' + label + ' 锁频（先切飞行模式）…');
-			var radioOff = false;
-			Ui.setFlightMode(true).then(function (ok) {
-				if (!ok) throw new Error('开启飞行模式失败');
-				radioOff = true;
-				return Ui.sleep(1000);
-			}).then(function () {
-				return AtWs.client.sendCommand(cmd);
-			}).then(function (res) {
-				if (!res.success) throw new Error(Ui.atErrorText(res, label + '锁频设置失败'));
-				Mt5700.success(label + '锁频设置成功');
-				return Ui.sleep(2000);
-			}).then(function () {
-				return Ui.setFlightMode(false);
-			}).then(function (off) {
-				if (!off) throw new Error('关闭飞行模式失败');
-				return Ui.sleep(2000);
-			}).then(function () {
-				return fetchCurrent();
-			}).catch(function (err) {
-				Mt5700.error(err.message || '锁频设置失败');
-				if (radioOff) Ui.setFlightMode(false).catch(function () {});
-			}).then(function () { busy = false; });
-		}
 
 		/* ---------- 查询当前锁频 ---------- */
 
@@ -336,178 +348,284 @@ return L.view.extend({
 			chain = chain.then(query5G);
 			chain = chain.then(function () {
 				// 回填锁频表单（基准：查询后重新渲染）
-				lteBody.innerHTML = '';
-				lteBody.appendChild(lockEditor('lte'));
-				nrBody.innerHTML = '';
-				nrBody.appendChild(lockEditor('nr'));
+				renderLockEditor();
 			});
 			return chain;
 		}
 
-		/* ---------- 5G 选项 ---------- */
+		/* ---------- 邻区扫描 / SSB 信息 ---------- */
+
+		var ssb = null;
+		var monncCells = [];
+		var neighBusy = false;
+
+		function lockNeighbor(cell) {
+			var band = cell.band != null ? cell.band : Parse.arfcnToBand(cell.rat, cell.arfcn);
+			if (band == null) {
+				Mt5700.error('无法由 ARFCN ' + cell.arfcn + ' 判断频段，请在锁频设置里手动指定');
+				return;
+			}
+			var kind = cell.rat === 'LTE' ? 'lte' : 'nr';
+			var cmd = Parse.buildLockCommand(kind, 2, 0, [{
+				band: band, arfcn: String(cell.arfcn), pci: String(cell.pci), scs: Parse.getDefaultScsType(band)
+			}]);
+			Mt5700.confirm('确定锁定 ' + cell.rat + ' ' + (kind === 'nr' ? 'n' : 'B') + band
+				+ '（ARFCN ' + cell.arfcn + '，PCI ' + cell.pci + '）？', function () {
+				var radioOff = false;
+				Ui.setFlightMode(true).then(function (ok) {
+					if (!ok) throw new Error('开启飞行模式失败');
+					radioOff = true;
+					return Ui.sleep(1000);
+				}).then(function () {
+					return AtWs.client.sendCommand(cmd);
+				}).then(function (res) {
+					if (!res.success) throw new Error(Ui.atErrorText(res, '锁定失败'));
+					return Ui.setFlightMode(false);
+				}).then(function (off) {
+					if (!off) throw new Error('关闭飞行模式失败');
+					Mt5700.success('已锁定 ' + cell.rat + ' PCI ' + cell.pci);
+					return fetchCurrent();
+				}).catch(function (err) {
+					Mt5700.error((err && err.message) || '锁定失败');
+					if (radioOff) Ui.setFlightMode(false).catch(function () {});
+				});
+			}, '确认锁定');
+		}
+
+		function renderNeighbors() {
+			neighBody.innerHTML = '';
+			renderSsbInto(neighBody);
+			var merged = [];
+			var seen = {};
+			monncCells.forEach(function (c) {
+				var k = c.rat + '|' + c.arfcn + '|' + c.pci;
+				seen[k] = true;
+				merged.push({ rat: c.rat, arfcn: c.arfcn, pci: c.pci, rsrp: c.rsrp, rsrq: c.rsrq, sinr: c.sinr, src: 'MONNC' });
+			});
+			if (ssb && ssb.neighbors) {
+				ssb.neighbors.forEach(function (n) {
+					var k = 'NR|' + n.arfcn + '|' + n.pci;
+					if (seen[k]) return;
+					seen[k] = true;
+					merged.push({ rat: 'NR', arfcn: n.arfcn, pci: n.pci, rsrp: n.rsrp, rsrq: null, sinr: n.sinr, src: 'SSB' });
+				});
+			}
+			/* 按信号强度从大到小排（取不到值的排最后）——最该锁的小区排最前 */
+			merged.sort(function (a, b) {
+				var ra = (a.rsrp != null ? a.rsrp : -999);
+				var rb = (b.rsrp != null ? b.rsrp : -999);
+				return rb - ra;
+			});
+			neighBody.appendChild(E('div', { 'class': 'mt5700-card-subtitle mt5700-mt-md' },
+				'邻区（' + merged.length + ' 个，按 RSRP 从强到弱）'));
+			if (!merged.length) {
+				neighBody.appendChild(Mt5700.empty('暂无邻区数据，点击右上「扫描邻区」'));
+				return;
+			}
+			var rows = merged.map(function (c) {
+				var band = Parse.arfcnToBand(c.rat, c.arfcn);
+				var btn = Mt5700.button('锁定', function () { lockNeighbor(c); }, 'secondary');
+				btn.disabled = band == null;
+				return [
+					c.rat + (c.src === 'SSB' ? '（SSB）' : ''),
+					band != null ? (c.rat === 'NR' ? 'n' + band : 'B' + band) : '—',
+					String(c.arfcn),
+					String(c.pci),
+					c.rsrp != null ? c.rsrp + ' dBm' : '—',
+					c.rsrq != null ? c.rsrq + ' dB' : '—',
+					c.sinr != null ? c.sinr + ' dB' : '—',
+					Mt5700.rsrpBar(c.rsrp),
+					btn
+				];
+			});
+			neighBody.appendChild(Mt5700.table(
+				['制式', '频段', 'ARFCN', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度', '操作'], rows, { striped: true }));
+			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+				'锁定会先切飞行模式再下发锁频并恢复；同频多个小区时注意区分 PCI。'));
+		}
+
+		function loadNeighbors() {
+			if (neighBusy) return;
+			neighBusy = true;
+			neighRefreshBtn.disabled = true;
+			return AtWs.client.sendCommand('AT^MONNC').then(function (res) {
+				monncCells = res.success && res.data ? Parse.parseMonncAll(String(res.data)) : [];
+				return AtWs.client.sendCommand('AT^NRSSBID?');
+			}).then(function (res) {
+				ssb = res.success && res.data ? Parse.parseNrssbid(String(res.data)) : null;
+				renderNeighbors();
+			}).catch(function () {
+				Mt5700.error('邻区扫描失败');
+			}).then(function () {
+				neighBusy = false;
+				neighRefreshBtn.disabled = false;
+			});
+		}
+
+		/*
+		 * SSB 信息：服务小区读数 + 波束强度。
+		 * 波束是这张卡的核心信息 —— 用一行紧凑列表呈现，并高亮当前最强波束
+		 * （切换/移动时最直观的观察对象）；小区标识与定时提前量一并给出。
+		 */
+		/* SSB 区块（服务小区读数 + 波束）——并入「邻区扫描」卡的上半部分 */
+		function renderSsbInto(host) {
+			var ssbBody = E('div');
+			host.appendChild(ssbBody);
+			ssbBody.innerHTML = '';
+			var s = ssb && ssb.serving;
+			if (!s) {
+				ssbBody.appendChild(Mt5700.empty('暂无 SSB 信息（点击右上「刷新 SSB 信息」）'));
+				ssbBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'^NRSSBID 只在 NR 连接态、且网侧配置了测量时上报；空闲态或非 NR 组网时为空。'));
+				return;
+			}
+			var mhz = Parse.nrArfcnToMHz(s.arfcn);
+			var beams = (s.beams || []).slice().sort(function (a, b) {
+				return (b.rsrp == null ? -999 : b.rsrp) - (a.rsrp == null ? -999 : a.rsrp);
+			});
+			var best = beams.length ? beams[0] : null;
+
+			/*
+			 * 读数区：去掉 TA（时间提前量）—— 本机 ^NRSSBID 的 TA 恒为 -1（无效值），
+			 * 且它对固定安装的路由器没有可行动价值；换成 ARFCN，可直接与工参/锁频表单对照。
+			 */
+			var g = E('div', { 'class': 'mt5700-metrics' });
+			g.appendChild(Mt5700.metric('SSB PCI', s.pci != null ? String(s.pci) : '—'));
+			g.appendChild(Mt5700.metric('SSB ARFCN', s.arfcn != null ? String(s.arfcn) : '—'));
+			g.appendChild(Mt5700.metric('SSB 频率', mhz != null ? (mhz.toFixed(2) + ' MHz') : '—'));
+			g.appendChild(Mt5700.metric('RSRP', s.rsrp != null ? s.rsrp + ' dBm' : '—', 'accent'));
+			g.appendChild(Mt5700.metric('SINR', s.sinr != null ? s.sinr + ' dB' : '—'));
+			ssbBody.appendChild(g);
+
+			ssbBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+				'小区标识 ' + (s.cid || '—')
+				+ (best ? ' · 最强波束 #' + best.id + '（' + best.rsrp + ' dBm）' : '')
+				+ ' · SSB ARFCN 可直接填进「锁频设置」的频点栏（锁定频点用）'));
+
+			/*
+			 * 波束怎么显示：8 行明细对固定安装的路由器几乎没信息量（这些数一天都不变），
+			 * 压缩成「一排迷你条 + 一行数字摘要」，只有要调天线/挪位置时才看：
+			 *   · 迷你条按波束号排列，一眼看出强波束集中在哪个方向；
+			 *   · 摘要给出最强/次强与其余上限，判断是否只吃到一束（可能偏离主瓣）。
+			 */
+			if (!beams.length) {
+				ssbBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'本次上报未包含波束数据（^NRSSBID 的波束测量需网侧配置并上报）。'));
+				return;
+			}
+			var byId = beams.slice().sort(function (a, b) { return a.id - b.id; });
+			ssbBody.appendChild(E('div', { 'class': 'mt5700-card-subtitle mt5700-mt-md' },
+				'波束分布（基站的分波束方向，' + beams.length + ' 束）'));
+			var strip = E('div', { 'class': 'mt5700-beam-strip' });
+			byId.forEach(function (b) {
+				var pct = Mt5700.signalPercent(b.rsrp);
+				var cell = E('div', {
+					'class': 'mt5700-beam-cell' + (best && b.id === best.id ? ' is-best' : ''),
+					'title': '#' + b.id + ' · ' + (b.rsrp != null ? b.rsrp + ' dBm' : '—')
+				});
+				cell.style.height = (20 + Math.max(0, pct == null ? 0 : pct) * 0.8) + '%';
+				cell.style.background = pct == null ? 'var(--mt5700-border-subtle)'
+					: (pct >= 60 ? 'var(--mt5700-success)' : pct >= 40 ? 'var(--mt5700-warning)' : 'var(--mt5700-danger)');
+				strip.appendChild(cell);
+			});
+			ssbBody.appendChild(strip);
+			var second = beams[1];
+			var rest = beams.slice(2);
+			var restMax = rest.length ? Math.max.apply(null, rest.map(function (b) { return b.rsrp == null ? -999 : b.rsrp; })) : null;
+			ssbBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+				'最强 #' + best.id + '（' + best.rsrp + ' dBm）'
+				+ (second ? ' · 次强 #' + second.id + '（' + second.rsrp + ' dBm）' : '')
+				+ (rest.length ? ' · 其余 ' + rest.length + ' 束 ≤ ' + restMax + ' dBm' : '')
+				+ '。一般只有 1~2 束强；若最强束编号在挪动天线后变化，说明方向变了。'));
+		}
+
+
+		/* ---------- 5G 接入模式（可设置，手册 13.17） ----------
+		 * AT^C5GOPTION=<nr_sa_support_flag>,<nr_dc_mode>,<5gc_access_mode>
+		 * 手册列出的三种受支持组合：
+		 *   仅 SA     1,0,1   仅 NSA    0,1,0    SA + NSA   1,1,1
+		 * 注意：设置前必须切飞行模式，设置后需软重启才生效（手册 13.17.2）。
+		 */
+
+		var ACCESS_MODES = [
+			{ label: '仅 SA', value: '101', triple: [1, 0, 1], hint: 'Option 2：NR 独立组网' },
+			{ label: '仅 NSA', value: '010', triple: [0, 1, 0], hint: 'Option 3：仅 EN-DC（LTE 锚点 + NR）' },
+			{ label: 'SA + NSA', value: '111', triple: [1, 1, 1], hint: 'Option 2+3：两种都允许' }
+		];
+		var accessInfo = E('div', { 'class': 'mt5700-hint' }, '正在读取当前接入模式…');
+
+		function modeKey(triple) {
+			var hit = ACCESS_MODES.filter(function (m) {
+				return m.triple[0] === triple[0] && m.triple[1] === triple[1] && m.triple[2] === triple[2];
+			})[0];
+			return hit ? hit.value : null;
+		}
+
+		function renderAccess(triple) {
+			optBody.innerHTML = '';
+			var seg = Mt5700.segmented(ACCESS_MODES.map(function (m) {
+				return { label: m.label, value: m.value };
+			}), modeKey(triple), function (v) { setAccessMode(v); });
+			optBody.appendChild(Mt5700.formGroup('接入模式', seg.el));
+			var cur = modeKey(triple);
+			if (!cur) {
+				seg.setValue(null);
+				accessInfo.textContent = '当前为 AT^C5GOPTION=' + triple.join(',')
+					+ '（不在手册标准的三种组合内），选择上方任一模式即切到标准组合。';
+			} else {
+				var m2 = ACCESS_MODES.filter(function (x) { return x.value === cur; })[0];
+				accessInfo.textContent = '当前：' + m2.label + '（AT^C5GOPTION=' + triple.join(',') + '）· ' + m2.hint;
+			}
+			optBody.appendChild(accessInfo);
+			optBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+				'切换会自动切飞行模式；下发成功后需在「模组设置 → 系统控制」软重启模组才生效。'));
+		}
+
+		function setAccessMode(value) {
+			var m = ACCESS_MODES.filter(function (x) { return x.value === value; })[0];
+			if (!m) return;
+			Mt5700.confirm('切换 5G 接入模式为「' + m.label + '」（AT^C5GOPTION=' + m.triple.join(',') + '）？'
+				+ '切换期间会短暂断网，且需要软重启才生效。', function () {
+				var radioOff = false;
+				Mt5700.info('正在切换接入模式（先切飞行模式）…');
+				Ui.setFlightMode(true).then(function (ok) {
+					if (!ok) throw new Error('开启飞行模式失败');
+					radioOff = true;
+					return Ui.sleep(1000);
+				}).then(function () {
+					return AtWs.client.sendCommand('AT^C5GOPTION=' + m.triple.join(','));
+				}).then(function (res) {
+					if (!res.success) throw new Error(Ui.atErrorText(res, '接入模式设置失败'));
+					return Ui.setFlightMode(false);
+				}).then(function (off) {
+					if (!off) throw new Error('关闭飞行模式失败');
+					Mt5700.success('已切换为「' + m.label + '」，软重启模组后生效');
+					return query5G();
+				}).catch(function (err) {
+					Mt5700.error((err && err.message) || '接入模式设置失败');
+					if (radioOff) Ui.setFlightMode(false).catch(function () {});
+					query5G();
+				});
+			}, '确认切换');
+		}
 
 		function query5G() {
 			return Ui.sleep(200).then(function () {
 				return AtWs.client.sendCommand('AT^C5GOPTION?');
 			}).then(function (res) {
-				optBody.innerHTML = '';
 				if (res.success && res.data) {
 					var m = String(res.data).match(/\^C5GOPTION:\s*(\d+),(\d+),(\d+)/);
 					if (m) {
 						lockState.option5g = { nr_sa_support_flag: Number(m[1]), nr_dc_mode: Number(m[2]), gc_access_mode: Number(m[3]) };
-						var saLabels = { 0: '不支持 NR SA', 1: '支持 NR SA' };
-						var dcLabels = { 0: '不支持 DC', 1: '支持 EN-DC' };
-						var gcLabels = { 0: '仅 4G', 1: '5G NSA', 2: '5G SA', 3: '5G SA+NSA' };
-						var items = [
-							{ label: 'NR SA 支持', value: saLabels[m[1]] || m[1] },
-							{ label: 'NR DC 模式', value: dcLabels[m[2]] || m[2] },
-							{ label: '接入模式', value: gcLabels[m[3]] || m[3] }
-						];
-						for (var i = 0; i < items.length; i++) {
-							optBody.appendChild(Mt5700.metric(items[i].label, items[i].value));
-						}
+						renderAccess([Number(m[1]), Number(m[2]), Number(m[3])]);
 						return;
 					}
 				}
-				optBody.appendChild(Mt5700.empty('暂无 5G 选项信息'));
+				optBody.innerHTML = '';
+				optBody.appendChild(Mt5700.empty('暂无 5G 接入模式信息'));
 			});
 		}
 
-		/* ---------- 邻区扫描 ---------- */
-
-		var neighbors = [];
-		var scanning = false;
-
-		function renderNeighbors() {
-			neighBody.innerHTML = '';
-			var rows = [];
-			for (var i = 0; i < neighbors.length; i++) {
-				var c = neighbors[i];
-				var lockBtn = Mt5700.button('锁定', function (idx) {
-					return function () { lockCell(neighbors[idx]); };
-				}(i), 'primary');
-				rows.push([
-					c.type,
-					c.band != null ? (c.type === 'NR' ? 'n' + c.band : 'B' + c.band) : '—',
-					c.arfcn,
-					String(c.pci),
-					c.rsrp != null ? c.rsrp + (typeof c.rsrp === 'number' ? ' dBm' : '') : '—',
-					c.rsrq != null ? String(c.rsrq) : '—',
-					c.sinr != null ? String(c.sinr) : '—',
-					lockBtn
-				]);
-			}
-			neighBody.appendChild(Mt5700.table(
-				['制式', '频段', 'ARFCN', 'PCI', 'RSRP', 'RSRQ', 'SINR', '操作'],
-				rows,
-				{ striped: true }
-			));
-			if (!neighbors.length) {
-				neighBody.appendChild(Mt5700.empty('暂无邻区数据，点击「扫描邻区」'));
-			}
-		}
-		renderNeighbors();
-
-		// 由频点反推频段
-		function getBandFromArfcn(kind, arfcn) {
-			if (kind === 'LTE') {
-				var lteMap = [[1, 0, 599], [3, 1200, 1949], [5, 2400, 2649], [8, 3450, 3799], [34, 36200, 36349], [38, 37750, 38249], [39, 38250, 38649], [40, 38650, 39649], [41, 39650, 41589]];
-				for (var i = 0; i < lteMap.length; i++) {
-					if (arfcn >= lteMap[i][1] && arfcn <= lteMap[i][2]) return lteMap[i][0];
-				}
-				return null;
-			}
-			var nrMap = [[1, 422000, 434000], [3, 376000, 396000], [5, 173800, 175000], [8, 185000, 192000], [28, 151600, 160600], [41, 499200, 537999], [77, 620000, 680000], [78, 620000, 653333], [79, 693334, 733333]];
-			for (var j = 0; j < nrMap.length; j++) {
-				if (arfcn >= nrMap[j][1] && arfcn <= nrMap[j][2]) return nrMap[j][0];
-			}
-			return null;
-		}
-
-		function scanNeighbors() {
-			if (scanning) return;
-			scanning = true;
-			scanBtn.disabled = true;
-			AtWs.client.sendCommand('AT^MONNC').then(function (res) {
-				var cells = [];
-				if (res.success && res.data) {
-					String(res.data).split('\n').forEach(function (line) {
-						if (line.indexOf('^MONNC:') !== 0) return;
-						var matched = line.match(/\^MONNC:\s*(\w+)(?:,(.+))?/);
-						if (!matched || matched[1] === 'NONE') return;
-						var type = matched[1];
-						var values = (matched[2] || '').split(',').map(function (v) { return v.trim().replace(/"/g, ''); });
-						if (type === 'LTE') {
-							var arfcnL = values[0];
-							cells.push({
-								type: type, arfcn: arfcnL, pci: parseInt(values[1], 16),
-								rsrp: values[2], rsrq: values[3], sinr: undefined,
-								band: getBandFromArfcn('LTE', parseInt(arfcnL, 10))
-							});
-						} else if (type === 'NR') {
-							var arfcnN = values[0];
-							var scale = function (raw, big) {
-								var n = parseInt(raw, 10);
-								if (isNaN(n)) return raw;
-								return Math.abs(n) > big ? (n / 8).toFixed(1) : n;
-							};
-							cells.push({
-								type: type, arfcn: arfcnN, pci: parseInt(values[1], 16),
-								rsrp: scale(values[2], 157), rsrq: scale(values[3], 43.5), sinr: scale(values[4], 40),
-								band: getBandFromArfcn('NR', parseInt(arfcnN, 10))
-							});
-						}
-					});
-				}
-				neighbors = cells;
-				renderNeighbors();
-			}).catch(function () {
-				Mt5700.error('扫描邻区失败');
-			}).then(function () {
-				scanning = false;
-				scanBtn.disabled = false;
-			});
-		}
-
-		function lockCell(cell) {
-			if (busy) return;
-			busy = true;
-			var kind = cell.type === 'LTE' ? 'lte' : 'nr';
-			var cmd;
-			try {
-				if (cell.band == null) throw new Error('无法由频点 ' + cell.arfcn + ' 判断频段，请在上方锁频表单中手动选择');
-				var arfcn = String(cell.arfcn).trim();
-				if (!/^\d+$/.test(arfcn)) throw new Error(cell.type + ' 频点必须为整数');
-				var pci = String(cell.pci).trim();
-				if (!/^\d+$/.test(pci)) throw new Error(cell.type + ' PCI 必须为整数');
-				var scs = cell.scs != null ? cell.scs : Parse.getDefaultScsType(cell.band);
-				cmd = kind === 'lte'
-					? 'AT^LTEFREQLOCK=2,0,1,"' + cell.band + '","' + arfcn + '","' + pci + '"'
-					: 'AT^NRFREQLOCK=2,0,1,"' + cell.band + '","' + arfcn + '","' + scs + '","' + pci + '"';
-			} catch (err) {
-				Mt5700.error(err.message);
-				busy = false;
-				return;
-			}
-			var radioOff = false;
-			Ui.setFlightMode(true).then(function (ok) {
-				if (!ok) throw new Error('开启飞行模式失败');
-				radioOff = true;
-				return Ui.sleep(1000);
-			}).then(function () {
-				return AtWs.client.sendCommand(cmd);
-			}).then(function (res) {
-				if (!res.success) throw new Error(Ui.atErrorText(res, '锁定失败'));
-				return Ui.setFlightMode(false);
-			}).then(function (off) {
-				if (!off) throw new Error('关闭飞行模式失败');
-				Mt5700.success('已锁定 ' + cell.type + ' PCI ' + cell.pci);
-				return fetchCurrent();
-			}).catch(function (err) {
-				Mt5700.error(err.message || '锁定失败');
-				if (radioOff) Ui.setFlightMode(false).catch(function () {});
-			}).then(function () { busy = false; });
-		}
 
 		/* ---------- 初始化 ---------- */
 
@@ -522,11 +640,14 @@ return L.view.extend({
 			}
 			if (err) console.warn(err);
 		}).then(function () {
+			renderLockEditor();
 			fetchCurrent();
+			renderNeighbors();
+			loadNeighbors();
 		});
 
 		self._dispose = function () {
-			if (autoTimer) clearInterval(autoTimer);
+			if (neighAutoTimer) clearInterval(neighAutoTimer);
 			AtWs.client.unsubscribe(rejectHandler);
 		};
 

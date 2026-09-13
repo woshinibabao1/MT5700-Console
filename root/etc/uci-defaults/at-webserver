@@ -17,7 +17,10 @@ for kv in \
 	watch_device=eth2 \
 	watch_interval=60 \
 	watch_fail_threshold=3 \
-	watch_reset_modem=0
+	watch_reset_modem=0 \
+	watch_reset_cmds=AT+CFUN=1,1 \
+	read_cache_ttl=0 \
+	read_cache_static_ttl=300
 do
 	key=${kv%%=*}
 	val=${kv#*=}

@@ -1,49 +1,85 @@
-# AT WebServer · MT5700M 5G 模组管理
+<div align="center">
 
-> **OpenWrt LuCI 插件** · 前端 12 页 + Rust 后端 **单包交付**  
-> 包名 `luci-app-mt5700` · 服务/UCI 段 `at-webserver` · 当前版本 **v1.5.0**
+# MT5700 Console
 
-| | |
-|:--|:--|
-| **架构** | LuCI → rpcd ucode → Rust (tokio) → 模组 AT |
-| **默认连接** | PCUI 串口 `/dev/ttyUSB1`（网络 TCP 备用） |
-| **打包** | 单包内含页面 + `/usr/bin/at-webserver-rust` |
-| **云编译** | GitHub Actions · x86_64 / aarch64 · apk + ipk |
-| **发布** | 每次编译成功自动上传 [Release](https://github.com/LianXia233/luci-app-mt5700/releases) |
+**鼎桥 MT5700M-CN 5G 模组 · OpenWrt LuCI 管理控制台**
+
+11 个页面 · Rust 常驻后端 · 前后端单包交付
+
+<sub>fork 自 [LianXia233/luci-app-mt5700](https://github.com/LianXia233/luci-app-mt5700)（MIT）· 当前版本 **v1.0**</sub>
+
+</div>
 
 ---
 
-## 目录
+| 项 | 值 |
+|:--|:--|
+| 包名 | `luci-app-mt5700` |
+| 服务 / UCI 段 | `at-webserver`（后端二进制 `/usr/bin/at-webserver-rust`） |
+| 架构 | LuCI → rpcd + ucode → Rust (tokio) → 模组 AT |
+| 默认连接 | PCUI 串口 `/dev/ttyUSB1`（网络 TCP 备用） |
+| 打包 | 单包内含页面 + 后端二进制 |
+| 云编译 | GitHub Actions · x86_64 / aarch64_cortex-a53 · apk + ipk |
 
-- [快速安装](#快速安装)
-- [功能一览](#功能一览)
-- [架构](#架构)
-- [项目结构](#项目结构)
-- [云编译与发布](#云编译与发布)
-- [本地开发与测试](#本地开发与测试)
-- [UCI 配置](#uci-配置)
-- [Rust 后端](#rust-后端)
+> **为什么叫 MT5700 Console**：它不只是「一个 LuCI 页面」——串口常开、AT 命令队列、
+> URC 事件分发、短信 PDU 收发、定时锁频、通知推送都跑在常驻后端里，前端只是它的操作台。
+> 包名 `luci-app-mt5700` 沿用上游以便 OpenWrt 生态识别，**仓库名与项目名**独立为 MT5700 Console。
+
+---
+
+## 截图
+
+> 全部截图取自**真实设备**（MT5700M-CN / 固件 V200R001C20B025，1440px 宽，按内容完整高度截取）。
+> **IMEI / IMSI / ICCID / 手机号 / IPv4 / IPv6 已打码**（保留前 4 后 4 或末段，回环地址 `127.0.0.1` 未作处理）。
+
+### 网络状态
+
+一张卡片铺开全部读数：信号质量、连接状态、载波与聚合、速率与流量、SIM 与设备（含各路传感器温度）。
+
+![网络状态](docs/screenshots/01-status.png)
+
+### 其余页面
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/02-settings.png" alt="网络设置"><br><sub><b>网络设置</b> · 锁频编辑器（LTE/NR 分段切换）、邻区与 SSB、接入模式</sub></td>
+<td width="50%"><img src="docs/screenshots/03-dial.png" alt="拨号设置"><br><sub><b>拨号设置</b> · 自动拨号 / APN / PDP 上下文，暂存式「应用更改」</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/04-schedule.png" alt="定时锁频"><br><sub><b>定时锁频</b> · 夜间/日间时段自动切换锁频，跨零点有效</sub></td>
+<td width="50%"><img src="docs/screenshots/05-modem.png" alt="模组设置"><br><sub><b>模组设置</b> · 设备信息、SIM 槽位、射频、NR 能力、漫游、温度保护</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/07-sms.png" alt="短信中心"><br><sub><b>短信中心</b> · 长短信按 UDH 自动合并为一条完整消息</sub></td>
+<td width="50%"><img src="docs/screenshots/09-terminal.png" alt="AT 调试终端"><br><sub><b>AT 调试终端</b> · 直连后端 AT 通道，带常用命令与历史</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/10-logs.png" alt="通知日志"><br><sub><b>通知日志</b> · 短信 / 来电 / 信号事件本地留档</sub></td>
+<td width="50%"><img src="docs/screenshots/11-service.png" alt="服务配置"><br><sub><b>服务配置</b> · 连接方式、串口、通知、看门狗、保存并应用</sub></td>
+</tr>
+</table>
+
+<sub>另有 `06-upgrade.png`（模组升级 FOTA）与 `08-sms-settings.png`（短信设置）在
+[`docs/screenshots/`](docs/screenshots/) 目录。</sub>
 
 ---
 
 ## 快速安装
 
-从 [Releases](https://github.com/LianXia233/luci-app-mt5700/releases) 下载**与目标架构匹配**的主包（约 1.2MB，已含后端）。
+从 [Releases](https://github.com/woshinibabao1/MT5700-Console/releases) 下载**与目标架构匹配**的主包
+（约 1.2MB，已内含后端二进制）。
 
 ### OpenWrt 24.10+（apk）
 
 ```sh
 # 以 aarch64_cortex-a53 为例
-apk add --allow-untrusted \
-  ./aarch64_cortex-a53-luci-app-mt5700-1.2.0-r1.apk \
-  ./aarch64_cortex-a53-luci-i18n-mt5700-zh-cn-*.apk
+apk add --allow-untrusted ./aarch64_cortex-a53-luci-app-mt5700-1.0-r1.apk
 ```
 
 ### OpenWrt 23.05（opkg / ipk）
 
 ```sh
-opkg install ./aarch64_cortex-a53-luci-app-mt5700_1.2.0_aarch64_cortex-a53.ipk
-opkg install ./aarch64_cortex-a53-luci-i18n-mt5700-zh-cn_*.ipk
+opkg install ./aarch64_cortex-a53-luci-app-mt5700_1.0_aarch64_cortex-a53.ipk
 ```
 
 ### 启动与确认
@@ -55,23 +91,13 @@ uci set at-webserver.config.serial_port=auto         # 优先探测 ttyUSB1
 uci commit at-webserver
 service at-webserver restart
 
-# 单包自检：后端二进制应存在
-ls -l /usr/bin/at-webserver-rust
+ls -l /usr/bin/at-webserver-rust                     # 单包自检：后端二进制应存在
 ```
 
-浏览器登录 LuCI → **移动网络 → 5G 模组管理**（路径 `admin/modem/5g`），即可看到 12 个页面。
+浏览器登录 LuCI → **移动网络 → 5G 模组管理**（路径 `admin/modem/5g`），即可看到 11 个页面。
 
-> **为何必须有后端进程？** 串口/`AT` 通道、定时锁频、扫频、企业微信推送都必须常驻，浏览器无法完成。  
-> 「一个安装包」= 前后端合一（v1.1.0+）；不是「一个静态 HTML」。
-
-> **v1.5.0 说明**：UI 全面升级为「Modern Dimensional Layering」v2（圆形信号仪表、
-> 卡片分层、统一按钮/开关样式），拨号设置页接入暂存式「保存并应用」，
-> 并修复短信乱码、SINR / MCS 数据源错误与 Aurora 主题开关串扰。
-> 详见 [CHANGELOG](CHANGELOG.md) 的 `[1.5.0]` 段。
-
-> **v1.4.1 说明**：v1.4.0 的 UI 重构把多个页面降级为骨架、且 LuCI 依赖指令被压缩器剥离
-> （运行时 `Mt5700 is not defined`）。v1.4.1 以 v1.3.4（`971008ca`）为基准逐页恢复功能，
-> 同时保留 v1.4.x 的新 UI 视觉。详见 [CHANGELOG](CHANGELOG.md) 的 `[1.4.1]` 段。
+> **为何必须有后端进程？** 串口 / `AT` 通道、定时锁频、企业微信推送都必须常驻，浏览器无法完成。
+> 「一个安装包」= 前后端合一；不是「一个静态 HTML」。
 
 ### 保存配置
 
@@ -79,11 +105,205 @@ ls -l /usr/bin/at-webserver-rust
 
 - 「服务配置」页：修改任一控件即标记「未保存更改」，点击「保存并应用」后依次执行
   `uci.changes()` → `uci.save()` → `uci.apply()`；若本来就没有待应用的变更
-  （rpcd 返回 ubus 状态码 5 / NO_DATA），视为已生效，提示「无待处理的变更」
-  而不是误报失败；应用成功后自动重载 at-webserver 服务并回查真实进程状态。
+  （rpcd 返回 ubus 状态码 5 / NO_DATA），视为已生效，提示「无待处理的变更」而不是误报失败；
+  应用成功后自动重载 at-webserver 服务并回查真实进程状态。
 - 「拨号设置」页：所有写操作（自动拨号、APN、拨号方式、USB 端口模式、网口模式、
   后置路由、DMZ、PDP 上下文）先暂存，页面底部粘性条提供「撤销更改 / 应用更改」，
   仅在确认应用后配置才真正写入并生效。
+
+---
+
+## 功能一览
+
+| 分组 | 页面 |
+|:--|:--|
+| 网络 | 网络状态 · 网络设置 · 拨号设置 · 定时锁频 |
+| 模组 | 模组设置 · 模组升级 |
+| 短信 | 短信中心 · 短信设置 |
+| 工具 | AT 调试终端 · 通知日志 · 服务配置 |
+
+原 WebUI 的深层能力均已保留，例如：
+
+- 服务小区 / 多载波聚合（`^MONSC` · `^MONSSC` · `^HFREQINFO`）
+- 网络拒绝原因（`^REJINFO`）实时面板
+- SIM 卡状态（`^SIMSQ`）、各路传感器温度（`^CHIPTEMP`）、实时速率（网卡计数差分）
+- 定时锁频（夜间 / 日间）、企业微信通知、连接看门狗
+
+短信中心：收到的长短信（UDH 拼接短信）按「发件人 + 拼接引用号」自动合并为一条完整消息，
+会话气泡不再拆成多条「片段 X/Y」，并保留原始换行；删除时一并清除所有分段。
+若部分分段丢失，会尽量合并已收到的部分并提示「长短信已合并 N/M 段（部分缺失）」。
+
+---
+
+## 架构
+
+```text
+                    ┌─────────────────────────────────────┐
+                    │                LuCI                 │
+                    │  11 个页面 · L.rpc.declare('mt5700') │
+                    └──────────────────┬──────────────────┘
+                                       │  ubus / rpcd 会话 + ACL
+                    ┌──────────────────▼──────────────────┐
+                    │         rpcd + ucode 插件           │
+                    │   mt5700.uc（读 UCI，附 auth_key）   │
+                    └──────────────────┬──────────────────┘
+                                       │  TCP newline-JSON
+                                       │  仅 127.0.0.1:8765
+                    ┌──────────────────▼──────────────────┐
+                    │      Rust  at-webserver-rust        │
+                    │  RpcServer · AtClient · Scheduler   │
+                    │  URC 分发 · PDU · 短信 · 通知        │
+                    └──────────────────┬──────────────────┘
+                                       │
+              ┌────────────────────────┼────────────────────────┐
+              │                        │                        │
+         /dev/ttyUSB1              192.168.8.1:20249            UCI
+            (PCUI)                    (TCP 备用)           at-webserver
+```
+
+要点：
+
+- **AT 通道的唯一持有者是 Rust 服务**：前端只能经
+  `L.rpc.declare({object:'mt5700',method:'at'})` → rpcd → ucode → Rust 这条链路下发；
+  前端代码里不出现 `navigator.serial` / `microcom` / 直写 `/dev/tty*`
+  （已有契约测试钉住，见「本地开发与测试」）。
+- **无对外监听端口**：后端只监听回环；页面经 rpcd 代理，依赖 LuCI 登录态 + ACL。
+- **事件**：后端维护事件总线（`raw_data` / `new_sms` / `incoming_call` / `pdcp_data` /
+  `cellscan` / `memory_full` / `urc_data`），前端约 1.5s 轮询 `events(since)`。
+- **默认 PCUI**：`connection_type=SERIAL`，串口优先 `/dev/ttyUSB1`；`serial_port=auto` 时自动探测。
+
+---
+
+## 项目结构
+
+```text
+MT5700-Console/                      # 仓库根 = OpenWrt 单包
+├── Makefile                         # PKG_NAME=luci-app-mt5700 · PKG_VERSION=1.0
+├── .github/workflows/build-openwrt.yml
+├── scripts/sdk-build.sh             # Actions 容器内：SDK + zig + cargo + 校验
+├── docs/screenshots/                # README 用截图（已打码）
+├── htdocs/luci-static/resources/
+│   ├── at-webserver/                # rpc.js · parse.js · ui.js · smsEncode.js · mt5700.css
+│   └── view/at-webserver/           # 11 个页面
+├── root/
+│   ├── etc/config/at-webserver      # UCI 默认（SERIAL / ttyUSB1）
+│   ├── etc/init.d/at-webserver      # procd
+│   └── usr/share/rpcd/ucode/mt5700.uc
+├── src/
+│   ├── Makefile                     # 编译并安装 at-webserver-rust 到本包
+│   └── rust/                        # tokio 后端
+└── tests/
+    ├── parse-contract.test.js       # AT 应答解析契约（45 项）
+    ├── ui-contract.test.js          # 样式 / 类名 / mock 保真 / AT 通道不变量（207 项）
+    ├── sms-pdu.test.js              # 短信 PDU 编解码闭环（90 项）
+    └── mock-modem/                  # 无硬件 e2e（mock AT 模组 + 真机应答样本）
+```
+
+---
+
+## 本地开发与测试
+
+### 契约测试（**不需要真机**）
+
+```sh
+node tests/parse-contract.test.js    # 45 项 · AT 应答 → 解析结果
+node tests/ui-contract.test.js       # 207 项 · 类名↔样式、mock↔真机、AT 通道不变量
+node tests/sms-pdu.test.js           # 90 项 · 短信 PDU 编码 ↔ pdu.rs 口径 往返一致
+```
+
+三套测试共 **342 项**，全部基于真实设备实测样本或厂商手册条文：
+
+- `parse-contract`：MONSC / NRSSBID / MONNC / 注册状态 / `^SYSCFGEX` 回读 /
+  `^CGPADDR` 的「16 段十进制点分 IPv6」/ `^NRRCCAPQRY` 三种 mode / COPS / VERSION。
+- `ui-contract`：`Mt5700.badge/button/toast` 的每个 variant 都必须在 CSS 里有定义、
+  JS 挂上的类名必须在 CSS 里存在、mock 对真机不支持的命令必须回 ERROR、
+  以及**前端不得绕过 Rust 直连串口**。
+- `sms-pdu`：自带一个逐行镜像 `src/rust/src/pdu.rs` 的参考解码器，做
+  「编码 → 参考解码 → 与原文比对」的闭环；覆盖首字节位序（手册附录表 20-6）、
+  GSM7 单条/含扩展字符/长短信、160↔161 边界、UCS2 与 emoji 代理对、
+  SMSC 与 TP-DA 地址编码、国际/国内 TOA、以及「输入框提示条数 = 实际分片数」。
+
+### Rust
+
+```sh
+cd src/rust
+cargo test
+cargo build --release
+```
+
+> Windows 上路径若含中文，可能影响 dlltool；建议用纯 ASCII 路径编译。
+
+### 无硬件端到端
+
+```sh
+cd tests/mock-modem
+npm install ws          # 仅测试依赖
+sh run-e2e.sh           # mock 模组 + 真实 Rust + RPC 客户端
+```
+
+`tests/mock-modem/real-samples.txt` 是 **62 条只读命令的真机应答原文**（各抓两遍并标注是否稳定），
+mock 的对齐一律以它为准——避免出现「mock 里能过、真机上不成立」的假通过。
+
+### 页面语法
+
+```sh
+find htdocs -name '*.js' -exec node --check {} \;
+```
+
+---
+
+## 云编译与发布
+
+workflow：`.github/workflows/build-openwrt.yml` · 镜像：官方 `openwrt/sdk`
+
+| 目标系统 | 包格式 | 架构 | 产物示例 |
+|:--|:--|:--|:--|
+| 主线 snapshot | `.apk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700-1.0-r1.apk` |
+| 23.05.5 | `.ipk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700_1.0_x86_64.ipk` |
+
+**触发方式**：push 到 `main` / 打 `v*` 标签 / Actions 手动 `Run workflow`。
+
+**编译成功后自动发布 Release**：标签推送用标签名；`main` 推送用 `Makefile` 里的
+`PKG_VERSION`（当前 `v1.0`）；同名 Release 先删后建；资产统一加架构前缀，避免同名冲突。
+
+交叉编译：容器内 rustup + **zig** 作 musl 链接器；`src/Makefile` 在包编译时
+`cargo build --release` 并装入 `usr/bin/at-webserver-rust`。
+CI 会校验主包体积（>500KB，排除「只有前端」），并检查 4 个构建组合齐全才允许发布。
+
+---
+
+## UCI 配置
+
+配置文件：`/etc/config/at-webserver`，**单 section `config` + 扁平键**（与 Rust / ucode / 服务配置页一致）。
+
+| 键 | 默认 | 说明 |
+|:--|:--|:--|
+| `enabled` | `1` | 总开关 |
+| `connection_type` | `SERIAL` | `SERIAL`=PCUI 串口；`NETWORK`=TCP 备用 |
+| `serial_port` | `auto` | `auto` 优先探测 ttyUSB1；可填 `/dev/ttyUSB1` |
+| `serial_baudrate` | `115200` | 波特率 |
+| `autodial_enable` | `1` | 连上模组后确保自动拨号开启（关掉则接口拿不到 IP） |
+| `autodial_mode` | `1` | `1`=USB 网络接口，`2`=转网口模式 |
+| `network_host` / `network_port` | `192.168.8.1` / `20249` | 网络通道 |
+| `websocket_port` | `8765` | 后端 RPC 端口（仅回环） |
+| `websocket_auth_key` | 空 | 由 ucode 自动附带；空则不校验密钥 |
+| `read_cache_static_ttl` | `300` | 不变类只读命令的缓存秒数（型号/固件/IMEI/ICCID…） |
+| `read_cache_ttl` | `0` | 状态类缓存秒数，默认关闭（宁可取实时值） |
+| `watch_enabled` | `0` | 连接看门狗总开关（默认不开） |
+| `notify_*` / `wechat_webhook` | 见默认文件 | 通知 |
+| `schedule_*` | 见默认文件 | 定时锁频 |
+
+改配置后：
+
+```sh
+uci commit at-webserver
+service at-webserver restart
+# 或在 LuCI「服务配置」页点「保存并应用」（会自动 reload）
+```
+
+---
+
+## 故障排查
 
 ### 网络接口没有 IP / 无法联网
 
@@ -98,9 +318,9 @@ uci show network.MT5700M | grep auto      # 期望 auto='1'
 printf 'AT^SETAUTODIAL?\r\n' | nc 127.0.0.1 8765
 ```
 
-自 v1.3.0 起，`/etc/init.d/at-webserver` 的 `ensure_modem_interface()` 会幂等地把接口
-`auto` 置 1 并在等待 `eth2` 就绪后 `ifup`；后端每次连上模组后也会调用
-`ensure_autodial()` 对齐拨号状态（已在目标状态则不重复下发）。两项默认值：
+`/etc/init.d/at-webserver` 的 `ensure_modem_interface()` 会幂等地把接口 `auto` 置 1
+并在等待 `eth2` 就绪后 `ifup`；后端每次连上模组后也会调用 `ensure_autodial()` 对齐拨号状态
+（已在目标状态则不重复下发）。两项默认值：
 
 | UCI 键 | 默认 | 含义 |
 |:--|:--|:--|
@@ -152,9 +372,13 @@ logread -e at-webserver | tail -30
 
 现象：AT 调试终端里 `ATI` 能正常返回，其余命令全部无任何回复（既无结果也无报错）。
 
-根因：后端的命令应答超时（2s）**从进入发送函数就开始计时**，而函数内部要先「等命令通道空闲」→「等 100ms 命令间隔」→「才写入命令等应答」。服务刚启动或模组重连时，`init_modem()` 会连续下发 8 条初始化命令（`AT+CMEE=2`、`AT+CNMI?/=`、`AT+CMGF?/=`、`AT+CLIP=1`、`AT^SETAUTODIAL?/=`）并全程持有通道锁，用户命令的 2 秒预算被排队耗尽，命令根本没写进模组。因此只在该时间窗内的命令会集体静默失败。
+根因：后端的命令应答超时（2s）**从进入发送函数就开始计时**，而函数内部要先「等命令通道空闲」
+→「等 100ms 命令间隔」→「才写入命令等应答」。服务刚启动或模组重连时，`init_modem()`
+会连续下发 8 条初始化命令（`AT+CMEE=2`、`AT+CNMI?/=`、`AT+CMGF?/=`、`AT+CLIP=1`、
+`AT^SETAUTODIAL?/=`）并全程持有通道锁，用户命令的 2 秒预算被排队耗尽，命令根本没写进模组。
+因此只在该时间窗内的命令会集体静默失败。
 
-`v1.3.1` 起，排队等待改用独立预算（8s），不再挤占应答超时；两类失败也给出不同文案：
+排队等待已改用独立预算（8s），不再挤占应答超时；两类失败也给出不同文案：
 
 | 返回文案 | 含义 | 处理 |
 |:--|:--|:--|
@@ -178,209 +402,27 @@ logread -e at-webserver | tail -30
 
 | 数据源 | 来源字段 | 物理单位 | 正确换算 |
 |:--|:--|:--|:--|
-| PDCP 实时速率 | `d.rx_rate` / `d.tx_rate` | 字节/秒（÷1024 后为 KiB/s） | ×8 得 bps |
+| 网卡实时速率 | 接口统计差分 | 字节/秒 | ×8 得 bps |
 | 签约速率 | `AT^DSAMBR` 第 2/3 字段 | kbps（本身即比特单位） | ×1000 得 bps |
 
 `AT^DSAMBR` 按手册 16.17 节定义为 `^DSAMBR: <cid>,<DlApnAmbr>,<UlApnAmbr>`，
-`DlApnAmbr` / `UlApnAmbr` 单位均为 **kbps**。实机返回示例：
+两者单位均为 **kbps**（实机返回 `^DSAMBR: 1,102400,102400,...` 即下行 102.40 Mbps）。
+修复后按**面板语义**拆成两组彼此独立的变量：
 
-```
-^DSAMBR: 1,102400,102400,"cmiot5g",5
-```
-
-即下行签约速率 = 102400 kbps = **102.40 Mbps**。原实现先对 kbps 值做了一次 `/1000`
-（把 kbps 误当 bps 降了一档），随后又无条件 `×8`（按字节口径换算），两次错误叠加：
-
-```
-102400 kbps  --(/1000)-->  102.4  --(×8)-->  819.2  -->  显示 "819 bps"
-```
-
-`v1.3.2` 起，速率状态引入显式单位口径字段 `speedUnit`（`'bytes'` / `'kbps'`），
-由赋值方声明单位、格式化函数据此选择换算路径，不再隐式假设；`v1.3.3` 起进一步
-按**面板语义**拆成两组彼此独立的变量，杜绝不同来源共用同一组状态：
-
-| 面板（`h3.at-panel-title`） | 状态变量 | 数据来源 | 单位口径 |
-|:--|:--|:--|:--|
-| 连接状态 | `ambrDown` / `ambrUp` | `AT^DSAMBR` 签约速率 | `kbps`（`×1000`） |
-| 实时速率 | `rtDown` / `rtUp` | OpenWrt 接口统计差分 | `bytes`（`×8`） |
-
-其中「实时速率」自 `v1.3.3` 起**不再下发任何 AT 命令**：原先依赖的 PDCP 速率订阅
-（`^DSFLOW`/PDCP 上报）会持续占用模组 AT 通道、干扰正常业务，改为直接读取
-`/sys/class/net/<dev>/statistics/{rx,tx}_bytes` 做两次采样差分（每秒一次），
-设备名由 `uci get network.MT5700M.device` 自动探测（实机为 `eth2`），取不到时回退
-`eth2`。该读取经新增的 ubus 方法 `mt5700 netrate` 暴露，前端无需 AT 通道。
-
-修复后「连接状态」显示签约速率 `102.40 Mbps`、「实时速率」显示接口实际吞吐
-（实测 `319.35 Kbps` / `238.04 Kbps`，随流量波动），两者互不串扰。
-若后续新增速率来源（如 QoS 协商速率），只需在赋值处声明一次单位归属即可。
-
-> 注：`^DSAMBR` 的第 4 字段（如 `"cmiot5g"`）在手册标准格式中并不存在，属部分固件版本的
-> 扩展字段。前端已加护栏：仅当该字段确实是**带引号的字符串**时才采信为 APN 显示，
-> 若为纯数字则忽略，避免把计数值误显示成 APN。
-
----
-
-## 功能一览
-
-| 分组 | 页面 |
-|:--|:--|
-| 网络 | 网络状态 · 网络设置 · 拨号设置 · 全网扫频 · 定时锁频 |
-| 模组 | 模组设置 · 模组升级 |
-| 短信 | 短信中心 · 短信设置（含 USSD） |
-| 工具 | AT 调试终端 · 通知日志 · 服务配置 |
-
-原 WebUI 的深层能力均已保留，例如：
-
-- 服务小区 / 辅载波聚合（`^MONSSC` · `^CASCELLINFO`）
-- 网络拒绝原因（`^REJINFO`）实时面板
-- SIM 卡状态（`^SIMSQ`）、温度保护、PDCP 实时速率
-- 定时锁频（夜间/日间）、全网扫频、企业微信通知
-
-短信中心优化：收到的长短信（UDH 拼接短信）按「发件人 + 拼接引用号」自动合并为一条完整消息，
-会话气泡不再拆成多条「片段 X/Y」，并保留原始换行；删除时一并清除所有分段。
-若部分分段丢失，会尽量合并已收到的部分并提示「长短信已合并 N/M 段（部分缺失）」。
-
----
-
-## 架构
-
-```text
-                    ┌─────────────────────────────────────┐
-                    │                LuCI                 │
-                    │   12 个页面 · L.rpc.declare('mt5700')│
-                    └──────────────────┬──────────────────┘
-                                       │  ubus / rpcd 会话 + ACL
-                    ┌──────────────────▼──────────────────┐
-                    │         rpcd + ucode 插件           │
-                    │   mt5700.uc（读 UCI，附 auth_key）   │
-                    └──────────────────┬──────────────────┘
-                                       │  TCP newline-JSON
-                                       │  仅 127.0.0.1:8765
-                    ┌──────────────────▼──────────────────┐
-                    │        Rust at-webserver-rust       │
-                    │  RpcServer · AtClient · Scheduler   │
-                    │  URC 分发 · PDU · 扫频 · 通知       │
-                    └──────────────────┬──────────────────┘
-                                       │
-              ┌────────────────────────┼────────────────────────┐
-              │                        │                        │
-         /dev/ttyUSB1              192.168.8.1:20249            UCI
-            (PCUI)                    (TCP 备用)           at-webserver
-```
-
-要点：
-
-- **无 WebSocket 对外端口**：后端只监听回环；页面经 rpcd 代理，依赖 LuCI 登录态 + ACL。
-- **事件**：后端维护事件总线（`raw_data` / `new_sms` / `incoming_call` / `pdcp_data` / `cellscan` / `memory_full` / `urc_data`），前端约 1.5s 轮询 `events(since)`。
-- **命令**：`mt5700.at` 返回 `{success,data,error}`，前端仍串行发送，避免串号。
-- **默认 PCUI**：`connection_type=SERIAL`，串口优先 `/dev/ttyUSB1`；`serial_port=auto` 时自动探测。
-
----
-
-## 项目结构
-
-```text
-luci-app-mt5700/                     # 仓库根 = OpenWrt 单包
-├── Makefile                         # PKG_NAME=luci-app-mt5700 · PKG_VERSION=1.2.0
-├── .github/workflows/build-openwrt.yml
-├── scripts/sdk-build.sh             # Actions 容器内：SDK + zig + cargo + 校验
-├── htdocs/luci-static/resources/
-│   ├── at-webserver/                # rpc.js · parse.js · ui.js · smsEncode.js · mt5700.css
-│   └── view/at-webserver/           # 12 个页面
-├── po/                              # 中文翻译
-├── root/
-│   ├── etc/config/at-webserver      # UCI 默认（SERIAL / ttyUSB1）
-│   ├── etc/init.d/at-webserver      # procd
-│   └── usr/share/rpcd/ucode/mt5700.uc
-├── src/
-│   ├── Makefile                     # 编译并安装 at-webserver-rust 到本包
-│   └── rust/                        # tokio 后端（约 13 个源文件）
-└── tests/mock-modem/                # 无硬件 e2e（mock AT 模组）
-```
-
----
-
-## 云编译与发布
-
-workflow：`.github/workflows/build-openwrt.yml`  
-镜像：官方 `openwrt/sdk`
-
-| 目标系统 | 包格式 | 架构 | 产物示例 |
-|:--|:--|:--|:--|
-| 主线 snapshot | `.apk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700-1.2.0-r1.apk` |
-| 23.05.5 | `.ipk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700_1.2.0_x86_64.ipk` |
-
-**触发方式**
-
-1. push 到 `main`
-2. 打 `v*` 标签（如 `v1.2.0`）
-3. Actions 手动 `Run workflow`
-
-**每次编译成功后自动发布 Release**
-
-- 标签推送 → Release tag = 标签名  
-- `main` 推送 → Release tag = `Makefile` 中的 `PKG_VERSION`（当前 `v1.2.0`）  
-- 同名 Release 先删后建；资产带架构前缀，避免同名冲突
-
-交叉编译：容器内 rustup + **zig** 作 musl 链接器；`src/Makefile` 在包编译时 `cargo build --release` 并装入 `usr/bin/at-webserver-rust`。CI 会校验主包体积（>500KB，排除「只有前端」）。
-
----
-
-## 本地开发与测试
-
-### Rust
-
-```sh
-cd src/rust
-cargo test              # PDU 单测 7/7
-cargo build --release
-```
-
-> Windows 上路径若含中文，可能影响 dlltool；建议用纯 ASCII 路径编译。
-
-### 无硬件端到端
-
-```sh
-cd tests/mock-modem
-npm install ws          # 仅测试依赖
-sh run-e2e.sh           # mock 模组 + 真实 Rust + RPC 客户端
-node parse-extra-test.js
-```
-
-### 页面语法
-
-```sh
-# 仓库根
-find htdocs -name '*.js' -exec node --check {} \;
-```
-
----
-
-## UCI 配置
-
-配置文件：`/etc/config/at-webserver`，**单 section `config` + 扁平键**（与 Rust / ucode / 服务配置页一致）。
-
-| 键 | 默认 | 说明 |
+| 面板 | 数据来源 | 单位口径 |
 |:--|:--|:--|
-| `enabled` | `1` | 总开关 |
-| `connection_type` | `SERIAL` | `SERIAL`=PCUI 串口；`NETWORK`=TCP 备用 |
-| `serial_port` | `auto` | `auto` 优先探测 ttyUSB1；可填 `/dev/ttyUSB1` |
-| `serial_baudrate` | `115200` | 波特率 |
-| `autodial_enable` | `1` | 连上模组后确保自动拨号开启（关掉则接口拿不到 IP） |
-| `autodial_mode` | `1` | `1`=USB 网络接口，`2`=转网口模式 |
-| `network_host` / `network_port` | `192.168.8.1` / `20249` | 网络通道 |
-| `websocket_port` | `8765` | 后端 RPC 端口（仅回环） |
-| `websocket_auth_key` | 空 | 由 ucode 自动附带；空则不校验密钥 |
-| `notify_*` / `wechat_webhook` | 见默认文件 | 通知 |
-| `schedule_*` | 见默认文件 | 定时锁频 |
+| 连接状态 | `AT^DSAMBR` 签约速率 | `kbps`（×1000） |
+| 实时速率 | OpenWrt 接口统计差分 | `bytes`（×8） |
 
-改配置后：
+「实时速率」**不下发任何 AT 命令**：直接读 `/sys/class/net/<dev>/statistics/{rx,tx}_bytes`
+做两次采样差分（1 秒一次），设备名由 `uci get network.MT5700M.device` 自动探测（实机为 `eth2`），
+取不到时回退 `eth2`。该读取经 ubus 方法 `mt5700 netrate` 暴露，前端不占 AT 通道。
 
-```sh
-uci commit at-webserver
-service at-webserver restart
-# 或在 LuCI「服务配置」页点「保存并应用」（会自动 reload）
-```
+### 长短信显示成多条「片段」
+
+收到长短信（UDH 拼接短信）时按「发件人 + 拼接引用号」合并；部分分段丢失时会提示
+「长短信已合并 N/M 段（部分缺失）」。若看到仍未合并的片段，多半是拼接引用号不同
+（不同发送时间的两条独立长短信），属正常表现。
 
 ---
 
@@ -389,24 +431,34 @@ service at-webserver restart
 | 模块 | 职责 |
 |:--|:--|
 | `main.rs` | 装配与优雅退出 |
-| `rpcserver.rs` | TCP RPC、伪命令、事件总线、扫频 |
-| `atclient.rs` | 命令串行、超时、URC 分流、连上模组后对齐自动拨号 |
+| `rpcserver.rs` | TCP RPC、伪命令、事件总线 |
+| `atclient.rs` | 命令串行、超时预算、URC 分流、连上模组后对齐自动拨号 |
 | `transport.rs` / `serial_*.rs` | TCP / 串口通道 |
-| `pdu.rs` | SMS PDU 编解码 |
-| `urc.rs` | 来电/短信/信号等上报 |
-| `schedule.rs` / `schedconfig.rs` | 定时锁频 |
-| `notify.rs` | 日志与 WebHook |
+| `pdu.rs` | SMS PDU 解码（`decode_incoming_pdu`）+ GSM7 扩展表 |
+| `urc.rs` | 来电 / 短信 / 信号等主动上报 |
+| `schedule.rs` / `schedconfig.rs` | 定时锁频（夜间跨零点判断） |
+| `notify.rs` | 本地日志与 WebHook 推送 |
 | `config.rs` | UCI 读取 |
 
-依赖：`tokio` · `serde` · `chrono` · `ureq` · `libc` 等。  
+依赖：`tokio` · `serde` · `chrono` · `ureq` · `libc` 等。
 Release：`opt-level=s` + LTO + strip，musl 静态链接，适合嵌入式。
 
 ---
 
-## 许可
+## 上游与许可
 
-本项目以 **[MIT License](LICENSE)** 发布，Copyright (c) 2026 LianXia233。
+本项目 **fork 自 [LianXia233/luci-app-mt5700](https://github.com/LianXia233/luci-app-mt5700)**，
+在其 LuCI 页面与 Rust 后端基础上继续开发：补齐/修正 AT 应答解析、重构短信 PDU 编码、
+清理无效功能与重复查询、收紧轮询与样式契约，并补充三套不依赖真机的契约测试。
 
-Rust 后端（`src/rust/`）在 `Cargo.toml` 中同样声明 `license = "MIT"`，两层一致。
+原项目的版权与许可一并保留：
 
-**MT5700M** 相关 AT 行为以厂商手册为准；本项目在无官方 OpenWrt 包源的前提下提供管理界面与后端。
+```text
+Copyright (c) 2026 LianXia233
+Copyright (c) 2026 MT5700 Console contributors
+```
+
+以 **[MIT License](LICENSE)** 发布（Rust 后端在 `Cargo.toml` 中同样声明 `license = "MIT"`，两层一致）。
+
+**MT5700M** 相关 AT 行为以厂商《MT5700M-CN 5G 系列模组 AT 命令手册》为准；
+本项目在无官方 OpenWrt 包源的前提下提供管理界面与后端。

@@ -10,7 +10,7 @@
 # 判定与动作：
 #   1) 接口未 up            → ubus renew（失败则 ifdown/ifup）
 #   2) 网关邻居不可达        → ubus renew 续约（失败则 ifdown/ifup）
-#   3) 连续失败达阈值        → 可选复位模组协议栈（AT+CFUN=1,1）
+#   3) 连续失败达阈值        → 按「复位命令」逐条下发（UCI watch_reset_cmds，可多行自定义）
 #
 # 用法：
 #   watchdog.sh once     只检查一次并尝试修复（给 LuCI「立即自检」用）
@@ -22,22 +22,25 @@
 DEF_IFACE='MT5700M'
 DEF_DEV='eth2'
 
-W_ENABLED=1
+W_ENABLED=0
 W_IFACE="$DEF_IFACE"
 W_DEV="$DEF_DEV"
 W_INTERVAL=60
 W_THRESHOLD=3
 W_RESET_MODEM=0
+W_RESET_CMDS=''
 W_LOG='/tmp/at-notifications.log'
 
 load_cfg() {
 	config_load at-webserver
-	config_get_bool W_ENABLED config watch_enabled 1
+	config_get_bool W_ENABLED config watch_enabled 0
 	config_get W_IFACE   config watch_iface "$DEF_IFACE"
 	config_get W_DEV     config watch_device "$DEF_DEV"
 	config_get W_INTERVAL config watch_interval 60
 	config_get W_THRESHOLD config watch_fail_threshold 3
 	config_get_bool W_RESET_MODEM config watch_reset_modem 0
+	# 复位命令：多行文本，UCI 里以字面 \n 存储（UCI 值不能带真实换行）
+	config_get W_RESET_CMDS config watch_reset_cmds 'AT+CFUN=1,1'
 	config_get W_LOG     config log_file '/tmp/at-notifications.log'
 
 	[ -n "$W_IFACE" ] || W_IFACE="$DEF_IFACE"
@@ -85,14 +88,42 @@ renew_lease() {
 	return 0
 }
 
-# 复位模组协议栈（可选，最后手段）
-reset_modem() {
-	body='{"id":1,"method":"at","params":{"cmd":"AT+CFUN=1,1"}}'
+# 通过本机 RPC 下发一条 AT 命令
+send_at() {
+	_json=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')
+	body='{"id":1,"method":"at","params":{"cmd":"'"$_json"'"}}'
 	if command -v wget >/dev/null 2>&1; then
 		printf '%s\n' "$body" | wget -q -O /dev/null --post-file=- \
 			--header='Content-Type: application/json' \
 			http://127.0.0.1:8765/ 2>/dev/null && return 0
 	fi
+	return 1
+}
+
+# 复位动作：按 UCI watch_reset_cmds 的**多行、自定义**命令逐条下发（顺序执行）
+#   · 支持字面 \n 作为换行（LuCI 保存时会转义）
+#   · 空行与以 # 开头的行忽略（可写注释）
+#   · 每条之间等 1 秒，给模组反应时间
+reset_modem() {
+	[ -n "$W_RESET_CMDS" ] || return 1
+	printf '%b\n' "$W_RESET_CMDS" > /tmp/mt5700-reset-cmds.$$
+	_ok=1
+	_n=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\r$//')
+		[ -n "$line" ] || continue
+		case "$line" in \#*) continue ;; esac
+		_n=$((_n + 1))
+		if send_at "$line"; then
+			log_msg "复位命令 $_n 已下发：$line"
+		else
+			_ok=0
+			log_msg "复位命令 $_n 下发失败：$line"
+		fi
+		sleep 1
+	done < /tmp/mt5700-reset-cmds.$$
+	rm -f /tmp/mt5700-reset-cmds.$$
+	[ "$_ok" = "1" ] && [ "$_n" -gt 0 ] && return 0
 	return 1
 }
 
@@ -142,7 +173,8 @@ once)
 daemon)
 	load_cfg
 	[ "$W_ENABLED" = "1" ] || { log_msg '看门狗未启用，退出'; exit 0; }
-	log_msg "看门狗启动：接口=$W_IFACE 设备=$W_DEV 间隔=${W_INTERVAL}s 阈值=$W_THRESHOLD 复位模组=$W_RESET_MODEM"
+	_cmds_n=$(printf '%b\n' "$W_RESET_CMDS" | grep -c -v '^[[:space:]]*\(#\|$\)' 2>/dev/null || echo 0)
+	log_msg "看门狗启动：接口=$W_IFACE 设备=$W_DEV 间隔=${W_INTERVAL}s 阈值=$W_THRESHOLD 复位模组=$W_RESET_MODEM 复位命令=${_cmds_n}条"
 	fails=0
 	while :; do
 		sleep "$W_INTERVAL"
@@ -157,7 +189,7 @@ daemon)
 				fails=$((fails + 1))
 				log_msg "异常累计 $fails/$W_THRESHOLD"
 				if [ "$W_RESET_MODEM" = "1" ] && [ "$fails" -ge "$W_THRESHOLD" ]; then
-					log_msg "达阈值，复位模组协议栈（AT+CFUN=1,1）"
+					log_msg "达阈值，按自定义复位命令逐条下发"
 					reset_modem && fails=0
 					sleep 30
 				fi

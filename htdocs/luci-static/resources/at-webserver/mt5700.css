@@ -1,79 +1,4 @@
 /* ==========================================================================
-   MT5700 LuCI 前端样式（单一样式表）
-   --------------------------------------------------------------------------
-   一份文件装完。原先拆在 at.css / mt5700.css 两处的规则已合并到此，
-   并删除了两边重名的规则——此前同一条规则会随两个样式表的加载顺序
-   在「网络状态页」与「网络设置页」表现不一致，合并后消除。
-
-   视觉基准：玻璃拟态
-     · 表面：半透明 + backdrop-filter: blur(18px) saturate(150%)
-     · 圆角：20 / 16 / 12 / 8（xl / lg / md / sm）
-     · 阴影：多层柔和投影 + 内嵌高光 inset 0 1px 0 rgba(255,255,255,.7)
-     · 连接状态卡：绿调玻璃 + 左侧状态色边
-
-   章节：
-     1. mt5700-* 设计令牌、组件、响应式
-     2. at-* 基础组件（面板 / 字段 / 按钮 / 表格 / 连接状态卡）
-     3. 宿主主题（实测 Argon）归一化 —— 位于组件规则之前
-     4. 对抗主题 !important 的反制 —— 位于文件末尾
-
-   功能改动（载波解析、连接看门狗、读缓存、短信流程）都在 JS 里，与本文件无关。
-   ========================================================================== */
-
-/* ==========================================================================
-   宿主主题归一化（必须放在组件规则之前）
-   --------------------------------------------------------------------------
-   插件跑在 LuCI 主题（实测 Argon）里，主题会按**标签名**给元素加上自己的外观，
-   典型污染（真机 computed style 实测）：
-     h3.mt5700-card-title → padding 14px 20px + 白底 + 4px 圆角
-     h2.mt5700-page-title → padding 16px 20px + 白底 + 4px 圆角 + 投影
-   结果卡片标题变成一块「白底圆角块」，页面标题变成一个带阴影的白盒子，
-   与设计稿完全不是一回事。
-   这里只清掉「表现层」属性（内边距/背景/描边/圆角/阴影/字距/大小写/装饰），
-   **不动字体族、字号、字重、行高、颜色**——那些由各自的组件规则精确控制。
-   选择器用 `:where()` 包裹列表——`:where()` 的权重为 0，
-   因此整条规则只有 `.mt5700-page` 的 (0,1,0)，既压得住主题的标签规则(0,0,1)，
-   又不会盖掉本文件后面任何一条组件规则（同为 (0,1,0) 时后写的胜出）。
-   ========================================================================== */
-.mt5700-page :where(h1, h2, h3, h4, h5, h6, p, ul, ol, li, small, strong, em, b, i,
-  code, pre, table, thead, tbody, tr, th, td, label, caption, figure, blockquote),
-.at-page :where(h1, h2, h3, h4, h5, h6, p, ul, ol, li, small, strong, em, b, i,
-  code, pre, table, thead, tbody, tr, th, td, label, caption, figure, blockquote) {
-  padding: 0;
-  margin: 0;
-  background: none;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-  letter-spacing: normal;
-  text-transform: none;
-  text-decoration: none;
-  min-width: 0;
-}
-
-/* 交互控件：主题同样会按标签覆盖外观 */
-.mt5700-page :where(button, input:not([type="checkbox"]):not([type="radio"]), select, textarea),
-.at-page :where(button, input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
-  padding: 0;
-  background: none;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-  font-family: inherit;
-  letter-spacing: normal;
-}
-
-/* 链接：避免主题的链接色/下划线渗进我们的组件 */
-.mt5700-page a,
-.at-page a {
-  color: inherit;
-  text-decoration: none;
-}
-
-/* ==========================================================================
-   1. mt5700-* 设计令牌、组件与响应式
-   ========================================================================== */
-/* ==========================================================================
    MT5700 LuCI 前端 - Modern Dimensional Layering 设计系统 v2
    Soft Minimalism + Glassmorphic Materials + Modern Data Dashboard
    Z 轴层级: L1 环境背景 / L2 主容器卡片 / L3 浮动数据卡片 / L4 按钮·图表·气泡
@@ -940,6 +865,9 @@
 .mt5700-badge-warning { background: rgba(245, 158, 11, 0.12); color: var(--mt5700-warning); }
 .mt5700-badge-danger { background: rgba(239, 68, 68, 0.12); color: var(--mt5700-danger); }
 .mt5700-badge-info { background: rgba(59, 130, 246, 0.12); color: var(--mt5700-accent); }
+/* primary：Mt5700.badge(..., 'primary') 在「定时锁频」页使用（当前时段）。
+   此前 CSS 缺这一条，徽章只能落到基础 .mt5700-badge 上（无配色）。取强调色，与 info 同族。 */
+.mt5700-badge-primary { background: rgba(59, 130, 246, 0.16); color: var(--mt5700-accent); }
 .mt5700-badge-neutral { background: rgba(0, 0, 0, 0.05); color: var(--mt5700-text-secondary); }
 
 /* ---------- AT 服务状态卡片 (L2，独立命名空间，不依赖 LuCI 主题) ---------- */
@@ -1186,6 +1114,10 @@
 
     font-size: 10px;
   }
+
+  .at-status-rpc-label {
+    display: none;
+  }
 }
 
 /* 很窄的手机 */
@@ -1193,6 +1125,10 @@
 
   .at-status-card {
     gap: 11px;
+  }
+
+  .at-status-rpc {
+    display: none;
   }
 }
 
@@ -1886,6 +1822,7 @@
 @media (max-width: 768px) {
   .mt5700-app { padding: var(--mt5700-space-md); }
   .mt5700-page-title { font-size: var(--mt5700-font-size-2xl); }
+  .mt5700-card-body { padding: var(--mt5700-space-md); }
   .mt5700-grid { gap: var(--mt5700-space-md); }
   .mt5700-metric-value { font-size: var(--mt5700-font-size-xl); }
   .mt5700-gauge-dial { width: 100px; height: 100px; }
@@ -1929,115 +1866,8 @@
 }
 
 /* ==========================================================================
-   对抗宿主主题的 !important（位于文件末尾，保证最后生效）
-   --------------------------------------------------------------------------
-   Argon 的 cascade.css 里有 h1~h6 { font-weight: normal !important }，普通规则赢不了。
-   这里用同样 !important 反制，取值一律取原版（页标题 700 / 卡片标题 600 / 表头 12px 16px），
-   因此真机观感与原版一致。
-   ========================================================================== */
-.at-metric-value,
-.at-speed-num,
-.at-status-title,
-.mt5700-gauge-value,
-.mt5700-metric-value,
-.mt5700-page-title,
-.mt5700-speed-value {
-  font-weight: 700 !important;
-}
-.at-status-rpc-value,
-.mt5700-card-title,
-.mt5700-modal-title,
-.mt5700-sms-item-number {
-  font-weight: 600 !important;
-}
-
-.mt5700-table th,
-.mt5700-table td {
-  padding: 12px 16px !important;
-}
-
-/* 本项目新增、且现有页面确实在用的组件（与 at.css 无重名） */
-.mt5700-input:hover:not(:disabled) {
-  border-color: var(--mt5700-text-muted)
-}
-.mt5700-carrier-head {
-  display: flex
-  align-items: center
-  gap: var(--mt5700-space-sm)
-  flex-wrap: wrap
-  margin-bottom: var(--mt5700-space-md)
-}
-.mt5700-carrier-badge {
-  padding: 2px 10px
-  font-size: var(--mt5700-font-size-xs)
-  font-weight: 600
-  line-height: 1.8
-  border-radius: var(--mt5700-radius-full)
-  background: var(--mt5700-neutral-soft)
-  color: var(--mt5700-text-secondary)
-}
-.mt5700-carrier-badge.is-on {
-  background: var(--mt5700-success-soft)
-  color: var(--mt5700-success)
-}
-.mt5700-carrier-headline {
-  font-size: var(--mt5700-font-size-lg)
-  font-weight: 650
-  color: var(--mt5700-text)
-}
-.at-status-sim {
-  display: flex
-  align-items: center
-  gap: 6px
-  flex: 0 0 auto
-  padding: 5px 10px
-  background: var(--mt5700-surface-2)
-  border: 1px solid var(--mt5700-border-subtle)
-  border-radius: var(--mt5700-radius-sm)
-  font-family: var(--mt5700-font-mono)
-  font-size: var(--mt5700-font-size-xs)
-  color: var(--mt5700-text-muted)
-  white-space: nowrap
-}
-.at-status-text {
-  color: var(--mt5700-text)
-  font-weight: 600
-}
-.at-status-sim.is-warn .at-status-rpc-value {
-  color: var(--mt5700-warning)
-}
-.at-service-status {
-  font-size: var(--mt5700-font-size-xs)
-  color: var(--mt5700-text-muted)
-}
-.at-autorefresh label {
-  display: inline-flex
-  align-items: center
-  gap: var(--mt5700-space-xs)
-  white-space: nowrap
-  cursor: pointer
-}
-.mt5700-toolbar {
-  display: flex
-  align-items: center
-  gap: var(--mt5700-space-sm)
-  flex-wrap: wrap
-}
-.mt5700-carrier-headline {
-  font-weight: 650 !important
-}
-@media (max-width: 430px) {
-  .at-status-sim {
-    display: none;
-  }
-}
-
-/* ==========================================================================
-   2. at-* 基础组件（唯一来源）
-   ========================================================================== */
-/* ==========================================================================
    at-webserver LuCI 前端公共样式（原 WebUI Semi Design 视觉的等价迁移）
-   覆盖：面板 / 字段 / 标签 / 弹窗 / 连接条 / 短信会话 / 终端 / 扫频进度等
+   覆盖：面板 / 字段 / 标签 / 弹窗 / 连接条 / 短信会话 / 终端等
    ========================================================================== */
 
 /* ---------- 页面骨架 ---------- */
@@ -2332,8 +2162,11 @@
 .at-sms-recv { align-self: flex-start; background: #fff; border: 1px solid #e5e8ec; border-bottom-left-radius: 2px; }
 .at-sms-msg-meta { font-size: 11px; opacity: .7; margin-top: 3px; }
 .at-sms-msg-part { font-size: 11px; opacity: .75; }
-.at-sms-del { position: absolute; top: -8px; right: -6px; padding: 0 6px; font-size: 11px; line-height: 18px; display: none; }
-.at-sms-bubble:hover .at-sms-del { display: inline-block; }
+/* 短信气泡上的删除按钮。JS（sms_center.js）实际挂的类名是 .mt5700-sms-del，
+   而这里原写作 .at-sms-del —— 类名不一致，导致下面这套「小号 ✕」样式从未生效过。
+   现改用与 JS 一致的类名；同时去掉 display:none + hover 显隐：触屏没有 hover，
+   那样会让删除按钮在手机上永远点不到。位置相关声明一并去掉，保持当前实际版面不变。 */
+.mt5700-sms-del { padding: 0 6px; font-size: 11px; line-height: 18px; }
 .at-sms-input-row { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #eef0f3; align-items: flex-end; flex-wrap: wrap; }
 .at-sms-textarea {
 	flex: 1 1 auto; min-width: 200px; min-height: 44px; resize: vertical;
@@ -2462,10 +2295,6 @@
 .at-lock-item .cbi-input-text { width: 90px; }
 .at-lock-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 
-/* ---------- 扫频结果单元格 ---------- */
-.at-op-cell { color: #1565c0; font-weight: 600; cursor: pointer; }
-.at-op-cell:hover { text-decoration: underline; }
-
 /* ---------- 通用提示 / 内联 / 等宽 ---------- */
 .at-note { color: #888; font-size: 12px; margin: 4px 0; }
 .at-inline { display: inline-block; margin-right: 10px; }
@@ -2531,4 +2360,195 @@
 	.at-modal-actions .at-btn { width: 100%; }
 	/* 表格在窄屏下改为横向滚动，避免挤压列宽 */
 	.at-panel .at-table { display: block; overflow-x: auto; white-space: nowrap; }
+}
+
+/* ==========================================================================
+   移植补丁（CSS v5.0.0）
+   --------------------------------------------------------------------------
+   视觉回归上游原版（v1.3.4 时代）。以下规则是基线之后新增组件所需的样式，
+   全部使用基线已有的设计令牌，不改变原版观感：
+     - .mt5700-cards        网络状态页中部双列卡区（连接状态 | SIM 与设备）
+     - .mt5700-carrier-*    载波卡头部的主小区身份行与聚合状态徽章
+     - .mt5700-toolbar      卡片内小工具条（如 SIM 卡「本机号码备注」）
+     - .at-autorefresh      自动刷新控件的 label 布局
+   ========================================================================== */
+
+/* 双列卡区：宽屏两列、窄屏自动回单列（与上游快照 pv-grid2 等价） */
+@media (min-width: 1100px) {
+  .mt5700-cards {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+    gap: var(--mt5700-space-lg);
+  }
+}
+
+/* 载波卡头部：主小区身份（PLMN / TAC / 小区 / PCI）+ 聚合状态徽章 */
+.mt5700-carrier-head {
+  display: flex;
+  align-items: center;
+  gap: var(--mt5700-space-sm);
+  flex-wrap: wrap;
+  margin-bottom: var(--mt5700-space-md);
+}
+.mt5700-carrier-headline {
+  font-size: var(--mt5700-font-size-lg);
+  font-weight: 650;
+  color: var(--mt5700-text);
+}
+.mt5700-carrier-badge {
+  padding: 2px 10px;
+  font-size: var(--mt5700-font-size-xs);
+  font-weight: 600;
+  line-height: 1.8;
+  border-radius: var(--mt5700-radius-full);
+  background: var(--mt5700-info-light);
+  color: var(--mt5700-text-secondary);
+}
+.mt5700-carrier-badge.is-on {
+  background: var(--mt5700-success-light);
+  color: var(--mt5700-success);
+}
+
+/* 卡片内小工具条 */
+.mt5700-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--mt5700-space-sm);
+  flex-wrap: wrap;
+}
+
+/* 自动刷新控件 */
+.at-autorefresh label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mt5700-space-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* 大字号读数不允许折行（签约速率等单位被挤断的修复） */
+.mt5700-card .mt5700-metric-value { white-space: nowrap; }
+
+/* ==========================================================================
+   页面宽度统一（CSS v5.1.0）
+   --------------------------------------------------------------------------
+   LuCI 的容器链（main → main-right → .container）全是 flex，而 .mt5700-page
+   原先只有 max-width:1400px，作为 flex item 会**按内容收缩**——于是各页宽度
+   变成内容宽度（实测 601 / 684 / 894 / 972px 各不相同），卡片风格一致但栏宽
+   不一致。这里强制撑满可用宽度，全站统一为容器宽度（1440 视口下约 1182px）。
+   ========================================================================== */
+.mt5700-page {
+  width: 100%;
+  min-width: 0;
+}
+
+/* ==========================================================================
+   SSB 波束列表（CSS v5.2.0）
+   --------------------------------------------------------------------------
+   ^NRSSBID 会报服务小区的 8 个 SSB 波束（含各自 RSRP）。每行「波束号 + 强度条 +
+   读数」，窄屏自动换列。这些类只被新加的「SSB 与邻区扫描」卡使用。
+   ========================================================================== */
+.mt5700-beams {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--mt5700-space-sm) var(--mt5700-space-md);
+}
+.mt5700-beam {
+  display: flex;
+  align-items: center;
+  gap: var(--mt5700-space-sm);
+  font-size: var(--mt5700-font-size-xs);
+  color: var(--mt5700-text-secondary);
+}
+.mt5700-beam .mt5700-signal-bar { flex: 1 1 auto; }
+
+/* ==========================================================================
+   分段选择器与卡内分区（CSS v5.3.0）
+   --------------------------------------------------------------------------
+   参考厂商后台的「锁频类型 / 接入模式」单选按钮：少量互斥选项平铺，一眼看到全部
+   可选值。分区用于在一张卡内区分 4G / 5G 两组同构设置。
+   ========================================================================== */
+.mt5700-segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--mt5700-border-subtle);
+  border-radius: var(--mt5700-radius-md);
+  background: var(--mt5700-glass-bg);
+}
+.mt5700-segmented-btn {
+  padding: 6px 14px;
+  font-size: var(--mt5700-font-size-sm);
+  font-family: inherit;
+  line-height: 1.4;
+  color: var(--mt5700-text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--mt5700-radius-sm);
+  cursor: pointer;
+  transition: background var(--mt5700-transition-fast), color var(--mt5700-transition-fast);
+}
+.mt5700-segmented-btn:hover:not(.is-active) {
+  background: var(--mt5700-card-bg-hover);
+  color: var(--mt5700-text);
+}
+.mt5700-segmented-btn.is-active {
+  background: var(--mt5700-accent);
+  color: #fff;
+  box-shadow: var(--mt5700-sh-1);
+}
+.mt5700-subsection {
+  padding: var(--mt5700-space-md);
+  border: 1px solid var(--mt5700-border-subtle);
+  border-radius: var(--mt5700-radius-md);
+}
+.mt5700-subsection-title {
+  font-size: var(--mt5700-font-size-base);
+  font-weight: 600;
+  color: var(--mt5700-text);
+  margin-bottom: var(--mt5700-space-sm);
+}
+
+/* ==========================================================================
+   波束高亮与锁频条目隐藏（CSS v5.4.0）
+   --------------------------------------------------------------------------
+   .mt5700-beam.is-best 标出当前最强 SSB 波束；.mt5700-lock-items.is-hidden
+   用于锁频类型为「关闭」时收起条目容器（该状态下只显示空态说明）。
+   ========================================================================== */
+.mt5700-beam.is-best {
+  color: var(--mt5700-text);
+  font-weight: 600;
+}
+.mt5700-beam.is-best .mt5700-mono {
+  color: var(--mt5700-accent);
+}
+.mt5700-lock-items.is-hidden {
+  display: none;
+}
+
+/* ==========================================================================
+   波束分布迷你条（CSS v5.5.0）
+   --------------------------------------------------------------------------
+   ^NRSSBID 的 8 个 SSB 波束：8 行明细对固定安装的路由器没有信息量，
+   压缩成一排小柱（按波束号排列，高度/颜色表示 RSRP，最强束高亮）。
+   ========================================================================== */
+.mt5700-beam-strip {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 56px;
+  padding: var(--mt5700-space-xs) 0;
+}
+.mt5700-beam-cell {
+  flex: 1 1 0;
+  min-height: 4px;
+  border-radius: 4px 4px 0 0;
+  background: var(--mt5700-border-subtle);
+  transition: height var(--mt5700-transition-base);
+}
+.mt5700-beam-cell.is-best {
+  outline: 2px solid var(--mt5700-accent);
+  outline-offset: 1px;
 }

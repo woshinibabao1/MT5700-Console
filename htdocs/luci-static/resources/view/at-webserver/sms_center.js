@@ -352,8 +352,14 @@ return L.view.extend({
 						var m = String(res.data).match(/\+CSCA: "([^"]+)"/);
 						if (m) smsc = m[1];
 					}
-					var formatted = target.replace(/^\+/, '');
-					var parts = SmsEncode.buildSubmitParts({ smsc: smsc, destination: formatted, message: content });
+					/*
+					 * 保留号码开头的 '+'：TP-DA 的类型字节（TOA）要靠它区分
+					 * 0x91（国际号码，带国家码）与 0x81（国内/未知）。
+					 * 此前这里先把 '+' 去掉，编码器就只能永远判成 0x81，
+					 * 给 +86… 这类国际号码发短信时 TOA 是错的。
+					 * 编码器内部自己会过滤非数字字符，不需要在这里预处理。
+					 */
+					var parts = SmsEncode.buildSubmitParts({ smsc: smsc, destination: target, message: content });
 				var chain2 = Promise.resolve();
 				for (var i = 0; i < parts.length; i++) {
 					chain2 = chain2.then(function (part) {

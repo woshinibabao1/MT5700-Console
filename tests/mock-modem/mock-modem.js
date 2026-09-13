@@ -33,7 +33,7 @@ const state = {
 function replyFor(cmd) {
 	const c = cmd.replace(/\r/g, '');
 	if (c === 'AT') return 'OK';
-	if (c === 'ATI') return 'Manufacturer: MTK\r\nModel: MT5700M\r\nRevision: MT5700M_CN_A0_V002\r\nIMEI: ' + state.imei + '\r\nOK';
+	if (c === 'ATI') return 'Manufacturer: TD Tech Ltd.\r\nModel: MT5700M-CN\r\nRevision: V200R001C20B025\r\nIMEI: ' + state.imei + '\r\nOK';
 	if (c === 'AT+CGSN') return state.imei + '\r\nOK';
 	if (c === 'AT+CMEE=2') return 'OK';
 	if (c === 'AT+CMEE?') return '+CMEE: 2\r\nOK';
@@ -46,20 +46,22 @@ function replyFor(cmd) {
 	if (c === 'AT+CFUN?') return '+CFUN: ' + state.cfun + '\r\nOK';
 	if (c === 'AT+CFUN=0') { state.cfun = 0; return 'OK'; }
 	if (c === 'AT+CFUN=1') { state.cfun = 1; return 'OK'; }
-	if (c === 'AT+CSQ?') return '+CSQ: 25,99\r\nOK';
-	if (c === 'AT^HCSQ?') return '^HCSQ: 0,0,0,0,17,45,25,10,14\r\nOK';
-	if (c === 'AT+CGREG?') return '+CGREG: 0,5\r\nOK';
-	if (c === 'AT+C5GREG?') return '+C5GREG: 0,5\r\nOK';
+	if (c === 'AT+CSQ?') return 'ERROR';   // 真机不支持该形式
+	if (c === 'AT+CSQ') return '+CSQ:\r\nOK';   // 真机实测：值区为空
+	if (c === 'AT^HCSQ?') return '^HCSQ: "NR",68,211,31\r\nOK';
+	if (c === 'AT+CGREG?') return '+CGREG: 1,1\r\nOK';
+	if (c === 'AT+C5GREG?') return '+C5GREG: 2,1,"14225C","0000000C027F5065",11,1,"01"\r\nOK';
 	if (c === 'AT+CREG?') return '+CREG: 0,1\r\nOK';
 	if (c === 'AT+COPS?') return '+COPS: 0,0,"CHN-UNICOM",7\r\nOK';
 	if (c === 'AT+COPS=3,2') return 'OK';
-	if (c === 'AT^MONSC?') return '^MONSC: 0,460,01,0,250,29001,119,71,2360,46,20,97,0\r\nOK';
-	if (c === 'AT^HFREQINFO?') return '^HFREQINFO: 0,2360,46,0,97,0\r\nOK';
-	if (c === 'AT^LENDC?') return '^LENDC: 0,1,10,0,0\r\nOK';
-	if (c === 'AT^TXPOWER?') return '^TXPOWER: 0,15,23\r\nOK';
-	if (c === 'AT^NTXPOWER?') return '^NTXPOWER: 0,1,20,23\r\nOK';
-	if (c === 'AT+CGPADDR') return '+CGPADDR: 1,"10.10.1.2"\r\n+CGPADDR: 2,"2408:8400:8000:0:0:0:0:1"\r\nOK';
-	if (c === 'AT^CHIPTEMP?') return '^CHIPTEMP: 42\r\nOK';
+	if (c === 'AT^MONSC?') return 'ERROR';   // 真机不支持 ? 形式
+	if (c === 'AT^MONSC') return '^MONSC: NR,460,00,524910,1,C027F5065,114,14225C,-73,-9,23\r\nOK';
+	if (c === 'AT^HFREQINFO?') return '^HFREQINFO: 0,7,41,528960,2644800,60000,528960,2644800,60000,41,513000,2565000,100000,0,0,1400\r\nOK';   // 每 7 字段一个载波
+	if (c === 'AT^LENDC?') return '^LENDC: 1,0,0,0,0\r\nOK';
+	if (c === 'AT^TXPOWER?') return 'ERROR';   // 手册 §13.23 仅 GUL 有效；本机 NR SA 实测 0/3 恒 ERROR
+	if (c === 'AT^NTXPOWER?') return '^NTXPOWER: 2,6,12,-10,2644800\r\nOK';
+	if (c === 'AT+CGPADDR') return '+CGPADDR: 1,"10.1.42.244"\r\n+CGPADDR: 5,"36.9.129.90.51.117.63.92.24.212.187.187.170.233.248.14"\r\nOK';
+	if (c === 'AT^CHIPTEMP?') return '^CHIPTEMP: 408,405,400,410,390,390,410,410,410,420,400,400\r\nOK';
 	if (c === 'AT+CPIN?') return '+CPIN: READY\r\nOK';
 	if (c === 'AT+CMGL=4') {
 		state.smsSeq++;
@@ -73,57 +75,63 @@ function replyFor(cmd) {
 	}
 	if (c === 'AT+CSCA?') return '+CSCA: "' + state.csca + '",145\r\nOK';
 	if (c.startsWith('AT+CSCA=')) { const m = c.match(/AT\+CSCA="([^"]+)"/); if (m) state.csca = m[1]; return 'OK'; }
-	if (c === 'AT^CPMS?') return '^CPMS: "SM",1,50,"SM",1,50,"MT",1,50\r\nOK';
-	if (c === 'AT+CPMS?') return '+CPMS: "SM",1,50,"SM",1,50,"MT",1,50\r\nOK';
+	if (c === 'AT^CPMS?') return 'ERROR';   // 真机笔误形式；标准命令是 AT+CPMS?
+	if (c === 'AT+CPMS?') return '+CPMS: "SM",9,50,"SM",9,50,"SM",9,50\r\nOK';
 	if (c.startsWith('AT+CPMS=')) return 'OK';
 	if (c === 'AT+CMGD=1,4') return 'OK';
 	if (c.startsWith('AT+CMGD=')) return 'OK';
 	if (c === 'AT^IMSSWITCH?') return '^IMSSWITCH: ' + state.ims + '\r\nOK';
 	if (c.startsWith('AT^IMSSWITCH=')) { const m = c.match(/AT\^IMSSWITCH=([^,]+)/); if (m) state.ims = m[1] + ',0,0'; return 'OK'; }
 	if (c === 'AT+CEUS=1' || c === 'AT+CEUS=0') return 'OK';
-	if (c === 'AT^LTEFREQLOCK?') return '^LTEFREQLOCK: 0,0,0,""\r\nOK';
+	if (c === 'AT^LTEFREQLOCK?') return '^LTEFREQLOCK: 0\r\nOK';   // 真机未锁频时只回 lockType
 	if (c.startsWith('AT^LTEFREQLOCK=')) return 'OK';
-	if (c === 'AT^NRFREQLOCK?') return '^NRFREQLOCK: 0,0,0,""\r\nOK';
+	if (c === 'AT^NRFREQLOCK?') return '^NRFREQLOCK: 0\r\nOK';
 	if (c.startsWith('AT^NRFREQLOCK=')) return 'OK';
-	if (c === 'AT^C5GOPTION?') return '^C5GOPTION: 0,1,0\r\nOK';
-	if (c === 'AT+C5GOPTION=0,1,0') return 'OK';
-	if (c === 'AT^SYSINFO?') return '^SYSINFO: 0,7,2,0\r\nOK';
-	if (c === 'AT+CGDCONT?') return '+CGDCONT: 1,"IP","ims","",0,0,0,0,1,1,1\r\nOK';
+	if (c === 'AT^C5GOPTION?') return '^C5GOPTION: 1,1,1\r\nOK';
+	if (c.startsWith('AT^C5GOPTION=')) return 'OK';
+	if (c === 'AT^SYSINFO?') return 'ERROR';   // 真机实测不支持（app 未使用）
+	if (c === 'AT+CGDCONT?') return '+CGDCONT: 0,"IPV4V6","","",0,0,0,0,0,0,1,,,,,,0,,0,0,0,0\r\n+CGDCONT: 1,"IP","","",0,0,0,0,0,0,1,,,,,,0,,0,0,0,0\r\n+CGDCONT: 5,"IPV4V6","ims","",0,0,0,0,1,1,1,,,,,,0,,0,0,0,0\r\n+CGDCONT: 6,"IPV4V6","","",0,0,0,1,1,1,1,,,,,,0,,0,0,0,0\r\nOK';
 	if (c.startsWith('AT+CGDCONT=')) return 'OK';
 	if (c.startsWith('AT+CGACT=')) return 'OK';
-	if (c.startsWith('AT^NDISSTATQRY')) return '^NDISSTATQRY: 1,1,0,0,0,0,0\r\nOK';
-	if (c === 'AT+CGACT?') return '+CGACT: 1,1\r\nOK';
-	if (c === 'AT+SETAUTODIAL?') return '+SETAUTODIAL: 1\r\nOK';
+	if (c === 'AT^NDISSTATQRY') return 'ERROR';   // 真机只支持带 ? 的形式
+	if (c === 'AT^NDISSTATQRY?') return '^NDISSTATQRY: 1,1,,,"IPV4",0,,,"IPV6"\r\nOK';
+	if (c === 'AT+CGACT?') return '+CGACT: 1,1\r\n+CGACT: 5,1\r\n+CGACT: 6,0\r\n+CGACT: 21,0\r\n+CGACT: 22,0\r\n+CGACT: 23,0\r\n+CGACT: 24,0\r\n+CGACT: 25,0\r\n+CGACT: 26,0\r\n+CGACT: 27,0\r\n+CGACT: 28,0\r\n+CGACT: 29,0\r\n+CGACT: 30,0\r\n+CGACT: 31,0\r\nOK';
+	if (c === 'AT+SETAUTODIAL?') return '^SETAUTODIAL:1,1,"IP","","","",0\r\nOK';
 	if (c.startsWith('AT+SETAUTODIAL=')) return 'OK';
-	if (c === 'AT^SETMODE?') return '^SETMODE: 2,0,3\r\nOK';
+	if (c === 'AT^SETMODE?') return '4\r\nOK';   // 真机返回裸值
 	if (c.startsWith('AT^SETMODE=')) return 'OK';
-	if (c === 'AT^TDCFG?') return '^TDCFG: 1,1,1,1\r\nOK';
+	if (c === 'AT^TDCFG?') return '^TDCFG:\r\nMode: 1\r\nDmz: not cfg\r\nPostRoute: 0\r\nLHCM: 192.168.8.1,255.255.255.0,192.168.8.100,192.168.8.200\r\nShare-pdp: 0\r\nOK';
 	if (c.startsWith('AT^TDCFG=')) return 'OK';
 	if (c === 'AT^IPFILTERSWITCH=0' || c === 'AT^IPFILTERSWITCH?') return 'OK';
 	if (c === 'AT^DMZ=0') return 'OK';
 	if (c.startsWith('AT^DMZ=')) return 'OK';
-	if (c === 'AT^CONNECT?') return '+CONNECT: 0\r\nOK';
-	if (c === 'AT^SYSCFGEX?') return '^SYSCFGEX: 1,0,1,1,1,2FFFFFFFFFFFFFFFF,0,0,0,0,0,0,0\r\nOK';
+	if (c === 'AT^CONNECT?') return 'ERROR';   // 真机不支持；AT+CONNECT? 是 Rust 后端伪命令
+	if (c === 'AT^SYSCFGEX?') return '^SYSCFGEX: "080302",2000000680380,1,2,1E200000095\r\nOK';
 	if (c.startsWith('AT^SYSCFGEX=')) return 'OK';
-	if (c === 'AT^PHYNUM?') return '^PHYNUM: 0,0\r\nOK';
-	if (c === 'AT^SCICHG?') return '^SCICHG: 0\r\nOK';
+	if (c === 'AT^PHYNUM?') return '^PHYNUM:IMEI,864640060359112\r\n^PHYNUM:MACWLAN,\r\n^PHYNUM:SVN,00\r\nOK';
+	if (c === 'AT^SCICHG?') return '^SCICHG: 0,1\r\nOK';
 	if (c.startsWith('AT^SCICHG=')) return 'OK';
-	if (c === 'AT^HVSST?') return '^HVSST: 1,1,1,1\r\nOK';
+	if (c === 'AT^HVSST?') return '^HVSST: 1,1,0,1\r\nOK';
 	if (c === 'AT^TDSIMHP?') return '^TDSIMHP: 1\r\nOK';
 	if (c.startsWith('AT^TDSIMHP=')) return 'OK';
-	if (c === 'AT+CLCK?') return '+CLCK: "SC",1\r\nOK';
+	if (c === 'AT+CLCK?') return 'ERROR';   // 真机不支持（app 未使用）
 	if (c.startsWith('AT+CLCK=')) return 'OK';
-	if (c === 'AT+CPWD?') return '+CPWD: "SC",8\r\nOK';
+	if (c === 'AT+CPWD?') return 'ERROR';   // 真机不支持（app 未使用）
 	if (c.startsWith('AT+CPWD=')) return 'OK';
-	if (c === 'AT^TDPCIELANCFG?') return '^TDPCIELANCFG: 0,0\r\nOK';
-	if (c === 'AT^TDPMCFG?') return '^TDPMCFG: 0,0,0\r\nOK';
-	if (c === 'AT^NRRCCAPQRY?') return '^NRRCCAPQRY: 1,1,1,0,0\r\nOK';
+	if (c === 'AT^TDPCIELANCFG?') return '^TDPCIELANCFG: 0\r\nOK';
+	if (c === 'AT^TDPMCFG?') return '^TDPMCFG: 1,0,0,0\r\nOK';
+	if (c === 'AT^NRRCCAPQRY?') return 'ERROR';   // 手册 §13.26：只有 =<mode> 形式
+	if (c === 'AT^NRRCCAPQRY=0') return '^NRRCCAPQRY: 0,0,0,0,0,0,0,0,0,0,0,0\r\nOK';
+	if (c === 'AT^NRRCCAPQRY=1') return '^NRRCCAPQRY: 1,0,0,0,0,0,0,0,0,0,0,0\r\nOK';
+	if (c === 'AT^NRRCCAPQRY=2') return '^NRRCCAPQRY: 2,1,0,0,0,0,0,0,0,0,0,0\r\nOK';   // VoNR 能力
+	if (c === 'AT^NRRCCAPQRY=3') return '^NRRCCAPQRY: 3,1,0,0,0,0,0,0,0,0,0,0\r\nOK';   // NR CA 能力
+	if (c === 'AT^NRRCCAPQRY=5') return '^NRRCCAPQRY: 5,1,0,0,0,0,0,0,0,0,0,0\r\nOK';   // DSS 能力
 	if (c.startsWith('AT^NRRCCAPCFG=')) return 'OK';
 	if (c === 'AT^THERMAUTOFUN?') return '^THERMAUTOFUN: 1,85,0,0\r\nOK';
 	// 手册 13.27 ^MONSSC：NSA 辅站（PCI 十六进制 0x86=134，RSRP -70 在合法区间原样用）
 	if (c === 'AT^MONSSC') return '^MONSSC: "NR",2360,86,-70,-10,15,0\r\nOK';
-	// 手册 13.18 ^CASCELLINFO?：LTE CA 辅小区（12 字段，dlbw=3→10MHz，dlfreq 17500=1750.0MHz）
-	if (c === 'AT^CASCELLINFO?') return '^CASCELLINFO: 0,120,-75,-95,-12,3,1650,1750,16500,17500,3,3\r\nOK';
+	// 真机实测：NR SA 下无 LTE CA 辅小区，AT^CASCELLINFO? 恒回 ERROR（app 已不再查询）
+	if (c === 'AT^CASCELLINFO?') return 'ERROR';
 	// 手册 6.6 ^SIMSQ
 	if (c === 'AT^SIMSQ?') return '^SIMSQ: 0,12\r\nOK';
 	if (c === 'AT^THERMLDAUTOPARA?') return '^THERMLDAUTOPARA: 80,85,90,95,100,105,110,115,120\r\nOK';
@@ -137,7 +145,7 @@ function replyFor(cmd) {
 	if (c === 'AT^CELLSCAN=STATE') return '^CELLSCAN: 0,0\r\nOK';
 	if (c === 'AT^CELLSCAN=ABORT') return '^CELLSCAN: 0,0\r\nOK';
 	if (c.startsWith('AT^CELLSCAN=')) return '^CELLSCAN: 0,0\r\nOK';
-	if (c === 'AT+NWTIME?') return '+NWTIME: 25/09/10,10:30:00+32\r\nOK';
+	if (c === 'AT^NWTIME?') return '^NWTIME: 26/09/13,01:02:15+32,00\r\nOK';   // 真机前缀是 ^NWTIME；另可用 90/01/06 模拟「网络未下发时间」
 	if (c === 'AT+CMGS=0') return 'ERROR'; // 实际发送由带 \rPDU 的命令触发
 	if (c.startsWith('AT+CMGS=')) return '\r\nOK';
 	if (c === 'AT+CMGS') return '>';

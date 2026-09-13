@@ -30,7 +30,7 @@ return L.view.extend({
 		var busy = false;
 		var expanded = false;
 
-		var statusCard = Mt5700.card('运行状态', '');
+		var statusCard = Mt5700.card('运行状态', '当前编排是否已启用、下一次切换时间');
 		var statusCardBody = E('div');
 		statusCard._body.appendChild(statusCardBody);
 		body.appendChild(statusCard);
@@ -38,10 +38,36 @@ return L.view.extend({
 		var statusLine = E('div', { 'class': 'mt5700-inline' });
 		statusCardBody.appendChild(statusLine);
 
-		var formCard = Mt5700.card('编排配置', '总开关在「服务 → 模组管理 → 服务配置」的 schedule_enabled，启用后此页才可编辑');
+		/*
+		 * 总开关（原在「服务配置」页，现归位到本页）：
+		 * 开关与配置在同一页，不必再来回跳页；写 UCI 后由后端调度生效。
+		 */
+		var schedChk = E('input', { type: 'checkbox' });
+		var schedSwitch = E('div', { 'class': 'mt5700-switch' });
+		schedSwitch.appendChild(schedChk);
+		statusCardBody.appendChild(Mt5700.formGroup('启用定时锁频', schedSwitch,
+			'关闭后后端不再按时段切换锁频；开启后才能编辑下方编排'));
+		schedChk.addEventListener('change', function () {
+			var on = schedChk.checked;
+			try {
+				L.uci.set('at-webserver', 'config', 'schedule_enabled', on ? '1' : '0');
+			} catch (e) {
+				Mt5700.error('无法写入配置');
+				schedChk.checked = !on;
+				return;
+			}
+			AtWs.uci.uciCommit('at-webserver').then(function () {
+				Mt5700.success(on ? '定时锁频已启用' : '定时锁频已关闭');
+				load();
+			}).catch(function () {
+				Mt5700.error('保存失败');
+				schedChk.checked = !on;
+			});
+		});
+
+		var formCard = Mt5700.card('编排配置', '先在「运行状态」卡打开总开关；夜间/日间时段各自独立启用');
 		var formBody = E('div');
 		formCard._body.appendChild(formBody);
-		formCard.style.display = 'none';
 		body.appendChild(formCard);
 
 		/* ---------- 通用小工具 ---------- */
@@ -251,6 +277,16 @@ return L.view.extend({
 			try {
 				if (!draft) throw new Error('配置未加载');
 				if (!HHMM(draft.night.start) || !HHMM(draft.night.end)) throw new Error('夜间时段请填写 HH:MM 格式，例如 22:00');
+				/*
+				 * 首尾不能相同：后端的时段判断是
+				 *   start > end → 跨零点（cur >= start || cur < end）
+				 *   否则        → cur >= start && cur < end
+				 * 当 start == end 时落到第二个式子，恒为 false —— 夜间模式会静默永不生效，
+				 * 用户只会觉得"设了没用"。这里直接拦下并说清原因。
+				 */
+				if (draft.night.start === draft.night.end) {
+					throw new Error('夜间时段的开始与结束时间不能相同（相同会导致该时段永不生效）');
+				}
 
 				var payload = {
 					enabled: true,
@@ -300,25 +336,24 @@ return L.view.extend({
 				statusLine.appendChild(E('span', { 'class': 'mt5700-hint' }, '暂无运行状态'));
 			}
 
-			// 总开关状态
-			formCard.style.display = '';
-			if (!cfg || !cfg.enabled || !draft) {
-				formCard.style.display = 'none';
-				statusLine.appendChild(E('span', { 'class': 'mt5700-hint' },
-					' （定时锁频未启用，请到「服务 → 模组管理 → 服务配置」开启 schedule_enabled）'));
-				return;
-			}
-
-			formBody.innerHTML = '';
-			if (!expanded) {
-				formBody.appendChild(Mt5700.primaryButton('展开配置', function () {
-					expanded = true;
-					buildForm();
-				}));
-			} else {
-				buildForm();
-			}
+		// 总开关状态：卡片始终显示——未启用时给出可行动的提示，而不是把整张卡藏掉
+		formCard.style.display = '';
+		formBody.innerHTML = '';
+		if (!cfg || !cfg.enabled || !draft) {
+			formBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+				'定时锁频未启用：打开上方「启用定时锁频」开关后即可编排时段。'));
+			return;
 		}
+
+		if (!expanded) {
+			formBody.appendChild(Mt5700.primaryButton('展开配置', function () {
+				expanded = true;
+				buildForm();
+			}));
+		} else {
+			buildForm();
+		}
+	}
 
 		/* ---------- 初始化 ---------- */
 
@@ -331,6 +366,12 @@ return L.view.extend({
 			}
 			if (err) console.warn(err);
 		}).then(function () {
+			// 读取总开关（UCI）后再加载状态
+			return L.uci.load('at-webserver').catch(function () {});
+		}).then(function () {
+			try {
+				schedChk.checked = (L.uci.get('at-webserver', 'config', 'schedule_enabled') || '0') === '1';
+			} catch (e) { /* 读不到就保持未勾选 */ }
 			load();
 		});
 

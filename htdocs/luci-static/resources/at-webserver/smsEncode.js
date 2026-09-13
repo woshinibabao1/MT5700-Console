@@ -15,35 +15,37 @@ var SmsEncode = (function () {
 
 	var GSM7_ALPHABET = '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\x1bÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà';
 
-	function isGsm7Char(ch) {
-		var code = ch.charCodeAt(0);
-		// 基本字母表里的可打印字符
-		if (GSM7_ALPHABET.indexOf(ch) >= 0) return true;
-		// ESC 扩展表（^ 0x1B 转义）：|^€{}[]~\
-		var esc = '|^€{}[]~\\';
-		return esc.indexOf(ch) >= 0;
+	/*
+	 * GSM7 扩展表：这些字符要写成 ESC(0x1B) + 下面这个字节，因此每个占 2 个 septet。
+	 * 取值**必须**与解码端 `src/rust/src/pdu.rs::gsm7_extension` 逐项一致。
+	 * 早期实现用的是「私有字符串的下标」（比如 '^' → 1、'€' → 2），那是错的：
+	 * 收件人会把 '^' 解成 ESC+£、'€' 解成 ESC+$，凡含这些字符的短信全是乱码。
+	 */
+	var EXT_MAP = { '^': 0x14, '{': 0x28, '}': 0x29, '\\': 0x2f, '[': 0x3c, '~': 0x3d, ']': 0x3e, '|': 0x40, '€': 0x65 };
+	var EXT_CHARS = '^' + '{' + '}' + '\\' + '[' + '~' + ']' + '|' + '€';
+
+	function isExtChar(ch) {
+		return Object.prototype.hasOwnProperty.call(EXT_MAP, ch);
 	}
 
 	function gsm7Code(ch) {
-		var code = ch.charCodeAt(0);
 		var basic = GSM7_ALPHABET.indexOf(ch);
 		if (basic >= 0) return basic;
-		var esc = '|^€{}[]~\\';
-		var e = esc.indexOf(ch);
-		if (e >= 0) return e; // 扩展字符：输出 0x1B 前置
+		if (isExtChar(ch)) return EXT_MAP[ch];
+		var code = ch.charCodeAt(0);
 		if (code === 0x0d) return 13;
 		if (code === 0x0a) return 10;
 		if (code === 0x00) return 0;
 		return null;
 	}
 
-	// 把字符列表编码成 7bit 位流（低位在前）。扩展字符输出 0x1B + 表内索引。
+	// 把字符列表编码成 7bit 位流（低位在前）。扩展字符输出 0x1B + 表内真值。
 	function packSeptets(chars) {
 		var bits = [];
 		for (var i = 0; i < chars.length; i++) {
 			var c = gsm7Code(chars[i]);
 			if (c === null) return null;
-			if (GSM7_ALPHABET.indexOf(chars[i]) < 0 && '|^€{}[]~\\'.indexOf(chars[i]) >= 0) {
+			if (isExtChar(chars[i])) {
 				pushBits(bits, 0x1b, 7);
 				pushBits(bits, c, 7);
 			} else {
@@ -100,7 +102,7 @@ var SmsEncode = (function () {
 			packed += digits[i + 1] + digits[i];
 		}
 		var len = isSmsc ? (digits.length / 2 + 1) : raw.length;
-		return len.toString(16).padStart(2, '0') + tonNpi.toString(16).padStart(2, '0') + packed.toUpperCase();
+		return (len.toString(16) + tonNpi.toString(16)).padStart(4, '0').toUpperCase() + packed.toUpperCase();
 	}
 
 	// 用户数据（TP-UD）构造
@@ -114,40 +116,70 @@ var SmsEncode = (function () {
 				bytes.push((code >> 8) & 0xff, code & 0xff);
 			}
 			if (concatHeader) bytes = concatHeader.concat(bytes);
-			return { data: bytes, udl: bytes.length, septets: null };
+			// UCS2 的 TP-UDL 按八位组计，UDH 的 6 个八位组一并计入
+			return { data: bytes, udl: bytes.length };
 		}
 
-		// GSM 7bit：header 字节直接作为 8-bit 位流前置，然后用户 septets 连续打包
+		// GSM 7bit：header 字节先作为 8-bit 位流写入，再补填充位对齐到 septet 边界，
+		// 最后接用户 septets。
 		var bits = [];
 		if (concatHeader) {
 			for (var i = 0; i < concatHeader.length; i++) pushBits(bits, concatHeader[i], 8);
+			/*
+			 * 必须补齐到 7 位（septet）边界：6 个八位组 = 48 位，补 1 个填充位变 49 位 = 7 个 septet。
+			 * 这正是「带 UDH 时每片正文只剩 153 个 septet」（160 − 7）的由来，
+			 * 也是本项目 pdu.rs 解码端的口径（udh_septets = (udh_len * 8 + 6) / 7 = 7）。
+			 * 少这一位会让收件人整段错位 1 bit，解出来是乱码。
+			 */
+			while (bits.length % 7 !== 0) bits.push(0);
 		}
 		var packed = packSeptets(Array.from(message));
 		if (packed === null) return null; // 含 GSM7 无法表示的字符，调用方应改用 UCS2
 		bits = bits.concat(packed);
 		var octets = bitsToOctets(bits);
-		return { data: octets, udl: message.length + (concatHeader ? 6 : 0), septets: message.length + (concatHeader ? 7 : 0) };
+		/*
+		 * TP-UDL（7bit）按 **septet** 计，不是按字符数：
+		 *   · 扩展字符（€ ^ { } [ ] ~ | \）在 7bit 流里占 2 个 septet；
+		 *   · UDH 也计入（6 字节头占 7 个 septet）。
+		 * 此前这里用 message.length 计数、UDH 只加 6，导致
+		 *   「含扩展字符的短消息被截断」与「长短信每片少 1 个字」。
+		 */
+		var msgSeptets = 0;
+		var chars = Array.from(message);
+		for (var k = 0; k < chars.length; k++) {
+			msgSeptets += (isExtChar(chars[k])) ? 2 : 1;
+		}
+		var udhSeptets = concatHeader ? Math.ceil(concatHeader.length * 8 / 7) : 0;
+		var udl = udhSeptets + msgSeptets;
+		return { data: octets, udl: udl };
 	}
 
 	// 构建单条 SMS-SUBMIT 的 TPDU（不含 SMSC 部分），返回 hex
 	function buildTpdu(opts) {
 		var udhi = opts.udhi || null;
-		var firstOctet = 0x01; // MTI=01 (SMS-SUBMIT)
-		if (udhi) firstOctet |= 0x40; // TP-UDHI
-		firstOctet |= 0x10; // TP-VPF=10 (relative)
-		firstOctet |= 0x20; // TP-RD=1 (reject duplicates)
+		/*
+		 * TP 首字节位序（厂商手册附录 表 20-6，b7..b0）：
+		 *   TP-RP(b7) TP-UDHI(b6) TP-SRR(b5) TP-VPF(b4:b3) TP-RD(b2) TP-MTI(b1:b0)
+		 */
+		var firstOctet = 0x01;          // MTI=01 (SMS-SUBMIT)
+		if (udhi) firstOctet |= 0x40;   // TP-UDHI
+		firstOctet |= 0x10;             // TP-VPF=10：TP-VP 用相对格式（1 字节，下方 vp='AA'）
+		firstOctet |= 0x04;             // TP-RD=1：请求短消息中心拒收重复短信
+		/* 注意：0x20 是 bit5 = TP-SRR「请求状态报告」，不是 TP-RD。
+		 * 此前这里写成 0x20，注释却写 TP-RD —— 实际效果是每条短信都向网络请求状态报告，
+		 * 而设备 CNMI=2,1,0,2,0 的 <ds>=2 会把 +CDS 上报给终端，全项目又没有 +CDS 处理。 */
 
 		var da = encodeAddress(opts.destination);
 		var mr = '00';
 		var pid = '00';
 		var dcs = opts.encoding === 'UCS2' ? '08' : '00';
-		var vp = 'AA'; // 24 小时（相对有效期，见 23.040 VP=0xAA）
+		var vp = 'AA'; // 24 小时（相对有效期，23.040 VP=0xAA）
 
 		var ud = buildUserData(opts.message, udhi, opts.encoding);
 		if (!ud) return null;
-		var udl = opts.encoding === 'UCS2' ? ud.udl.toString(16).padStart(2, '0') : ud.udl.toString(16).padStart(2, '0');
+		var udl = ud.udl.toString(16).padStart(2, '0').toUpperCase();
 
-		return firstOctet.toString(16).padStart(2, '0') + mr + da + pid + dcs + vp + udl + octetsToHex(ud.data);
+		return firstOctet.toString(16).padStart(2, '0').toUpperCase() + mr + da + pid + dcs + vp + udl + octetsToHex(ud.data);
 	}
 
 	// 计算分片参数
@@ -164,73 +196,90 @@ var SmsEncode = (function () {
 		return false;
 	}
 
-	api.messageStats = function (message) {
-		if (!message) return { encoding: '7bit', parts: 0, chars: Array.from(message).length };
-		var ucs2 = needsUcs2(message);
-		var chars = Array.from(message).length;
-		if (!ucs2) {
-			// 扩展字符每个占 2 个 septet
-			var septets = 0;
-			Array.from(message).forEach(function (ch) {
-				septets += '|^€{}[]~\\'.indexOf(ch) >= 0 ? 2 : 1;
-			});
-			var parts = septets <= GSM7_MAX ? 1 : Math.ceil(septets / GSM7_MAX_UDH);
-			return { encoding: '7bit', parts: parts, chars: chars, septets: septets };
+	/*
+	 * 分片算法只写一份：messageStats（输入框下方的提示）与 buildSubmitParts（真正发出去的）
+	 * 必须走同一套逻辑，否则会出现「提示说 2 条、实际发 3 条」。
+	 */
+	function totalSeptets(message) {
+		var chars = Array.from(message);
+		var n = 0;
+		for (var i = 0; i < chars.length; i++) n += isExtChar(chars[i]) ? 2 : 1;
+		return n;
+	}
+
+	/** GSM7 长短信按 septet 精确切分（每片正文 ≤153 septets，扩展字符算 2） */
+	function gsm7Chunks(message) {
+		var chars = Array.from(message);
+		var chunks = [], tmp = '', tmpS = 0;
+		for (var i = 0; i < chars.length; i++) {
+			var s = isExtChar(chars[i]) ? 2 : 1;
+			if (tmpS + s > GSM7_MAX_UDH && tmp) { chunks.push(tmp); tmp = ''; tmpS = 0; }
+			tmp += chars[i];
+			tmpS += s;
 		}
-		var parts = chars <= 70 ? 1 : Math.ceil(chars / (UCS2_MAX_UDH / 2));
-		return { encoding: 'UCS2', parts: parts, chars: chars };
+		if (tmp) chunks.push(tmp);
+		return chunks;
+	}
+
+	/*
+	 * UCS2 长短信按 **UTF-16 码元**（code unit）切分，而不是码点：
+	 * 容量按八位组算 —— 单条 ≤140 字节 = 70 码元，带 UDH 每片 ≤134 字节 = 67 码元。
+	 * 增补平面字符（emoji 等）占 2 个码元，若按码点数切分，
+	 * 67 个 emoji 会被塞进一片 = 268 字节，PDU 直接无效。
+	 * 刀口若落在代理对中间则退一个码元，避免切出孤立代理项。
+	 */
+	function ucs2Chunks(message) {
+		var perUnits = Math.floor(UCS2_MAX_UDH / 2);     // 67
+		var chunks = [];
+		var start = 0;
+		while (start < message.length) {
+			var end = Math.min(start + perUnits, message.length);
+			if (end < message.length) {
+				var prev = message.charCodeAt(end - 1), next = message.charCodeAt(end);
+				if (prev >= 0xD800 && prev <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) end -= 1;
+			}
+			chunks.push(message.slice(start, end));
+			start = end;
+		}
+		return chunks;
+	}
+
+	api.messageStats = function (message) {
+		if (!message) return { encoding: '7bit', parts: 0, chars: 0 };
+		var chars = Array.from(message).length;
+		if (!needsUcs2(message)) {
+			var septets = totalSeptets(message);
+			var parts7 = septets <= GSM7_MAX ? 1 : gsm7Chunks(message).length;
+			return { encoding: '7bit', parts: parts7, chars: chars, septets: septets };
+		}
+		var partsU = message.length <= Math.floor(UCS2_MAX / 2) ? 1 : ucs2Chunks(message).length;
+		return { encoding: 'UCS2', parts: partsU, chars: chars };
 	};
 
 	// 构建发送分片，等价 buildSubmitParts
 	api.buildSubmitParts = function (opts) {
 		var message = opts.message || '';
-		var ucs2 = needsUcs2(message);
-		var chars = Array.from(message);
 
 		var parts = [];
-		if (!ucs2) {
-			// 先算总 septets
-			var septets = 0;
-			chars.forEach(function (ch) { septets += '|^€{}[]~\\'.indexOf(ch) >= 0 ? 2 : 1; });
-			if (septets <= GSM7_MAX) {
+		if (!needsUcs2(message)) {
+			if (totalSeptets(message) <= GSM7_MAX) {
 				parts.push({ message: message, encoding: '7bit', udhi: null });
 			} else {
-				// 长短信：按字符分包（近似 septets，扩展字符少时按字符数分包即可）
-				var per = GSM7_MAX_UDH;
-				var count = Math.ceil(septets / per);
+				var chunks = gsm7Chunks(message);
 				var ref = Math.floor(Math.random() * 255) + 1;
-				// 重新按字符精确分包
-				var cur = [], curSeptets = 0, seq = 0, total = 0;
-				// 先估算 total：按 septet 精确切分
-				var chunks = [];
-				var tmp = [], tmpS = 0;
-				for (var i = 0; i < chars.length; i++) {
-					var s = '|^€{}[]~\\'.indexOf(chars[i]) >= 0 ? 2 : 1;
-					if (tmpS + s > per && tmp.length) {
-						chunks.push(tmp); tmp = []; tmpS = 0;
-					}
-					tmp.push(chars[i]); tmpS += s;
-				}
-				if (tmp.length) chunks.push(tmp);
-				total = chunks.length;
-				for (var c = 0; c < chunks.length; c++) {
-					parts.push({ message: chunks[c].join(''), encoding: '7bit', udhi: { ref: ref, total: total, seq: c + 1 } });
-				}
+				chunks.forEach(function (seg, i) {
+					parts.push({ message: seg, encoding: '7bit', udhi: { ref: ref, total: chunks.length, seq: i + 1 } });
+				});
 			}
 		} else {
-			if (chars.length <= 70) {
+			if (message.length <= Math.floor(UCS2_MAX / 2)) {
 				parts.push({ message: message, encoding: 'UCS2', udhi: null });
 			} else {
-				var perC = Math.floor(UCS2_MAX_UDH / 2); // 67 octets → 33 chars
-				var totalC = Math.ceil(chars.length / perC);
+				var chunksU = ucs2Chunks(message);
 				var refC = Math.floor(Math.random() * 255) + 1;
-				for (var i = 0; i < totalC; i++) {
-					parts.push({
-						message: chars.slice(i * perC, (i + 1) * perC).join(''),
-						encoding: 'UCS2',
-						udhi: { ref: refC, total: totalC, seq: i + 1 }
-					});
-				}
+				chunksU.forEach(function (seg, i) {
+					parts.push({ message: seg, encoding: 'UCS2', udhi: { ref: refC, total: chunksU.length, seq: i + 1 } });
+				});
 			}
 		}
 

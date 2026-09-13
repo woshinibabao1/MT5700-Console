@@ -6,16 +6,16 @@
 /* global L, AtWs, Parse, Ui, Mt5700 */
 
 /**
- * 网络状态 - 新 UI 视觉 + 基准 v1.3.4 功能
+ * 网络状态 - 上游原版视觉 + 基准 v1.3.4 功能
  *
  * 等价迁移原 WebUI network/Info.tsx，并按「一个主题一张卡片」重新组织，避免信息重叠：
- *   ① 信号质量     主小区 RSRP/RSRQ/SINR + 信号百分比 + 调制方式(MCS)
+ *   ① 信号质量     主小区 RSRP/RSRQ/SINR + 调制方式(MCS)，头部放刷新控制
  *   ② 连接状态     注册/运营商/签约速率 + 连接诊断(ENDC/5GC/发射功率/PDP) + IP 与 DNS
- *   ③ 载波与聚合   ^HFREQINFO 载波列表（每载波 7 字段）+ CA / EN-DC 状态
+ *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量
- *   ⑤ SIM 与设备   SIM 卡、模块标识、网络时间、各路温度
- * 原「载波聚合」与「辅载波信号」、原「实时速率/速率曲线/流量统计」、
- * 原「连接诊断/IP 与 DNS」、原「模组温度」均已合并进上述卡片。
+ *   ⑤ SIM 与设备   SIM 卡、模块标识、各路传感器温度
+ * 版式与上游原版一致：载波与聚合满宽 → 信号质量满宽 → [连接状态 | SIM 与设备] 双列
+ * → 速率与流量满宽。载波表列与上游快照一致（制式/频段/频点/带宽/PCI/RSRP/RSRQ/SINR/强度）。
  */
 
 return L.view.extend({
@@ -24,14 +24,18 @@ return L.view.extend({
 		var page = Mt5700.page('网络状态', '实时网络信息与信号质量');
 		var body = page._body;
 
+		/* ---------- 顶部连接状态条 ----------
+		 * 与其它页一致的 at-status-card（AT 服务 / RPC / SIM），不再做读数带。 */
 		var connBar = E('div');
-		body.appendChild(connBar);
 		Mt5700.renderConnectionBar(connBar);
+		body.appendChild(connBar);
 
 		/* ---------- 面板骨架（按「一个主题一张卡片」组织，避免信息重叠） ---------- */
 
-		/* ① 信号质量：主小区 RSRP/RSRQ/SINR + 信号百分比 + 调制方式(MCS) */
-		var signalCard = Mt5700.card('信号质量', '主小区 RSRP / RSRQ / SINR、信号百分比与调制方式');
+		/* ① 信号质量：主小区 RSRP/RSRQ/SINR + 信号百分比 + 调制方式(MCS)
+		 * 刷新控制（自动刷新 + 手动刷新）归位到这张卡的头部（相关控件按业务归位） */
+		var sigExtra = E('div');
+		var signalCard = Mt5700.card('信号质量', '主小区信号与调制方式', sigExtra);
 		var sigGrid = E('div', { 'class': 'mt5700-metrics' });
 		signalCard._body.appendChild(sigGrid);
 		var mcsGrid = E('div', { 'class': 'mt5700-metrics mt5700-mt-md' });
@@ -39,23 +43,25 @@ return L.view.extend({
 		body.appendChild(signalCard);
 
 		/* ② 连接状态：注册 / 运营商 / 签约速率 + 连接诊断 + IP 与 DNS（原三张卡合并） */
-		var connCard = Mt5700.card('连接状态', '网络注册、运营商、连接诊断与 IP / DNS');
+		var connCard = Mt5700.card('连接状态', '注册、诊断与地址');
 		var connBody = E('div');
 		connCard._body.appendChild(connBody);
 		var diagBox = E('div', { 'class': 'mt5700-mt-md' });
 		connCard._body.appendChild(diagBox);
 		var dhcpBox = E('div', { 'class': 'mt5700-mt-md' });
 		connCard._body.appendChild(dhcpBox);
-		body.appendChild(connCard);
 
 		/* ③ 载波与聚合：^HFREQINFO 载波列表 + 聚合状态（原「载波聚合」+「辅载波信号」合并） */
-		var carrierCard = Mt5700.card('载波与聚合', 'AT^HFREQINFO 上报的载波，每载波 7 个字段');
+		var carrierCard = Mt5700.card('载波与聚合', '主小区身份与各载波');
 		var carrierBox = E('div');
 		carrierCard._body.appendChild(carrierBox);
 		body.appendChild(carrierCard);
 
-		/* ④ 速率与流量：实时速率 + 速率曲线 + 收发流量统计（原三张卡合并） */
-		var rateCard = Mt5700.card('速率与流量', '接口实时速率（每秒采样）、速率曲线与流量统计');
+		/* ④ 速率与流量：实时速率 + 速率曲线 + 收发流量统计（原三张卡合并）
+		 * 头部放「实时监测」开关：关掉后停止每秒采样（不再读接口计数器），
+		 * 流量统计仍随慢档刷新。 */
+		var rateExtra = E('div');
+		var rateCard = Mt5700.card('速率与流量', '实时速率与流量统计', rateExtra);
 		var speedRow = E('div', { 'class': 'mt5700-speed-row' });
 		rateCard._body.appendChild(speedRow);
 		var chart = E('div', { 'class': 'mt5700-chart' });
@@ -64,20 +70,21 @@ return L.view.extend({
 		rateCard._body.appendChild(flowGrid);
 		body.appendChild(rateCard);
 
-		/* ⑤ SIM 与设备：SIM 卡、模块标识、网络时间与各路温度 */
-		var devCard = Mt5700.card('SIM 与设备', 'SIM 卡、模块标识、网络时间与温度（60 秒节流刷新）');
+		/* ⑤ SIM 与设备：SIM 卡、模块标识与各路传感器温度（同一张表铺开，不跳转、不重复） */
+		var devCard = Mt5700.card('SIM 与设备', 'SIM、模块标识与各路传感器温度');
 		var devBody = E('div');
 		devCard._body.appendChild(devBody);
-		var tempGrid = E('div', { 'class': 'mt5700-metrics mt5700-mt-md' });
-		devCard._body.appendChild(tempGrid);
-		body.appendChild(devCard);
 
-		/* 顺序与配对（与原版顺序一致，也让宽屏双列的两列高度接近）：
+		/* 版式与上游原版一致：
+		     载波与聚合（满宽，表格含逐载波 RSRP/RSRQ/SINR/强度）
 		     信号质量（满宽）
-		     连接状态 | SIM 与设备
-		     载波与聚合 | 速率与流量
-		   原先 SIM 与设备排在最后，双列时右侧会空出一大片。 */
-		body.insertBefore(devCard, carrierCard);
+		     连接状态 | SIM 与设备（双列卡区 .mt5700-cards）
+		     速率与流量（满宽） */
+		var duo = E('div', { 'class': 'mt5700-cards' });
+		duo.appendChild(connCard);
+		duo.appendChild(devCard);
+		body.insertBefore(duo, rateCard);
+		body.insertBefore(carrierCard, signalCard);
 
 		/* ---------- 状态 ---------- */
 
@@ -87,8 +94,8 @@ return L.view.extend({
 				rsrp: null, rsrq: null, sinr: null, sysMode: '未知', signalPercent: ''
 			},
 			carriers: [],
-			secondaryNR: [], secondaryLTE: [],
-			diag: { endc: null, reg: null, tx: null, nrTx: [], addrs: [] },
+			nrssbid: null,
+			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
 			temps: { sub3GPA: 0, sub6GPA: 0, mimoPa: 0, tcxo: 0, ap1: 0, ap2: 0, modem1: 0 },
 			flow: { lastDsTime: 0, lastTxFlow: 0, lastRxFlow: 0, totalDsTime: 0, totalTxFlow: 0, totalRxFlow: 0 },
 			dhcpv4: null, dhcpv6: null, ipv6Cap: null,
@@ -119,12 +126,10 @@ return L.view.extend({
 			98: ['卡失效', true], 99: ['已移除', true], 100: ['卡错误', true]
 		};
 
-		/* 敏感号段打码：只保留前 4 位与后 4 位 */
-		function maskNum(v) {
-			var t = String(v == null ? '' : v).replace(/[^0-9]/g, '');
-			if (!t) return '—';
-			if (t.length <= 8) return t;
-			return t.slice(0, 4) + ' **** ' + t.slice(-4);
+		/* 号段显示完整值（用户明确要求：本机状态页不打码） */
+		function fullNum(v) {
+			var t = String(v == null ? '' : v).trim();
+			return t || '—';
 		}
 
 		function firstValueLine(data) {
@@ -142,25 +147,12 @@ return L.view.extend({
 			catch (e) { return ''; }
 		}
 
-		/* ^NWTIME: 26/09/12,17:18:47+32,00 —— 时区以 15 分钟为单位（+32 → UTC+8） */
-		function parseNetTime(txt) {
-			var m = String(txt == null ? '' : txt).match(
-				/(\d{2})\/(\d{2})\/(\d{2}),(\d{2}):(\d{2}):(\d{2})([+-]\d+)/);
-			if (!m) return null;
-			var qh = parseInt(m[7], 10) / 4;
-			var tz = (qh >= 0 ? '+' : '-') + String(Math.floor(Math.abs(qh))).padStart(2, '0') + ':00';
-			return '20' + m[1] + '-' + m[2] + '-' + m[3] + ' ' +
-				m[4] + ':' + m[5] + ':' + m[6] + ' (UTC' + tz + ')';
-		}
+	/* ⑦ 功能归位原则：同一数据不重复查询。
+	 * ^NWTIME（网络时间）已整条移除：手册 §13.8.5 与真机实测都表明，网络未下发
+	 * EMM/GMM/MM information 时模组固定输出占位符 90/01/06，本机正是如此，界面只能显示假日期。
+	 * 随之删掉 maxTemp（^CHIPTEMP 的重复查询）——温度统一由 getTemp 在慢档取一次。 */
 
-		function maxTemp(txt) {
-			var nums = String(txt == null ? '' : txt).match(/\d+/g);
-			var vals = nums ? nums.map(function (v) { return parseInt(v, 10); })
-				.filter(function (v) { return v > 0; }) : [];
-			return vals.length ? (Math.max.apply(Math, vals) / 10).toFixed(1) + ' °C' : null;
-		}
-
-		var _devInfoAt = 0;
+	var _devInfoAt = 0;
 
 		function loadDeviceInfo(force) {
 			// 设备信息变化很慢：首次加载与每 60s 刷新一次，避免每轮都打十几条查询
@@ -182,10 +174,6 @@ return L.view.extend({
 			}).then(function (r) {
 				var m = String(r && r.data ? r.data : '').match(/"([+\d]{5,20})"/);
 				st.phone = m ? m[1] : '';
-				return q('AT+CPBS?');
-			}).then(function (r) {
-				var m = String(r && r.data ? r.data : '').match(/CPBS:\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)/);
-				st.pb = m ? (m[1] + ' ' + m[2] + '/' + m[3]) : '';
 				return q('AT^TDSIMHP?');
 			}).then(function (r) {
 				var m = String(r && r.data ? r.data : '').match(/TDSIMHP:\s*(\d+)/);
@@ -205,30 +193,21 @@ return L.view.extend({
 				return q('AT+CGSN');
 			}).then(function (r) {
 				st.imei = (String(r && r.data ? r.data : '').match(/\d{10,}/) || [''])[0];
-				return q('AT^NWTIME?');
-			}).then(function (r) {
-				st.time = parseNetTime(r && r.data);
-				return q('AT^CHIPTEMP?');
-			}).then(function (r) {
-				st.temp = maxTemp(r && r.data);
-				return q('AT^HFREQINFO?');
-			}).then(function (r) {
-				var mm = String(r && r.data ? r.data : '').match(/HFREQINFO:\s*([\d,]+)/);
-				var cc = 0;
-				if (mm) {
-					var parts = mm[1].split(',').filter(function (x) { return x !== ''; });
-					cc = Math.max(0, Math.floor((parts.length - 2) / 7));
-				}
-				st.cc = cc;
-				return q('AT^NRRCCAPQRY=3');
-			}).then(function (r) {
-				st.ca = (String(r && r.data ? r.data : '').match(/NRRCCAPQRY:\s*3,(\d+)/) || [])[1];
 				renderDeviceInfo(st);
 			});
 		}
 
-		function renderDeviceInfo(st) {
+		/*
+		 * 「SIM 与设备」一张表铺开：SIM / 标识 与 各路传感器温度。
+		 * 温度数据由 getTemp（慢档 30s，AT^CHIPTEMP? 只取一次）写入 state.temps，
+		 * 两路数据到齐时都走同一个 renderDevCard，不会互相覆盖。
+		 */
+		var devState = null;
+
+		function renderDevCard() {
 			if (!devBody) return;
+			var st = devState;
+			if (!st) return;
 			devBody.innerHTML = '';
 			var simRow = SIM_STATE[st.sim];
 			var simText = simRow ? simRow[0] : (st.sim == null ? '未知' : ('状态 ' + st.sim));
@@ -238,35 +217,48 @@ return L.view.extend({
 			head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (warn ? '' : ' is-on') },
 				'SIM：' + simText));
 			if (st.pin) head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' }, 'PIN：' + st.pin));
-			head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' },
-				'载波：' + (st.cc ? (st.cc + ' 个' + (st.cc > 1 ? '（聚合中）' : '（单载波）')) : '—')));
-			if (st.ca != null) head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' },
-				'CA 能力：' + (st.ca === '1' ? '已开启' : '已关闭')));
 			devBody.appendChild(head);
 
 			if (warn) {
 				devBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'尚未到「就绪」：AT^SIMSQ? 返回 12 才表示「短信与电话本可以接入」；' +
-					'长期停在 11「已初始化」时短信可能发不出去。'));
+					'短信与电话本要等 SIM 到「就绪」；长期停在「已初始化」时短信可能发不出去。'));
 			}
 
 			var note = manualPhoneNote();
-			var phone = st.phone ? (maskNum(st.phone) + '（SIM 卡）')
-				: (note ? (maskNum(note) + '（手动备注）')
-					: '未写入（AT+CNUM → not found，可在「服务配置」手动备注）');
+			var phone = st.phone ? (st.phone + '（SIM 卡）')
+				: (note ? (note + '（手动备注）')
+					: '未写入（可在「服务配置」手动备注）');
 
-			devBody.appendChild(Mt5700.table(['项目', '值'], [
+			var rows = [
 				['手机号', phone],
 				/* 「电话本」原显示 "ON 0/2"（存储位置 ON、0 条记录、容量 2），既不直观
 				   也与上方 SIM 状态重复，已移除；电话本能否接入见该行提示。 */
 				['SIM 热插拔', st.hotplug == null ? '—' : (st.hotplug ? '已开启' : '已关闭')],
-				['IMSI', maskNum(st.imsi)],
-				['ICCID', maskNum(st.iccid)],
-				['IMEI', maskNum(st.imei)],
-				['模块 / 固件', (st.model || '—') + ' / ' + (st.fw || '—')],
-				['网络时间', st.time || '—']
-			], { striped: true }));
-			/* 温度不在此处重复：下方 tempGrid 会逐路列出 ^CHIPTEMP 的各传感器值 */
+				['IMSI', fullNum(st.imsi)],
+				['ICCID', fullNum(st.iccid)],
+				['IMEI', fullNum(st.imei)],
+				['模块 / 固件', (st.model || '—') + ' / ' + (st.fw || '—')]
+			];
+
+			/* 各路传感器温度（AT^CHIPTEMP?，单位 0.1℃）：按温度从高到低排，便于一眼看到最热那路 */
+			var t = state.temps || {};
+			var temps = [
+				['Sub3G PA', t.sub3GPA], ['Sub6G PA', t.sub6GPA], ['MIMO PA', t.mimoPa],
+				['TCXO', t.tcxo], ['AP1', t.ap1], ['AP2', t.ap2], ['Modem1', t.modem1]
+			].filter(function (it) { return it[1]; })
+				.sort(function (a, b) { return Number(b[1]) - Number(a[1]); });
+			if (temps.length) {
+				temps.forEach(function (it) { rows.push(['温度 · ' + it[0], it[1] + ' ℃']); });
+			} else {
+				rows.push(['温度', '—']);
+			}
+
+			devBody.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
+		}
+
+		function renderDeviceInfo(st) {
+			devState = st;
+			renderDevCard();
 		}
 
 		/* ---------- 渲染 ---------- */
@@ -293,8 +285,6 @@ return L.view.extend({
 			var grid = E('div', { 'class': 'mt5700-metrics' });
 			[
 				{ label: '网络状态', value: state.networkStatus, color: 'info' },
-				{ label: '运营商', value: state.operator },
-				{ label: '网络模式', value: c.sysMode || '未知' },
 				/* 信号强度不在此重复：上方环形仪表与顶部状态条已各有一处 */
 				{ label: 'APN', value: state.apn },
 				{ label: 'QCI', value: state.qci },
@@ -306,14 +296,8 @@ return L.view.extend({
 			});
 			connBody.appendChild(grid);
 
-			connBody.appendChild(Mt5700.table(
-				['PLMN', 'TAC / 小区', 'PCI / 频点'],
-				[[(c.mcc || '—') + ' / ' + (c.mnc || '—'),
-					/* ^MONSSC 的 lac/cid 与频点同为十六进制字符串（实测 "C027F5065"、"14225C"），
-					   与 +C5GREG 的 tac/ci 同源；统一转十进制，便于与运营商工参对照。 */
-					(hexToDec(c.lac) || '—') + ' / ' + (hexToDec(c.cid) || '—'),
-					(c.pci || '—') + ' / ' + (hexToDec(c.channel) || '—')]]
-			));
+			/* PLMN / TAC / 小区 / PCI 已并入「载波与聚合」卡片：那才是描述主小区的地方，
+			   而且原表里的「频点」列其实取的是 TAC（0x14225C），标错了，真频点在载波表里。 */
 		}
 
 		/* 环形仪表实例只创建一次，之后每次刷新仅更新数值与弧线 */
@@ -326,19 +310,15 @@ return L.view.extend({
 				sigGauges = {
 					rsrp: Mt5700.gauge('RSRP', 'dBm', 'rsrp'),
 					rsrq: Mt5700.gauge('RSRQ', 'dB', 'rsrq'),
-					sinr: Mt5700.gauge('SINR', 'dB', 'sinr'),
-					pct: Mt5700.gauge('信号百分比', '%', 'pct')
+					sinr: Mt5700.gauge('SINR', 'dB', 'sinr')
 				};
 				sigGrid.appendChild(sigGauges.rsrp.el);
 				sigGrid.appendChild(sigGauges.rsrq.el);
 				sigGrid.appendChild(sigGauges.sinr.el);
-				sigGrid.appendChild(sigGauges.pct.el);
 			}
 			sigGauges.rsrp.set(c.rsrp);
 			sigGauges.rsrq.set(c.rsrq);
 			sigGauges.sinr.set(c.sinr);
-			var pct = parseInt(c.signalPercent, 10);
-			sigGauges.pct.set(isNaN(pct) ? null : pct);
 		}
 
 		/*
@@ -350,14 +330,11 @@ return L.view.extend({
 		 *   dcActive  = ^LENDC? 报 EN-DC 双连接已建立
 		 * 三者分开表达，避免把「EN-DC 双连接」与「NR 载波聚合」混为一谈。
 		 *
-		 * 注意 ^HFREQINFO **不含** RSRP/RSRQ/SINR，按载波的信号质量需要 ^MONSSC /
-		 * ^CASCELLINFO；本固件分别返回 NONE / ERROR，所以表格不设信号列（避免整列「—」），
-		 * 信号质量统一看顶部「信号质量」卡片。
+		 * 注意 ^HFREQINFO **不含** RSRP/RSRQ/SINR：主载波行的信号取主小区实时值，
+		 * 辅载波行尝试用 ^MONSSC / ^CASCELLINFO 按下行频点对上（本固件分别返回
+		 * NONE / ERROR，对不上就是「—」）。表格列与上游快照一致：
+		 * 制式 / 频段 / 频点 / 带宽 / PCI / RSRP / RSRQ / SINR / 强度。
 		 */
-		/* 频率已是 MHz（parseHFREQINFO 已换算），不要再除 1000 */
-		function fmtMHz(v) {
-			return v == null ? '—' : v.toFixed(1) + ' MHz';
-		}
 		function fmtBw(khz) {
 			if (khz == null) return '—';
 			return khz >= 1000 ? (khz / 1000) + ' MHz' : khz + ' kHz';
@@ -372,6 +349,7 @@ return L.view.extend({
 			carrierBox.innerHTML = '';
 			var list = state.carriers || [];
 			var count = list.length;
+			var c0 = state.cell || {};
 			var caActive = count > 1;
 			var endc = state.diag && state.diag.endc;
 			var dcActive = !!(endc && endc.established);
@@ -379,14 +357,43 @@ return L.view.extend({
 				: caActive ? (count + ' 载波聚合中')
 				: dcActive ? 'EN-DC 双连接'
 				: '单载波';
-			var headline = !count ? '—'
-				: caActive ? (count + 'CA')
-				: dcActive ? (endc.mode || 'EN-DC')
-				: (list[0].band != null ? AtWs.bandName(list[0].sysMode || list[0].kind, list[0].band) : '单载波');
 
+			/* 头部与上游快照一致：先「当前载波数：N 个」，再聚合状态徽章 */
 			var head = E('div', { 'class': 'mt5700-carrier-head' });
+			head.appendChild(E('span', { 'class': 'mt5700-carrier-headline' },
+				count ? ('当前载波数：' + count + ' 个') : '当前载波数：—'));
 			head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (caActive || dcActive ? ' is-on' : '') }, badge));
-			head.appendChild(E('span', { 'class': 'mt5700-carrier-headline' }, headline));
+
+			/* 主小区身份：PLMN / TAC / 小区标识 / PCI。
+			   原来这组信息单独占一张表放在「连接状态」里，而这里说的是同一个主小区，
+			   两处各说一半；现在合并到一处。注意不收「频点」——逐载波频点本表已有，
+			   原先那张表里的"频点"取值其实是 TAC（实测 0x14225C），是标错的。 */
+			var idLine = [];
+			if (c0.mcc || c0.mnc) idLine.push('PLMN ' + (c0.mcc || '—') + '/' + (c0.mnc || '—'));
+			if (c0.lac) idLine.push('TAC ' + hexToDec(c0.lac));
+			if (c0.cid) idLine.push('小区 ' + hexToDec(c0.cid));
+			if (c0.pci) idLine.push('PCI ' + c0.pci);
+			if (idLine.length) {
+				carrierBox.appendChild(E('div', {
+					'class': 'mt5700-hint',
+					'style': 'margin:0 0 10px'
+				}, idLine.join(' · ')));
+			}
+
+			/* 聚合总带宽：原页面只有逐载波带宽，没有合计，要自己心算。
+			   多载波时把下行/上行带宽各自求和给出，一眼知道聚合了多少频谱。 */
+			var sumDl = 0, sumUl = 0, hasUl = false;
+			list.forEach(function (c) {
+				if (c.dlBwKHz) sumDl += Number(c.dlBwKHz) || 0;
+				if (!c.downlinkOnly && c.ulBwKHz) {
+					sumUl += Number(c.ulBwKHz) || 0;
+					hasUl = true;
+				}
+			});
+			if (count > 1 && sumDl > 0) {
+				head.appendChild(E('span', { 'class': 'mt5700-carrier-badge is-on' },
+					'下行合计 ' + fmtBw(sumDl) + (hasUl ? ' · 上行合计 ' + fmtBw(sumUl) : '')));
+			}
 			carrierBox.appendChild(head);
 
 			if (!count) {
@@ -395,70 +402,70 @@ return L.view.extend({
 				return;
 			}
 
+			/* 强度条：RSRP → 百分比（-120dBm=0%、-70dBm=100%），≥60 绿 / ≥40 黄 / 否则红 */
+			function sigBar(rsrp) {
+				if (rsrp == null) return document.createTextNode('—');
+				var pct = Math.max(0, Math.min(100, Math.round(2 * (Number(rsrp) + 120))));
+				var color = pct >= 60 ? 'var(--mt5700-success)'
+					: pct >= 40 ? 'var(--mt5700-warning)' : 'var(--mt5700-danger)';
+				return E('div', { 'class': 'mt5700-signal-bar' },
+					E('div', { 'class': 'mt5700-signal-bar-fill',
+						'style': 'width:' + pct + '%;background:' + color }));
+			}
+
+			/* ^NRSSBID 邻区按「SSB 频点落在载波下行带宽内」配对；同频有多个邻区时取 RSRP 最强者 */
+			function nrssbidMatch(c) {
+				var nb = state.nrssbid && state.nrssbid.neighbors;
+				if (!nb || !nb.length || c.dlFreqMHz == null || !c.dlBwKHz) return null;
+				var halfMHz = c.dlBwKHz / 2000;
+				var best = null;
+				nb.forEach(function (n) {
+					var mhz = Parse.nrArfcnToMHz(n.arfcn);
+					if (mhz == null || Math.abs(mhz - c.dlFreqMHz) > halfMHz) return;
+					if (!best || (n.rsrp != null && (best.rsrp == null || n.rsrp > best.rsrp))) best = n;
+				});
+				return best;
+			}
+
+			/*
+			 * 信号列数据源：
+			 *   主载波  主小区实时值（^MONSC；PCI/TAC 是十六进制，已在解析时换算）
+			 *   辅载波  ^NRSSBID 邻区按「SSB 频点落在载波带宽内」配对（无 RSRQ）
+			 * 其余数据源（^MONSSC 仅 NSA、^CASCELLINFO 仅 LTE CA）在本机无效，已删除。
+			 */
+			var usedSsbid = false;
 			var rows = list.map(function (c, i) {
+				var sig;
+				if (i === 0) {
+					sig = { pci: c0.pci || null, rsrp: c0.rsrp, rsrq: c0.rsrq, sinr: c0.sinr };
+				} else {
+					var nb = nrssbidMatch(c);
+					sig = nb ? { pci: nb.pci, rsrp: nb.rsrp, rsrq: null, sinr: nb.sinr } : {};
+					if (nb) usedSsbid = true;
+				}
 				return [
-					i === 0 ? '主载波' : ('辅载波 ' + i),
 					c.sysMode || c.kind || '—',
 					bandLabel(c.sysMode, c.band),
-					c.dlFcn ? (c.dlFcn + ' · ' + fmtMHz(c.dlFreqMHz)) : '—',
+					c.dlFcn ? String(c.dlFcn) : '—',
 					fmtBw(c.dlBwKHz),
-					c.downlinkOnly ? '—（仅下行）'
-						: (c.ulFcn ? (c.ulFcn + ' · ' + fmtMHz(c.ulFreqMHz)) : '—'),
-					c.downlinkOnly ? '—' : fmtBw(c.ulBwKHz)
+					c.downlinkOnly ? '仅下行' : fmtBw(c.ulBwKHz),
+					sig.pci != null ? String(sig.pci) : '—',
+					sig.rsrp != null ? sig.rsrp + ' dBm' : '—',
+					sig.rsrq != null ? sig.rsrq + ' dB' : '—',
+					sig.sinr != null ? sig.sinr + ' dB' : '—',
+					sigBar(sig.rsrp)
 				];
 			});
 			carrierBox.appendChild(Mt5700.table(
-				['载波', '制式', '频段', '下行频点', '下行带宽', '上行频点', '上行带宽'],
+				['制式', '频段', '频点', '下行带宽', '上行带宽', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度'],
 				rows,
 				{ striped: true }
 			));
 
-			var hint = '载波数取自 ^HFREQINFO（NR 多 CC，最多 4 个）；'
-				+ '载波聚合需在 RRC 连接态（有数据业务）才会激活，空闲态通常只报主载波。';
-			if (!(state.secondaryNR || []).length && !(state.secondaryLTE || []).length) {
-				hint += ' 本固件不提供按载波的信号质量（^MONSSC 返回 '
-					+ (state.monsscRaw || 'NONE') + '、^CASCELLINFO 不被支持），'
-					+ '故本表不含信号列，信号质量请看「信号质量」卡片。';
-			}
+			var hint = '载波聚合要等到有数据业务时才会激活，空闲时通常只报主载波。';
+			if (usedSsbid) hint += ' 辅载波 PCI/RSRP/SINR 来自 ^NRSSBID 邻区测量（按频点配对），RSRQ 无测量项。';
 			carrierBox.appendChild(E('div', { 'class': 'mt5700-hint' }, hint));
 
-			/*
-			 * 若 ^MONSSC / ^CASCELLINFO 真的报回了辅小区，就把它们按下行频点对到载波上
-			 * 单独列出来（信息不丢）；对不上的也一并列出。
-			 */
-			var nr = state.secondaryNR || [];
-			var lte = state.secondaryLTE || [];
-			if (!nr.length && !lte.length) return;
-			var extraRows = [];
-			list.forEach(function (c, i) {
-				var sig = Parse.carrierSignalFor(
-					{ sysMode: c.sysMode, dlFcn: String(c.dlFcn) }, nr, lte);
-				if (sig) {
-					extraRows.push([
-						i === 0 ? '主载波' : ('辅载波 ' + i),
-						String(sig.pci != null ? sig.pci : '—'),
-						dash(sig.rsrp, ' dBm'), dash(sig.rsrq, ' dB'),
-						sig.sinr != null ? dash(sig.sinr, ' dB') : dash(sig.rssi, ' dBm'),
-						sig.measType || '—'
-					]);
-				}
-			});
-			var orphan = Parse.unmatchedSecondaries(
-				list.map(function (c) { return { sysMode: c.sysMode, dlFcn: String(c.dlFcn) }; }), nr, lte);
-			orphan.nr.forEach(function (c) {
-				extraRows.push(['未匹配 · NR', String(c.pci), dash(c.rsrp, ' dBm'), dash(c.rsrq, ' dB'),
-					dash(c.sinr, ' dB'), '^MONSSC']);
-			});
-			orphan.lte.forEach(function (c) {
-				extraRows.push(['未匹配 · LTE B' + c.band, String(c.pci), dash(c.rsrp, ' dBm'),
-					dash(c.rsrq, ' dB'), dash(c.rssi, ' dBm'), '^CASCELLINFO']);
-			});
-			if (extraRows.length) {
-				carrierBox.appendChild(E('div', { 'class': 'mt5700-card-subtitle mt5700-mt-md' },
-					'按载波信号质量（来自 ^MONSSC / ^CASCELLINFO）'));
-				carrierBox.appendChild(Mt5700.table(
-					['载波', 'PCI', 'RSRP', 'RSRQ', 'SINR/RSSI', '测量'], extraRows, { striped: true }));
-			}
 		}
 
 		/* ---------- 连接诊断（已并入「连接状态」卡片，见 renderDiag） ---------- */
@@ -484,14 +491,13 @@ return L.view.extend({
 				/* 取不到数据的项直接不显示：一排「—」「不适用」只占版面、没有信息量 */
 				return r[1] && r[1] !== '—' && r[1] !== '不适用';
 			});
-			/*
-			 * AT^TXPOWER? 在部分固件不被支持（实测 V200R001C20B025 连续 6 次全回 ERROR）。
-			 * 拿不到数据时直接隐藏这几行，而不是显示一排「—」占版面。
-			 */
-			if (d.tx) {
-				rows.push(['LTE PUSCH / PUCCH', dash(d.tx.pusch, ' dBm') + ' / ' + dash(d.tx.pucch, ' dBm')]);
-				rows.push(['LTE SRS / PRACH', dash(d.tx.srs, ' dBm') + ' / ' + dash(d.tx.prach, ' dBm')]);
-				if (d.tx.total != null) rows.push(['2G/3G 总功率', dash(d.tx.total, ' dBm')]);
+			if (d.creg) rows.push(['4G(EPS) 注册', d.creg.statText]);
+			if (d.cireg) rows.push(['IMS 注册', d.cireg.text + (d.cireg.info ? '（VoLTE/VoNR/IMS 短信可用）' : '（语音/IMS 短信不可用）')]);
+			if (d.rrc) rows.push(['RRC 状态', d.rrc.rrcText + (d.rrc.campText ? ' · ' + d.rrc.campText : '')]);
+			if (d.cops) {
+				var copsTxt = d.cops.modeText + (d.cops.oper ? ' · ' + d.cops.oper : '');
+				if (d.cops.actText) copsTxt += ' · ' + d.cops.actText;
+				rows.push(['选网模式', copsTxt]);
 			}
 			(d.nrTx || []).forEach(function (c, i) {
 				rows.push(['NR CC' + (i + 1) + ' PUSCH', dash(c.pusch, ' dBm') + (c.freq ? ' · ' + (c.freq / 1000).toFixed(1) + ' MHz' : '')]);
@@ -517,6 +523,14 @@ return L.view.extend({
 		 */
 		function renderSpeed() {
 			speedRow.innerHTML = '';
+			if (!rateOn) {
+				speedRow.appendChild(Mt5700.speedBox('↓ 下行', '—'));
+				speedRow.appendChild(Mt5700.speedBox('↑ 上行', '—'));
+				chart.innerHTML = '';
+				chart.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'实时速率监测已关闭（不再每秒读取接口计数器）；累计流量统计仍会自动刷新。'));
+				return;
+			}
 			var d = splitSpeedUI(state.rtDown, 'bytes');
 			var u = splitSpeedUI(state.rtUp, 'bytes');
 			speedRow.appendChild(Mt5700.speedBox('↓ 下行', d.value + ' ' + d.unit));
@@ -571,36 +585,9 @@ return L.view.extend({
 		}
 
 		function renderTemp() {
-			tempGrid.innerHTML = '';
-			var t = state.temps;
-			var items = [
-				{ label: 'Sub3G PA', value: t.sub3GPA }, { label: 'Sub6G PA', value: t.sub6GPA },
-				{ label: 'MIMO PA', value: t.mimoPa }, { label: 'TCXO', value: t.tcxo },
-				{ label: 'AP1', value: t.ap1 }, { label: 'AP2', value: t.ap2 }, { label: 'Modem1', value: t.modem1 }
-			].filter(function (it) { return it.value; });
-
-			if (!items.length) {
-				tempGrid.appendChild(Mt5700.metric('温度', '—'));
-				return;
-			}
-			/*
-			 * 原来 7 路传感器各占一个磁贴，一屏全是温度数字，真正的信息只有「最高那一路」。
-			 * 现在：最高温单独成磁贴（判断是否过热看的就是它），其余收成一行细字备查。
-			 */
-			items.sort(function (a, b) { return Number(b.value) - Number(a.value); });
-			var top = Number(items[0].value);
-			tempGrid.appendChild(Mt5700.metric(
-				'最高温 · ' + items[0].label, items[0].value + ' ℃',
-				top >= 75 ? 'danger' : (top >= 65 ? 'warning' : null)));
-
-			if (items.length > 1) {
-				tempGrid.appendChild(E('div', {
-					'class': 'mt5700-hint',
-					'style': 'grid-column:1/-1;margin-top:6px'
-				}, '其他传感器：' + items.slice(1).map(function (it) {
-					return it.label + ' ' + it.value + ' ℃';
-				}).join(' · ')));
-			}
+			/* 各路温度已并入「SIM 与设备」卡的那一张表（见 renderDevCard），
+			   这里只触发重绘，不再单独占一块磁贴区。 */
+			renderDevCard();
 		}
 
 		function renderDHCP() {
@@ -884,14 +871,15 @@ return L.view.extend({
 		}
 
 		function loadSecondary() {
-			return AtWs.client.sendCommand('AT^MONSSC').then(function (monssc) {
-				state.monsscRaw = monssc.success && monssc.data
-					? (String(monssc.data).match(/\^MONSSC:\s*([^\r\n]*)/) || [null, 'NONE'])[1].trim()
-					: 'NONE';
-				state.secondaryNR = monssc.success && monssc.data ? Parse.parseMonsscAll(String(monssc.data)) : [];
-				return AtWs.client.sendCommand('AT^CASCELLINFO?');
-			}).then(function (cascell) {
-				state.secondaryLTE = cascell.success && cascell.data ? Parse.parseCascellAll(String(cascell.data)) : [];
+			/*
+			 * 辅载波/邻区信号已统一由 ^NRSSBID 提供（见 renderCarriers 的 nrssbidMatch）：
+			 *   - ^MONSSC 手册注明「非 NSA 返回查询失败」，本机 SA 组网恒回 NONE；
+			 *   - ^CASCELLINFO? 仅 LTE CA 有效，本机 NR CA 下恒回 ERROR。
+			 * 这两条在本机属于无效功能，已删除查询（每轮省 2 次串口往返），
+			 * 其解析函数也从 parse.js 一并移除。
+			 */
+			return AtWs.client.sendCommand('AT^NRSSBID?').then(function (ssbid) {
+				state.nrssbid = ssbid.success && ssbid.data ? Parse.parseNrssbid(String(ssbid.data)) : null;
 				renderCarriers();
 			});
 		}
@@ -903,12 +891,27 @@ return L.view.extend({
 				return AtWs.client.sendCommand('AT+C5GREG?');
 			}).then(function (c5g) {
 				state.diag.reg = c5g.success && c5g.data ? Parse.parseC5greg(c5g.data) : null;
-				return AtWs.client.sendCommand('AT^TXPOWER?');
-			}).then(function (txp) {
-				state.diag.tx = txp.success && txp.data ? Parse.parseTxPower(txp.data) : null;
+				/* 不再发 AT^TXPOWER?（LTE/GUL 发射功率）：手册 §13.23 注明仅 GUL 有效，
+				   本机 NR SA 下实测 0/3 恒 ERROR，属无效查询。NR 侧用 ^NTXPOWER?。 */
 				return AtWs.client.sendCommand('AT^NTXPOWER?');
 			}).then(function (ntxp) {
 				state.diag.nrTx = ntxp.success && ntxp.data ? Parse.parseNrTxPower(ntxp.data) : [];
+				/* 4G(EPS) 注册：SA/NSA 下 LTE 侧的注册状态，与 CGREG(2/3G)、C5GREG(5G) 互补 */
+				return AtWs.client.sendCommand('AT+CEREG?');
+			}).then(function (creg) {
+				state.diag.creg = creg.success && creg.data ? Parse.parseRegStat(String(creg.data), '+CEREG') : null;
+				/* IMS 注册：直接决定 VoLTE / VoNR / IMS 短信能不能用 */
+				return AtWs.client.sendCommand('AT+CIREG?');
+			}).then(function (cireg) {
+				state.diag.cireg = cireg.success && cireg.data ? Parse.parseCireg(String(cireg.data)) : null;
+				/* RRC 状态：连接态/空闲态 —— 也解释了「空闲时看不到载波聚合」 */
+				return AtWs.client.sendCommand('AT^RRCSTAT?');
+			}).then(function (rrc) {
+				state.diag.rrc = rrc.success && rrc.data ? Parse.parseRrcstat(String(rrc.data)) : null;
+				/* 选网模式（+COPS?）：自动还是手动锁了运营商；读命令，安全 */
+				return AtWs.client.sendCommand('AT+COPS?');
+			}).then(function (cops) {
+				state.diag.cops = cops.success && cops.data ? Parse.parseCops(String(cops.data)) : null;
 				return AtWs.client.sendCommand('AT+CGPADDR');
 			}).then(function (pdp) {
 				state.diag.addrs = pdp.success && pdp.data ? Parse.parseCgpaddr(pdp.data) : [];
@@ -931,6 +934,25 @@ return L.view.extend({
 		 */
 		var rateSample = null;
 		var rateTimer = null;
+		var rateOn = true;
+
+		/* 「实时监测」开关：关闭即停表（不再每秒读接口计数器），重开时重新起基准 */
+		function setRateEnabled(on) {
+			rateOn = !!on;
+			try { localStorage.setItem('mt5700.rateOn', rateOn ? '1' : '0'); } catch (e) {}
+			if (rateTimer) { clearInterval(rateTimer); rateTimer = null; }
+			if (rateOn) {
+				rateSample = null;
+				rateTimer = setInterval(sampleRate, 1000);
+				sampleRate();
+			}
+			renderSpeed();
+		}
+
+		var rateChk = E('input', { 'type': 'checkbox' });
+		rateChk.addEventListener('change', function () { setRateEnabled(rateChk.checked); });
+		rateExtra.appendChild(E('div', { 'class': 'at-autorefresh' },
+			E('label', {}, rateChk, document.createTextNode(' 实时监测'))));
 
 		function sampleRate() {
 			return AtWs.netRate('').then(function (r) {
@@ -968,8 +990,11 @@ return L.view.extend({
 			});
 		}
 
-		rateTimer = setInterval(sampleRate, 1000);
-		sampleRate();
+		/* 恢复上次的开关状态（默认开） */
+		var savedRateOn = '1';
+		try { savedRateOn = localStorage.getItem('mt5700.rateOn') || '1'; } catch (e) {}
+		rateChk.checked = savedRateOn !== '0';
+		setRateEnabled(rateChk.checked);
 
 		/* ---------- 刷新（分级） ----------
 		 *
@@ -996,7 +1021,10 @@ return L.view.extend({
 			if (refreshing) return Promise.resolve();
 			refreshing = true;
 			var chain = Promise.resolve();
-			[getPSReg, getFlow, updateNetworkInfo]
+			/* 只保留「用户盯着看、需要秒级新鲜」的内容：信号与小区信息。
+			   注册状态（AT+CGREG?）与模组侧累计流量（AT^DSFLOWQRY）不随秒变化，
+			   已移到 30 秒慢档——实时速率另有 1Hz 的网卡计数采样，不受影响。 */
+			[updateNetworkInfo]
 				.forEach(function (fn) { chain = chain.then(fn); });
 			return chain.catch(function (err) {
 				console.warn('快速刷新失败', err);
@@ -1008,7 +1036,7 @@ return L.view.extend({
 			if (slowRefreshing) return Promise.resolve();
 			slowRefreshing = true;
 			var chain = Promise.resolve();
-			[getOperator, getAMBR, getQCI, getDHCP, getTemp, getMCS, loadSecondary, loadDiagnostics]
+			[getPSReg, getFlow, getOperator, getAMBR, getQCI, getDHCP, getTemp, getMCS, loadSecondary, loadDiagnostics]
 				.forEach(function (fn) { chain = chain.then(fn); });
 			return chain.catch(function (err) {
 				console.warn('慢速刷新失败', err);
@@ -1028,6 +1056,7 @@ return L.view.extend({
 			if (timer) { clearInterval(timer); timer = null; }
 			if (slowTimer) { clearInterval(slowTimer); slowTimer = null; }
 			if (!enabled) return;
+			if (document.hidden) return;   /* 后台标签页不重建定时器（见下方 visibilitychange） */
 			var fast = (interval || 5) * 1000;
 			timer = setInterval(refreshFast, fast);
 			/* 慢档跟随快档倍数，但不少于 30 秒，避免小间隔下把慢档也拉成高频 */
@@ -1036,12 +1065,24 @@ return L.view.extend({
 		var ar = Ui.autoRefresh(resetTimers);
 		resetTimers(true, 5);
 
-		var extra = Mt5700.panelActions(
+		/*
+		 * 标签页不可见时暂停轮询。
+		 * 这一页是全插件轮询最密的（2026-09-13 实测稳态 2.60 次/秒，其中 AT 命令 1.73 次/秒），
+		 * 而此前没有任何可见性判断——标签页切到后台后仍在全速占串口。
+		 * 回到前台立即恢复并补一次刷新，避免看到陈旧读数。
+		 */
+		var onVisibility = function () {
+			if (document.hidden) { resetTimers(false); return; }
+			resetTimers(ar.isEnabled(), ar.getInterval());
+			refreshAll();
+		};
+		document.addEventListener('visibilitychange', onVisibility);
+
+		/* 刷新控制归位到「信号质量」卡片头部，不再单独占一行 */
+		sigExtra.appendChild(Mt5700.panelActions(
 			ar.el,
 			Mt5700.primaryButton('刷新', function () { refreshAll(); })
-		);
-		// 放到页面顶部（连接状态条之后），避免在页面末尾单独占一整行
-		body.insertBefore(extra, connBar.nextSibling);
+		));
 
 		/* ---------- 初始化 ---------- */
 
@@ -1071,11 +1112,13 @@ return L.view.extend({
 		});
 
 		self._dispose = function () {
-			/* 离开页面必须清干净：三个定时器 + 只读缓存，否则反复进出会叠加倍轮询 */
+			/* 离开页面必须清干净：三个定时器 + 可见性监听 + 只读缓存，
+			   否则反复进出会叠加倍轮询。 */
 			if (timer) clearInterval(timer);
 			if (slowTimer) clearInterval(slowTimer);
 			if (rateTimer) clearInterval(rateTimer);
 			timer = slowTimer = rateTimer = null;
+			if (onVisibility) document.removeEventListener('visibilitychange', onVisibility);
 			if (AtWs.client && AtWs.client.clearReadCache) AtWs.client.clearReadCache();
 		};
 

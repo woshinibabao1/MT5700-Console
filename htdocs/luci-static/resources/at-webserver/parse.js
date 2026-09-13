@@ -3,7 +3,7 @@
 /* global AtWs, baseclass */
 
 /**
- * 补充解析库：运行状态 / 扫频 / USSD / 短信 / 锁频 / 定时锁频 DTO。
+ * 补充解析库：运行状态 / 短信 / 锁频 / 定时锁频 / 系统配置解读 DTO。
  * 全部从原 React 前端 modem/*.ts 等价迁移，与 Rust 后端的应答格式严格一致。
  */
 
@@ -36,19 +36,6 @@ var Parse = (function () {
 	};
 
 	// AT^TXPOWER?
-	api.parseTxPower = function (text) {
-		var match = text.match(/\^TXPOWER:\s*(.+)/);
-		if (!match) return null;
-		var f = match[1].split(',');
-		if (f.length < 5) return null;
-		var total = power(f[0]);
-		return {
-			total: total === null ? null : Number((total / 10).toFixed(1)),
-			pusch: power(f[1]), pucch: power(f[2]), srs: power(f[3]), prach: power(f[4])
-		};
-	};
-
-	// AT^NTXPOWER? 每 5 字段一个载波
 	api.parseNrTxPower = function (text) {
 		var match = text.match(/\^NTXPOWER:\s*(.+)/);
 		if (!match) return [];
@@ -64,7 +51,7 @@ var Parse = (function () {
 		return carriers;
 	};
 
-	var REG_STATES = { 0: '未注册，未搜网', 1: '已注册本地网络', 2: '未注册，搜网中', 3: '注册被拒绝', 4: '未知原因', 5: '已注册漫游网络', 8: '仅紧急业务' };
+	var REG_STATES = { 0: '未注册，未搜网', 1: '已注册', 2: '未注册，搜网中', 3: '注册被拒绝', 4: '未知原因', 5: '已注册（漫游）', 8: '仅紧急业务' };
 	var ACT_TYPES = { 10: 'EUTRAN-5GC', 11: 'NR-5GC' };
 
 	// AT+C5GREG?
@@ -183,143 +170,207 @@ var Parse = (function () {
 		return '能力值 ' + v;
 	};
 
-	/* ================= 扫频 ================= */
+	/* ================= 系统配置解读（SYSCFGEX，手册 13.2） =================
+	 * 这几个字段都是编码/位掩码，直接摆十六进制没人看得懂，这里翻成中文/频段号。
+	 */
 
-	var RAT_NAMES = { 0: 'GSM', 1: 'WCDMA', 2: 'LTE', 3: 'NR' };
-	var INVALID_MEASURE = 99;
-	var MAX_BAND = 512;
-
-	var dec = function (v) { var t = v.trim(); if (t === '') return null; var n = Number(t); return isFinite(n) ? n : null; };
-	var hexv = function (v) { var t = v.trim(); if (t === '') return null; var n = parseInt(t, 16); return isNaN(n) ? null : n; };
-	var measure = function (v, scale) {
-		var n = dec(v);
-		if (n === null || n === INVALID_MEASURE) return null;
-		return scale === 1 ? n : n * scale;
-	};
-	var parseBand = function (v) {
-		var n = hexv(v);
-		if (n === null || n <= 0 || n > MAX_BAND) return null;
-		return n;
-	};
-
-	api.parseScanLine = function (line) {
-		var idx = line.indexOf('^CELLSCAN:');
-		if (idx < 0) return null;
-		var body = line.slice(idx + '^CELLSCAN:'.length).trim();
-		if (body === '' || /^(STARTED|OK)$/i.test(body)) return null;
-		var f = body.split(',').map(function (s) { return s.trim(); });
-		while (f.length < 15) f.push('');
-		var rat = dec(f[0]);
-		if (rat === null || !(rat in RAT_NAMES)) return null;
+	/*
+	 * 解析 `AT^SYSCFGEX?` 应答 → { acqorder, band, roam, srvdomain, lteband }
+	 *
+	 * 为什么必须清洗字段：应答形如
+	 *   ^SYSCFGEX: "080302",2000000680380,1,2,1E200000095\r\nOK
+	 * 最后一段后面没有逗号收尾，若用 ([^,]*) 抓取会把 "\r\nOK" 一起吞进来。
+	 * 这些值要原样拼回 AT^SYSCFGEX= 命令，带换行会把命令行截断成两条，
+	 * 因此这里统一去掉换行与应答尾部的 OK/ERROR。
+	 */
+	api.parseSysCfg = function (text) {
+		var m = String(text == null ? '' : text)
+			.match(/\^SYSCFGEX:\s*"([^"]*)",\s*([^,]*),\s*(\d+),\s*(\d+),\s*([^,\r\n]*)/);
+		if (!m) return null;
+		var tok = function (v) {
+			return String(v == null ? '' : v)
+				.replace(/[\r\n]+/g, '')
+				.replace(/\s*(OK|ERROR)\s*$/i, '')
+				.trim();
+		};
 		return {
-			rat: rat, ratName: RAT_NAMES[rat], plmn: f[1].replace(/"/g, ''),
-			freq: dec(f[2]), pci: dec(f[3]), band: parseBand(f[4]),
-			lac: f[5].trim(), cid: f[6].trim(),
-			rxlev: dec(f[7]), bsic: dec(f[8]), psc: dec(f[9]),
-			scs: dec(f[10]), rsrp: measure(f[11]),
-			rsrq: measure(f[12], 0.5),
-			sinr: rat === 2 ? measure(f[14], 0.125) : measure(f[13], 0.5),
-			raw: line.trim()
+			acqorder: tok(m[1]), band: tok(m[2]),
+			roam: Number(m[3]), srvdomain: Number(m[4]),
+			lteband: tok(m[5])
 		};
 	};
 
-	api.parseScanLines = function (lines) {
+	/* 把回读字段拼成可安全下发的 AT^SYSCFGEX 命令（空值视为「不修改」用 99/0 占位由调用方决定） */
+	api.buildSysCfgCommand = function (cfg) {
+		var c = cfg || {};
+		var num = function (v, d) { var n = parseInt(v, 10); return isFinite(n) ? n : d; };
+		return 'AT^SYSCFGEX="' + String(c.acqorder || '') + '",' + String(c.band || '') + ','
+			+ num(c.roam, 1) + ',' + num(c.srvdomain, 2) + ',' + String(c.lteband || '') + ',,';
+	};
+
+	/* ================= NR 能力（NRRCCAPQRY，手册 13.26） =================
+	 * 真机语法只有 AT^NRRCCAPQRY=<mode>（带 ? 的形式恒回 ERROR，实测 0/3）。
+	 * 应答形如 `^NRRCCAPQRY: <mode>,<para1>,<para2>,…`，取第 1 个参数即为该能力开关。
+	 * 界面用到 mode：2 = VoNR 能力、3 = NR CA 能力、5 = DSS 能力。
+	 */
+	api.parseNrrcCapQry = function (text, mode) {
+		var m = String(text == null ? '' : text)
+			.match(new RegExp('\\^NRRCCAPQRY:\\s*' + Number(mode) + '\\s*,\\s*(\\d+)'));
+		return m ? Number(m[1]) : null;
+	};
+
+	/* <acqorder>：每 2 位一个制式，按顺序表示搜索优先级 */
+	var ACQ_CODES = { '01': 'GSM', '02': 'WCDMA', '03': 'LTE', '04': 'CDMA 1X', '07': 'CDMA EVDO', '08': 'NR', '99': '（不修改）' };
+	api.decodeAcqOrder = function (s) {
+		var t = String(s == null ? '' : s).trim().replace(/^"|"$/g, '');
+		if (!t) return '未设置';
+		if (t === '99') return '不修改（保持原有接入次序）';
 		var out = [];
-		for (var i = 0; i < lines.length; i++) {
-			var c = api.parseScanLine(lines[i]);
-			if (c) out.push(c);
+		for (var i = 0; i + 1 < t.length + 1; i += 2) {
+			var code = t.substr(i, 2);
+			if (code.length < 2) break;
+			out.push(ACQ_CODES[code] || ('未知(' + code + ')'));
 		}
-		return out;
+		return out.length ? out.join(' → ') : '未设置';
 	};
 
-	// 1<<(band-1) 十六进制位图
-	api.scanBandMask = function (band) {
-		return (BigInt(1) << BigInt(band - 1)).toString(16).toUpperCase();
-	};
-
-	api.buildScanCommand = function (f) {
-		var rat = f.rat || '', plmn = (f.plmn || '').trim(), freq = (f.freq || '').trim();
-		var pci = (f.pci || '').trim(), band = (f.band || '').trim(), scs = (f.scs || '').trim();
-		if ((freq || pci) && rat === '') return { command: '', error: '指定频点或 PCI 时必须选择接入技术' };
-		if (pci && !freq) return { command: '', error: '指定 PCI 时必须同时指定频点' };
-		if (band && freq) return { command: '', error: '频段与频点不能同时指定' };
-		if (pci && rat !== '2' && rat !== '3') return { command: '', error: '只有 LTE 与 NR 支持指定 PCI' };
-		if (rat === '3' && (freq || pci) && scs === '') return { command: '', error: 'NR 指定频点或 PCI 时必须同时选择子载波间隔' };
-
-		var bandArg = '';
-		if (band) {
-			var n = Number(band);
-			if (!Number.isInteger(n) || n < 1 || n > MAX_BAND) return { command: '', error: '频段号超出范围（1-' + MAX_BAND + '）' };
-			bandArg = api.scanBandMask(n);
+	/*
+	 * <band>（GSM/WCDMA 频带位掩码）。手册 13.2.3 的宏值 → 名称。
+	 * 0x00680380 是手册特别标注的「自动」组合；0x3FFFFFFF=任何频带；0x40000000=不修改。
+	 */
+	var BAND_BITS = [
+		[0x00000080, 'GSM 1800'], [0x00000100, 'GSM 900(EGSM)'], [0x00000200, 'GSM 900(PGSM)'],
+		[0x00080000, 'GSM 850'], [0x00100000, 'GSM 900(铁路)'], [0x00200000, 'GSM 1900'],
+		[0x00400000, 'WCDMA I (2100)'], [0x00800000, 'WCDMA II (1900)'],
+		[0x04000000, 'WCDMA V (850)'], [0x08000000, 'WCDMA VI (800)'],
+		[0x0002000000000000, 'WCDMA VIII (900)'], [0x0004000000000000, 'WCDMA IX (1700)'],
+		[0x1000000000000000, 'WCDMA XIX (850)']
+	];
+	api.decodeBandMask = function (s) {
+		var t = String(s == null ? '' : s).trim();
+		if (!t) return '未设置';
+		var v = parseInt(t, 16);
+		if (isNaN(v)) return '无法解析（应为十六进制）';
+		if (v === 0x3FFFFFFF) return '任何频带（不限制）';
+		if (v === 0x40000000) return '不修改';
+		if (t.replace(/^0+/, '').toUpperCase() === '680380') {
+			return '自动（GSM 850/900/1800/1900 + WCDMA I；如需含 WCDMA 900，值为 2000000680380）';
 		}
-		var args = [rat, plmn ? '"' + plmn + '"' : '', freq, pci, bandArg, scs];
-		while (args.length > 0 && args[args.length - 1] === '') args.pop();
-		if (args.length === 0) return { command: 'AT^CELLSCAN' };
-		return { command: 'AT^CELLSCAN=' + args.join(',') };
+		/* 注意：JS 位运算只有 32 位，而手册里 WCDMA VIII/IX/XIX 的宏值在第 49/50/60 位，
+		   所以一律用「取模 + 除法」拆位，不能用 & 1 << n。 */
+		var names = [];
+		var known = 0;
+		BAND_BITS.forEach(function (b) {
+			if (Math.floor(v / b[0]) % 2 === 1) { names.push(b[1]); known += b[0]; }
+		});
+		var left = v - known;
+		if (left > 0) names.push('未识别位 0x' + left.toString(16).toUpperCase());
+		return names.length ? names.join(' · ') : '未设置';
 	};
 
-	api.SCAN_ABORT_COMMAND = 'AT^CELLSCAN=ABORT';
-	api.SCAN_STATE_COMMAND = 'AT^CELLSCAN=STATE';
-	api.isScanRunning = function (text) { return /\^CELLSCAN:\s*RUNNING/i.test(text); };
-
-	/* ================= USSD ================= */
-
-	var packGsm7 = function (text) {
-		var octets = [], acc = 0, bits = 0;
-		for (var i = 0; i < text.length; i++) {
-			acc |= (text.charCodeAt(i) & 0x7f) << bits;
-			bits += 7;
-			while (bits >= 8) { octets.push(acc & 0xff); acc >>= 8; bits -= 8; }
+	/* <lteband>：位掩码，第 n 位 = LTE B(n+1)（手册 13.2.3 逐条列出，与位序一致） */
+	api.decodeLteBandMask = function (s) {
+		var t = String(s == null ? '' : s).trim();
+		if (!t) return '未设置';
+		var v = parseInt(t, 16);
+		if (isNaN(v)) return '无法解析（应为十六进制）';
+		if (String(t).toUpperCase().replace(/^0+/, '') === '7FFFFFFFFFFFFFFF') return '任何频段（不限制）';
+		var out = [];
+		for (var i = 0; i <= 63; i++) {
+			if (v <= 0) break;
+			if (v % 2 === 1) out.push('B' + (i + 1));
+			v = Math.floor(v / 2);
 		}
-		if (bits > 0) octets.push(acc & 0xff);
-		return octets.map(function (b) { return b.toString(16).padStart(2, '0'); }).join('').toUpperCase();
+		return out.length ? out.join(', ') : '未设置';
 	};
 
-	var unpackGsm7 = function (hex) {
-		var out = '', acc = 0, bits = 0;
-		for (var i = 0; i + 1 < hex.length; i += 2) {
-			var byte = parseInt(hex.slice(i, i + 2), 16);
-			if (isNaN(byte)) return out;
-			acc |= byte << bits;
-			bits += 8;
-			while (bits >= 7) { out += String.fromCharCode(acc & 0x7f); acc >>= 7; bits -= 7; }
-		}
-		return out.replace(/\0+$/, '');
+	api.ROAM_TEXT = {
+		0: '0 · 开启国内国际漫游（旧语义：不支持漫游）',
+		1: '1 · 开启国内漫游、关闭国际漫游（旧语义：支持漫游）',
+		2: '2 · 关闭国内漫游、开启国际漫游（旧语义：不修改）',
+		3: '3 · 关闭国内国际漫游'
 	};
 
-	var decodeUcs2 = function (hex) {
-		var out = '';
-		for (var i = 0; i + 3 < hex.length; i += 4) out += String.fromCharCode(parseInt(hex.slice(i, i + 4), 16));
-		return out;
+	api.SRV_DOMAIN_TEXT = {
+		0: '0 · CS_ONLY（仅电路域）',
+		1: '1 · PS_ONLY（仅分组域）',
+		2: '2 · CS_PS（电路 + 分组域）',
+		3: '3 · ANY（任意）',
+		4: '4 · 不修改'
 	};
 
-	var isHex = function (s) { return /^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0; };
 
-	api.buildUssdCommand = function (code) {
-		var text = code.trim();
-		if (!text) return { command: '', error: '请输入 USSD 代码，例如 *133#' };
-		if (text.length > 160) return { command: '', error: 'USSD 字符串最长 160 个字符' };
-		if (!/^[0-9*#+]+$/.test(text)) return { command: '', error: 'USSD 代码只能包含数字与 * # +' };
-		return { command: 'AT+CUSD=1,"' + packGsm7(text) + '",15' };
+	/* ================= 补充注册/连接状态（对标 FAN789 项目用到的命令） ================= */
+
+	/* +CEREG? / +C5GREG? 这类「<n>,<stat>」结构的通用解析 */
+	api.parseRegStat = function (text, prefix) {
+		var m = String(text).match(new RegExp('\\' + prefix + ':\\s*([^\\r\\n]*)'));
+		if (!m) return null;
+		var f = m[1].split(',').map(function (x) { return x.trim().replace(/^"|"$/g, ''); });
+		var stat = Number(f[1]);
+		if (!isFinite(stat)) return null;
+		return { stat: stat, statText: REG_STATES[stat] || ('状态 ' + stat) };
 	};
 
-	api.USSD_CANCEL_COMMAND = 'AT+CUSD=2';
+	/* +CIREG?（IMS 注册）：<n>,<info>；info 0=未注册 1=已注册（决定 VoLTE/VoNR/IMS 短信能否用） */
+	api.parseCireg = function (text) {
+		var m = String(text).match(/\+CIREG:\s*([^\r\n]*)/);
+		if (!m) return null;
+		var f = m[1].split(',').map(function (x) { return x.trim(); });
+		var info = Number(f[1]);
+		if (isFinite(info)) return { info: info, text: info ? '已注册' : '未注册' };
+		/* 有些固件返回位域形式（16 进制），退化为原样显示 */
+		return { info: null, text: (f[1] || '—') };
+	};
 
-	var USSD_RESULT_TYPES = { 0: '网络无需回复', 1: '网络等待进一步输入', 2: '会话已被网络释放', 3: '其他客户端已响应', 4: '操作不支持', 5: '网络超时' };
+	/* ^RRCSTAT?：<enable>,<rrc_status>[,<camp_status>]（手册 13.21） */
+	api.RRC_TEXT = { 0: '空闲（非连接态）', 1: '连接态', 2: 'INACTIVE（NR 非激活）', 3: '无效' };
+	api.CAMP_TEXT = { 98: '已驻留', 99: '未驻留' };
+	api.parseRrcstat = function (text) {
+		var m = String(text).match(/\^RRCSTAT:\s*([^\r\n]*)/);
+		if (!m) return null;
+		var f = m[1].split(',').map(function (x) { return x.trim(); });
+		var rrc = Number(f[1]);
+		var camp = f[2] !== undefined ? Number(f[2]) : null;
+		return {
+			enable: Number(f[0]),
+			rrc: isFinite(rrc) ? rrc : null,
+			rrcText: api.RRC_TEXT[rrc] || ('状态 ' + rrc),
+			camp: (camp != null && isFinite(camp)) ? camp : null,
+			campText: api.CAMP_TEXT[camp] || null
+		};
+	};
 
-	api.parseUssd = function (line) {
-		var match = line.match(/\+CUSD:\s*(\d+)(?:\s*,\s*"?([^"]*)"?\s*(?:,\s*(\d+))?)?/);
-		if (!match) return null;
-		var m = Number(match[1]);
-		var dcs = match[3] !== undefined ? Number(match[3]) : 15;
-		var raw = (match[2] || '').trim();
-		var text = raw;
-		if (isHex(raw)) {
-			if (dcs === 72) text = decodeUcs2(raw);
-			else if (dcs === 68) { var a = ''; for (var i = 0; i + 1 < raw.length; i += 2) a += String.fromCharCode(parseInt(raw.slice(i, i + 2), 16)); text = a; }
-			else text = unpackGsm7(raw);
-		}
-		return { m: m, mText: USSD_RESULT_TYPES[m] || ('状态 ' + m), text: text, needsReply: m === 1 };
+
+	/* +COPS?：<mode>,<format>,"<oper>",<act>（27.007）—— 当前是自动选网还是手动锁了运营商 */
+	api.C0PS_MODE = { 0: '自动选网', 1: '手动选网', 2: '已注销', 3: '仅限手动', 4: '自动/手动' };
+	api.C0PS_ACT = {
+		0: 'GSM', 2: 'UMTS', 3: 'GSM/EGPRS', 4: 'UMTS/HSDPA', 5: 'UMTS/HSUPA', 6: 'UMTS/HSPA',
+		7: 'LTE（E-UTRAN）', 8: 'CDMA2000 HRPD', 9: 'LTE-A', 10: 'LTE NB-IoT', 11: 'NR（5G）', 12: 'NR（5G）'
+	};
+	api.parseCops = function (text) {
+		var m = String(text).match(/\+COPS:\s*([^\r\n]*)/);
+		if (!m) return null;
+		var f = m[1].split(',').map(function (x) { return x.trim().replace(/^"|"$/g, ''); });
+		var mode = Number(f[0]);
+		var act = f[3] !== undefined && f[3] !== '' ? Number(f[3]) : null;
+		return {
+			mode: isFinite(mode) ? mode : null,
+			modeText: api.C0PS_MODE[mode] || ('模式 ' + f[0]),
+			oper: f[2] || '',
+			act: act,
+			actText: (act != null && api.C0PS_ACT[act]) ? api.C0PS_ACT[act] : (act != null ? ('制式 ' + act) : '')
+		};
+	};
+
+	/* ^VERSION?：多行 ^VERSION:<KEY>:<value>；挑有用的几项 */
+	api.parseVersion = function (text) {
+		var out = {};
+		String(text).split(/\r?\n/).forEach(function (line) {
+			var m = line.match(/\^VERSION:([A-Z]+):(.*)$/);
+			if (m) out[m[1]] = m[2].trim();
+		});
+		return (out.EXTS || out.EXTH || out.ROMSIZE) ? out : null;
 	};
 
 	/* ================= 短信 ================= */
@@ -702,7 +753,7 @@ var Parse = (function () {
 		return { type: type, bands: bands, arfcns: arfcns, scs_types: scs_types, pcis: pcis };
 	};
 
-	// 原前端拼锁频命令（即时生效场景，如扫频结果一键锁定）
+	// 前端拼锁频命令（即时生效场景）
 	api.buildLockCommand = function (kind, type, mobility, items) {
 		var cmd = kind === 'lte' ? 'AT^LTEFREQLOCK' : 'AT^NRFREQLOCK';
 		if (type === 0) return cmd + '=0';
@@ -772,92 +823,120 @@ var Parse = (function () {
 		return isFinite(n) ? n : null;
 	};
 
-	// 解析一行 ^MONSSC。NONE（非 ENDC）或解析失败返回 null。
-	api.parseMonssc = function (line) {
-		var match = line.match(/\^MONSSC:\s*(.+)/);
-		if (!match) return null;
-		var f = match[1].split(',').map(function (s) { return s.trim(); });
-		var rat = String(f[0] || '').replace(/"/g, '').toUpperCase();
-		if (rat !== 'NR' || f.length < 3) return null; // NONE 表示非 ENDC，LTE 分支手册标注暂不支持
-		var arfcn = numOrNull(f[1]);
-		// 手册 13.27.3：<PCI> 十六进制，取值范围 0~0x3EF
-		var pci = f[2] === '' ? null : parseInt(f[2], 16);
-		if (arfcn === null || pci === null || isNaN(pci)) return null;
-		var rawRsrp = numOrNull(f[3]), rawRsrq = numOrNull(f[4]), rawSinr = numOrNull(f[5]);
-		var meas = numOrNull(f[6]);
-		return {
-			arfcn: arfcn,
-			pci: pci,
-			rsrp: rawRsrp === null || rawRsrp === NR_INVALID.rsrp ? null : descale(rawRsrp, -156, -31),
-			rsrq: rawRsrq === null || rawRsrq === NR_INVALID.rsrq ? null : descale(rawRsrq, -43, 20),
-			sinr: rawSinr === null || rawSinr === NR_INVALID.sinr ? null : descale(rawSinr, -23, 40),
-			measType: meas !== null && MEAS_TYPES[meas] ? MEAS_TYPES[meas] : '—'
-		};
-	};
-
-	api.parseMonsscAll = function (text) {
-		return String(text).split(/\r?\n/).map(api.parseMonssc).filter(Boolean);
-	};
-
-	// 解析一行 ^CASCELLINFO。CA 未配置时模组直接回 ERROR，这里自然解析不到。
-	api.parseCascell = function (line) {
-		var match = line.match(/\^CASCELLINFO:\s*(.+)/);
-		if (!match) return null;
-		var f = match[1].split(',').map(function (s) { return s.trim(); });
-		if (f.length < 12) return null;
-		var index = numOrNull(f[0]), pci = numOrNull(f[1]);
-		if (index === null || pci === null) return null;
-		var bw = function (v) {
+	/*
+	 * 解析 ^NRSSBID（手册 13.28）：SA 连接态且网侧配置测量时，报服务小区
+	 * 与最多 4 个邻区的 SSB 测量。这是本固件在 SA 下**唯一**能拿到
+	 * 其他小区 PCI/RSRP/SINR 的途径（^MONSSC 仅 NSA、^CASCELLINFO 仅 LTE CA）。
+	 * 注意：邻区测量**不含 RSRQ**。
+	 * 结构：ARFCN,CID,PCI,RSRP,SINR,TA, 8×(SSBID,RSRP), N_NB,
+	 *       N×[PCI,ARFCN,RSRP,SINR, 4×(SSBID,RSRP)]
+	 * 无效值：PCI 0xFFFF、RSRP/SINR 0x7FFF、ARFCN 0xFFFFFFFF。
+	 */
+	api.parseNrssbid = function (text) {
+		var m = String(text).match(/\^NRSSBID:\s*([^\r\n]*)/);
+		if (!m) return null;
+		var f = m[1].split(',').map(function (s) { return s.trim(); });
+		if (f.length < 23) return null;
+		var valid = function (v, bad) {
 			var n = numOrNull(v);
-			return n === null ? null : (LTE_BANDWIDTHS[n] != null ? LTE_BANDWIDTHS[n] : null);
+			return (n === null || bad.indexOf(n) >= 0) ? null : n;
 		};
-		var freq = function (v) {
-			var n = numOrNull(v);
-			// 手册：<ulfreq>/<dlfreq> 单位 100kHz，换成 MHz 显示
-			return n === null ? null : Number((n / 10).toFixed(1));
+		/* 波束对：每 2 个字段是 (SSBID, RSRP)，RSRP 无效值 32767 直接丢弃 */
+		var beamsOf = function (from, count) {
+			var out = [];
+			for (var i = 0; i < count; i++) {
+				var id = numOrNull(f[from + i * 2]);
+				var rsrp = valid(f[from + i * 2 + 1], [32767]);
+				if (id === null || rsrp === null || id === 255) continue;
+				out.push({ id: id, rsrp: rsrp });
+			}
+			return out;
 		};
-		return {
-			index: index,
-			pci: pci,
-			rssi: numOrNull(f[2]),
-			rsrp: numOrNull(f[3]),
-			rsrq: numOrNull(f[4]),
-			band: numOrNull(f[5]) || 0,
-			ulArfcn: numOrNull(f[6]),
-			dlArfcn: numOrNull(f[7]),
-			ulFreq: freq(f[8]),
-			dlFreq: freq(f[9]),
-			ulBandwidth: bw(f[10]),
-			dlBandwidth: bw(f[11])
+		var serving = {
+			arfcn: valid(f[0], [4294967295]),
+			cid: f[1] || '',
+			pci: valid(f[2], [65535]),
+			rsrp: valid(f[3], [32767]),
+			sinr: valid(f[4], [32767]),
+			ta: numOrNull(f[5]),
+			beams: beamsOf(6, 8)
 		};
-	};
-
-	api.parseCascellAll = function (text) {
-		return String(text).split(/\r?\n/).map(api.parseCascell).filter(Boolean);
-	};
-
-	// 把 ^MONSSC / ^CASCELLINFO 的信号质量对应到 ^HFREQINFO 报出来的某个载波上。
-	api.carrierSignalFor = function (carrier, nr, lte) {
-		var arfcn = Number(carrier.dlFcn);
-		if (!isFinite(arfcn)) return null;
-		if (carrier.sysMode === 'NR') {
-			var hit = nr.find(function (c) { return c.arfcn === arfcn; });
-			return hit
-				? { pci: hit.pci, rsrp: hit.rsrp, rsrq: hit.rsrq, sinr: hit.sinr, measType: hit.measType }
-				: null;
+		if (serving.arfcn === null) return null;
+		var nNb = numOrNull(f[22]) || 0;
+		var neighbors = [];
+		for (var i = 0; i < nNb; i++) {
+			var o = 23 + i * 12;
+			if (o + 3 >= f.length) break;
+			var nb = {
+				pci: valid(f[o], [65535]),
+				arfcn: valid(f[o + 1], [4294967295]),
+				rsrp: valid(f[o + 2], [32767]),
+				sinr: valid(f[o + 3], [32767]),
+				beams: beamsOf(o + 4, 4)
+			};
+			if (nb.arfcn !== null) neighbors.push(nb);
 		}
-		var lHit = lte.find(function (c) { return c.dlArfcn === arfcn; });
-		return lHit ? { pci: lHit.pci, rsrp: lHit.rsrp, rsrq: lHit.rsrq, sinr: null, rssi: lHit.rssi } : null;
+		return { serving: serving, neighbors: neighbors };
 	};
 
-	// 找出没能对应到任何载波的辅小区，合并后不把数据悄悄丢掉。
-	api.unmatchedSecondaries = function (carriers, nr, lte) {
-		var arfcns = {};
-		carriers.forEach(function (c) { arfcns[Number(c.dlFcn)] = true; });
-		return {
-			nr: nr.filter(function (c) { return !arfcns[c.arfcn]; }),
-			lte: lte.filter(function (c) { return c.dlArfcn === null || !arfcns[c.dlArfcn]; })
-		};
+	/*
+	 * 解析 ^MONNC（当前邻区）：每行 `^MONNC: <RAT>,<arfcn>,<pci_hex>,<rsrp>,<rsrq>[,<sinr>]`。
+	 * NR 的 RSRP/RSRQ/SINR 在超范围时是 ×8 定点（如 -1256），这里还原；
+	 * PCI 是十六进制（实测出现过 "10A" / "16B"）。
+	 */
+	api.parseMonncAll = function (text) {
+		var out = [];
+		String(text).split(/\r?\n/).forEach(function (line) {
+			var m = line.match(/\^MONNC:\s*(\w+)\s*(?:,(.+))?/);
+			if (!m || m[1] === 'NONE' || !m[2]) return;
+			var v = m[2].split(',').map(function (s) { return s.trim().replace(/"/g, ''); });
+			var cell = { rat: m[1], arfcn: numOrNull(v[0]), pci: parseInt(v[1], 16) };
+			/* 无效码按「无测量」处理：RSRP -157/-1256、RSRQ -44/-348、SINR -24/-188 */
+			var fix = function (raw, big, invalid) {
+				var n = numOrNull(raw);
+				if (n === null) return null;
+				if (invalid.indexOf(n) >= 0) return null;
+				var val = Math.abs(n) > big ? Number((n / 8).toFixed(1)) : n;
+				return invalid.indexOf(val) >= 0 ? null : val;
+			};
+			if (m[1] === 'NR') {
+				cell.rsrp = fix(v[2], 157, [-157, -1256]);
+				cell.rsrq = fix(v[3], 43.5, [-44, -348, -5.5]);
+				cell.sinr = fix(v[4], 40, [-24, -188, -23.5]);
+			} else {
+				var rsrp = numOrNull(v[2]);
+				var rsrq = numOrNull(v[3]);
+				cell.rsrp = (rsrp === null || rsrp <= -140) ? null : rsrp;
+				cell.rsrq = (rsrq === null || rsrq <= -20) ? null : rsrq;
+			}
+			cell.band = api.arfcnToBand(m[1], cell.arfcn);
+			out.push(cell);
+		});
+		return out;
+	};
+
+	/* ARFCN → 频段号（常用频段表；测不准返回 null，调用方按 null 处理） */
+	api.arfcnToBand = function (rat, arfcn) {
+		var n = numOrNull(arfcn);
+		if (n === null) return null;
+		var table = rat === 'LTE'
+			? [[1, 0, 599], [3, 1200, 1949], [5, 2400, 2649], [8, 3450, 3799],
+				[34, 36200, 36349], [38, 37750, 38249], [39, 38250, 38649],
+				[40, 38650, 39649], [41, 39650, 41589]]
+			: [[1, 422000, 434000], [3, 376000, 396000], [5, 173800, 175000], [8, 185000, 192000],
+				[28, 151600, 160600], [41, 499200, 537999], [77, 620000, 680000],
+				[78, 620000, 653333], [79, 693334, 733333]];
+		for (var i = 0; i < table.length; i++) {
+			if (n >= table[i][1] && n <= table[i][2]) return table[i][0];
+		}
+		return null;
+	};
+
+	/* NR-ARFCN → MHz（3GPP 全局栅格：<600000 时 5kHz 步进，以上 15kHz） */
+	api.nrArfcnToMHz = function (n) {
+		n = Number(n);
+		if (!isFinite(n) || n <= 0) return null;
+		return n < 600000 ? n * 0.005 : 3000 + (n - 600000) * 0.015;
 	};
 
 	/* ================= 网络拒绝原因 ^REJINFO（reject.ts 等价迁移） ================= */

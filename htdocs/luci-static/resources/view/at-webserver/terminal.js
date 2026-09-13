@@ -83,8 +83,7 @@ return L.view.extend({
 			{ label: '查询 SIM 状态', command: 'AT+CPIN?' },
 			{ label: '查询网络注册', command: 'AT+CREG?' },
 			{ label: '查询基站信息', command: 'AT+CGREG?' },
-			{ label: '查询网络时间', command: 'AT^NWTIME?' },
-			/* 以下条目与 IMEI 相关，完全沿用基准实现，未做任何改动 */
+				/* 以下条目与 IMEI 相关，完全沿用基准实现，未做任何改动 */
 			{ label: '查询 IMEI', command: 'AT+CGSN' }
 		];
 

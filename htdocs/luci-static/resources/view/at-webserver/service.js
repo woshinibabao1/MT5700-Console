@@ -11,7 +11,6 @@
  * - connection_type / network_host / network_port / serial_port / baud_rate
  * - websocket_host / websocket_port / websocket_auth_key
  * - 通知开关：notify_*（来电/短信/信号/内存满/WebHook URL 与企业微信）
- * - 定时锁频总开关 schedule_enabled
  * - 保存后通过 ubus 重载服务（等价 /etc/init.d/at-webserver reload）
  *
  * 状态判定说明（修复「未运行」误报）：
@@ -174,12 +173,25 @@ return L.view.extend({
 		var page = Mt5700.page('服务配置', 'AT 服务与通知设置（保存后自动重载）');
 		var body = page._body;
 
+		/* 顶部 AT 服务状态卡（与其余页面一致） */
+		var connBar = E('div');
+		Mt5700.renderConnectionBar(connBar);
+		body.appendChild(connBar);
+
 		var state = data || {};
 
 		/* ---------- 服务状态判定（五态） ---------- */
 		var status = resolveStatus(state);
 
-		var statusCard = Mt5700.card('服务状态', '');
+		/* 服务操作按钮归位到卡片头部 */
+		var actions = Mt5700.panelActions(
+			Mt5700.button('重载服务', function () { reloadService(); }, 'primary'),
+			Mt5700.button('重启服务', function () { restartService(); }, 'primary')
+		);
+		var reloadBtn = actions.firstChild;
+		var restartBtn = actions.lastChild;
+
+		var statusCard = Mt5700.card('服务状态', '后端进程、监听端口与安装状态', actions);
 		var statusBody = E('div');
 		statusCard._body.appendChild(statusBody);
 		body.appendChild(statusCard);
@@ -189,18 +201,10 @@ return L.view.extend({
 		if (status.pid) statusRow.appendChild(Mt5700.badge('PID ' + status.pid, 'neutral'));
 		statusBody.appendChild(statusRow);
 
-		var actions = Mt5700.panelActions(
-			Mt5700.button('重载服务', function () { reloadService(); }, 'primary'),
-			Mt5700.button('重启服务', function () { restartService(); }, 'primary')
-		);
-		var reloadBtn = actions.firstChild;
-		var restartBtn = actions.lastChild;
-
 		// 非「运行中」时给出可读的原因与建议，避免只有一个红色标签
 		if (status.hint) {
 			statusBody.appendChild(E('div', { 'class': 'mt5700-hint' }, status.hint));
 		}
-		statusBody.appendChild(actions);
 
 		/* ---------- 连接配置 ---------- */
 		var connCard = Mt5700.card('调制解调器连接', '后端连接模组的通道');
@@ -283,17 +287,6 @@ return L.view.extend({
 		var authKeyInput = Mt5700.input('text', '留空表示无需认证', '');
 		wsBody.appendChild(Mt5700.formGroup('认证密钥', authKeyInput, 'ucode 代理自动附带该密钥；LuCI 登录态由 rpcd 会话保证'));
 
-		/* ---------- 定时锁频 ---------- */
-		var schedCard = Mt5700.card('定时锁频', '总开关与默认参数');
-		var schedBody = E('div');
-		schedCard._body.appendChild(schedBody);
-		body.appendChild(schedCard);
-
-		var schedSwitch = E('div', { 'class': 'mt5700-switch' });
-		var schedChk = E('input', { type: 'checkbox' });
-		schedSwitch.appendChild(schedChk);
-		schedBody.appendChild(Mt5700.formGroup('启用定时锁频', schedSwitch, '在「服务 → 模组管理 → 定时锁频」编排时段'));
-
 		/* ---------- 通知配置 ---------- */
 		var notifCard = Mt5700.card('通知', '事件通知与 WebHook');
 		var notifBody = E('div');
@@ -343,8 +336,17 @@ return L.view.extend({
 		var wdResetSwitch = E('div', { 'class': 'mt5700-switch' });
 		var wdResetChk = E('input', { type: 'checkbox' });
 		wdResetSwitch.appendChild(wdResetChk);
-		wdBody.appendChild(Mt5700.formGroup('达阈值时复位模组', wdResetSwitch,
-			'向模组下发 AT+CFUN=1,1 复位协议栈（最后手段，会短暂断网约 30 秒）'));
+		wdBody.appendChild(Mt5700.formGroup('达阈值时执行复位', wdResetSwitch,
+			'连续异常达到阈值后，按下方命令逐条下发（最后手段，会短暂断网）'));
+
+		/* 复位命令：多行、自定义、按顺序执行（watchdog.sh 逐条下发，每条间隔 1 秒） */
+		var wdCmdsArea = E('textarea', { 'class': 'mt5700-input', 'rows': '4',
+			'placeholder': '每行一条 AT 命令，按顺序执行' });
+		wdCmdsArea.style.width = '100%';
+		wdCmdsArea.style.fontFamily = 'var(--mt5700-font-mono)';
+		wdCmdsArea.style.minHeight = '84px';
+		wdBody.appendChild(Mt5700.formGroup('复位命令（每行一条，按顺序执行）', wdCmdsArea,
+			'空行与 # 开头的行会被忽略；可写多步，例如先关射频再开：AT+CFUN=4 换行 AT+CFUN=1'));
 
 		wdBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 			'看门狗每轮都会重新读取配置，保存后最多一个检查间隔即生效，无需重启服务。' +
@@ -369,7 +371,6 @@ return L.view.extend({
 		}
 		wsBindSel.value = bindCur === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
 		authKeyInput.value = String(get('websocket_auth_key', ''));
-		schedChk.checked = get('schedule_enabled', '0') === '1';
 		notifyCalls.input.checked = get('notify_call', '1') === '1';
 		notifySms.input.checked = get('notify_sms', '1') === '1';
 		notifySignal.input.checked = get('notify_signal', '1') === '1';
@@ -379,7 +380,9 @@ return L.view.extend({
 		wdChk.checked = get('watch_enabled', '0') === '1';
 		wdIntervalInput.value = String(get('watch_interval', '60'));
 		wdThresholdInput.value = String(get('watch_fail_threshold', '3'));
-		wdResetChk.checked = get('watch_reset_modem', '1') === '1';
+		wdResetChk.checked = get('watch_reset_modem', '0') === '1';
+		/* UCI 里以字面 \n 存多行命令，这里还原成换行显示 */
+		wdCmdsArea.value = String(get('watch_reset_cmds', 'AT+CFUN=1,1')).replace(/\\n/g, '\n');
 
 		/* ---------- 保存（OpenWrt 标准「保存并应用」流程） ----------
 		 *
@@ -409,7 +412,6 @@ return L.view.extend({
 			set('websocket_bind', bind);
 			set('websocket_allow_wan', bind === '0.0.0.0' ? '1' : '0');
 			set('websocket_auth_key', authKeyInput.value.trim());
-			set('schedule_enabled', schedChk.checked ? '1' : '0');
 			set('notify_call', notifyCalls.input.checked ? '1' : '0');
 			set('notify_sms', notifySms.input.checked ? '1' : '0');
 			set('notify_signal', notifySignal.input.checked ? '1' : '0');
@@ -420,6 +422,10 @@ return L.view.extend({
 			set('watch_interval', String(Math.max(15, parseInt(wdIntervalInput.value, 10) || 60)));
 			set('watch_fail_threshold', String(Math.max(1, parseInt(wdThresholdInput.value, 10) || 3)));
 			set('watch_reset_modem', wdResetChk.checked ? '1' : '0');
+			/* 多行 → 字面 \n（UCI 值不能带真实换行），看门狗侧用 printf %b 还原 */
+			set('watch_reset_cmds', wdCmdsArea.value.replace(/\r/g, '')
+				.replace(/^\s*|\s*$/g, '').split('\n')
+				.map(function (x) { return x.replace(/\s+$/, ''); }).join('\\n'));
 
 			// 写内存后立刻标脏，未点保存就离开会被浏览器拦截
 			AtWs.uci.markDirty();

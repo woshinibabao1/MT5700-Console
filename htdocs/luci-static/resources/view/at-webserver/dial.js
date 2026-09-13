@@ -135,21 +135,29 @@ return L.view.extend({
 			};
 		}
 
-		/* ---------- 卡片：自动拨号 + APN ---------- */
-		var dialCard = Mt5700.card('自动拨号与 APN', '开启后设备自动保持网络连接，建议保持开启');
+		/* ---------- 卡片：自动拨号 + APN ----------
+		 * 内部结构（调整点）：
+		 *   1. 状态徽章 + 当前认证合成一行（原先「当前认证」在底部另起一行重复说明）
+		 *   2. 自动拨号改用统一的 .mt5700-switch 开关（原先混在 2 列表单里的裸 checkbox）
+		 *   3. APN 表单独立成 2 列网格；「暂存 APN 更改」归位到卡片头部
+		 */
+		var dialSaveBtn = Mt5700.primaryButton('暂存 APN 更改', function () { handleApnSettingChange(); });
+		var dialCard = Mt5700.card('自动拨号与 APN', '开启后设备自动保持网络连接，建议保持开启', dialSaveBtn);
 		body.appendChild(dialCard);
 
 		var dialStatus = E('div', { 'class': 'mt5700-inline' });
 		dialCard._body.appendChild(dialStatus);
 
-		var dialBody = E('div', { 'class': 'mt5700-grid mt5700-grid-2' });
-		dialCard._body.appendChild(dialBody);
-
-		var dialSwitch = document.createElement('input');
-		dialSwitch.type = 'checkbox';
-		dialSwitch.className = 'cbi-input-checkbox';
+		/* 自动拨号开关：与其它页一致的 switch 组件，单独一行 */
+		var dialSwitchWrap = E('div', { 'class': 'mt5700-switch' });
+		var dialSwitch = E('input', { type: 'checkbox' });
+		dialSwitchWrap.appendChild(dialSwitch);
 		dialSwitch.addEventListener('change', function () { handleAutoDialChange(dialSwitch.checked); });
-		dialBody.appendChild(Mt5700.formGroup('自动拨号', dialSwitch, '开启后设备将自动保持网络连接'));
+		dialCard._body.appendChild(Mt5700.formGroup('自动拨号', dialSwitchWrap,
+			'开启后模组上电即自动拨号并保持在线；关闭后需手动拨号'));
+
+		var dialBody = E('div', { 'class': 'mt5700-grid mt5700-grid-2 mt5700-mt-md' });
+		dialCard._body.appendChild(dialBody);
 
 		var apnInput = Mt5700.input('text', '请输入 APN');
 		apnInput.maxLength = 99;
@@ -168,16 +176,10 @@ return L.view.extend({
 		}), '0');
 		authSel.addEventListener('change', function () { apnForm.authType = parseInt(authSel.value, 10); });
 
-		dialBody.appendChild(Mt5700.formGroup('APN', apnInput));
-		dialBody.appendChild(Mt5700.formGroup('用户名', userInput));
-		dialBody.appendChild(Mt5700.formGroup('密码', passInput));
+		dialBody.appendChild(Mt5700.formGroup('APN', apnInput, '运营商接入点，例：cmnet / 3gnet'));
 		dialBody.appendChild(Mt5700.formGroup('认证方式', authSel));
-
-		var authCurrent = E('span', { 'class': 'mt5700-hint' }, '当前认证：无鉴权');
-		dialCard._body.appendChild(Mt5700.panelActions(
-			Mt5700.primaryButton('暂存 APN 更改', function () { handleApnSettingChange(); }),
-			authCurrent
-		));
+		dialBody.appendChild(Mt5700.formGroup('用户名', userInput, '无认证时可留空'));
+		dialBody.appendChild(Mt5700.formGroup('密码', passInput, '无认证时可留空'));
 
 		/* ---------- 卡片：模式配置 ---------- */
 		var modeCard = Mt5700.card('模式配置', '拨号方式与 USB 端口模式');
@@ -252,7 +254,7 @@ return L.view.extend({
 				settings.enable === 1 ? 'success' : 'warning'));
 			dialStatus.appendChild(Mt5700.badge('拨号方式：' + getDialModeText(settings.dialMode), 'info'));
 			dialStatus.appendChild(Mt5700.badge('协议：' + (settings.protocol || '-'), 'neutral'));
-			authCurrent.textContent = '当前认证：' + getAuthTypeText(settings.authType);
+			dialStatus.appendChild(Mt5700.badge('认证：' + getAuthTypeText(settings.authType), 'neutral'));
 
 			apnInput.value = apnForm.apn || '';
 			userInput.value = apnForm.username || '';

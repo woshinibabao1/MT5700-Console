@@ -13,3 +13,9 @@ tests/mock-modem/node_modules/
 # IDE
 .idea/
 .vscode/
+
+# WorkBuddy 本地数据（含设备凭据，禁止入库）
+.workbuddy/
+
+# 本机开发说明（含绝对路径，不入库）
+CLAUDE.md

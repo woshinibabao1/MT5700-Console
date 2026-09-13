@@ -683,7 +683,7 @@ function signalColor(rsrp) {
 function psRegText(stat) {
 	switch (parseInt(stat, 10)) {
 		case 0: return '未注册，正在搜索';
-		case 1: return '已注册（本地网络）';
+		case 1: return '已注册';
 		case 2: return '未注册，正在搜索（但允许紧急呼叫）';
 		case 3: return '注册被拒绝';
 		case 4: return '未知';
@@ -777,37 +777,70 @@ function parseMONSC(data) {
 	if (!str) return null;
 	var p = str.split(',').map(function (s) { return s.trim(); });
 	/*
-	 * 两种实测格式，按首字段是否为纯数字自动判别：
-	 *   格式 A（NR，带前导制式）:
-	 *     ^MONSC: NR,<mcc>,<mnc>,<tac>,<flag>,<cid>,<pci>,<arfcn>,<rsrp>,<rsrq>,<sinr>
-	 *     实测: ^MONSC: NR,460,00,504990,1,C2840C002,80,149002,-65,-10,28
-	 *     RSRP/RSRQ/SINR 为直接工程值（dBm/dB/dB），无需 convert* 换算。
-	 *     与 ^HCSQ: "NR",77,236,31 独立交叉验证一致（77→-63, 236→27.2）。
-	 *   格式 B（旧版，无前导制式，原始编码值）:
-	 *     ^MONSC: <mcc>,<mnc>,<lac>,<cid>,<pci>,<ch>,<rsrp_raw>,<rsrq_raw>,<sinr_raw>,<sysmode>
+	 * 手册 13.9.3 的字段序（**按 RAT 不同**，此前把三者当成同一套，导致 TAC/频点/PCI 全错位）：
+	 *   NR ：<MCC>,<MNC>,<ARFCN-NR>,<SCS>,<Cell_ID>,<PCI>,<TAC>,<RSRP>,<RSRQ>,<SINR>
+	 *   LTE：<MCC>,<MNC>,<ARFCN>,<Cell_ID>,<PCI>,<TAC>,<RSRP>,<RSRQ>,<RSSI>   （无 SCS）
+	 * 实测 NR：^MONSC: NR,460,00,524910,1,C027F5065,114,14225C,-73,-9,24
+	 *    → ARFCN 524910（**SSB 频点**，手册注：与上下行频点可不一致）、SCS 1(30kHz)、
+	 *      Cell_ID C027F5065、PCI 0x114=276、TAC 0x14225C=1319516。
+	 *      PCI 与 ^NRSSBID 的服务小区 PCI 276 交叉验证一致。
+	 * 注意：<PCI> 与 <TAC> 是**十六进制**（LTE/NR 皆然），必须按 hex 解析/展示。
 	 */
+	var hexInt = function (v) {
+		if (v === undefined || v === null || v === '') return null;
+		var s = String(v).trim();
+		var n = parseInt(s, 16);
+		return isNaN(n) ? null : n;
+	};
+	var num = function (v) {
+		return (v === undefined || v === null || v === '') ? null : parseFloat(v);
+	};
 	var hasLeadingMode = p.length > 0 && !/^-?\d+$/.test(p[0]);
 	var d;
 	if (hasLeadingMode) {
-		d = {
-			sysMode: p[0] || '',
-			mcc: p[1] || '',
-			mnc: p[2] || '',
-			lac: p[3] || '',
-			cid: p[5] || '',
-			pci: p[6] !== undefined ? parseInt(p[6], 10) : 0,
-			channel: p[7] || '',
-			rsrp: p[8] !== undefined && p[8] !== '' ? parseFloat(p[8]) : null,
-			rsrq: p[9] !== undefined && p[9] !== '' ? parseFloat(p[9]) : null,
-			sinr: p[10] !== undefined && p[10] !== '' ? parseFloat(p[10]) : null
-		};
+		var rat = String(p[0] || '').toUpperCase();
+		if (rat === 'NR') {
+			d = {
+				sysMode: 'NR',
+				mcc: p[1] || '', mnc: p[2] || '',
+				channel: p[3] || '',                       // ARFCN（SSB 频点）
+				scs: hexInt(p[4]),
+				cid: p[5] || '',
+				pci: hexInt(p[6]),                         // 十六进制
+				lac: p[7] || '',                           // TAC（十六进制，展示时转十进制）
+				rsrp: num(p[8]), rsrq: num(p[9]), sinr: num(p[10])
+			};
+		} else if (rat === 'LTE') {
+			d = {
+				sysMode: 'LTE',
+				mcc: p[1] || '', mnc: p[2] || '',
+				channel: p[3] || '',
+				scs: null,
+				cid: p[4] || '',
+				pci: hexInt(p[5]),
+				lac: p[6] || '',
+				rsrp: num(p[7]), rsrq: num(p[8]), sinr: null, rssi: num(p[9])
+			};
+		} else {
+			/* WCDMA 等：手册字段与 LTE 相近（PSC 代替 PCI），按 LTE 位序宽松解析 */
+			d = {
+				sysMode: rat,
+				mcc: p[1] || '', mnc: p[2] || '',
+				channel: p[3] || '',
+				cid: p[4] || '',
+				pci: hexInt(p[5]),
+				lac: p[6] || '',
+				rsrp: num(p[7]), rsrq: num(p[8]), sinr: null
+			};
+		}
 	} else {
+		/* 旧版格式（无前导制式，原始编码值） */
 		d = {
 			mcc: p[0] || '',
 			mnc: p[1] || '',
 			lac: p[2] || '',
 			cid: p[3] || '',
-			pci: p[4] ? parseInt(p[4], 10) : 0,
+			pci: hexInt(p[4]),
 			channel: p[5] ? p[5].trim() : '',
 			rsrp: p[6] !== undefined ? convertRsrp(parseInt(p[6], 10)) : null,
 			rsrq: p[7] !== undefined ? convertRsrq(parseInt(p[7], 10)) : null,

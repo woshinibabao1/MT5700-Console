@@ -172,9 +172,12 @@ async function main() {
 		const monssc = await at('AT^MONSSC');
 		const md = String(monssc.result && monssc.result.data);
 		check('AT^MONSSC 辅站应答', md.indexOf('^MONSSC') >= 0 && md.indexOf('NR') >= 0 && md.indexOf('2360') >= 0, md.replace(/\r/g, '\\r').slice(0, 40));
+		/* ^CASCELLINFO? 曾断言「有 1750 数据」，但真机 NR SA 下恒回 ERROR、且前端已不再查询它。
+		   改为断言「返回失败」，与真机一致——不要再让测试为不存在的能力背书。 */
 		const cascell = await at('AT^CASCELLINFO?');
 		const cd = String(cascell.result && cascell.result.data);
-		check('AT^CASCELLINFO? CA 应答', cd.indexOf('^CASCELLINFO') >= 0 && cd.indexOf('1750') >= 0, cd.replace(/\r/g, '\\r').slice(0, 60));
+		check('AT^CASCELLINFO? 与真机一致（NR SA 下失败）',
+			!/\^CASCELLINFO/.test(cd), cd.replace(/\r/g, '\\r').slice(0, 60));
 		const simsq = await at('AT^SIMSQ?');
 		const sd = String(simsq.result && simsq.result.data);
 		check('AT^SIMSQ? 应答', sd.indexOf('^SIMSQ') >= 0, sd.replace(/\r/g, '\\r').slice(0, 30));

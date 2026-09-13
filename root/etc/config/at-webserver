@@ -23,6 +23,12 @@ config at-webserver 'config'
 	option websocket_bind ''               # 可选：覆盖监听地址，如 0.0.0.0 或 192.168.10.1
 	option websocket_auth_key ''            # RPC 访问密钥（留空则不验证；LuCI 登录态由 rpcd 会话保证）
 	option cellscan_timeout '180'           # 一次 ^CELLSCAN 全网扫频允许运行的秒数（下限 10）
+	# 只读缓存（秒）：只缓存「不变类」身份数据（型号/固件/IMEI/ICCID…），状态类默认关闭——
+	# 我们的 Rust 后端有常驻串口与命令队列，扛得住实时轮询，不必用陈旧数据换速度。
+	# read_cache_static_ttl 管不变类（默认 300），read_cache_ttl 管状态类（默认 0=不缓存）。
+	# 任何写命令都会清空缓存，所以「保存后读回」永远是新的。设 0 关闭缓存。
+	option read_cache_ttl '0'
+	option read_cache_static_ttl '300'           # 一次 ^CELLSCAN 全网扫频允许运行的秒数（下限 10）
 
 	# 连接看门狗（默认关闭，避免未确认前自行改动网络）
 	# 解决的场景：模组 USB 重新枚举后 DHCP 租约未续期，路由器持有失效地址，
@@ -33,6 +39,10 @@ config at-webserver 'config'
 	option watch_interval '60'               # 检查间隔（秒，下限 15）
 	option watch_fail_threshold '3'          # 连续异常多少次后触发模组复位
 	option watch_reset_modem '0'             # 1=达阈值时复位模组协议栈（AT+CFUN=1,1）
+	# 复位动作：多行自定义 AT 命令，按顺序逐条下发（空行与 # 开头行忽略）。
+	# 默认 AT+CFUN=1,1（复位协议栈）；也可写多步，例如先关射频再开：
+	#   AT+CFUN=4\nAT+CFUN=1
+	option watch_reset_cmds 'AT+CFUN=1,1'
 
 	# 通知配置
 	option wechat_webhook ''

@@ -11,7 +11,7 @@
  */
 
 // 注入新样式
-var MT5700_CSS_VERSION = '3.8.1';
+var MT5700_CSS_VERSION = '5.5.2';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -112,6 +112,59 @@ var Mt5700 = (function () {
 		return m;
 	};
 
+	/* ================= 分段选择器（单选按钮组） ================= */
+
+	/*
+	 * 少量互斥选项（如锁频类型 4 项、接入模式 3 项）用分段按钮而不是下拉：
+	 * 全部选项一眼可见、一次点选到位。返回 { el, setValue, getValue }。
+	 */
+	api.segmented = function (options, value, onChange) {
+		var wrap = E('div', { 'class': 'mt5700-segmented' });
+		var current = value;
+		var btns = [];
+		options.forEach(function (opt) {
+			var btn = E('button', { 'class': 'mt5700-segmented-btn', 'type': 'button' }, opt.label);
+			btn.addEventListener('click', function () {
+				if (current === opt.value) return;
+				current = opt.value;
+				paint();
+				if (onChange) onChange(opt.value);
+			});
+			btns.push({ el: btn, value: opt.value });
+			wrap.appendChild(btn);
+		});
+		function paint() {
+			btns.forEach(function (b) {
+				b.el.classList.toggle('is-active', b.value === current);
+			});
+		}
+		paint();
+		return {
+			el: wrap,
+			setValue: function (v) { current = v; paint(); },
+			getValue: function () { return current; }
+		};
+	};
+
+	/* ================= 信号强度（RSRP → 条） ================= */
+
+	/* -120dBm=0%、-70dBm=100%，≥60 绿 / ≥40 黄 / 否则红（与载波表同一套判据） */
+	api.signalPercent = function (rsrp) {
+		if (rsrp == null) return null;
+		return Math.max(0, Math.min(100, Math.round(2 * (Number(rsrp) + 120))));
+	};
+
+	api.rsrpBar = function (rsrp) {
+		if (rsrp == null) return document.createTextNode('—');
+		var pct = api.signalPercent(rsrp);
+		var color = pct >= 60 ? 'var(--mt5700-success)'
+			: pct >= 40 ? 'var(--mt5700-warning)' : 'var(--mt5700-danger)';
+		return E('div', { 'class': 'mt5700-signal-bar' },
+			E('div', { 'class': 'mt5700-signal-bar-fill',
+				'style': 'width:' + pct + '%;background:' + color }));
+	};
+
+	
 	/* ================= 环形仪表 (Circular Gauge) ================= */
 
 	/*
@@ -394,6 +447,27 @@ var Mt5700 = (function () {
 
 		apply('connecting');
 		cl.onConnectionStateChange(apply);
+
+		/*
+		 * 兜底发起连接（connect() 幂等：已就绪时直接置 connected 并返回）。
+		 *
+		 * 背景：通知日志、服务配置两页只画状态卡、从不连接 AT 服务，
+		 * 于是卡片永远停在「未连接 / SIM —」。这两页确实不必发 AT 命令，
+		 * 但既然状态卡在页面上，就必须反映真实连接状态 —— 与其在每个视图里
+		 * 各写一遍 connect()，不如由组件保证：画了这张卡，连接就得建立。
+		 */
+		if (cl.isReady && cl.isReady()) {
+			apply('connected');
+		} else {
+			cl.connect().catch(function (err) {
+				if (err && err.message === 'REQUIRE_AUTH_KEY') {
+					apply('error', '需要访问密钥：请在「服务配置」核对 websocket_auth_key');
+					return;
+				}
+				console.warn('AT 服务连接失败', err);
+			});
+		}
+
 		// 定期刷新 SIM 状态（卡插拔、初始化进度都会变）
 		api.interval(15000, refreshSimStatus);
 		return card;

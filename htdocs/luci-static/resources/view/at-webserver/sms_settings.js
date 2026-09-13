@@ -7,7 +7,7 @@
 /* global L, AtWs, Parse, Ui, SmsEncode, Mt5700 */
 
 /**
- * 短信设置 - 新 UI 视觉 + 基准 v1.3.4 功能（含 USSD 查询）
+ * 短信设置 - 新 UI 视觉 + 基准 v1.3.4 功能
  *
  * - IMS 开关（AT^IMSSWITCH? / AT^IMSSWITCH=1,0,0 等）
  * - 短信开关（开启步骤：CEUS=1/IMSSWITCH=1/CFUN=1/CGDCONT=5/CSCA；关闭步骤反向）
@@ -15,13 +15,12 @@
  * - 存储位置与用量（AT+CMGF=0 + AT+CPMS? / AT+CPMS=...）
  * - 清空全部短信（AT+CMGD=1,4 逐存储）
  * - 本地已发缓存导出/导入/清空
- * - USSD 查询（AT+CUSD，GSM7 打包，+CUSD URC 回复）
  */
 
 return L.view.extend({
 	render: function () {
 		var self = this;
-		var page = Mt5700.page('短信设置', '短信功能开关、中心号码、存储管理与 USSD 查询');
+		var page = Mt5700.page('短信设置', '短信功能开关、中心号码与存储管理');
 		var body = page._body;
 
 		var connBar = E('div');
@@ -205,91 +204,6 @@ return L.view.extend({
 				});
 			})
 		));
-
-		/* ---------- USSD ---------- */
-		var ussdCard = Mt5700.card('USSD 查询', '向运营商发送 USSD 代码，例如中国移动 *133#');
-		var ussdBody = E('div');
-		ussdCard._body.appendChild(ussdBody);
-		body.appendChild(ussdCard);
-
-		var ussdInput = Mt5700.input('text', '*133#', '*133#');
-		ussdInput.style.maxWidth = '260px';
-		ussdInput.addEventListener('keydown', function (e) {
-			if (e.key === 'Enter') sendUssd();
-		});
-		ussdBody.appendChild(Mt5700.formGroup('USSD 代码', ussdInput));
-
-		var ussdReplyEl = E('div', { 'class': 'mt5700-terminal-log' });
-		ussdBody.appendChild(ussdReplyEl);
-
-		var ussdSendBtn = Mt5700.primaryButton('发送', function () { sendUssd(); });
-		var ussdCancelBtn = Mt5700.button('取消会话', function () {
-			AtWs.client.sendCommand(Parse.USSD_CANCEL_COMMAND).catch(function () {});
-			ussdBusy = false;
-			ussdSendBtn.disabled = false;
-			ussdCancelBtn.style.display = 'none';
-		}, 'ghost');
-		ussdCancelBtn.style.display = 'none';
-		ussdBody.appendChild(Mt5700.panelActions(ussdSendBtn, ussdCancelBtn));
-
-		var ussdBusy = false;
-		var ussdTimeout = null;
-
-		function sendUssd() {
-			var built = Parse.buildUssdCommand(ussdInput.value);
-			if (built.error) { Mt5700.error(built.error); return; }
-			ussdBusy = true;
-			ussdSendBtn.disabled = true;
-			ussdCancelBtn.style.display = '';
-			ussdReplyEl.textContent = '等待运营商回复…';
-			AtWs.client.sendCommand(built.command).then(function (res) {
-				if (!res.success) throw new Error('模组拒绝了 USSD 请求');
-				var inline = Parse.parseUssd(String(res.data || ''));
-				if (inline && inline.text) {
-					ussdReplyEl.textContent = inline.text;
-					ussdBusy = false;
-					ussdSendBtn.disabled = false;
-					ussdCancelBtn.style.display = 'none';
-				}
-			}).catch(function (err) {
-				ussdBusy = false;
-				ussdSendBtn.disabled = false;
-				ussdCancelBtn.style.display = 'none';
-				Mt5700.error((err && err.message) || 'USSD 请求失败');
-			});
-			if (ussdTimeout) clearTimeout(ussdTimeout);
-			ussdTimeout = setTimeout(function () {
-				if (ussdBusy) {
-					ussdBusy = false;
-					ussdSendBtn.disabled = false;
-					ussdCancelBtn.style.display = 'none';
-					ussdReplyEl.textContent = '';
-					Mt5700.warning('等待运营商回复超时，可重试或取消会话');
-				}
-			}, 30000);
-		}
-
-		// +CUSD URC 订阅
-		var ussdHandler = function (resp) {
-			if (!resp || resp.type !== 'urc_data') return;
-			var urc = resp.data;
-			var parsed = urc && urc.raw ? Parse.parseUssd(urc.raw) : null;
-			if (parsed) {
-				ussdReplyEl.textContent = parsed.text || '（无内容）';
-				var extra = parsed.mText + (parsed.needsReply ? '：可继续输入选项后再次发送' : '');
-				ussdReplyEl.appendChild(E('div', { 'class': 'mt5700-hint' }, extra));
-				ussdBusy = false;
-				ussdSendBtn.disabled = false;
-				ussdCancelBtn.style.display = 'none';
-				if (ussdTimeout) clearTimeout(ussdTimeout);
-			}
-		};
-		AtWs.client.subscribe(ussdHandler);
-
-		self._dispose = function () {
-			AtWs.client.unsubscribe(ussdHandler);
-			if (ussdTimeout) clearTimeout(ussdTimeout);
-		};
 
 		/* ---------- 短信开关步骤 ---------- */
 

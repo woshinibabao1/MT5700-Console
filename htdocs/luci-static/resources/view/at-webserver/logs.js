@@ -30,9 +30,20 @@ return L.view.extend({
 		var page = Mt5700.page('通知日志', '短信、来电、信号变化等通知记录');
 		var body = page._body;
 
+		/* 顶部 AT 服务状态卡（与其余页面一致） */
+		var connBar = E('div');
+		Mt5700.renderConnectionBar(connBar);
+		body.appendChild(connBar);
+
 		var path = (data && data.path) || '/tmp/at-notifications.log';
 
-		var logCard = Mt5700.card('通知日志', '文件：' + path);
+		/* 操作按钮归位到卡片头部（与「信号质量」卡的刷新控件同一处理） */
+		var actions = Mt5700.panelActions(
+			Mt5700.primaryButton('刷新', function () { refreshLog(); }),
+			Mt5700.dangerButton('清空日志', function () { clearLog(); })
+		);
+
+		var logCard = Mt5700.card('通知日志', '文件：' + path, actions);
 		var logBody = E('div');
 		logCard._body.appendChild(logBody);
 		body.appendChild(logCard);
@@ -63,12 +74,6 @@ return L.view.extend({
 			if (L.fs && typeof L.fs.write === 'function') return L.fs.write(p, content);
 			return fileWrite(p, content);
 		}
-
-		var actions = Mt5700.panelActions(
-			Mt5700.primaryButton('刷新', function () { refreshLog(); }),
-			Mt5700.dangerButton('清空日志', function () { clearLog(); })
-		);
-		logBody.appendChild(actions);
 
 		function renderLog(content, status) {
 			if (status === 'error') {
