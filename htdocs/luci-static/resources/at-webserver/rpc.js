@@ -108,7 +108,6 @@ ATClient.prototype.loadConfig = function () {
 		self.authKey = authKey;
 		return self.port;
 	}).catch(function (err) {
-		console.warn('加载 UCI 配置失败，使用默认值', err);
 		self.port = 8765;
 		self.bind = '127.0.0.1';
 		self.host = '127.0.0.1';

@@ -364,7 +364,6 @@ return L.view.extend({
 				});
 				return;
 			}
-			if (err) console.warn(err);
 		}).then(function () {
 			// 读取总开关（UCI）后再加载状态
 			return L.uci.load('at-webserver').catch(function () {});

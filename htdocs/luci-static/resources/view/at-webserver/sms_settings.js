@@ -318,7 +318,7 @@ return L.view.extend({
 				.then(loadIMS)
 				.then(loadStorage)
 				.then(refreshCacheCount)
-				.catch(function (err) { console.warn(err); });
+				.catch(function () { /* 单项数据失败时保留其余卡片，不打断整页 */ });
 		}
 
 		AtWs.client.connect().catch(function (err) {
@@ -330,7 +330,6 @@ return L.view.extend({
 				});
 				return;
 			}
-			if (err) console.warn(err);
 		}).then(function () {
 			loadAll();
 		});

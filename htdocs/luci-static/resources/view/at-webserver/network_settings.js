@@ -638,7 +638,6 @@ return L.view.extend({
 				});
 				return;
 			}
-			if (err) console.warn(err);
 		}).then(function () {
 			renderLockEditor();
 			fetchCurrent();

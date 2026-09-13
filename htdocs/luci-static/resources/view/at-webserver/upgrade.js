@@ -264,7 +264,6 @@ return L.view.extend({
 				Mt5700.error('需要提供连接密钥');
 				return;
 			}
-			if (err) console.warn(err);
 		}).then(function () {
 			fetchVersion();
 			if (!agreed) showDisclaimer();

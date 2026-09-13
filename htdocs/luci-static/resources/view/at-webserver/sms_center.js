@@ -541,7 +541,6 @@ return L.view.extend({
 				});
 				return;
 			}
-			if (err) console.warn(err);
 		}).then(function () {
 			refreshStorage();
 			refresh();

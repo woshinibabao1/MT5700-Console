@@ -626,7 +626,7 @@ return L.view.extend({
 				.then(fetchNRCapability)
 				.then(fetchSysCfg)
 				.then(fetchThermConfig)
-				.catch(function (err) { console.warn('部分数据加载失败', err); });
+				.catch(function () { /* 单项数据失败时保留其余卡片，不打断整页 */ });
 		}
 
 		var bottomActions = Mt5700.panelActions(
@@ -643,7 +643,6 @@ return L.view.extend({
 				});
 				return;
 			}
-			if (err) console.warn(err);
 		}).then(function () {
 			loadAll();
 		});

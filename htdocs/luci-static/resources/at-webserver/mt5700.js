@@ -464,7 +464,6 @@ var Mt5700 = (function () {
 					apply('error', '需要访问密钥：请在「服务配置」核对 websocket_auth_key');
 					return;
 				}
-				console.warn('AT 服务连接失败', err);
 			});
 		}
 

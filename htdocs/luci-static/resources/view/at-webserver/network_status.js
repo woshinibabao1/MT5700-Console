@@ -1026,9 +1026,8 @@ return L.view.extend({
 			   已移到 30 秒慢档——实时速率另有 1Hz 的网卡计数采样，不受影响。 */
 			[updateNetworkInfo]
 				.forEach(function (fn) { chain = chain.then(fn); });
-			return chain.catch(function (err) {
-				console.warn('快速刷新失败', err);
-			}).then(function () { refreshing = false; });
+			return chain.catch(function () { /* 刷新失败保留上一次数据 */ })
+				then(function () { refreshing = false; });
 		}
 
 		var slowRefreshing = false;
@@ -1038,9 +1037,8 @@ return L.view.extend({
 			var chain = Promise.resolve();
 			[getPSReg, getFlow, getOperator, getAMBR, getQCI, getDHCP, getTemp, getMCS, loadSecondary, loadDiagnostics]
 				.forEach(function (fn) { chain = chain.then(fn); });
-			return chain.catch(function (err) {
-				console.warn('慢速刷新失败', err);
-			}).then(function () { slowRefreshing = false; });
+			return chain.catch(function () { /* 刷新失败保留上一次数据 */ })
+				then(function () { slowRefreshing = false; });
 		}
 
 		/* 手动点「刷新」时全量拉一次（含设备信息，绕过 60s 节流） */
@@ -1106,7 +1104,6 @@ return L.view.extend({
 				});
 				return;
 			}
-			if (err) console.warn('连接失败', err);
 		}).then(function () {
 			refreshAll();
 		});
