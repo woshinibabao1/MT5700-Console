@@ -364,38 +364,62 @@ return L.view.extend({
 				for (var i = 0; i < parts.length; i++) {
 					chain2 = chain2.then(function (part) {
 						/*
-						 * 按鼎桥《MT5700M-CN 5G 系列模组 AT 命令手册》9.14 节，PDU 模式
-						 * 发送为一次性下发：
-						 *     AT+CMGS=<TPDU 字节数><CR><完整 PDU>
-						 * 模组依据 <length> 读够字节数后自动提交到网络侧，
-						 * 不需要、也不应追加 Ctrl-Z(0x1A) 结束符。
+						 * 按鼎桥《MT5700M-CN 5G 系列模组 AT 命令手册》9.14 节，
+						 * 本模组的 PDU 发送为「两步下发」：
 						 *
-						 * 后端收到该命令后不会同步等待模组应答，而是转入独立任务并
-						 * 立刻返回受理；这里轮询 AT+SMSJOB? 取最终结果。
-						 * 这样即使模组迟迟不确认，界面也不会被卡住。
+						 *   1. 发 AT+CMGS=<length>\r，等模组回「<echo>+\x1A」（SUB），
+						 *      提示可以输入 PDU 数据。
+						 *   2. 发完整 PDU hex 字符串（不带 Ctrl-Z，Rust 端
+						 *      send_command_inner 对 CMGS 类不再自动追加 \r，
+						 *      consume 识别 0x1A 后由前端继续送 PDU）。
+						 *
+						 * 关键不变量（Rust 端已加测试守住）：
+						 *   - send_command_inner 对 AT+CMGS 不再追加行终止 \r，
+						 *     避免破坏 PDU 数据流。
+						 *   - consume 见到 0x1A 时只在 CMGS pending 上触发
+						 *     done.notify_one()，避免误判普通命令应答。
+						 *
+						 * 旧实现（一次性下发）会因为：
+						 *   - Rust 自动追加 \r 把 PDU 切坏 / 模组多收字节
+						 *   - Rust 等不到 OK/+CMGS 终止符而 6s 假超时
+						 * 导致永远失败。这里改为两步下发，每一步各自等真实应答。
 						 */
-						return AtWs.client.sendCommand('AT+CMGS=' + part.tpduLength + '\r' + part.pdu)
-							.then(function (res) {
-								if (!res || res.success === false) {
-									throw new Error(String((res && res.error) || '发送失败'));
+						var length = part.tpduLength;
+						return AtWs.client.sendCommand('AT+CMGS=' + length + '\r')
+							.then(function (headRes) {
+								if (!headRes || headRes.success === false) {
+									throw new Error('CMGS 头命令失败: ' + (headRes && headRes.error || '未知错误'));
 								}
-								var txt = String(res.data == null ? '' : res.data);
-								if (/\bERROR\b/i.test(txt)) {
-									throw new Error('模组返回错误：' + txt.replace(/\s+/g, ' ').trim());
+								var txt = String(headRes.data == null ? '' : headRes.data);
+								/*
+								 * 模组应答应包含 SUB(0x1A) 提示符；标准 3GPP 是 '>'，
+								 * 两种形态只要见到任意一种都说明已就绪。
+								 */
+								if (txt.indexOf('\x1a') < 0 && txt.indexOf('>') < 0) {
+									throw new Error('模组未返回 PDU 输入提示符（实际：' + txt.replace(/\s+/g, ' ').trim() + '）');
+								}
+								if (/\b(ERROR|CMS ERROR|CME ERROR)\b/i.test(txt)) {
+									throw new Error('模组在 PDU 提示符前报错：' + txt.replace(/\s+/g, ' ').trim());
 								}
 								/*
-								 * 新后端：命令被转入后台任务，返回 SMS_ACCEPTED，需轮询结果。
-								 * 旧后端：同步返回发送结果，此时必须看到 +CMGS/OK 才算成功，
-								 * 只有回显与数据输入提示符（形如 "AT+CMGS=15" + 0x1A）说明
-								 * 模组没接受 PDU —— 不能报成功。
+								 * 第二步：发 PDU hex 字符串。
+								 * Rust 端不会自动追加 \r，会原样写到串口。
+								 * 模组按 length 读完 PDU 字节后自动提交，回 +CMGS: <mr>\r\nOK\r\n。
 								 */
-								if (txt.indexOf('SMS_ACCEPTED') >= 0) {
-									return waitSmsJob();
-								}
-								if (!/(\+CMGS:|\bOK\b)/.test(txt)) {
-									throw new Error('模组未确认短信提交（无 +CMGS/OK 应答，短信未发出）');
-								}
-								return txt;
+								return AtWs.client.sendCommand(part.pdu)
+									.then(function (dataRes) {
+										if (!dataRes || dataRes.success === false) {
+											throw new Error('PDU 发送失败: ' + (dataRes && dataRes.error || '未知错误'));
+										}
+										var dtxt = String(dataRes.data == null ? '' : dataRes.data);
+										if (/\bERROR\b/i.test(dtxt)) {
+											throw new Error('模组返回错误：' + dtxt.replace(/\s+/g, ' ').trim());
+										}
+										if (!/(\+CMGS:|\bOK\b)/.test(dtxt)) {
+											throw new Error('模组未确认短信提交（无 +CMGS/OK 应答，短信未发出）：' + dtxt.replace(/\s+/g, ' ').trim());
+										}
+										return dtxt;
+									});
 							});
 					}.bind(null, parts[i]));
 				}
