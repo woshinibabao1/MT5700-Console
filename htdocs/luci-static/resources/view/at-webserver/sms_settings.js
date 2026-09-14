@@ -66,6 +66,20 @@ return L.view.extend({
 		var smsOnChk = smsOnSwitch.querySelector('input');
 		smsBody.appendChild(Mt5700.formGroup('短信功能', smsOnSwitch, '开启时按顺序下发 CEUS/IMSSWITCH/CFUN/CGDCONT/CSCA 配置'));
 
+		/*
+		 * 短信格式（AT+CMGF）—— 只读展示。
+		 *
+		 * 发送侧已经两种模式都支持（见 sms_center.js 的 sendPduMode / sendTextMode：
+		 * PDU 模式组 PDU，Text 模式下发明文，含中文时临时切 UCS2 字符集），
+		 * 所以模组被外部工具切到 Text 也能发出去。
+		 *
+		 * 这里**不给切换开关**是有意的：接收侧（新短信 URC → AT+CMGR → PDU 解码，
+		 * 以及短信列表解析）是按 PDU 实现的，切到 Text 会让「收」这一侧读不出来。
+		 * 把当前格式摆出来，是为了排查时一眼能看出模组处在哪种模式。
+		 */
+		var fmtEl = E('div', { 'class': 'mt5700-hint' }, '短信格式：—');
+		smsBody.appendChild(fmtEl);
+
 		/* ---------- 短信中心号码 ---------- */
 		var centerCard = Mt5700.card('短信中心号码', '用于发送短信的 SMSC');
 		var centerBody = E('div');
@@ -280,6 +294,15 @@ return L.view.extend({
 			}).catch(function () {});
 		}
 
+		function loadFormat() {
+			return AtWs.client.sendCommand('AT+CMGF?').then(function (res) {
+				var m = String((res && res.data) || '').match(/\+CMGF:\s*(\d)/);
+				var v = m ? m[1] : '';
+				var label = v === '1' ? 'Text（明文）' : (v === '0' ? 'PDU（十六进制）' : '未知');
+				fmtEl.textContent = '短信格式：' + label + (v ? '　AT+CMGF=' + v : '');
+			}).catch(function () { fmtEl.textContent = '短信格式：读取失败'; });
+		}
+
 		function loadStorage() {
 			return AtWs.client.sendCommand('AT+CMGF=0').then(function () {
 				return AtWs.client.sendCommand('AT+CPMS?');
@@ -316,6 +339,8 @@ return L.view.extend({
 		function loadAll() {
 			return Promise.resolve()
 				.then(loadIMS)
+				// 必须在 loadStorage 之前：后者会下发 AT+CMGF=0，会把它之前读到的格式覆盖掉
+				.then(loadFormat)
 				.then(loadStorage)
 				.then(refreshCacheCount)
 				.catch(function () { /* 单项数据失败时保留其余卡片，不打断整页 */ });

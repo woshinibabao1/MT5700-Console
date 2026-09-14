@@ -414,19 +414,47 @@ return L.view.extend({
 			});
 		}
 
-		function send(explicitTarget) {
-			var content = msgInput.value.trim();
-			if (!content) { Mt5700.warning('请输入短信内容'); return; }
-			var target = (explicitTarget || '').trim() || state.selectedContact || '';
-			if (!target) { Mt5700.warning('请输入联系人号码'); return; }
-			if (!Parse.isValidPhoneNumber(target)) { Mt5700.warning('请输入正确的 5-19 位手机号码'); return; }
+		/* 解析 AT+CMGF? 的应答：0 = PDU，1 = Text；取不到按 PDU 处理 */
+		function parseCmgf(res) {
+			var m = String((res && res.data) || '').match(/\+CMGF:\s*(\d)/);
+			return m ? parseInt(m[1], 10) : 0;
+		}
 
-			sendBtn.disabled = true;
-			var chain = Promise.resolve();
-			// 确保 PDU 模式
-			chain = chain.then(function () { return AtWs.client.sendCommand('AT+CMGF?'); })
+		/*
+		 * 提交一条短信命令并取结果（PDU / Text 两种模式共用）。
+		 *
+		 * 后端会把 AT+CMGS 转入独立任务、先回 SMS_ACCEPTED，这里再轮询
+		 * AT+SMSJOB? 拿最终结果；旧后端是同步返回，此时必须看到 +CMGS / OK
+		 * 才算成功 —— 只回显命令而没有 +CMGS，说明模组没接受数据，不能报成功。
+		 */
+		function submitSms(cmd) {
+			return AtWs.client.sendCommand(cmd).then(function (res) {
+				if (!res || res.success === false) {
+					throw new Error(String((res && res.error) || '发送失败'));
+				}
+				var txt = String(res.data == null ? '' : res.data);
+				if (/\bERROR\b/i.test(txt)) {
+					throw new Error('模组返回错误：' + txt.replace(/\s+/g, ' ').trim());
+				}
+				if (txt.indexOf('SMS_ACCEPTED') >= 0) {
+					return waitSmsJob();
+				}
+				if (!/(\+CMGS:|\bOK\b)/.test(txt)) {
+					throw new Error('模组未确认短信提交（无 +CMGS/OK 应答，短信未发出）');
+				}
+				return txt;
+			});
+		}
+
+		/*
+		 * PDU 模式（AT+CMGF=0）发送。
+		 * 命令形态见 SmsEncode.buildPduSendCommand 的注释：命令与 PDU 之间必须用
+		 * 字面 "\r" 分隔，整条命令只在末尾有一个回车（由后端补）。
+		 */
+		function sendPduMode(target, content) {
+			return AtWs.client.sendCommand('AT+CMGF?')
 				.then(function (res) {
-					if (res.success && String(res.data).indexOf('+CMGF: 1') >= 0) {
+					if (parseCmgf(res) === 1) {
 						return AtWs.client.sendCommand('AT+CMGF=0');
 					}
 					return { success: true };
@@ -441,51 +469,78 @@ return L.view.extend({
 					/*
 					 * 保留号码开头的 '+'：TP-DA 的类型字节（TOA）要靠它区分
 					 * 0x91（国际号码，带国家码）与 0x81（国内/未知）。
-					 * 此前这里先把 '+' 去掉，编码器就只能永远判成 0x81，
-					 * 给 +86… 这类国际号码发短信时 TOA 是错的。
 					 * 编码器内部自己会过滤非数字字符，不需要在这里预处理。
 					 */
 					var parts = SmsEncode.buildSubmitParts({ smsc: smsc, destination: target, message: content });
-				var chain2 = Promise.resolve();
-				for (var i = 0; i < parts.length; i++) {
-					chain2 = chain2.then(function (part) {
-						/*
-						 * 按鼎桥《MT5700M-CN 5G 系列模组 AT 命令手册》9.14 节，PDU 模式
-						 * 发送为一次性下发：
-						 *     AT+CMGS=<TPDU 字节数><CR><完整 PDU>
-						 * 模组依据 <length> 读够字节数后自动提交到网络侧，
-						 * 不需要、也不应追加 Ctrl-Z(0x1A) 结束符。
-						 *
-						 * 后端收到该命令后不会同步等待模组应答，而是转入独立任务并
-						 * 立刻返回受理；这里轮询 AT+SMSJOB? 取最终结果。
-						 * 这样即使模组迟迟不确认，界面也不会被卡住。
-						 */
-						return AtWs.client.sendCommand('AT+CMGS=' + part.tpduLength + '\r' + part.pdu)
-							.then(function (res) {
-								if (!res || res.success === false) {
-									throw new Error(String((res && res.error) || '发送失败'));
-								}
-								var txt = String(res.data == null ? '' : res.data);
-								if (/\bERROR\b/i.test(txt)) {
-									throw new Error('模组返回错误：' + txt.replace(/\s+/g, ' ').trim());
-								}
-								/*
-								 * 新后端：命令被转入后台任务，返回 SMS_ACCEPTED，需轮询结果。
-								 * 旧后端：同步返回发送结果，此时必须看到 +CMGS/OK 才算成功，
-								 * 只有回显与数据输入提示符（形如 "AT+CMGS=15" + 0x1A）说明
-								 * 模组没接受 PDU —— 不能报成功。
-								 */
-								if (txt.indexOf('SMS_ACCEPTED') >= 0) {
-									return waitSmsJob();
-								}
-								if (!/(\+CMGS:|\bOK\b)/.test(txt)) {
-									throw new Error('模组未确认短信提交（无 +CMGS/OK 应答，短信未发出）');
-								}
-								return txt;
-							});
-					}.bind(null, parts[i]));
-				}
-				return chain2;
+					var c = Promise.resolve();
+					for (var i = 0; i < parts.length; i++) {
+						c = c.then(function (part) {
+							return submitSms(SmsEncode.buildPduSendCommand(part));
+						}.bind(null, parts[i]));
+					}
+					return c;
+				});
+		}
+
+		/*
+		 * Text 模式（AT+CMGF=1）发送。
+		 *  - 纯 ASCII 且不超过 160 字符：直接下发明文；
+		 *  - 含中文：临时切 AT+CSCS="UCS2"，号码与正文都写成 UCS2 十六进制，
+		 *    发完立刻切回 IRA（字符集是全局设置，不恢复会让整条 AT 通道的
+		 *    应答都变成 UCS2 编码，其它页面集体读不出来）；
+		 *  - 超长：Text 模式没有分片语法（拼接头只能自己写 PDU），
+		 *    降级为 PDU 模式发送，发完再切回 Text。
+		 */
+		function sendTextMode(target, content) {
+			var ucs2 = SmsEncode.usesUcs2(content);
+			var limit = ucs2 ? SmsEncode.TEXT_MAX_UCS2 : SmsEncode.TEXT_MAX_ASCII;
+			if (content.length > limit) {
+				return AtWs.client.sendCommand('AT+CMGF=0')
+					.then(function () { return sendPduMode(target, content); })
+					.then(function (r) {
+						return AtWs.client.sendCommand('AT+CMGF=1')
+							.then(function () { return r; }, function () { return r; });
+					});
+			}
+
+			var plan = SmsEncode.buildTextSendCommand({ destination: target, message: content });
+			var restore = function () {
+				var c = Promise.resolve();
+				(plan.post || []).forEach(function (cmd) {
+					c = c.then(function () { return AtWs.client.sendCommand(cmd); });
+				});
+				return c;
+			};
+			var run = Promise.resolve();
+			(plan.pre || []).forEach(function (cmd) {
+				run = run.then(function () { return AtWs.client.sendCommand(cmd); });
+			});
+			run = run.then(function () { return submitSms(plan.cmd); });
+			// 成功失败都要恢复现场
+			return run.then(
+				function (r) { return restore().then(function () { return r; }, function () { return r; }); },
+				function (e) { return restore().then(function () { throw e; }, function () { throw e; }); }
+			);
+		}
+
+		function send(explicitTarget) {
+			var content = msgInput.value.trim();
+			if (!content) { Mt5700.warning('请输入短信内容'); return; }
+			var target = (explicitTarget || '').trim() || state.selectedContact || '';
+			if (!target) { Mt5700.warning('请输入联系人号码'); return; }
+			if (!Parse.isValidPhoneNumber(target)) { Mt5700.warning('请输入正确的 5-19 位手机号码'); return; }
+
+			sendBtn.disabled = true;
+			/*
+			 * 跟随模组当前的短信格式，而不是强扭成 PDU：
+			 * 模组可能正被别的工具（或用户自己）设在 Text 模式，强行切换会改动
+			 * 别人的现场；两种模式我们都支持，按当前模式构造命令即可。
+			 */
+			var chain = AtWs.client.sendCommand('AT+CMGF?')
+				.then(function (res) {
+					return (parseCmgf(res) === 1)
+						? sendTextMode(target, content)
+						: sendPduMode(target, content);
 				});
 
 			chain.then(function (lastRes) {
