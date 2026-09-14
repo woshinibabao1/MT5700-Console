@@ -5,6 +5,79 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-09-14
+
+> ** breaking**：移除了「SIM 卡状态自愈」（UCI `sim_heal_enable`）。理由与证据见下。
+
+### ★ 修正 - SIM 状态 11 不是故障，界面文案此前在误导
+
+`AT^SIMSQ?` → `^SIMSQ: 1,11`，界面此前写成「已初始化 · **短信未就绪**」并标红，
+网络状态页还挂着一句「长期停在『已初始化』时**短信可能发不出去**」。
+
+依据只有手册 6.6 的一句话：`<sim_status>` = 12 才算「短信与电话可接入」。
+**真机结论恰好相反**：
+
+| 观察 | 结果 |
+| --- | --- |
+| 本卡 `^SIMSQ: 1,11` 时收发短信 | ✅ 完全正常（`AT+CPMS?` → `"SM",44,50`；向 10086 实发并收到回复） |
+| 开机自愈按 `AT^HVSST=1,0` → 3s → `AT^HVSST=1,1` 推一次 | ❌ **推完状态仍是 11**（真机日志，2026-09-13 23:41） |
+
+所以 11 既不影响短信，也不是能靠推卡修好的故障，它就是这张卡的常态。改法：
+
+- 11 的短标签改为「**已初始化 · 可接入网络**」，**不再点告警色**；
+- 详细说明保留手册口径但补上实测结论：
+  「手册标注『短信与电话未接入』；本机实测 11 下短信收发正常」；
+- 删掉「短信可能发不出去」那句吓人提示，未插卡 / 卡失效等真正的异常仍会提示；
+- 1（已插卡）同样不再告警 —— 它只是过渡态。
+
+### ★ 移除 - SIM 卡状态自愈
+
+三条理由，都有真机证据：
+
+1. **无效** —— 推完 `HVSST` 卡状态仍是 11（见上表）；
+2. **无收益** —— 11 下短信本来就正常，没有需要它修的问题；
+3. **有风险** —— `HVSST` 是模拟 SIM 热插拔，会让模组重读 SIM，可能连带触发
+   USB 重枚举 —— 而重枚举之后 netifd 不会重跑 udhcpc，正是「能进路由器但完全没网」
+   那个老坑的成因。
+
+它剩下的只有副作用：每次开机一条 `WRN` 日志，偶尔还报「查询 `AT^SETMODE?` 失败」。
+整条链路一并删除：
+
+- Rust：`simheal.rs` 删除；`AtClient::ensure_sim_ready` 与开机守卫 `sim_heal_guard`、
+  假模组集成测试（6 个用例）全部移除；`AtConfig::sim_heal_enable` 移除；
+  `cargo check --target x86_64-unknown-linux-gnu --all-targets` 通过。
+- 配置：UCI `sim_heal_enable` 从随包 `etc/config/at-webserver` 与 `uci-defaults` 中移除。
+  **旧配置里残留的这一项会被忽略**，想清掉可执行
+  `uci delete at-webserver.config.sim_heal_enable && uci commit at-webserver`。
+- 界面：「服务配置」页的「SIM 卡状态自愈」卡片与开关移除。
+- `HVSST` 现在只由「模组设置 → SIM 槽位切换」这一个**手动**入口下发，
+  自动化路径（Rust / 看门狗 / hotplug / init.d）不再碰它。
+
+### 重构 - SIM 码表收敛到唯一真源
+
+此前 `parse.js`（`SIM_STATUS`）、`mt5700.js`（`SIM_TEXT`）、`network_status.js`
+（`SIM_STATE`）**各抄一份**，改一次文案要改三遍，迟早漏一处 —— 这次就差点漏。
+现在只留 `parse.js` 一处：
+
+- `SIM_STATUS` 详细说明 / `SIM_STATUS_SHORT` 徽章短标签 / `SIM_STATUS_WARN` 是否告警；
+- 消费入口 `Parse.simDetail()` / `Parse.simShort()` / `Parse.simIsWarn()`；
+- `parseSimsq()` 额外返回 `shortLabel` 与 `warn`。
+
+### 测试
+
+- 新增 `tests/sim-status-contract.test.js`（59 项），取代 `sim-heal-contract.test.js`：
+  码表唯一真源（另两个文件不许自带码表）、**11 不告警**（直接把表抠出来求值，
+  不是字符串匹配）、文案不写「电话本」、一切 AT 走 Rust（shell 不许碰串口、不许
+  自动下发 `HVSST`）、**自愈已删除且不许复活**（Rust / UCI / 界面三处都没有残留）。
+- `parse-extra` 同步更新：11 的文案断言改为「写明实测短信正常」，并新增
+  `simIsWarn(11) === false` 等 5 项。
+- 阴性对照：把 `SIM_STATUS_WARN[11]` 改回 `true`，新测试如期失败 1 项，已还原。
+
+### 文档
+
+- README 的「SIM 卡状态自愈」整节替换为「SIM 卡状态（`AT^SIMSQ?`）」+ 状态表 +
+  「自愈已删除」说明；配置项表与 ubus 说明里的 `sim_heal_enable` 一并移除。
+
 ## [1.0.9] - 2026-09-14
 
 ### ★ 修复 - 固件升级页面把 AT 通道刷爆（固定 1 秒轮询）

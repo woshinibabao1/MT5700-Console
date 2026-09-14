@@ -225,6 +225,19 @@ jobs:
             echo "==> 已清理旧 Release ${TAG}，将重建"
           fi
 
+      - name: Compose release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="${{ steps.ver.outputs.tag }}"
+          # 自动生成的变更列表（PR 标题等）保留，前面拼一段固定的「按架构选包」说明 ——
+          # 发版后最常见的问题就是下错架构装不上（apk 报 error: uninstallable）。
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" --jq .body > autonotes.md || echo "" > autonotes.md
+          cat .github/release-notes-header.md autonotes.md > notes.md
+          echo "==> Release notes 已生成（$(wc -c < notes.md) 字节）"
+
       - name: Publish to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -233,6 +246,6 @@ jobs:
           mapfile -t FILES < <(find dist -type f | sort)
           gh release create "$TAG" "${FILES[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --generate-notes \
+            --notes-file notes.md \
             --title "AT WebServer ${TAG}"
           echo "==> Release ${TAG} 已发布，资产 ${#FILES[@]} 个"

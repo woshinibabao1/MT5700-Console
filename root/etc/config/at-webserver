@@ -18,13 +18,6 @@ config at-webserver 'config'
 	# 服务每次连上模组后会按此配置对齐一次（已在目标状态则不重复下发）。
 	option autodial_enable '1'                 # 1=开启自动拨号（默认），0=关闭
 	option autodial_mode '1'                   # 1=USB网络接口，2=转网口模式
-	# SIM 卡状态自愈（默认**开启**）：AT^SETMODE? 为 4（USB 网口模式）且 AT^SIMSQ? 不是 12 时，
-	# 按 AT^HVSST=1,0 → 等待 3 秒 → AT^HVSST=1,1 推一手，把卡从 11 推到 12。
-	# ★ **每次开机最多执行一次**：靠 /tmp（tmpfs）里的标记文件，
-	#   服务重启/模组重连都不会重跑，只有设备重启后才重新获得一次机会。
-	# ★ 所有 AT 一律由前端服务（Rust）下发，界面与 shell 都不直接碰串口。
-	# 卡已就绪、非 USB 网口模式、卡不在位或已失效时都会跳过，且**不消耗**这一次机会。
-	option sim_heal_enable '1'                 # 1=启用（默认），0=关闭
 	option websocket_port '8765'           # LuCI RPC 监听端口
 	option websocket_allow_wan '0'          # 1=RPC 监听 0.0.0.0 可被外部访问（建议同时设置 auth_key）
 	option websocket_bind ''               # 可选：覆盖监听地址，如 0.0.0.0 或 192.168.10.1

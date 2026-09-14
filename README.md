@@ -69,6 +69,18 @@
 从 [Releases](https://github.com/woshinibabao1/MT5700-Console/releases) 下载**与目标架构匹配**的主包
 （约 1.2MB，已内含后端二进制）。
 
+> ⚠️ **架构选错是最常见的安装失败原因**。Release 里有 `x86_64-` 与
+> `aarch64_cortex-a53-` 两套包，装错时 `apk` 会报
+> `error: uninstallable / arch: xxx`。**先确认再下载**：
+>
+> ```sh
+> apk --print-arch                  # apk 设备
+> opkg print-architecture | tail -1 # opkg 设备
+> ```
+>
+> 顺带一提：`luci-i18n-mt5700-zh-cn-*` 是中文语言包（`noarch`，不装也能用，只是界面为英文），
+> 主包已内含后端，不需要再单独装 `at-webserver`。
+
 ### OpenWrt 24.10+（apk）
 
 ```sh
@@ -197,7 +209,7 @@ MT5700-Console/                      # 仓库根 = OpenWrt 单包
     ├── ui-contract.test.js          # 样式 / 类名 / mock 保真 / AT 通道不变量（206 项）
     ├── sms-pdu.test.js              # 短信 PDU 编解码闭环（90 项）
     ├── watchdog-routing.test.js     # 看门狗 AT/Shell 分流 + 探测目标契约（52 项）
-    ├── sim-heal-contract.test.js    # SIM 自愈 / 「AT 只走 Rust」契约（58 项）
+    ├── sim-status-contract.test.js  # SIM 码表唯一 + 11 不算告警 + AT 只走 Rust + 自愈已删（59 项）
     └── mock-modem/                  # 无硬件 e2e（mock AT 模组 + 真机应答样本）
 ```
 
@@ -212,14 +224,14 @@ node tests/parse-contract.test.js          # 45 项 · AT 应答 → 解析结�
 node tests/ui-contract.test.js             # 206 项 · 类名↔样式、mock↔真机、AT 通道不变量
 node tests/sms-pdu.test.js                 # 90 项 · 短信 PDU 编码 ↔ pdu.rs 口径 往返一致
 node tests/watchdog-routing.test.js        # 52 项 · 看门狗 AT/Shell 分流 + 探测目标契约
-node tests/sim-heal-contract.test.js       # 58 项 · SIM 自愈「每次开机一次」+ AT 只走 Rust
+node tests/sim-status-contract.test.js    # 59 项 · SIM 码表唯一 / 11 不算告警 / AT 只走 Rust / 自愈已删
 node tests/mock-modem/parse-extra-test.js  # 14 项 · REJINFO / SIMSQ / parseRawData 拆分
 sh tests/watchdog-routing.test.sh          # 51 项 · 真跑分流与执行逻辑（上面那条会自动调用）
 ```
 
 六套测试共 **465 项**，全部基于真实设备实测样本或厂商手册条文：
 
-注：`sim-heal-contract` 与看门狗契约里的「默认值四处一致」都是**静态守卫**——
+注：`sim-status-contract` 与看门狗契约里的「默认值四处一致」都是**静态守卫**——
 本机没有 `cargo`/`rustc`，Rust 侧的行为测试（假模组集成测试）在 CI 上跑，
 但源码里那些「少一行就出事」的写法在这里就能钉住。
 
@@ -239,12 +251,14 @@ sh tests/watchdog-routing.test.sh          # 51 项 · 真跑分流与执行逻�
   `etc/config` / `uci-defaults` / `service.js`）口径一致。
   另含「探测目标可自定义」一节：默认必须是 `119.29.29.29`（腾讯 DNS）、判定收敛到
   `connectivity_ok` 单一入口、没有 `ping` 时要有回退与明示、界面必须暴露三个可编辑项。
-- `sim-heal-contract`：SIM 自愈的三条硬约束都不许回退 ——
-  ① **每次开机最多执行一次**（tmpfs 标记文件用 `create_new`，跨服务重启也拦得住）；
-  ② **一切 AT 都走 Rust**（看门狗脚本里不许再出现 `HVSST`，也没有任何 shell 用
-  `microcom`/`stty` 碰串口）；③ **`HVSST` 配对必须闭合**（`=1,0` 与 `=1,1` 之间
-  不许有提前 `return`，等待也不许响应 ctx 取消）。同时钉住「卡已就绪 / 非 USB 网口模式 /
-  卡不在位或已失效时跳过且**不消耗**唯一一次机会」，以及界面文案不写「电话本」。
+- `sim-status-contract`：SIM 码表**只有一份**（在 `parse.js`，`mt5700.js` /
+  `network_status.js` 只准消费 `Parse.simShort()` / `Parse.simIsWarn()`）；
+  **11（已初始化）不算告警**（本卡常态，短信实测正常，手册那句「短信与电话未接入」
+  照抄进界面会误导）；界面文案统一写「短信与电话」不写「电话本」；
+  **一切 AT 都走 Rust**（看门狗 / hotplug / init.d 里不许出现 `HVSST`，也没有任何
+  shell 用 `microcom`/`stty` 碰串口）；
+  **SIM 卡状态自愈已删除且不许复活**（Rust 侧无 `simheal` / `HVSST`，UCI 无
+  `sim_heal_enable`，「服务配置」页无对应开关）。
 - `parse-extra`：`^REJINFO` 拒绝原因、`^SIMSQ` 的 11/12/98 语义（11 与 12 的文案必须可区分、
   且统一写「短信与电话」不写「电话本」）、以及 `rpc.js` 的 `parseRawData` 拆分。
 
@@ -309,7 +323,6 @@ CI 会校验主包体积（>500KB，排除「只有前端」），并检查 4 �
 | `serial_baudrate` | `115200` | 波特率 |
 | `autodial_enable` | `1` | 连上模组后确保自动拨号开启（关掉则接口拿不到 IP） |
 | `autodial_mode` | `1` | `1`=USB 网络接口，`2`=转网口模式 |
-| `sim_heal_enable` | `1` | SIM 卡状态自愈：`AT^SETMODE?`=4 且 `AT^SIMSQ?`≠12 时用 `HVSST` 推一次，**每次开机最多执行一次** |
 | `network_host` / `network_port` | `192.168.8.1` / `20249` | 网络通道 |
 | `websocket_port` | `8765` | 后端 RPC 端口（仅回环） |
 | `websocket_auth_key` | 空 | 由 ucode 自动附带；空则不校验密钥 |
@@ -362,27 +375,44 @@ printf '%s\n' '{"id":1,"method":"at","params":{"cmd":"AT+CSQ"}}' | nc 127.0.0.1 
   （用哨兵而不是留空，是因为 `config_get` 是 `:-` 语义，空值会落回默认值，区分不出来。）
 - 系统没有 `ping` 时自动回退到邻居判定，并在启动日志里明确写出。
 
-### SIM 卡状态自愈（`sim_heal_enable`，默认开）
+### SIM 卡状态（`AT^SIMSQ?`）
 
-`AT^SIMSQ?` 只有 `<sim_status>` = 12 才算完全就绪（短信与电话可接入）；
-本卡实测长期停在 `1,11`（网络可用，但短信与电话未接入）。判定与动作：
+码表只有一份，在 `htdocs/.../at-webserver/parse.js`（`SIM_STATUS` 详细说明 /
+`SIM_STATUS_SHORT` 徽章短标签 / `SIM_STATUS_WARN` 是否点提示色），
+页面只消费 `Parse.simShort()` / `Parse.simIsWarn()` / `Parse.simDetail()`。
 
-| 情况 | 行为 |
-| --- | --- |
-| `AT^SETMODE?` = 4 且 `AT^SIMSQ?` ≠ 12 | `AT^HVSST=1,0` → 等待 3 秒 → `AT^HVSST=1,1`，随后复核一次 |
-| 卡已是 12 / 非 USB 网口模式 / 卡不在位(0)·已失效(98)·已移除(99) | 跳过，且**不消耗**「本次开机唯一一次」的机会 |
+| `<sim_status>` | 短标签 | 告警 |
+|:--|:--|:--|
+| 0 | 未插卡 | ✅ |
+| 1 | 已插卡 | — |
+| 2 / 3 | PIN 锁定 / SIM 锁定 | ✅ |
+| 10 | 初始化中 | ✅ |
+| **11** | **已初始化 · 可接入网络** | **—** |
+| 12 | 就绪 · 短信与电话可接入 | — |
+| 98 / 99 / 100 | 卡失效 / 已移除 / 卡错误 | ✅ |
 
-三条硬约束：
+★ **11 不算告警，也不写「短信未就绪」**。手册 6.6 说 12 才算「短信与电话可接入」，
+于是旧文案把 11 写成「短信与电话未接入」，还在网络状态页加了一句
+「长期停在『已初始化』时短信可能发不出去」。真机结论正好相反：
 
-1. **每次开机最多执行一次** —— 靠 `/tmp/mt5700-simheal.done`（tmpfs）标记文件：
-   服务重启、模组反复重连都不会重跑，只有设备重启（tmpfs 清空）后才重新获得一次机会。
-   条件检查本身每次连上都做（纯只读，代价可忽略），但真正下发 `HVSST` 前必须先取走这次机会。
-2. **一切 AT 都走 Rust** —— 命令全部经后端 `AtClient::send_command`（`/dev/ttyUSB1` 的唯一持有者）下发；
-   shell 与前端都不碰串口，也没有第二条通道。
-3. **`HVSST` 配对必须闭合** —— `=1,0` 之后无论应答如何都必须把 `=1,1` 发出去，
-   否则 SIM 检测会一直停在关闭状态。因此两发之间的 3 秒等待刻意**不**响应服务关闭信号。
+- 本卡长期停在 `^SIMSQ: 1,11`，而**短信收发完全正常**
+  （`AT+CPMS?` → `"SM",44,50`，向 10086 实发并收到回复）；
+- 开机自愈按 `AT^HVSST=1,0` → 3 秒 → `AT^HVSST=1,1` 推过一次，**推完状态仍是 11**。
 
-处置记录：`logread -e at-webserver | grep "SIM 自愈"`。
+也就是说 11 既不影响短信，也不是能靠推卡修好的故障 —— 它是这张卡的常态。
+
+### ⛔ SIM 卡状态自愈已删除（v1.1.0）
+
+上面那次实测把自愈的立身之本推翻了：**无效**（推完还是 11）、**无收益**（11 下短信
+本来就正常）、**有风险**（`HVSST` 是模拟 SIM 热插拔，会让模组重读 SIM，可能连带
+触发 USB 重枚举与断网），只剩每次开机一条 `WRN` 日志的噪音。因此整条链路一并移除：
+
+- Rust：`simheal.rs` 删除，`AtClient::ensure_sim_ready` 与其开机守卫、测试全部移除；
+- 配置：UCI `sim_heal_enable` 从随包配置与 `uci-defaults` 中移除（旧配置里残留的
+  这一项会被忽略，可自行 `uci delete at-webserver.config.sim_heal_enable`）；
+- 界面：「服务配置」页的「SIM 卡状态自愈」卡片与开关移除。
+
+`HVSST` 现在只由「模组设置 → SIM 槽位切换」这一个**手动**入口下发，自动化路径不再碰它。
 
 改配置后：
 
@@ -420,7 +450,6 @@ printf '%s\n' '{"id":1,"method":"at","params":{"cmd":"AT^SETAUTODIAL?"}}' | nc 1
 | `network.MT5700M.auto` | `1` | 开机自启接口 |
 | `at-webserver.config.autodial_enable` | `1` | 连上模组后确保自动拨号开启 |
 | `at-webserver.config.autodial_mode` | `1` | 1=USB 网络接口，2=转网口模式 |
-| `at-webserver.config.sim_heal_enable` | `1` | 连上模组后按需执行一次 SIM 自愈（每次开机最多一次） |
 
 手动触发一次对齐：
 
