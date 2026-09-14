@@ -164,10 +164,20 @@ var SmsEncode = (function () {
 		var firstOctet = 0x01;          // MTI=01 (SMS-SUBMIT)
 		if (udhi) firstOctet |= 0x40;   // TP-UDHI
 		firstOctet |= 0x10;             // TP-VPF=10：TP-VP 用相对格式（1 字节，下方 vp='AA'）
-		firstOctet |= 0x04;             // TP-RD=1：请求短消息中心拒收重复短信
-		/* 注意：0x20 是 bit5 = TP-SRR「请求状态报告」，不是 TP-RD。
-		 * 此前这里写成 0x20，注释却写 TP-RD —— 实际效果是每条短信都向网络请求状态报告，
-		 * 而设备 CNMI=2,1,0,2,0 的 <ds>=2 会把 +CDS 上报给终端，全项目又没有 +CDS 处理。 */
+		/*
+		 * 不再置 TP-RD(0x04)。
+		 *
+		 * TP-RD=1 是「请求短消息中心拒收重复短信」：SMSC 会把「同一目的号码 + 同一
+		 *  TP-MR + 同一内容」且在有效期内的短信判为重复并丢弃。调试时反复重发同一条
+		 * （如 LLCX → 10086）就符合这个判定，表现为「第一条之后的都发不出去」。
+		 * 本项目的诉求是把短信发出去，并无去重需求，故保持默认的 RD=0。
+		 *
+		 * 与实测对齐：已验证能提交成功的样本首字节正是 0x11（MTI=01 + VPF=10，无 RD）。
+		 *
+		 * 另注：0x20 是 bit5 = TP-SRR「请求状态报告」，不是 TP-RD。此前这里写成 0x20
+		 * 而注释却写 TP-RD —— 实际效果是每条短信都向网络请求状态报告，而设备
+		 * CNMI=2,1,0,2,0 的 <ds>=2 会把 +CDS 上报给终端，全项目又没有 +CDS 处理。
+		 */
 
 		var da = encodeAddress(opts.destination);
 		var mr = '00';

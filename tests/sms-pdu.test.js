@@ -148,14 +148,28 @@ function decodePart(p) {
 	const single = decodePart(parts('hello')[0]);
 	eq('单条首字节 MTI=SMS-SUBMIT', single.mti, 1);
 	eq('单条首字节 VPF=10（相对格式）', (single.first >> 3) & 0x03, 2);
-	eq('单条首字节 TP-RD=1（bit2）', (single.first >> 2) & 0x01, 1);
+	eq('单条首字节 TP-RD=0（不去重，见下方说明）', (single.first >> 2) & 0x01, 0);
 	eq('单条首字节 TP-SRR=0（不请求状态报告，bit5）', (single.first >> 5) & 0x01, 0);
 	eq('单条首字节 TP-UDHI=0', (single.first >> 6) & 0x01, 0);
 
 	const multi = decodePart(parts('A'.repeat(200))[0]);
 	eq('长短信首字节 TP-UDHI=1', (multi.first >> 6) & 0x01, 1);
 	eq('长短信首字节 TP-SRR=0', (multi.first >> 5) & 0x01, 0);
-	eq('长短信首字节 TP-RD=1', (multi.first >> 2) & 0x01, 1);
+	eq('长短信首字节 TP-RD=0', (multi.first >> 2) & 0x01, 0);
+}
+
+/*
+ * TP-RD 必须为 0（曾为 1，2026-09-14 改为 0）。
+ *
+ * TP-RD=1 =「请求短消息中心拒收重复短信」：SMSC 会把「同目的号码 + 同内容」且仍在
+ * 有效期内的短信判为重复并丢弃。调试与重试场景（反复重发同一条）会静默失败。
+ * 本项目无去重需求，且与已实测提交成功的样本首字节（0x11，无 RD）对齐。
+ */
+{
+	eq('单条首字节整体 = 0x11（MTI=01 + VPF=10，无 RD/SRR/UDHI）',
+		decodePart(parts('hello')[0]).first, 0x11);
+	eq('长短信首字节整体 = 0x51（0x11 + UDHI）',
+		decodePart(parts('A'.repeat(200))[0]).first, 0x51);
 }
 
 /* ---------- 2. GSM7 单条（无 UDH）：往返必须一致 ---------- */
