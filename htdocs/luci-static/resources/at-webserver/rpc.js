@@ -177,8 +177,23 @@ ATClient.prototype.pollEvents = function () {
 			self.firstPoll = false;
 			return;
 		}
+		/*
+		 * 事件分发必须自己兜住异常。
+		 * handlePush → dispatchRawData → Parse.parseRawData 解析的是模组上报的
+		 * 原始行，格式稍有出入就可能抛异常。若不在这里拦住，异常会冒泡到下面
+		 * 的 catch，被当成「RPC 调用失败」——于是解析一个 URC 失败就会把整个
+		 * 插件置为离线、停掉轮询、3 秒后重连，期间所有 AT 命令都只回
+		 * 「未连接到调制解调器」。故障性质完全被误判，排查时会往网络方向找。
+		 * 单条事件解析失败只应影响这一条事件，不该掀翻整条连接。
+		 */
 		for (var i = 0; i < events.length; i++) {
-			self.handlePush(events[i]);
+			try {
+				self.handlePush(events[i]);
+			} catch (e) {
+				if (typeof console !== 'undefined' && console.warn) {
+					console.warn('[mt5700] 事件处理异常，已跳过：', e);
+				}
+			}
 		}
 	}).catch(function (err) {
 		if (self.connected && (err && err.message !== '事件轮询超时')) {
@@ -257,13 +272,84 @@ const READ_CACHE_TTL = 2500;
 const READ_CACHE_MAX = 64;
 ATClient.prototype._readCache = null;
 
+/*
+ * 缓存时长分档
+ * ----------------------------------------------------------------------------
+ * 一刀切 2500ms 时，缓存只在「同一轮刷新内去重」有用；而页面每 5~30 秒刷新
+ * 一次，绝大多数查询都命中不了，像 IMEI 这种一辈子不变的值也被反复重查
+ * （实测每条往返 240~300ms，7 条就是近 2 秒的纯等待）。
+ *
+ * 因此按「值本身多久会变」分三档。判据不是采样——采样会被 ^MONSC 这种
+ * 「3 秒内恰好没变、实际随时会变」的命令骗到（实测它就曾被判成恒定），
+ * 而是命令所读对象的物理属性：
+ *
+ *   ① IDENTIFIER（10 分钟）：读的是烧在模块里 / 刻在 SIM 卡上的标识。
+ *      IMEI/SVN/MAC 在模块 EEPROM，IMSI/ICCID 在 SIM 卡，型号与固件版本由
+ *      硬件与当前刷写的版本决定——除非换模块、换卡或升级固件，否则不会变。
+ *      真机连查两次结果完全一致（864640060359112 / 460009711127691 等）。
+ *      10 分钟上限是为了换卡后能自愈：换卡后最迟 10 分钟拿到新 IMSI。
+ *
+ *   ② STATE（15 秒）：会变，但只在用户主动操作后才变（插拔卡、切飞行
+ *      模式、改 PIN）。比刷新周期(30s)短，保证每轮慢档刷新能拿到真实状态，
+ *      又能吃掉页面来回切换时的重复查询。
+ *      注意边界：^SYSINFOEX（系统模式/服务域）看起来像状态，但它会在
+ *      5G↔4G 重选时**自行**变化，不属于「用户操作后才变」，故不进这一档。
+ *
+ *   ③ 其余一律 2500ms：信号、流量、温度这类连续量，一轮一查。
+ *
+ * 失败结果不缓存（_cachePut 只收 success）：本模组存在偶发单次 ERROR
+ * （实测 AT^SYSINFOEX? 两次里有一次 ERROR），若把失败也缓存起来，一次
+ * 偶发就会变成「持续显示失败」，比多等一次往返的代价大得多。
+ */
+var CACHE_TTL_IDENTIFIER = 10 * 60 * 1000;
+var CACHE_TTL_STATE = 15 * 1000;
+
+/* 物理标识类：模块/卡上写死，会话内不会变 */
+var IDENTIFIER_COMMANDS = [
+	'AT+CGSN',      /* IMEI */
+	'AT+CIMI',      /* IMSI */
+	'AT^ICCID?',    /* ICCID */
+	'AT+CGMM',      /* 模块型号 */
+	'AT+CGMR',      /* 固件版本 */
+	'AT^PHYNUM?',   /* IMEI / MAC / SVN */
+	'AT^VERSION?',  /* 各组件版本 */
+	'ATI'           /* 厂商与模块标识 */
+];
+
+/* 状态类：只在用户操作后变化 */
+var STATE_COMMANDS = [
+	'AT+CPIN?',         /* SIM 锁状态 */
+	'AT^SIMSQ?',        /* SIM 状态 */
+	'AT+CFUN?',         /* 射频开关 */
+	'AT+CLCK?',         /* PIN 锁开关 */
+	'AT+CGDCONT?',      /* PDP 上下文 */
+	'AT+CSCA?'          /* 短信中心号 */
+];
+
+var IDENTIFIER_SET = {};
+IDENTIFIER_COMMANDS.forEach(function (c) { IDENTIFIER_SET[c] = true; });
+var STATE_SET = {};
+STATE_COMMANDS.forEach(function (c) { STATE_SET[c] = true; });
+
+/* 命令归一化：忽略大小写与首尾空格，去掉重复空格 */
+function normalizeCommand(command) {
+	return String(command == null ? '' : command).trim().toUpperCase().replace(/\s+/g, '');
+}
+
+function cacheTtlFor(command) {
+	var k = normalizeCommand(command);
+	if (IDENTIFIER_SET[k]) return CACHE_TTL_IDENTIFIER;
+	if (STATE_SET[k]) return CACHE_TTL_STATE;
+	return READ_CACHE_TTL;
+}
+
 ATClient.prototype._cacheGet = function (command) {
 	var c = this._readCache;
 	if (!c) return null;
-	var hit = c[command];
+	var hit = c[normalizeCommand(command)];
 	if (!hit) return null;
-	if (Date.now() - hit.t > READ_CACHE_TTL) {
-		delete c[command];
+	if (Date.now() - hit.t > cacheTtlFor(command)) {
+		delete c[normalizeCommand(command)];
 		return null;
 	}
 	hit.hits = (hit.hits || 0) + 1;
@@ -279,7 +365,7 @@ ATClient.prototype._cachePut = function (command, value) {
 		keys.sort(function (a, b) { return this._readCache[a].t - this._readCache[b].t; }.bind(this));
 		for (var i = 0; i < keys.length / 2; i++) delete this._readCache[keys[i]];
 	}
-	this._readCache[command] = { t: Date.now(), value: value, hits: 0 };
+	this._readCache[normalizeCommand(command)] = { t: Date.now(), value: value, hits: 0 };
 };
 
 ATClient.prototype.cacheStats = function () {
@@ -291,6 +377,19 @@ ATClient.prototype.cacheStats = function () {
 
 ATClient.prototype.clearReadCache = function () {
 	this._readCache = null;
+};
+
+/*
+ * 只丢掉「状态类」缓存。
+ * 写命令（改 PIN、切飞行模式、改 PDP、改短信中心号）执行成功后，被它改动的
+ * 那些状态查询可能已经失效；物理标识类不受影响，没必要一起丢。
+ */
+ATClient.prototype._dropStateCache = function () {
+	var c = this._readCache;
+	if (!c) return;
+	Object.keys(c).forEach(function (k) {
+		if (STATE_SET[normalizeCommand(k)]) delete c[k];
+	});
 };
 
 ATClient.prototype.sendCommand = function (command, opts) {
@@ -336,7 +435,15 @@ ATClient.prototype.sendCommand = function (command, opts) {
 			return res;
 		});
 	}
-	return this.commandQueue;
+	/*
+	 * 写命令：执行成功后丢掉状态类缓存。页面未必每次都记得调
+	 * invalidateReadCache()，而「改完 PIN 还显示旧状态」这类问题很难排查，
+	 * 因此在这里兜底——只丢状态类，物理标识类不受影响。
+	 */
+	return this.commandQueue.then(function (res) {
+		if (res && res.success) self._dropStateCache();
+		return res;
+	});
 };
 
 /* 写命令之后，之前的只读缓存很可能已经过期，主动清掉避免读到陈旧值 */

@@ -37,6 +37,26 @@ const MAX_RESIDUAL_BYTES: usize = 64 * 1024;
 const ZERO_READ_BACKOFF: Duration = Duration::from_millis(50);
 /// 连续 0 字节读达到该次数才判定链路断开（50ms × 20 ≈ 1s）。
 const ZERO_READ_RETRY_LIMIT: u32 = 20;
+/// 写入模组的独立超时。
+///
+/// `write_all` 本身没有超时：串口的发送缓冲被填满、而对端（模组）又不再读走
+/// 数据时会一直挂住 —— 典型场景是模组卡在「等待 PDU 输入」的数据态，此时它
+/// 把后续一切字节当短信内容吞掉，读循环拿不到任何结束码，缓冲区也就不再排空。
+///
+/// 不设上限的后果比一次命令超时严重得多：写入卡住时 `cmd_mu` 一直被持有，
+/// **之后每一条命令都会耗到 QUEUE_WAIT_TIMEOUT(8s) 才失败**，AT 通道等于整体
+/// 瘫痪，而进程还活着、procd 不会重启它，只能手动干预。
+///
+/// 取 3 秒：一次 AT 命令最多几百字节，正常情况下写入是微秒级完成的；
+/// 3 秒只可能是「对端不读了」，此时尽早失败、清掉 pending 才是正解。
+///
+/// 上限还受 rpcd 侧总预算约束：ucode 代理给整个 RPC 限时 20 秒，而一条命令
+/// 的最坏耗时是 排队 QUEUE_WAIT(8s) + 写入(本值) + 等应答 / 短信(6s)。
+/// 本值取 5 秒时最坏 19s，几乎顶满 20s，正常的慢响应就有被掐断的风险；
+/// 取 3 秒则最坏 17s，留出了余量。
+const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+/// 连接断开后，等待初始化任务收尾的最长时间（超过就放弃，直接进入重连）。
+const INIT_JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct AtResponse {
@@ -198,12 +218,34 @@ impl AtClient {
             tokio::select! {
                 r = read_done => {
                     if let Err(e) = r {
-                        log_warn!("模组连接中断: {}", e);
+                        log_warn!("模组读循环异常结束: {}", e);
                     }
                 }
                 _ = ctx_c.changed() => {}
             }
-            let _ = init.await;
+
+            // 先拆连接，再收尾初始化任务。
+            //
+            // init_modem 与读循环是并行跑的。连接一旦断开，它发出的命令就再也等不到
+            // 应答 —— 而 ctx 只在**服务关闭**时才翻转，链路断开并不会，于是这些命令
+            // 会各自耗满 COMMAND_TIMEOUT(2s) 才失败，一次重连因此被白白推迟好几秒，
+            // 期间用户看到的就是「所有命令都在转圈」。
+            //
+            // teardown 会清空 pending 并 notify，等待中的命令立刻返回错误，
+            // init_modem 于是能马上收尾。teardown 本身是幂等的（见其实现）。
+            self.teardown().await;
+
+            // 兜底：万一 init 还卡在 teardown 影响不到的地方（例如正排在命令锁后面），
+            // 最多再等 INIT_JOIN_TIMEOUT 就放弃 —— 绝不能让一个注定没有结果的初始化
+            // 把重连流程拖死。
+            match tokio::time::timeout(INIT_JOIN_TIMEOUT, init).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => log_warn!("初始化任务异常结束: {}", e),
+                Err(_) => log_warn!(
+                    "初始化任务未在 {}s 内结束，放弃等待并继续重连",
+                    INIT_JOIN_TIMEOUT.as_secs()
+                ),
+            }
             self.teardown().await;
 
             if !*ctx.borrow() && !sleep_ctx(&ctx, Duration::from_secs(2)).await {
@@ -290,9 +332,11 @@ impl AtClient {
         } else {
             "AT^SETAUTODIAL=0".to_string()
         };
+        let mut applied = false;
         match self.send_command(ctx, &cmd, COMMAND_TIMEOUT, None).await {
             Ok(resp) if resp.ok() => {
                 log_info!("已{}自动拨号（{}）", if desired { "开启" } else { "关闭" }, cmd);
+                applied = true;
             }
             Ok(resp) => {
                 log_warn!("自动拨号设置未返回 OK: {}", resp.text());
@@ -303,6 +347,11 @@ impl AtClient {
         }
 
         // 3) 复核，便于日志里直接看出是否真的生效。
+        // 只在设置成功时做：设置已经失败时复核不出新信息，白白多占一次 AT 通道
+        // （这条查询同样要排队 + 100ms 命令间隔，重连时每次都是实打实的等待）。
+        if !applied {
+            return;
+        }
         if let Ok(resp) = self.send_command(ctx, "AT^SETAUTODIAL?", COMMAND_TIMEOUT, None).await {
             match parse_autodial_enable(&resp.text()) {
                 Some(v) if v == desired => log_info!("自动拨号状态复核通过"),
@@ -386,11 +435,18 @@ impl AtClient {
             payload.push('\r');
         }
         let mut w = writer.lock().await;
-        w.write_all(payload.as_bytes()).await.map_err(|e| {
-            log_warn!("写入打断字符串失败: {}", e);
-            e.to_string()
-        })?;
-        Ok(())
+        // 同样要限时：打断就是用在「模组不回话」的场景，此时它同样可能不读数据。
+        match tokio::time::timeout(WRITE_TIMEOUT, w.write_all(payload.as_bytes())).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => {
+                log_warn!("写入打断字符串失败: {}", e);
+                Err(e.to_string())
+            }
+            Err(_) => {
+                log_warn!("写入打断字符串超时({}s)", WRITE_TIMEOUT.as_secs());
+                Err(format!("写入模组超时（{}s）", WRITE_TIMEOUT.as_secs()))
+            }
+        }
     }
 
     /// 向模组写入 ESC(0x1B)，取消当前的数据输入态。
@@ -411,11 +467,20 @@ impl AtClient {
             }
         };
         let mut w = writer.lock().await;
-        w.write_all(&[0x1b]).await.map_err(|e| {
-            log_warn!("写入 ESC 取消失败: {}", e);
-            e.to_string()
-        })?;
-        Ok(())
+        // 这里比别处更需要限时：本函数就是用在「模组卡在数据态」的事后清场，
+        // 而卡住时它对端往往既不回数据也不再读数据，写入很容易挂住。
+        // 挂住的后果是清场者自己被卡死，本来还能救的通道彻底没人救了。
+        match tokio::time::timeout(WRITE_TIMEOUT, w.write_all(&[0x1b])).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => {
+                log_warn!("写入 ESC 取消失败: {}", e);
+                Err(e.to_string())
+            }
+            Err(_) => {
+                log_warn!("写入 ESC 取消超时({}s)，模组已不接收数据", WRITE_TIMEOUT.as_secs());
+                Err(format!("写入 ESC 超时（{}s）", WRITE_TIMEOUT.as_secs()))
+            }
+        }
     }
 
     async fn send_command_inner(
@@ -482,10 +547,28 @@ impl AtClient {
         let notified = done.notified();
         {
             let mut w = conn.lock().await;
-            if let Err(e) = w.write_all(cmd.as_bytes()).await {
-                log_warn!("写入 AT 命令失败: {}", e);
-                self.pending.lock().await.take();
-                return Err(e.to_string());
+            match tokio::time::timeout(WRITE_TIMEOUT, w.write_all(cmd.as_bytes())).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    log_warn!("写入 AT 命令失败: {}", e);
+                    self.pending.lock().await.take();
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    // 写入超时多半是模组卡在「等待 PDU 输入」的数据态：
+                    // 它既不取走数据也不回结束码。此时必须清掉 pending，
+                    // 否则锁要一直被这条命令占着，后续命令全都会排队超时。
+                    log_warn!(
+                        "写入 AT 命令超时({}s)，模组可能卡在数据输入态: {}",
+                        WRITE_TIMEOUT.as_secs(),
+                        command.trim()
+                    );
+                    self.pending.lock().await.take();
+                    return Err(format!(
+                        "写入模组超时（{}s）：模组可能正等待数据输入",
+                        WRITE_TIMEOUT.as_secs()
+                    ));
+                }
             }
         }
         *self.last_cmd_at.lock().await = Instant::now();

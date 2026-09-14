@@ -357,7 +357,6 @@ return L.view.extend({
 
 		var ssb = null;
 		var monncCells = [];
-		var hfreqCarriers = [];
 		/* 服务小区（^MONSC）：唯一实测的 SCS 来源，见 neighborScs 注释 */
 		var servingCell = null;
 		var neighBusy = false;
@@ -399,31 +398,6 @@ return L.view.extend({
 			})[0];
 			var label = t ? t.label : (v.scs + ' kHz');
 			return v.measured ? label : label + ' *';
-		}
-
-		/*
-		 * 邻区带宽：^MONNC 与 ^NRSSBID 都不报邻区带宽 —— 3GPP 上 UE 不读邻区 SIB1
-		 * （frequencyInfoDL 才带带宽），本模组 238 条命令里也没有任何一条暴露它。
-		 * 唯一可靠来源是 ^HFREQINFO 的**当前工作载波**：若邻区 SSB 频点落在某载波的
-		 * 下行频带内，它必然与该载波同频同带宽，可以如实标注；落在工作载波之外
-		 * 的异频邻区（本机如 n28 / n79）无从得知，显示「—」而不是猜一个数。
-		 */
-		function neighborBandwidth(rat, arfcn) {
-			if (rat !== 'NR' || !hfreqCarriers.length) return null;
-			var mhz = Parse.nrArfcnToMHz(arfcn);
-			if (mhz == null) return null;
-			for (var i = 0; i < hfreqCarriers.length; i++) {
-				var c = hfreqCarriers[i];
-				if (c.sysMode !== 'NR' || !c.dlBwKHz || c.dlFreqMHz == null) continue;
-				/* 载波带宽按中心频点对称展开，半宽 = dlBwKHz/2 换算成 MHz */
-				if (Math.abs(mhz - c.dlFreqMHz) <= c.dlBwKHz / 2000) return c.dlBwKHz;
-			}
-			return null;
-		}
-
-		function fmtBw(khz) {
-			if (khz == null) return '—';
-			return khz >= 1000 ? (khz / 1000) + ' MHz' : khz + ' kHz';
 		}
 
 		function lockNeighbor(cell) {
@@ -555,7 +529,6 @@ return L.view.extend({
 					band != null ? (c.rat === 'NR' ? 'n' + band : 'B' + band) : '—',
 					String(c.arfcn),
 					fmtScs(neighborScs(c.rat, c.arfcn)),
-					fmtBw(neighborBandwidth(c.rat, c.arfcn)),
 					String(c.pci),
 					c.rsrp != null ? c.rsrp + ' dBm' : '—',
 					c.rsrq != null ? c.rsrq + ' dB' : '—',
@@ -565,7 +538,7 @@ return L.view.extend({
 				];
 			});
 			neighBody.appendChild(Mt5700.table(
-				['制式', '频段', 'ARFCN', 'SCS', '带宽', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度', '操作'], rows, { striped: true }));
+				['制式', '频段', 'ARFCN', 'SCS', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度', '操作'], rows, { striped: true }));
 			if (unmeasured) {
 				neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 					'另有 ' + unmeasured + ' 个小区模组只上报了邻区关系、未给出测量值'
@@ -577,7 +550,7 @@ return L.view.extend({
 		/* 表格下方的说明。早退路径（无邻区）也要调用，故抽成函数。 */
 		function renderNeighborHints() {
 			var names = { MONNC: '邻区列表 ^MONNC', NRSSBID: 'SSB 测量 ^NRSSBID',
-				HFREQINFO: '工作载波 ^HFREQINFO（带宽列）', MONSC: '服务小区 ^MONSC（同频实测 SCS）' };
+				MONSC: '服务小区 ^MONSC（同频实测 SCS）' };
 			var failed = Object.keys(neighFailures).filter(function (k) { return neighFailures[k]; });
 			if (failed.length) {
 				neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
@@ -591,9 +564,7 @@ return L.view.extend({
 				+ '与当前服务小区同频点的邻区用 ^MONSC 的实测值，异频邻区只能按 3GPP TS 38.104'
 				+ '规定的 SSB SCS 推断并加「*」标注——模组不报邻区 SCS，这是唯一不猜的做法。'));
 			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-				'带宽取自 ^HFREQINFO 的当前工作载波：仅当邻区频点落在该载波下行频带内才可知，'
-				+ '异频邻区无测量项，显示「—」。RSRQ 由 ^MONNC 提供（^NRSSBID 邻区不带 RSRQ），'
-				+ '已按 ARFCN+PCI 关联回填。'));
+				'RSRQ 由 ^MONNC 提供（^NRSSBID 邻区不带 RSRQ），已按 ARFCN+PCI 关联回填。'));
 		}
 
 		var neighFailures = {};
@@ -603,11 +574,11 @@ return L.view.extend({
 			neighRefreshBtn.disabled = true;
 			neighFailures = {};
 			/*
-			 * 四个数据源彼此独立，逐个兜错：
+			 * 三个数据源彼此独立，逐个兜错：
 			 * 过去是 `then(a).then(b).then(c)` 串行 + **链尾单个 catch**，任一条命令
 			 * reject 后面的就全部跳过、连 renderNeighbors 都不执行 —— 整张表空白，
-			 * 只弹一句「邻区扫描失败」。^NRSSBID 在空闲态/非 NR 组网、^HFREQINFO 在
-			 * RRC null 态都会 ERROR，一次偶发失败就表现为「数据全丢了」。
+			 * 只弹一句「邻区扫描失败」。^NRSSBID 在空闲态/非 NR 组网就会 ERROR，
+			 * 一次偶发失败就表现为「数据全丢了」。
 			 * 现在：谁失败只丢谁那一部分，其余照常渲染，并在页面上点明是哪一项。
 			 */
 			var jobs = [
@@ -616,11 +587,6 @@ return L.view.extend({
 				} },
 				{ key: 'NRSSBID', cmd: 'AT^NRSSBID?', apply: function (res) {
 					ssb = res.success && res.data ? Parse.parseNrssbid(String(res.data)) : null;
-				} },
-				{ key: 'HFREQINFO', cmd: 'AT^HFREQINFO?', apply: function (res) {
-					/* 只影响带宽列；RRC null 态会报错，降级为整列「—」 */
-					hfreqCarriers = (res && res.success && res.data)
-						? AtWs.parseHFREQINFO(String(res.data)) : [];
 				} },
 				{ key: 'MONSC', cmd: 'AT^MONSC', apply: function (res) {
 					/* 只影响同频邻区的实测 SCS；拿不到就整列退回按频段推断 */

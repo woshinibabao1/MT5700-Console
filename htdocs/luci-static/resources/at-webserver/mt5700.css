@@ -680,6 +680,87 @@
   margin-top: var(--mt5700-space-xs);
 }
 
+/* ---------- 状态提示条 ----------
+   用于「SIM PIN」这类状态会改变整段操作含义的区域：文案与配色都随状态切换，
+   让用户先看清当前处于哪种状态，再决定点哪个按钮。 */
+.mt5700-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: var(--mt5700-space-md);
+  font-size: var(--mt5700-font-size-sm);
+  line-height: 1.6;
+  color: var(--mt5700-text-secondary);
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.18);
+  border-radius: var(--mt5700-radius-md);
+}
+
+.mt5700-notice::before {
+  content: "!";
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.16);
+  color: var(--mt5700-accent);
+}
+
+.mt5700-notice-success {
+  background: rgba(16, 185, 129, 0.06);
+  border-color: rgba(16, 185, 129, 0.18);
+}
+.mt5700-notice-success::before {
+  background: rgba(16, 185, 129, 0.16);
+  color: var(--mt5700-success);
+}
+
+.mt5700-notice-warning {
+  background: rgba(245, 158, 11, 0.07);
+  border-color: rgba(245, 158, 11, 0.2);
+}
+.mt5700-notice-warning::before {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--mt5700-warning);
+}
+
+.mt5700-notice-danger {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.2);
+}
+.mt5700-notice-danger::before {
+  background: rgba(239, 68, 68, 0.16);
+  color: var(--mt5700-danger);
+}
+
+/* ---------- 危险操作区 ----------
+   把会造成不可逆后果的操作（PUK 解锁、恢复出厂）用红框单独隔开，
+   视觉上跟上面的常规操作区分开，避免手滑点错。 */
+.mt5700-danger-zone {
+  margin-top: var(--mt5700-space-lg);
+  padding: var(--mt5700-space-md);
+  background: rgba(239, 68, 68, 0.03);
+  border: 1px solid rgba(239, 68, 68, 0.28);
+  border-radius: var(--mt5700-radius-md);
+}
+
+.mt5700-danger-zone-title {
+  margin-bottom: 4px;
+  font-size: var(--mt5700-font-size-sm);
+  font-weight: 600;
+  color: var(--mt5700-danger);
+}
+
+.mt5700-danger-zone .mt5700-hint {
+  margin-bottom: var(--mt5700-space-sm);
+}
+
 .mt5700-select {
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");

@@ -6,12 +6,12 @@
  *
  * 钉住两个「看起来像 bug、其实是数据源边界」的问题，以及一个真实的丢数据 bug。
  *
- *   ① **邻区带宽只能推，不能查**
- *      ^MONNC 与 ^NRSSBID 都不报邻区带宽：3GPP 上 UE 压根不读邻区 SIB1
- *      （frequencyInfoDL 才带 bandwidth），本模组 238 条命令也没有任何一条暴露它。
- *      唯一可靠来源是 ^HFREQINFO 的**当前工作载波** —— 若邻区 SSB 频点落在该载波
- *      下行频带内，它与该载波同频同带宽，可以如实标注；落在工作载波之外的异频
- *      邻区（本机 n28 / n79）必须显示「—」，**绝不能猜一个数填上去**。
+ *   ① **邻区「带宽」列已按产品决策移除**
+ *      邻区带宽本来只能由 ^HFREQINFO 的**当前工作载波**推出来——^MONNC 与
+ *      ^NRSSBID 都不报它（3GPP 上 UE 压根不读邻区 SIB1，frequencyInfoDL 才带
+ *      bandwidth），落到工作载波之外的异频邻区（本机 n28 / n79）永远是「—」。
+ *      信息量低，却要为它多发一条 AT（且 RRC null 态还会 ERROR），故整列连同
+ *      推断函数与数据源一并删除，避免留下「只为一个不再显示的列服务」的死代码。
  *
  *   ② **SSB 邻区不带 RSRQ**
  *      手册 13.28 的邻区字段只有 <NB_PCI>,<NB_ARFCN>,<NB_RSRP>,<NB_SINR> + 波束，
@@ -77,29 +77,42 @@ function loadLuciModule(relPath, returnExpr) {
 	return vm.runInContext('(function(){\n' + src + '\nreturn ' + returnExpr + ';\n})()', ctx);
 }
 
-/* ---------- A. 邻区带宽列 ---------- */
+/* ---------- A. 邻区「带宽」列已移除 ---------- */
 
-const bwFn = extractFunction(settingsJs, 'neighborBandwidth(rat, arfcn)');
-ok('存在 neighborBandwidth 函数', bwFn.length > 0);
-ok('邻区表已加入「带宽」列',
-	/\['制式',\s*'频段',\s*'ARFCN',\s*'SCS',\s*'带宽'/.test(settingsJs), '表头缺少「SCS/带宽」');
-ok('邻区行确实输出带宽值', /fmtBw\(neighborBandwidth\(c\.rat, c\.arfcn\)\)/.test(settingsJs));
-ok('存在 fmtBw 格式化（kHz → MHz）', /function fmtBw\(khz\)/.test(settingsJs));
-ok('fmtBw 对空值返回占位符「—」', /if \(khz == null\) return '—';/.test(settingsJs));
-
-ok('带宽按「频点落在载波下行频带内」判定', /Math\.abs\(mhz - c\.dlFreqMHz\) <= c\.dlBwKHz \/ 2000/.test(bwFn),
-	'半宽判定式不对（dlBwKHz/2 换算 MHz 应为 /2000）');
-ok('非 NR（LTE）不套用 NR 载波表', /if \(rat !== 'NR'/.test(bwFn));
-ok('载波为空时直接返回 null', /!hfreqCarriers\.length\) return null/.test(bwFn));
-ok('匹配不到时返回 null 而不是猜一个数', /return null;\s*\}\s*$/.test(bwFn.replace(/\s+$/, '')),
-	'末条分支必须 return null');
-ok('只认 NR 载波（跳过 LTE 行）', /c\.sysMode !== 'NR'/.test(bwFn));
-
+/*
+ * 带宽列按产品决策移除。这里的断言不是走过场，而是防止它在别处复活：
+ * ① 邻区带宽本来就只能由 ^HFREQINFO 的工作载波「推」出来，对异频邻区永远
+ *    是「—」，信息量低；② 为它多发一条 AT（RRC null 态还会 ERROR）不划算。
+ * 因此不仅删了显示，也删掉了为它服务的数据源与推断函数——否则会留下
+ * 「有一条查询只为一个不再显示的列服务」的死代码。
+ */
 const loadNeighbors = extractFunction(settingsJs, 'loadNeighbors()');
-ok('扫描时会拉取 ^HFREQINFO?（带宽的唯一来源）', /AT\^HFREQINFO\?/.test(loadNeighbors));
-ok('^HFREQINFO 失败时降级为空数组，不拖垮邻区',
-	/hfreqCarriers = \(res && res\.success && res\.data\)/.test(loadNeighbors) &&
-	/: \[\]/.test(loadNeighbors), '未做失败降级');
+ok('邻区表头不再有「带宽」列',
+	!/\['制式',\s*'频段',\s*'ARFCN',\s*'SCS',\s*'带宽'/.test(settingsJs),
+	'「带宽」列又回来了');
+ok('表头保留 SCS 且与 PCI 相邻（删除未留下空列）',
+	/\['制式',\s*'频段',\s*'ARFCN',\s*'SCS',\s*'PCI',/.test(settingsJs));
+ok('邻区行不再输出带宽值', !/neighborBandwidth\(/.test(settingsJs));
+ok('带宽推断函数已删除（不留死代码）',
+	!/function neighborBandwidth\(/.test(settingsJs));
+ok('邻区专用的 fmtBw 已删除',
+	!/function fmtBw\(khz\)/.test(settingsJs),
+	'fmtBw 若仍存在却无人调用，就是死代码（注意：载波表用的是 network_status.js 里另一份）');
+ok('不再为带宽拉取 ^HFREQINFO（省一条 AT 往返）',
+	!/AT\^HFREQINFO\?/.test(loadNeighbors),
+	'邻区已不显示带宽，仍查 ^HFREQINFO 是纯浪费');
+ok('hfreqCarriers 状态变量已删除', !/hfreqCarriers/.test(settingsJs));
+ok('失败提示里不再提 ^HFREQINFO', !/HFREQINFO/.test(settingsJs));
+
+/* 扫描只剩三个数据源：MONNC / NRSSBID / MONSC */
+ok('邻区三个数据源齐全',
+	/AT\^MONNC/.test(loadNeighbors) && /AT\^NRSSBID\?/.test(loadNeighbors) &&
+	/AT\^MONSC/.test(loadNeighbors));
+ok('数据源数量恰好为 3（多一个就是给废弃列服务）',
+	(loadNeighbors.match(/cmd: 'AT/g) || []).length === 3,
+	'实际 ' + (loadNeighbors.match(/cmd: 'AT/g) || []).length + ' 个');
+ok('三个数据源仍各自兜错（少一个都不能整表空白）',
+	/\.catch\(function \(\) \{ neighFailures\[job\.key\] = true; \}\)/.test(loadNeighbors));
 
 /* ---------- A2. SCS（子载波间隔）列 ---------- */
 
@@ -225,29 +238,13 @@ ok('4 个 SSB 邻区全部能在 ^MONNC 里找到同一小区（RSRQ 回填可�
 ok('回填得到的 RSRQ 都是有效值', filled.every((f) => f.rsrq != null),
 	JSON.stringify(filled));
 
+/*
+ * ^HFREQINFO 解析仍要保留——网络状态页「载波与聚合」的载波表在用它
+ * （显示下行/上行带宽）。这里钉住的是解析本身，不是邻区带宽推断。
+ */
 ok('^HFREQINFO 解析出 2 个载波', carriers.length === 2, '实际 ' + carriers.length);
 ok('主载波带宽 60000 kHz（60 MHz）', carriers[0] && carriers[0].dlBwKHz === 60000);
 ok('辅载波带宽 100000 kHz（100 MHz）', carriers[1] && carriers[1].dlBwKHz === 100000);
-
-/* 带宽推断：复刻 network_settings.js 的判定式，校验真机样本结论 */
-function bwOf(rat, arfcn) {
-	if (rat !== 'NR' || !carriers.length) return null;
-	const mhz = Parse.nrArfcnToMHz(arfcn);
-	if (mhz == null) return null;
-	for (const c of carriers) {
-		if (c.sysMode !== 'NR' || !c.dlBwKHz || c.dlFreqMHz == null) continue;
-		if (Math.abs(mhz - c.dlFreqMHz) <= c.dlBwKHz / 2000) return c.dlBwKHz;
-	}
-	return null;
-}
-
-ok('同载波邻区 524910（2624.55 MHz 落在 CC0 内）→ 60 MHz',
-	bwOf('NR', 524910) === 60000, '实际 ' + bwOf('NR', 524910));
-ok('异频邻区 152650（n28）不在任何工作载波内 → null（不编造）',
-	bwOf('NR', 152650) === null, '实际 ' + bwOf('NR', 152650));
-ok('异频邻区 723360（n79）不在任何工作载波内 → null（不编造）',
-	bwOf('NR', 723360) === null, '实际 ' + bwOf('NR', 723360));
-ok('LTE 邻区不套用 NR 载波表 → null', bwOf('LTE', 1850) === null);
 
 /* ---------- D. 辅载波刷新链路（网络状态页「载波与聚合」） ---------- */
 

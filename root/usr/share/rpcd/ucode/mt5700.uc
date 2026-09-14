@@ -167,6 +167,39 @@ function detectModemDevice() {
 	return dev;
 }
 
+/*
+ * 接口名白名单：只认 [A-Za-z0-9._-]，其余一律拒绝。
+ *
+ * device 可以直接从 RPC 参数传进来，而它会被拼进
+ * `/sys/class/net/<dev>/statistics/rx_bytes`。rpcd 不做路径规范化，不过滤的话
+ * 传一个带斜杠的名字就能把 ucode 的 fs.open 指到任意文件上 —— ucode 是以 root
+ * 跑的，泄漏面取决于那个文件首行能不能被 int() 解析，但目录遍历本身就不该存在。
+ *
+ * 真实接口名全都落在这个集合里（eth2 / wwan0 / eth2.100），限制不会误伤。
+ * 另外挡掉 "." / ".." 这类纯点名，避免拼出 /sys/class/net/.. 这种路径。
+ */
+function safeNetDevice(dev) {
+	if (dev == null || dev == '') {
+		return null;
+	}
+	if (length(dev) > 32) {
+		return null;
+	}
+	let alnum = false;
+	for (let i = 0; i < length(dev); i++) {
+		let c = substr(dev, i, 1);
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			alnum = true;
+		} else if (c != '.' && c != '_' && c != '-') {
+			return null;
+		}
+	}
+	if (!alnum) {
+		return null;
+	}
+	return dev;
+}
+
 /* 读取单个字节计数器；失败返回 null（不做静默补 0，避免算出假速率） */
 function readCounter(path) {
 	let f;
@@ -203,6 +236,10 @@ function netrateCall(req) {
 	if (dev == null || dev == '') {
 		dev = detectModemDevice();
 	}
+	dev = safeNetDevice(dev);
+	if (dev == null) {
+		return { success: false, error: '接口名不合法' };
+	}
 
 	const base = '/sys/class/net/' + dev;
 	const rx = readCounter(base + '/statistics/rx_bytes');
@@ -220,6 +257,35 @@ function netrateCall(req) {
 	};
 }
 
+/*
+ * 每次调用生成独立的临时文件名。
+ *
+ * 原来固定叫 /tmp/mt5700-rpc.json。LuCI 上多张卡片并行刷新是常态（状态页、邻区、
+ * 载波各刷各的），两个请求会在极短的时间窗里先后写同一个文件：后写的那个会
+ * 在前一个的 nc 读到之前把内容覆盖掉，于是前一个请求**实际发出去的是别人的
+ * 命令**，拿回来的也是别人的应答 —— 表现为卡片偶尔显示别处的数据，且毫无报错。
+ *
+ * 另外这个文件里带着 auth_key（见下），固定路径等于把密钥长期明文摊在 /tmp。
+ * 所以这里两件事一起做：文件名加随机后缀，且用完立刻删除。
+ *
+ * 后缀生成放在 try 里：万一某个固件的 ucode 没有 rand()，退回原来的固定名，
+ * 行为与改动前一致，不会因为这个改动让整个 RPC 挂掉。
+ */
+function rpcTmpPath() {
+	let suffix = '';
+	try {
+		suffix = '.' + sprintf('%d', time()) + '.' + sprintf('%d', rand());
+	} catch (e) {
+		suffix = '';
+	}
+	return '/tmp/mt5700-rpc' + suffix + '.json';
+}
+
+/* 所有退出路径都要删，早退分支也不能落下 */
+function rpcTmpUnlink(path) {
+	try { fs.unlink(path); } catch (e) { }
+}
+
 function rpcCall(method, params) {
 	const rpcCfg = readRpcConfig();
 	const port = rpcCfg.port;
@@ -232,7 +298,7 @@ function rpcCall(method, params) {
 
 	/* 本固件 ucode fs 无 connect，经 busybox nc 管道访问回环 RPC */
 	const body = sprintf('%J', payload);
-	const tmp = '/tmp/mt5700-rpc.json';
+	const tmp = rpcTmpPath();
 	let f;
 	try {
 		f = fs.open(tmp, 'w');
@@ -246,6 +312,7 @@ function rpcCall(method, params) {
 	f.close();
 
 	let p;
+
 	/*
 	 * 必须用 timeout 包住 nc。
 	 *
@@ -258,21 +325,30 @@ function rpcCall(method, params) {
 	 * usage 并立刻退出，会让所有 RPC 全部失败），限时只能靠外部的 timeout。
 	 *
 	 * 上限取 20 秒而不是更短：后端最坏耗时是有上界的 ——
-	 * 普通命令 QUEUE_WAIT(8s) + COMMAND_TIMEOUT(2s) + 3s = 13s，
-	 * 短信后台任务 QUEUE_WAIT(8s) + SMS_SEND_TIMEOUT(6s) + 2s = 16s。
+	 * 普通命令 QUEUE_WAIT(8s) + WRITE(3s) + COMMAND_TIMEOUT(2s) = 13s，
+	 * 短信后台任务 QUEUE_WAIT(8s) + WRITE(3s) + SMS_SEND_TIMEOUT(6s) = 17s。
 	 * 20s 留了余量，只会兜住「真的不回包」，不会把正常的慢响应掐掉。
+	 * （后端后来给写入也加了 3s 超时，预算按加过之后的最坏值核过，仍然够。）
 	 */
 	try {
 		p = fs.popen('timeout 20 nc 127.0.0.1 ' + port + ' < ' + tmp, 'r');
 	} catch (e) {
+		rpcTmpUnlink(tmp);
 		return { success: false, error: '无法连接 Rust 后端' };
 	}
 	if (!p) {
+		rpcTmpUnlink(tmp);
 		return { success: false, error: '无法连接 Rust 后端' };
 	}
 
 	let line = p.read('line');
 	p.close();
+
+	/*
+	 * 立刻删掉：文件内容里含 auth_key（回环 RPC 的密钥），请求结束就不该再留在
+	 * /tmp 里。文件存在的窗口只有 nc 那几十毫秒，但以前用固定文件名时会长期留着。
+	 */
+	rpcTmpUnlink(tmp);
 
 	if (!line) {
 		return { success: false, error: 'Rust 后端无应答（已限时 20 秒）' };
@@ -320,10 +396,18 @@ function rpcCall(method, params) {
 
 const READ_CACHE_DIR = '/tmp/mt5700-read-cache';
 
-/* 不变类：写一次终身不变（或极少变），可安全长 TTL */
+/*
+ * 不变类：写一次终身不变（或极少变），可安全长 TTL。
+ *
+ * 入选标准只有一条：**没有任何界面能改它**。可选的项一律不进 ——
+ * 早先把 `AT+CSCA?`（短信中心号）和 `AT^C5GOPTION?` 也列了进来，而这两项在
+ * 短信页 / 网络设置页都能改。虽然写命令会清空全部缓存兜住了大部分情况，
+ * 但缓存的语义是「这项不会变」，可写的项放进来等于给自己埋雷
+ * （比如从别的途径改了短信中心号，界面最多陈旧 5 分钟）。
+ */
 const STATIC_READS = [
 	'ATI', 'AT+CGMM', 'AT+CGMR', 'AT+CGSN', 'AT+CIMI', 'AT+CGMI',
-	'AT^ICCID?', 'AT^PHYNUM?', 'AT^VERSION?', 'AT+CSCA?', 'AT^C5GOPTION?'
+	'AT^ICCID?', 'AT^PHYNUM?', 'AT^VERSION?'
 ];
 
 /* 无问号但属只读的查询（默认不启用缓存，留给 read_cache_ttl>0 时用） */
@@ -450,6 +534,15 @@ return {
 				let cmd = getStr(a, 'cmd');
 				if (cmd == null || cmd == '') {
 					return { success: false, error: '缺少参数 cmd' };
+				}
+				/*
+				 * 长度上限：最长的是短信 PDU（70 个 UCS2 字符 ≈ 280 个十六进制
+				 * 字符，长短信再分几条），4096 留了十倍余量，正常业务绝不会触到。
+				 * 拦的是异常输入 —— 它会被写进临时文件、经 nc 打到模组，
+				 * 没有上限时一条请求就能把串口堵上好几秒。
+				 */
+				if (length(cmd) > 4096) {
+					return { success: false, error: 'AT 命令过长（上限 4096 字节）' };
 				}
 				return atCallCached(cmd);
 			}

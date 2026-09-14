@@ -114,7 +114,24 @@ has('PDP 地址加引号', /sanitizeAtParam\(values\.pdp_addr \|\| ''\) \+ '",0,
 has('CID 限定 1-20', /cid >= 1 && cid <= 20/.test(DIAL),
 	'手册 7.1：21~31 保留给网络，0 是默认 PDP 不可删除');
 has('FOTA 地址过转义', /sanitizeAtParam\(formatted\)/.test(UPG), '只校验 http:// 前缀挡不住引号/换行');
-has('PIN 码过转义', /sanitizeAtParam\(values\.pin\)/.test(MODEM), 'PIN 直接拼进 AT+CPIN/AT+CLCK');
+/*
+ * PIN 码必须过转义。这里钉的是**语义**——凡是拼进 AT+CPIN/AT+CLCK 的值都得
+ * 先 sanitizeAtParam()，而不是钉某个变量名：早先断言写的是 values.pin（弹窗
+ * 取值），PIN 区改成内联输入框、值来自局部变量后就误报了，但转义本身没丢。
+ * 取「包含命令拼接的语句」逐条检查，比匹配单个变量名稳。
+ */
+const pinStmts = MODEM.split(/[;\n]/).filter(function (s) {
+	return /AT\+CPIN="|AT\+CLCK="SC",/.test(s) && /'\s*\+/.test(s);
+});
+has('PIN 码过转义 —— 拼进 AT+CPIN/AT+CLCK 的每条语句都过 sanitizeAtParam',
+	pinStmts.length > 0 && pinStmts.every(function (s) { return /sanitizeAtParam\(/.test(s); }),
+	'存在未过转义就直接拼进 AT+CPIN/AT+CLCK 的语句：' +
+	JSON.stringify(pinStmts.filter(function (s) { return !/sanitizeAtParam\(/.test(s); })));
+has('PUK 解锁同样过转义',
+	/AT\+CPIN="[^;]*sanitizeAtParam\(puk\)/.test(MODEM),
+	'PUK 也是自由输入，直接拼可注入第二条 AT 命令');
+has('PIN 输入有格式校验（4-8 位数字）',
+	/\\d\{4,8\}/.test(MODEM), '不校验会把非法值直接发给模组，白白消耗 PIN 尝试次数');
 has('短信中心号码过转义', /sanitizeAtParam\(num\)/.test(SMSSET) || /sanitizeAtParam\(centerInput\.value/.test(SMSSET),
 	'中心号码直接拼进 AT+CSCA');
 has('Text 模式号码滤非数字', /replace\(\/\[\^\\d\+\]\/g, ''\)/.test(read(path.join(A, 'smsEncode.js'))),

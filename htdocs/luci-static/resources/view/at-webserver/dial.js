@@ -359,7 +359,16 @@ return L.view.extend({
 		function handleApnSettingChange() {
 			staged.set('apn', 'APN 设置更新', function () {
 				/* APN/用户名/密码是自由文本，不过滤就能拼出第二条 AT 命令 */
-				var cmd = 'AT^SETAUTODIAL=' + settings.enable + ',' + settings.dialMode + ',"' + Parse.sanitizeAtParam(settings.protocol) + '","' +
+				/*
+				 * dialMode / enable 在没有回读到值（模组应答缺字段，或 AT^NDISSTATQRY?
+				 * 没判定出激活）时是 undefined，直接拼进命令会变成
+				 * 'AT^SETAUTODIAL=1,undefined,"cmnet"...' —— 模组只会回 ERROR，
+				 * 界面却报「APN 设置失败」，看不出是命令拼错了。这里与上面
+				 * handleAutoDialChange 的 '(settings.dialMode || 1)' 保持一致兜底。
+				 */
+				var mode = settings.dialMode != null ? settings.dialMode : 1;
+				var enable = settings.enable != null ? settings.enable : 0;
+				var cmd = 'AT^SETAUTODIAL=' + enable + ',' + mode + ',"' + Parse.sanitizeAtParam(settings.protocol) + '","' +
 					Parse.sanitizeAtParam(apnForm.apn) + '","' + Parse.sanitizeAtParam(apnForm.username) + '","' + Parse.sanitizeAtParam(apnForm.password) + '",' + (Number(apnForm.authType) || 0);
 				return Ui.sendCmd(cmd).then(function (res) {
 					if (!res.success) throw new Error('APN 设置失败');

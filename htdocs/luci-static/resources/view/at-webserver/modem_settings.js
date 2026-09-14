@@ -113,12 +113,10 @@ return L.view.extend({
 		simCard._body.appendChild(simBody);
 		body.appendChild(simCard);
 
-		var simStatusRow = E('div', { 'class': 'mt5700-inline' });
 		var simSqEl = E('span', { 'class': 'mt5700-hint' }, 'SIM 状态：—');
-		var pinStatusEl = E('span', { 'class': 'mt5700-hint' }, 'PIN 状态：—');
-		simStatusRow.appendChild(simSqEl);
-		simStatusRow.appendChild(pinStatusEl);
-		simBody.appendChild(simStatusRow);
+		simBody.appendChild(simSqEl);
+		/* SIM 卡状态徽章：卡片头一个，同时复用在「SIM 卡信息」表的状态行 */
+		var pinStatusEl = Mt5700.badge('未知', 'neutral');
 
 		var simSlotSel = Mt5700.select([
 			{ label: '外置 SIM', value: '0' },
@@ -134,41 +132,202 @@ return L.view.extend({
 		simBody.appendChild(Mt5700.formGroup('SIM 卡热插拔', hpSwitch));
 		var hpChk = hpSwitch.querySelector('input');
 
-		var pinOps = Mt5700.panelActions(
-			Mt5700.button('输入 PIN', function () { pinModal('verify'); }, 'primary'),
-			Mt5700.button('修改 PIN', function () { pinModal('change'); }, 'primary'),
-			Mt5700.button('禁用 PIN', function () { pinModal('disable'); }, 'primary'),
-			Mt5700.button('启用 PIN', function () { pinModal('enable'); }, 'primary')
-		);
-		simBody.appendChild(pinOps);
+		/* ================= PIN 码管理 ================= */
 
-		function pinModal(op) {
-			var titles = { verify: '输入 PIN', change: '修改 PIN', disable: '禁用 PIN', enable: '启用 PIN' };
-			var fields = [];
-			if (op === 'change') {
-				fields.push({ key: 'old', label: '当前 PIN', type: 'password' });
-				fields.push({ key: 'new', label: '新 PIN', type: 'password' });
-				fields.push({ key: 'confirm', label: '确认新 PIN', type: 'password' });
-			} else {
-				fields.push({ key: 'pin', label: 'PIN', type: 'password' });
-			}
-			Ui.promptModal(titles[op], fields, function (values) {
-				var cmd;
-				if (op === 'verify') cmd = 'AT+CPIN="' + Parse.sanitizeAtParam(values.pin) + '"';
-				else if (op === 'change') {
-					if (values['new'] !== values.confirm) { Mt5700.error('两次输入的 PIN 码不一致'); return; }
-					cmd = 'AT+CPIN="' + Parse.sanitizeAtParam(values.old) + '","' + Parse.sanitizeAtParam(values['new']) + '"';
-				} else if (op === 'disable') cmd = 'AT+CLCK="SC",0,"' + Parse.sanitizeAtParam(values.pin) + '"';
-				else cmd = 'AT+CLCK="SC",1,"' + Parse.sanitizeAtParam(values.pin) + '"';
-				send(cmd).then(function (res) {
-					if (res.success) {
-						Mt5700.success('操作成功');
-						fetchPinStatus();
-					} else {
-						Mt5700.error(Ui.atErrorText(res, 'PIN 码操作失败'));
-					}
-				}).catch(function () { Mt5700.error('PIN 码操作失败'); });
+		/*
+		 * PIN 锁的启用与否（AT+CLCK="SC",2）决定这一整段操作该怎么用：
+		 * 卡片头的徽章、提示条文案、以及中间那个按钮是「启用」还是「关闭」
+		 * 都由它驱动，所以做成状态驱动而不是四个固定按钮。
+		 */
+		var pinLockEnabled = null;   /* null = 还没读到 */
+
+		var pinLockBadge = Mt5700.badge('PIN 状态未知', 'neutral');
+		var pinCard = Mt5700.card('PIN 码管理', '验证、启用与修改 SIM 卡 PIN 码', pinLockBadge);
+		var pinBody = E('div');
+		pinCard._body.appendChild(pinBody);
+		body.appendChild(pinCard);
+
+		var pinNoticeEl = E('div', { 'class': 'mt5700-notice' }, '正在读取 PIN 状态…');
+		pinBody.appendChild(pinNoticeEl);
+
+		function pinInput(placeholder) {
+			var el = Mt5700.input('password', placeholder);
+			el.setAttribute('autocomplete', 'off');
+			el.setAttribute('maxlength', '8');
+			return el;
+		}
+
+		var pinCurInput = pinInput('请输入 PIN 码');
+		var pinNewInput = pinInput('请输入新 PIN 码');
+		var pinConfirmInput = pinInput('请再次输入新 PIN 码');
+
+		pinBody.appendChild(Mt5700.formGroup('输入 PIN 码', pinCurInput, '当前 PIN 码，用于验证身份或开启/关闭 PIN 锁'));
+		pinBody.appendChild(Mt5700.formGroup('新 PIN 码', pinNewInput, '4-8 位数字'));
+		pinBody.appendChild(Mt5700.formGroup('确认新 PIN 码', pinConfirmInput));
+
+		var pinLockBtn = Mt5700.button('启用 PIN 锁', function () { togglePinLock(); }, 'primary');
+		pinBody.appendChild(Mt5700.panelActions(
+			Mt5700.button('验证 PIN', function () { verifyPin(); }, 'primary'),
+			pinLockBtn,
+			Mt5700.button('修改 PIN 码', function () { changePin(); }, 'primary')
+		));
+
+		/* PUK 解锁是不可逆操作（PUK 只有 10 次机会），单独隔开并二次确认 */
+		var pukZone = E('div', { 'class': 'mt5700-danger-zone' });
+		pukZone.appendChild(E('div', { 'class': 'mt5700-danger-zone-title' }, '忘记 PIN 码？'));
+		pukZone.appendChild(E('p', { 'class': 'mt5700-hint' },
+			'如果连续 3 次输入错误 PIN 码，SIM 卡将被锁定，需要使用 PUK 码解锁。'));
+		pukZone.appendChild(Mt5700.button('使用 PUK 码解锁', function () { pukUnlock(); }, 'danger'));
+		pinBody.appendChild(pukZone);
+
+		function readPin(el) {
+			var v = String(el.value || '').trim();
+			if (!v) { Mt5700.error('请先填写 PIN 码'); return null; }
+			if (!/^\d{4,8}$/.test(v)) { Mt5700.error('PIN 码必须是 4-8 位数字'); return null; }
+			return v;
+		}
+
+		function clearPinInputs() {
+			pinCurInput.value = '';
+			pinNewInput.value = '';
+			pinConfirmInput.value = '';
+		}
+
+		function runPinCmd(cmd, okMsg) {
+			return send(cmd).then(function (res) {
+				if (res.success) {
+					Mt5700.success(okMsg);
+					clearPinInputs();
+					fetchPinStatus();
+				} else {
+					Mt5700.error(Ui.atErrorText(res, 'PIN 码操作失败'));
+				}
+			}).catch(function () { Mt5700.error('PIN 码操作失败'); });
+		}
+
+		function verifyPin() {
+			var pin = readPin(pinCurInput);
+			if (!pin) return;
+			runPinCmd('AT+CPIN="' + Parse.sanitizeAtParam(pin) + '"', 'PIN 验证成功');
+		}
+
+		function togglePinLock() {
+			var pin = readPin(pinCurInput);
+			if (!pin) return;
+			var turnOn = pinLockEnabled !== true;
+			Mt5700.confirm(turnOn
+				? '启用后每次开机都需要输入 PIN 码才能使用 SIM 卡功能，确定启用？'
+				: '关闭后开机无需输入 PIN 码即可使用 SIM 卡功能，确定关闭？',
+				function () {
+					runPinCmd('AT+CLCK="SC",' + (turnOn ? 1 : 0) + ',"' + Parse.sanitizeAtParam(pin) + '"',
+						turnOn ? 'PIN 锁已启用' : 'PIN 锁已关闭');
+				}, turnOn ? '确定启用' : '确定关闭');
+		}
+
+		function changePin() {
+			var oldPin = readPin(pinCurInput);
+			if (!oldPin) return;
+			var np = readPin(pinNewInput);
+			if (!np) return;
+			var cp = readPin(pinConfirmInput);
+			if (!cp) return;
+			if (np !== cp) { Mt5700.error('两次输入的新 PIN 码不一致'); return; }
+			if (np === oldPin) { Mt5700.error('新 PIN 码不能与当前 PIN 码相同'); return; }
+			runPinCmd('AT+CPIN="' + Parse.sanitizeAtParam(oldPin) + '","' + Parse.sanitizeAtParam(np) + '"',
+				'PIN 码修改成功');
+		}
+
+		/*
+		 * PUK 解锁：AT+CPIN 的两个参数形式 '<PUK>,<新PIN>'。
+		 * PUK 错 10 次卡就永久报废，因此这里除了格式校验还强制二次确认。
+		 */
+		function pukUnlock() {
+			Ui.promptModal('使用 PUK 码解锁', [
+				{ key: 'puk', label: 'PUK 码（8 位数字）', type: 'password' },
+				{ key: 'pin', label: '新 PIN 码（4-8 位数字）', type: 'password' }
+			], function (values) {
+				var puk = String(values.puk || '').trim();
+				var np = String(values.pin || '').trim();
+				if (!/^\d{8}$/.test(puk)) { Mt5700.error('PUK 码必须是 8 位数字'); return; }
+				if (!/^\d{4,8}$/.test(np)) { Mt5700.error('新 PIN 码必须是 4-8 位数字'); return; }
+				Mt5700.confirm('PUK 码只有 10 次尝试机会，用尽后 SIM 卡将永久报废。确定解锁？',
+					function () {
+						runPinCmd('AT+CPIN="' + Parse.sanitizeAtParam(puk) + '","' + Parse.sanitizeAtParam(np) + '"',
+							'SIM 卡已解锁，PIN 码已重置');
+					}, '确定解锁');
 			});
+		}
+
+		/* 徽章 / 提示条 / 按钮文案随 PIN 状态整体切换 */
+		function renderPinState(cpinText, cpinReady, lockEnabled) {
+			pinLockEnabled = (lockEnabled == null) ? null : !!lockEnabled;
+			pinLockBadge.textContent = pinLockEnabled == null
+				? 'PIN 状态未知' : (pinLockEnabled ? 'PIN 已启用' : 'PIN 未启用');
+			pinLockBadge.className = 'mt5700-badge mt5700-badge-' +
+				(pinLockEnabled == null ? 'neutral' : (pinLockEnabled ? 'success' : 'neutral'));
+			pinLockBtn.textContent = pinLockEnabled ? '关闭 PIN 锁' : '启用 PIN 锁';
+
+			var cls = 'mt5700-notice';
+			var txt;
+			if (cpinText === 'SIM PUK') {
+				cls += ' mt5700-notice-danger';
+				txt = 'SIM 卡已被锁定，需要使用 PUK 码解锁后才能继续。';
+			} else if (cpinText === 'SIM PIN') {
+				cls += ' mt5700-notice-warning';
+				txt = 'SIM 卡正在等待输入 PIN 码，验证后才能使用短信与电话。';
+			} else if (cpinReady) {
+				cls += ' mt5700-notice-success';
+				txt = pinLockEnabled
+					? 'PIN 锁已启用，开机需要输入 PIN 码才能使用 SIM 卡功能。'
+					: 'PIN 锁已禁用，开机无需输入 PIN 码即可使用 SIM 卡功能。';
+			} else {
+				txt = 'PIN 状态未知，请检查 SIM 卡是否插好。';
+			}
+			pinNoticeEl.className = cls;
+			pinNoticeEl.textContent = txt;
+		}
+
+		/* ================= SIM 卡信息 ================= */
+
+		var simInfoBadge = Mt5700.badge('未知', 'neutral');
+		var simInfoCard = Mt5700.card('SIM 卡信息', 'ICCID、IMSI 与运营商', simInfoBadge);
+		var simInfoBody = E('div');
+		simInfoCard._body.appendChild(simInfoBody);
+		body.appendChild(simInfoCard);
+
+		var simIccidEl = E('span', { 'class': 'mt5700-mono' }, '—');
+		var simImsiEl = E('span', { 'class': 'mt5700-mono' }, '—');
+		var simOperEl = E('span', {}, '—');
+
+		function renderSimInfo() {
+			simInfoBody.innerHTML = '';
+			simInfoBody.appendChild(Mt5700.table(
+				['项目', '值'],
+				[
+					['状态', pinStatusEl],
+					['ICCID', simIccidEl],
+					['IMSI', simImsiEl],
+					['运营商', simOperEl]
+				]
+			));
+		}
+		renderSimInfo();
+
+		function fetchSimInfo() {
+			function txt(res) { return String((res && res.data) || ''); }
+			return Promise.all([
+				send('AT^ICCID?'),
+				send('AT+CIMI'),
+				send('AT+COPS?')
+			]).then(function (r) {
+				var iccid = txt(r[0]).match(/(\d{19,20})/);
+				if (iccid) simIccidEl.textContent = iccid[1];
+				var imsi = txt(r[1]).match(/(\d{15})/);
+				if (imsi) simImsiEl.textContent = imsi[1];
+				/* +COPS: <mode>,<format>,"<oper>" —— 只取引号里的运营商名 */
+				var op = txt(r[2]).match(/\+COPS:\s*[^,]+,[^,]+,"([^"]*)"/);
+				if (op && op[1]) simOperEl.textContent = op[1];
+			}).catch(function () { /* 读不到就保持上一次的值，不弹错打扰 */ });
 		}
 
 		function handleSimSwitch(target) {
@@ -196,37 +355,56 @@ return L.view.extend({
 			}).catch(function () { Mt5700.error('SIM 卡热插拔设置失败'); });
 		}
 
+		/*
+		 * PIN 有两个互相独立的状态，别混为一谈：
+		 *   AT+CPIN?        卡现在解锁了没有（READY / SIM PIN / SIM PUK）—— 决定能不能用
+		 *   AT+CLCK="SC",2  PIN 锁开没开（启用 / 未启用）—— 决定开机要不要输
+		 * 早先这里用 +CLCK 的结果去覆盖 +CPIN 的显示，卡等输 PIN 时会被写成
+		 * READY，正好是谎报「卡已就绪」。两者现在各归各位。
+		 */
 		function fetchPinStatus() {
+			var cpinReady = false;
+			var cpinText = '';
 			return send('AT+CPIN?').then(function (res) {
-				var ready = false;
 				var got = false;
 				if (res.success && res.data) {
 					/* 原正则 (\w+) 匹配不到空格，'+CPIN: SIM PIN' 只解出 SIM，
-					   于是「等输 PIN」被当成未知、再被下面的兜底硬写成 READY。*/
+					   于是「等输 PIN」被当成未知。*/
 					var m = atText(res).match(/\+CPIN:\s*([A-Za-z ]+)/);
 					if (m) {
 						got = true;
-						var st = m[1].trim();
-						ready = st === 'READY';
-						pinStatusEl.textContent = 'PIN 状态：' + st;
+						cpinText = m[1].trim();
+						cpinReady = cpinText === 'READY';
 					}
 				}
-				/*
-				 * 不能把非 READY 一律写成 READY：卡等着输 PIN（SIM PIN）/ 被锁（SIM PUK）
-				 * 时 ready 为 false，硬写成 READY 会让界面谎报「卡已就绪」，用户看到
-				 * 「卡插着却上不了网」而无从下手。取不到应答时才显示未知。
-				 */
-				if (!got) pinStatusEl.textContent = 'PIN 状态：未知';
+				if (!got) { cpinText = ''; cpinReady = false; }
 				return send('AT+CLCK="SC",2');
 			}).then(function (res) {
+				var enabled = null;
 				if (res.success && res.data) {
 					var m = atText(res).match(/,(\d+)/);
-					if (m) {
-						var enabled = m[1] === '1';
-						pinStatusEl.textContent = 'PIN 状态：READY，' + (enabled ? '已启用' : '未启用');
-					}
+					if (m) enabled = m[1] === '1';
 				}
-			}).catch(function () {});
+				renderSimBadge(cpinText, cpinReady);
+				renderPinState(cpinText, cpinReady, enabled);
+			}).catch(function () {
+				renderSimBadge('', false);
+				renderPinState('', false, null);
+			});
+		}
+
+		/* SIM 卡状态徽章：卡片头一个，「SIM 卡信息」表的状态行共用同一套判定 */
+		function renderSimBadge(cpinText, cpinReady) {
+			var variant = 'neutral';
+			var label = '未知';
+			if (cpinText === 'SIM PUK') { label = '已锁定'; variant = 'danger'; }
+			else if (cpinText === 'SIM PIN') { label = '等待 PIN'; variant = 'warning'; }
+			else if (cpinReady) { label = '已就绪'; variant = 'success'; }
+			else if (cpinText) { label = cpinText; }
+			pinStatusEl.textContent = label;
+			pinStatusEl.className = 'mt5700-badge mt5700-badge-' + variant;
+			simInfoBadge.textContent = label;
+			simInfoBadge.className = 'mt5700-badge mt5700-badge-' + variant;
 		}
 
 		/* ================= 飞行模式 ================= */
@@ -249,7 +427,7 @@ return L.view.extend({
 					Mt5700.error((checked ? '开启' : '关闭') + '飞行模式失败');
 					input.checked = !checked;
 				}
-			}).catch(function () { Mt5700.error('飞行模式设置失败'); });
+			}).catch(function () { Mt5700.error('飞行模式设置失败'); input.checked = !checked; });
 			}
 			if (checked) {
 				Mt5700.confirm('开启飞行模式会立即关闭射频、数据连接中断，恢复可能需要重启模组。确定开启？',
@@ -632,7 +810,7 @@ return L.view.extend({
 					Mt5700.error((checked ? '开启' : '关闭') + '温度保护功能失败');
 					input.checked = !checked;
 				}
-			}).catch(function () { Mt5700.error('温度保护设置失败'); });
+			}).catch(function () { Mt5700.error('温度保护设置失败'); input.checked = !checked; });
 		});
 		thermBody.appendChild(Mt5700.formGroup('温度保护功能', thermSwitch));
 		var thermChk = thermSwitch.querySelector('input');
@@ -643,11 +821,24 @@ return L.view.extend({
 
 		var thermIntervalInput = Mt5700.input('number', '5', '5');
 		thermIntervalInput.min = 1;
+		/*
+		 * 输入防抖：input 事件每敲一个字符就触发一次，直接下发的话输入 "15"
+		 * 会先发 'AT^THERMAUTOFUN=x,y,1' 再发 '...,15' —— 前一条是完整无意义的
+		 * 写命令，白占一次独占串口。这里停手 600ms 才发，且空值/非法值不发。
+		 */
+		var thermIntervalTimer = null;
 		thermIntervalInput.addEventListener('input', function () {
-			send(thermCmd()).then(function (res) {
-				if (res.success) Mt5700.success('温度检测间隔设置成功');
-				else Mt5700.error('温度检测间隔设置失败');
-			}).catch(function () { Mt5700.error('温度检测间隔设置失败'); });
+			if (thermIntervalTimer) clearTimeout(thermIntervalTimer);
+			var n = parseInt(thermIntervalInput.value, 10);
+			if (!isFinite(n) || n < 1) return;   /* 正在输入中间态，别下发给模组 */
+			thermIntervalTimer = setTimeout(function () {
+				thermIntervalTimer = null;
+				if (disposed) return;
+				send(thermCmd()).then(function (res) {
+					if (res.success) Mt5700.success('温度检测间隔设置成功');
+					else Mt5700.error('温度检测间隔设置失败');
+				}).catch(function () { Mt5700.error('温度检测间隔设置失败'); });
+			}, 600);
 		});
 		thermBody.appendChild(Mt5700.formGroup('检测间隔（秒）', thermIntervalInput));
 
@@ -816,6 +1007,7 @@ return L.view.extend({
 			return Promise.resolve()
 				.then(fetchDeviceInfo)
 				.then(fetchSimConfig)
+				.then(fetchSimInfo)
 				.then(fetchAirplane)
 				.then(fetchDeviceControl)
 				.then(fetchNRCapability)

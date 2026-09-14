@@ -896,15 +896,42 @@ var Mt5700 = (function () {
 			applyBtn.disabled = true;
 			revertBtn.disabled = true;
 			text.textContent = '正在应用更改（' + queue.length + ' 项）…';
+			/*
+			 * 逐项执行，且**不让任何一项的失败中断后续项**。
+			 *
+			 * 早先的写法是 `chain = chain.then(function(){ return it.run(); })`
+			 * 串成一条链：只要第 1 项失败（或 reject），链直接跳到末尾的 catch，
+			 * 后面所有暂存项**一次都不会执行**，用户只看到一句「应用更改失败」，
+			 * 却不知道 APN 改了、USB 模式没改。拨号页正是同时暂存多项的场景。
+			 * 这里改为：每项各自 catch，失败记下来，成功的从暂存列表移除；
+			 * 全部跑完再按失败数量给出结论。
+			 */
+			var failed = [];
 			var chain = Promise.resolve();
 			queue.forEach(function (it) {
-				chain = chain.then(function () { return it.run(); });
+				chain = chain.then(function () {
+					return Promise.resolve()
+						.then(function () { return it.run(); })
+						.then(function () {
+							/* 成功：从暂存列表移除，避免失败项重跑时它被重复下发 */
+							var i = items.indexOf(it);
+							if (i >= 0) items.splice(i, 1);
+						})
+						.catch(function (err) {
+							failed.push(it.label + '：' + ((err && err.message) || '失败'));
+						});
+				});
 			});
 			return chain.then(function () {
-				items = [];
-				api.success('更改已应用');
-			}).catch(function (err) {
-				api.error((err && err.message) || '应用更改失败');
+				if (!failed.length) {
+					items = [];
+					api.success('更改已应用');
+				} else if (failed.length === queue.length) {
+					api.error('全部 ' + failed.length + ' 项都未应用：' + failed[0]);
+				} else {
+					api.error('已应用 ' + (queue.length - failed.length) + ' 项，' +
+						failed.length + ' 项失败：' + failed.join('；'));
+				}
 			}).then(function () {
 				applyBtn.disabled = false;
 				revertBtn.disabled = false;

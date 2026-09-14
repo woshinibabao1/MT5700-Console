@@ -317,6 +317,14 @@ return L.view.extend({
 		 */
 		var partialRetryTimer = null;
 		var partialRetryLeft = 2;
+
+		/*
+		 * waitSmsJob 的轮询句柄表与页面存活标志。
+		 * 发长短信时它会以 350ms 间隔连查 AT+SMSJOB? 最多 20 秒；若中途离开页面，
+		 * 必须能把这些 setTimeout 收掉，否则会继续占用独占的 AT 通道。
+		 */
+		var jobPollers = [];
+		var disposed = false;
 		function schedulePartialRetry() {
 			if (partialRetryTimer) return;
 			if (partialRetryLeft <= 0) return;
@@ -453,8 +461,18 @@ return L.view.extend({
 		 */
 		function waitSmsJob(timeoutMs) {
 			var deadline = Date.now() + (timeoutMs || 20000);
+			var nextTimer = null;
+			var pending = jobPollers.length;
+			jobPollers.push(null);
 			return new Promise(function (resolve, reject) {
 				var tick = function () {
+					/*
+					 * 离开页面后必须停下：这条链每 350ms 就要往独占串口发一条
+					 * AT+SMSJOB?，页面切走了还继续发，会把别的页面的命令全堵在
+					 * 队列后面。_dispose 只清得掉 partialRetryTimer，管不到这里，
+					 * 故用一个模块级标志 + 句柄双保险。
+					 */
+					if (disposed) { jobPollers[pending] = null; reject(new Error('页面已离开，等待中止')); return; }
 					AtWs.client.sendCommand('AT+SMSJOB?').then(function (res) {
 						var st = null;
 						try { st = JSON.parse(String(res && res.data ? res.data : '{}')); }
@@ -465,7 +483,9 @@ return L.view.extend({
 						}
 						if (st.running) {
 							if (Date.now() > deadline) { reject(new Error('等待模组确认超时')); return; }
-							setTimeout(tick, 350);
+							if (disposed) { reject(new Error('页面已离开，等待中止')); return; }
+							nextTimer = setTimeout(tick, 350);
+							jobPollers[pending] = nextTimer;
 							return;
 						}
 						if (st.ok) resolve(st.message || '发送成功');
@@ -474,7 +494,9 @@ return L.view.extend({
 						reject(new Error(String((err && err.message) || err || '查询任务状态失败')));
 					});
 				};
-				setTimeout(tick, 300);
+				if (disposed) { reject(new Error('页面已离开，等待中止')); return; }
+				nextTimer = setTimeout(tick, 300);
+				jobPollers[pending] = nextTimer;
 			});
 		}
 
@@ -792,6 +814,9 @@ return L.view.extend({
 		AtWs.client.subscribe(newSmsHandler);
 
 		self._dispose = function () {
+			disposed = true;
+			jobPollers.forEach(function (t) { if (t) clearTimeout(t); });
+			jobPollers = [];
 			AtWs.client.unsubscribe(newSmsHandler);
 			if (partialRetryTimer) { clearTimeout(partialRetryTimer); partialRetryTimer = null; }
 			if (openMask && openMask.parentNode) openMask.parentNode.removeChild(openMask);
