@@ -90,9 +90,11 @@ try {
 	/* ---- SIMSQ ---- */
 	/* 标签文案以 parse.js 的 SIM_STATUS（全项目唯一一份码表）为准：
 	 *   12 = 卡初始化完成，短信与电话可接入
-	 *   11 = 卡初始化完成，可接入网络（短信与电话未接入）  ← 本卡长期停在这一档
+	 *   11 = 卡初始化完成，可接入网络  ← 本卡长期停在这一档
 	 *   98 = 卡已失效（PUK 锁死或物理损坏）
-	 * ★ 文案用「短信与电话」，**不写「电话本」**（用户拍板）——见下方断言。 */
+	 * ★ 文案用「短信与电话」，**不写「电话本」**（用户拍板）——见下方断言。
+	 * ★ 11 的文案必须交代「实测短信正常」：手册口径是「11 时短信与电话未接入」，
+	 *   但本机实测 11 下收发短信完全正常，照抄手册会误导（2026-09-14 真机结论）。 */
 	const sqReady = Parse.parseSimsq('^SIMSQ: 0,12');
 	check('parseSimsq 完全就绪（12）', !!sqReady && sqReady.present === true && sqReady.dead === false
 		&& sqReady.label === '卡初始化完成，短信与电话可接入', sqReady ? sqReady.label : 'null');
@@ -104,7 +106,16 @@ try {
 	check('文案不出现「电话本」，统一写「电话」',
 		sq11.label.indexOf('电话本') < 0 && sqReady.label.indexOf('电话本') < 0,
 		sq11.label + ' / ' + sqReady.label);
-	check('11 的文案标明「短信与电话未接入」', sq11.label.indexOf('短信与电话未接入') >= 0, sq11.label);
+	check('11 的文案写明「实测短信收发正常」（不能照抄手册的「未接入」吓唬人）',
+		sq11.label.indexOf('实测 11 下短信收发正常') >= 0, sq11.label);
+
+	/* ★ 11 不算告警：本卡常态，短信不受影响；0（未插卡）才要报警。
+	 * 判据见 parse.js 的 SIM_STATUS_WARN。 */
+	check('11 不触发告警提示色', Parse.simIsWarn(11) === false, String(Parse.simIsWarn(11)));
+	check('12 不触发告警提示色', Parse.simIsWarn(12) === false, String(Parse.simIsWarn(12)));
+	check('0（未插卡）触发告警提示色', Parse.simIsWarn(0) === true, String(Parse.simIsWarn(0)));
+	check('98（卡失效）触发告警提示色', Parse.simIsWarn(98) === true, String(Parse.simIsWarn(98)));
+	check('短标签里 11 不写「未就绪」', Parse.simShort(11).indexOf('未就绪') < 0, Parse.simShort(11));
 
 	const sqDead = Parse.parseSimsq('^SIMSQ: 0,98');
 	// 原版语义：present 只排除 0/99，98（失效）依然 present=true

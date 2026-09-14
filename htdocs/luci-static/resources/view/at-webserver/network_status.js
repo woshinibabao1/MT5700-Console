@@ -118,13 +118,10 @@ return L.view.extend({
 		var history = [];
 		var HISTORY_POINTS = 60;
 
-		var SIM_STATE = {
-			0: ['未插卡', true], 1: ['已插卡', true], 2: ['PIN 锁定', true], 3: ['SIM 锁定', true],
-			10: ['初始化中', true],
-			11: ['已初始化 · 可接入网络（短信/电话未接入）', true],
-			12: ['就绪 · 短信与电话可接入', false],
-			98: ['卡失效', true], 99: ['已移除', true], 100: ['卡错误', true]
-		};
+		/*
+		 * SIM 状态**只有一份码表**，在 parse.js（SIM_STATUS_SHORT / SIM_STATUS_WARN）。
+		 * 这里只消费 Parse.simShort() / Parse.simIsWarn()，不再自带一份。
+		 */
 
 		/* 号段显示完整值（用户明确要求：本机状态页不打码） */
 		function fullNum(v) {
@@ -209,9 +206,10 @@ return L.view.extend({
 			var st = devState;
 			if (!st) return;
 			devBody.innerHTML = '';
-			var simRow = SIM_STATE[st.sim];
-			var simText = simRow ? simRow[0] : (st.sim == null ? '未知' : ('状态 ' + st.sim));
-			var warn = simRow ? simRow[1] : true;
+			var simText = Parse.simShort(st.sim);
+			// 11（已初始化）**不算**告警：本卡长期停在 1,11，实测短信收发正常，
+			// 自愈推卡也推不动它 —— 详见 parse.js 码表注释。
+			var warn = Parse.simIsWarn(st.sim);
 
 			var head = E('div', { 'class': 'mt5700-toolbar' });
 			head.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (warn ? '' : ' is-on') },
@@ -221,7 +219,9 @@ return L.view.extend({
 
 			if (warn) {
 				devBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'短信与电话要等 SIM 到「就绪」；长期停在「已初始化」时短信可能发不出去。'));
+					st.sim === 0 || st.sim === 99
+						? '未检测到 SIM 卡：请检查卡是否插好、是否需要换槽位。'
+						: 'SIM 未就绪：请检查卡是否插好、是否被 PIN/PUK 锁定。'));
 			}
 
 			var note = manualPhoneNote();

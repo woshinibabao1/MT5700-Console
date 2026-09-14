@@ -403,28 +403,6 @@ return L.view.extend({
 			'查看它的处置记录：SSH 执行 logread -e mt5700-watchdog，' +
 			'或查看日志文件 /tmp/at-notifications.log 里带 [watchdog] 的行。'));
 
-		/* ---------- SIM 卡状态自愈 ---------- */
-		var simHealCard = Mt5700.card('SIM 卡状态自愈',
-			'USB 网口模式下卡状态不是 12 时，自动用 HVSST 推一次');
-		var simHealBody = E('div');
-		simHealCard._body.appendChild(simHealBody);
-		body.appendChild(simHealCard);
-
-		var shSwitch = E('div', { 'class': 'mt5700-switch' });
-		var shChk = E('input', { type: 'checkbox' });
-		shSwitch.appendChild(shChk);
-		simHealBody.appendChild(Mt5700.formGroup('启用 SIM 卡状态自愈', shSwitch,
-			'默认开启。判定条件：AT^SETMODE? 为 4（USB 网口模式）且 AT^SIMSQ? 不是 12 —— ' +
-			'本卡实测长期停在 1,11（网络可用，但短信与电话未接入）。' +
-			'命中时按 AT^HVSST=1,0 → 等待 3 秒 → AT^HVSST=1,1 推一手。'));
-
-		simHealBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-			'★ 每次开机最多执行一次：服务重启、模组反复重连都不会重跑，' +
-			'只有设备重启（清空 /tmp 标记）后才重新获得一次机会；' +
-			'卡已就绪、非 USB 网口模式、卡不在位或已失效时都不消耗这次机会。' +
-			'所有 AT 指令一律由后端服务下发，界面与看门狗都不直接碰串口。' +
-			'处置记录：SSH 执行 logread -e at-webserver | grep "SIM 自愈"。'));
-
 		/* ---------- 载入 UCI（单 section `config` + 扁平键，与 Rust/ucode 一致） ---------- */
 		var get = function (key, def) {
 			var v = L.uci.get('at-webserver', 'config', key);
@@ -460,7 +438,6 @@ return L.view.extend({
 		var gwRaw = L.uci.get('at-webserver', 'config', 'watch_gateway');
 		wdGwInput.value = (gwRaw == null || String(gwRaw) === '')
 			? WATCH_GATEWAY_DEFAULT : String(gwRaw);
-		shChk.checked = get('sim_heal_enable', '1') === '1';
 		/* UCI 里以字面 \n 存多行命令，这里还原成换行显示 */
 		wdCmdsArea.value = String(get('watch_reset_cmds', WATCH_RESET_CMDS_DEFAULT)).replace(/\\n/g, '\n');
 
@@ -507,7 +484,6 @@ return L.view.extend({
 			/* 空白视为「用默认值」——config_get 本来就分不出空值和未设置，统一成显式默认值。 */
 			var gwVal = wdGwInput.value.trim();
 			set('watch_gateway', gwVal === '' ? WATCH_GATEWAY_DEFAULT : gwVal);
-			set('sim_heal_enable', shChk.checked ? '1' : '0');
 			/* 多行 → 字面 \n（UCI 值不能带真实换行），看门狗侧只翻译 \n、不动其它反斜杠。
 			 * 逐行去首尾空白 + 丢掉空行 + 用字面 \n 连接；**不做反斜杠转义**——
 			 * 命令里合法出现的反斜杠要原样保留。

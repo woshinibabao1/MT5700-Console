@@ -43,12 +43,6 @@ pub struct AtConfig {
     pub autodial_enable: bool,
     /// 自动拨号方式：1=USB网络接口，2=转网口模式
     pub autodial_mode: i64,
-    /// 模组连上后是否执行一次 SIM 卡状态自愈（默认 true）。
-    ///
-    /// 判据：`AT^SETMODE?` = 4 且 `AT^SIMSQ?` 的 `<sim_status>` 不是 12 时，
-    /// 按 `AT^HVSST=1,0` → 等 3 秒 → `AT^HVSST=1,1` 推一手。
-    /// **每次开机最多执行一次**（见 `simheal::BootGuard`），且全部 AT 走 Rust 客户端。
-    pub sim_heal_enable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -134,8 +128,6 @@ pub fn default_config() -> Config {
             // 自动拨号默认开启：模组不拨号则 USB 网口不会有 DHCP，接口拿不到 IP
             autodial_enable: true,
             autodial_mode: 1,
-            // SIM 卡状态自愈默认开启：本卡实测长期停在 ^SIMSQ=1,11（短信与电话未接入）
-            sim_heal_enable: true,
         },
         notification: NotificationConfig {
             wechat_webhook: String::new(),
@@ -301,7 +293,6 @@ pub async fn load_config() -> Config {
     cfg.at.autodial_enable = values.bool("autodial_enable", true);
     cfg.at.autodial_mode = values.int("autodial_mode", 1).clamp(1, 2);
     // SIM 卡状态自愈：默认开启，且每次开机最多执行一次（与 UCI 默认值保持一致）。
-    cfg.at.sim_heal_enable = values.bool("sim_heal_enable", true);
 
     cfg.websocket.port = values.int("websocket_port", 8765).clamp(1, 65535) as u16;
     cfg.websocket.auth_key = values.str("websocket_auth_key", "");

@@ -1023,13 +1023,58 @@ var Parse = (function () {
 		};
 	};
 
-	/* ================= SIM 信号质量 ^SIMSQ（sim.ts 等价迁移） ================= */
-	// 手册 6.6：^SIMSQ 能区分卡不在位 / 被锁 / PUK 锁死，+CPIN 看不出来。
+	/* ================= SIM 卡状态 ^SIMSQ（手册 6.6） ================= */
+
+	/*
+	 * SIM 状态码表 —— **全插件唯一真源**。
+	 * mt5700.js（顶部状态芯片）与 network_status.js（SIM 徽章）只准消费
+	 * simShort() / simIsWarn() / simDetail()，不许再各抄一份 —— 此前三处各写一份，
+	 * 改一次文案要改三遍，迟早漏一处。
+	 *
+	 * ★ 11 与 12 到底差在哪（2026-09-14 真机结论，推翻了此前「11 就不能发短信」的判断）：
+	 *   手册写的是「12 才算短信与电话可接入」。但本卡长期停在 1,11，实测：
+	 *     · 短信收发完全正常（CPMS "SM",44,50，向 10086 实发并收到回复）；
+	 *     · 开机自愈推 HVSST 之后状态**仍停在 11**，根本推不动。
+	 *   也就是说 11 既不影响短信，也不是能靠推卡修好的故障 —— 它是这张卡的常态。
+	 *   所以 11 不再算告警态，文案也不再写「短信未接入」这种与实际不符、还吓人的话。
+	 */
 	var SIM_STATUS = {
 		0: '卡不在位', 1: '卡已插入', 2: '卡被 PIN/PUK 锁定', 3: 'SIMLOCK 锁定',
-		10: '卡文件初始化中', 11: '卡初始化完成，可接入网络（短信与电话未接入）',
+		10: '卡文件初始化中',
+		11: '卡初始化完成，可接入网络（手册标注「短信与电话未接入」；本机实测 11 下短信收发正常）',
 		12: '卡初始化完成，短信与电话可接入', 98: '卡已失效（PUK 锁死或物理损坏）',
 		99: '卡已移除', 100: '卡初始化失败'
+	};
+
+	/* 徽章 / 状态芯片用的短标签（详细说明走 simDetail） */
+	var SIM_STATUS_SHORT = {
+		0: '未插卡', 1: '已插卡', 2: 'PIN 锁定', 3: 'SIM 锁定',
+		10: '初始化中', 11: '已初始化 · 可接入网络', 12: '就绪 · 短信与电话可接入',
+		98: '卡失效', 99: '已移除', 100: '卡错误'
+	};
+
+	/*
+	 * 哪些状态要点提示色。
+	 * ★ 11 刻意**不**告警：本卡常态，且短信不受影响（见上）。
+	 *   1（已插卡）只是过渡态，同样不告警。
+	 *   未收录的状态按「告警」处理（保守：宁可提示，不要漏）。
+	 */
+	var SIM_STATUS_WARN = {
+		0: true, 1: false, 2: true, 3: true,
+		10: true, 11: false, 12: false,
+		98: true, 99: true, 100: true
+	};
+
+	function simLabel(table, s) {
+		if (s == null || s === '') return '未知';
+		return table[s] != null ? table[s] : '状态 ' + s;
+	}
+
+	api.simDetail = function (s) { return simLabel(SIM_STATUS, s); };
+	api.simShort = function (s) { return simLabel(SIM_STATUS_SHORT, s); };
+	api.simIsWarn = function (s) {
+		if (s == null || s === '') return false;   // 没读到状态时不该报警
+		return SIM_STATUS_WARN[s] !== false;
 	};
 
 	api.parseSimsq = function (text) {
@@ -1038,7 +1083,9 @@ var Parse = (function () {
 		var status = Number(match[2]);
 		return {
 			status: status,
-			label: SIM_STATUS[status] != null ? SIM_STATUS[status] : '状态 ' + status,
+			label: api.simDetail(status),
+			shortLabel: api.simShort(status),
+			warn: api.simIsWarn(status),
 			dead: status === 98,
 			present: status !== 0 && status !== 99
 		};
