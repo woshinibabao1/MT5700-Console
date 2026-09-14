@@ -202,6 +202,11 @@ impl Dispatcher {
     async fn handle_new_sms(&mut self, storage: String, index: String) {
         log_info!("收到新短信，存储区: {}，索引: {}", storage, index);
 
+        // 能存下新短信说明存储已腾出空位：复位「存储满」通知标志。
+        // 该标志此前只在 handle_memory_full 里置 true、从不复位，导致清理短信
+        // 之后若再次存满，不会再推任何通知（兜底静默失效）。
+        self.memory_full_notified = false;
+
         let resp = match self.client.send_command(&self.ctx, &format!("AT+CMGR={index}"), crate::atclient::COMMAND_TIMEOUT, None).await {
             Ok(r) => r,
             Err(e) => {

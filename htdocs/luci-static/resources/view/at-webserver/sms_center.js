@@ -30,7 +30,8 @@ return L.view.extend({
 			contacts: [],        // [{ number, lastMessage, lastTime, unreadCount, messages: [] }]
 			selectedContact: '',
 			messages: [],        // 当前联系人消息
-			storage: { used: 0, total: 0 }
+			storage: { used: 0, total: 0 },
+			receivedCount: 0
 		};
 
 		/* ---------- 布局 ---------- */
@@ -197,7 +198,19 @@ return L.view.extend({
 		}
 
 		function renderStorage() {
-			storageEl.textContent = '存储：' + state.storage.used + ' / ' + state.storage.total;
+			var used = state.storage.used;
+			var total = state.storage.total;
+			var txt = '存储：';
+			if (state.receivedCount > 0) txt += '收到 ' + state.receivedCount + ' 条 · ';
+			txt += '占用 ' + used + ' / ' + total;
+			/*
+			 * 存满之后模组收不下新短信（会回 +CMS ERROR: 322 / ^SMMEMFULL，
+			 * 后端 urc.rs 已识别并推送通知）。这里提前在界面上给个可见的提醒，
+			 * 别等真收不到短信了才知道。
+			 */
+			if (total > 0 && used >= total) txt += '（已满，新短信收不到）';
+			else if (total > 0 && used / total >= 0.9) txt += '（将满）';
+			storageEl.textContent = txt;
 		}
 
 		function renderContacts() {
@@ -302,6 +315,16 @@ return L.view.extend({
 
 		function buildContacts(list) {
 			list = mergeConcatenated(list);
+			/*
+			 * 合并长短信分片之后才是「完整短信」条数；state.storage.used 是
+			 * AT+CPMS? 的物理槽位占用，一条 3 段的长短信占 3 格但只算 1 条，
+			 * 两个数含义不同，界面上必须分开显示。
+			 */
+			var fullReceived = 0;
+			for (var fi = 0; fi < list.length; fi++) {
+				if (list[fi] && list[fi].type === 'received') fullReceived++;
+			}
+			state.receivedCount = fullReceived;
 			var map = {};
 			for (var i = 0; i < list.length; i++) {
 				var msg = list[i];
@@ -532,6 +555,13 @@ return L.view.extend({
 
 			sendBtn.disabled = true;
 			/*
+			 * ★ 时间戳必须在「点下发送」这一刻就固定，不能等 chain 跑完再取。
+			 * 收到的短信用的是短信中心时间（SCTS），已发送短信走的则是本地时钟；
+			 * 若取「发送完成」时刻，AT+CMGS 的耗时（实测可达数秒）会把本地时间
+			 * 推到对方回复之后 —— 表现就是 10086 的回复反而排在发出的「套餐」前面。
+			 */
+			var sentAt = nowTimeStr();
+			/*
 			 * 跟随模组当前的短信格式，而不是强扭成 PDU：
 			 * 模组可能正被别的工具（或用户自己）设在 Text 模式，强行切换会改动
 			 * 别人的现场；两种模式我们都支持，按当前模式构造命令即可。
@@ -549,7 +579,7 @@ return L.view.extend({
 					index: -Date.now(),
 					content: content,
 					number: target,
-					time: nowTimeStr(),
+					time: sentAt,
 					type: 'sent'
 				};
 				Parse.saveSentMessageToCache(sent);

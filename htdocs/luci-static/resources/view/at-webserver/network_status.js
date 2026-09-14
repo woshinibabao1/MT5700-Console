@@ -740,7 +740,7 @@ return L.view.extend({
 					if (!row && rows.length) row = rows[0];
 					if (row) state.qci = AtWs.qciLabel(row.split(',')[1] ? row.split(',')[1].trim() : '');
 				});
-			});
+			}).then(renderConn);
 		}
 
 		function getDHCP() {
@@ -1027,7 +1027,7 @@ return L.view.extend({
 			[updateNetworkInfo]
 				.forEach(function (fn) { chain = chain.then(fn); });
 			return chain.catch(function () { /* 刷新失败保留上一次数据 */ })
-				then(function () { refreshing = false; });
+				.then(function () { refreshing = false; });
 		}
 
 		var slowRefreshing = false;
@@ -1038,7 +1038,7 @@ return L.view.extend({
 			[getPSReg, getFlow, getOperator, getAMBR, getQCI, getDHCP, getTemp, getMCS, loadSecondary, loadDiagnostics]
 				.forEach(function (fn) { chain = chain.then(fn); });
 			return chain.catch(function () { /* 刷新失败保留上一次数据 */ })
-				then(function () { slowRefreshing = false; });
+				.then(function () { slowRefreshing = false; });
 		}
 
 		/* 手动点「刷新」时全量拉一次（含设备信息，绕过 60s 节流） */
