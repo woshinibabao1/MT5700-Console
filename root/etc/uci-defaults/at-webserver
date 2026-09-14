@@ -30,7 +30,8 @@ for kv in \
 	watch_reset_modem=0 \
 	watch_reset_cmds="$DEF_RESET_CMDS" \
 	read_cache_ttl=0 \
-	read_cache_static_ttl=300
+	read_cache_static_ttl=300 \
+	sms_auto_clean=1
 do
 	key=${kv%%=*}
 	val=${kv#*=}

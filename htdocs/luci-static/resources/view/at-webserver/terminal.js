@@ -164,6 +164,8 @@ return L.view.extend({
 					ok: !!res.success,
 					at: new Date().toLocaleTimeString('zh-CN', { hour12: false })
 				});
+				/* 无上限会越攒越多，而 renderConsole 每次都是全量重建 DOM */
+				if (entries.length > 300) entries.splice(0, entries.length - 300);
 				cmdInput.value = '';
 				renderConsole();
 			}).catch(function () {

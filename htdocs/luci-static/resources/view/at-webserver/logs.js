@@ -121,6 +121,7 @@ return L.view.extend({
 		// 自动刷新（10 秒）
 		var timer = setInterval(refreshLog, 10000);
 		self._dispose = function () { clearInterval(timer); };
+		page._onDispose(self._dispose);
 
 		return page;
 	}

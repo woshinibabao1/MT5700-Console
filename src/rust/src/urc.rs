@@ -41,6 +41,8 @@ pub struct Dispatcher {
     last_sys_mode: String,
 
     memory_full_notified: bool,
+    /// 短信存储满时是否自动删除最旧的短信腾出空间。
+    sms_auto_clean: bool,
 
     partials: HashMap<String, PartialSms>,
 }
@@ -51,6 +53,7 @@ impl Dispatcher {
         notifier: Arc<Notifier>,
         ws: Broadcaster,
         ctx: tokio::sync::watch::Receiver<bool>,
+        sms_auto_clean: bool,
     ) -> Dispatcher {
         Dispatcher {
             client,
@@ -64,6 +67,7 @@ impl Dispatcher {
             have_rsrp: false,
             last_sys_mode: String::new(),
             memory_full_notified: false,
+            sms_auto_clean,
             partials: HashMap::new(),
         }
     }
@@ -195,6 +199,36 @@ impl Dispatcher {
                 })
                 .await;
         });
+
+        /*
+         * 兜底：按时间从旧到新删掉最旧的几条，给后续短信腾出空间。
+         * 注意此时模组已经拒绝了这一条（+CMS ERROR: 322 / ^SMMEMFULL），
+         * 清理救不回它，但能避免「之后每一条都收不到」。
+         *
+         * 必须 spawn：清理要连发数条 AT，而本函数是同步的、且正持有 &mut self。
+         * 传进去的是 Arc<AtClient> 与 watch::Receiver 的克隆，不借 self。
+         */
+        if self.sms_auto_clean {
+            let client = self.client.clone();
+            let ctx = self.ctx.clone();
+            let notifier = self.notifier.clone();
+            tokio::spawn(async move {
+                let n = crate::smsclean::clean_oldest(&client, &ctx).await;
+                if n > 0 {
+                    notifier
+                        .notify(Notification {
+                            sender: String::new(),
+                            content: format!(
+                                "短信存储已满，已自动删除最旧的 {} 条短信以腾出接收空间",
+                                n
+                            ),
+                            kind: NotifyKind::MemoryFull,
+                            memory_full: true,
+                        })
+                        .await;
+                }
+            });
+        }
     }
 
     // ============= 新短信 =============

@@ -316,6 +316,20 @@ return L.view.extend({
 		notifCard._body.appendChild(notifBody);
 		body.appendChild(notifCard);
 
+		/**
+		 * 把输入钳到 [lo, hi]，非数字回落到 def。
+		 * input 的 min/max 只是属性、不参与 JS 侧校验 —— 填 99999 会被原样写进 UCI
+		 * 并重载服务，后端绑端口失败后所有页面的 AT 都不可用，而界面已经提示
+		 * 「已保存并应用」。所以必须自己钳。
+		 */
+		function clampInt(v, lo, hi, def) {
+			var n = parseInt(v, 10);
+			if (!isFinite(n)) n = def;
+			if (n < lo) n = lo;
+			if (n > hi) n = hi;
+			return n;
+		}
+
 		function mkCheck() {
 			var wrap = E('div', { 'class': 'mt5700-switch' });
 			var input = E('input', { type: 'checkbox' });
@@ -457,14 +471,16 @@ return L.view.extend({
 			set('connection_type', connTypeSel.value);
 			set('network_host', hostInput.value.trim() || '192.168.8.1');
 			set('phone_note', phoneNoteInput.value.trim());
-			set('network_port', String(parseInt(netPortInput.value, 10) || 20249));
+			/* min/max 只是 input 属性，不参与校验：填 99999 会被写进 UCI 并重载服务，
+			   后端绑端口失败 → 所有页面 AT 不可用，而界面已经提示「已保存并应用」。*/
+			set('network_port', String(clampInt(netPortInput.value, 1, 65535, 20249)));
 			var serialVal = serialSel.value;
 			if (serialVal === '__custom__') {
 				serialVal = serialCustom.value.trim() || 'auto';
 			}
 			set('serial_port', serialVal || 'auto');
-			set('serial_baudrate', String(parseInt(baudInput.value, 10) || 115200));
-			set('websocket_port', String(parseInt(wsPortInput.value, 10) || 8765));
+			set('serial_baudrate', String(clampInt(baudInput.value, 9600, 4000000, 115200)));
+			set('websocket_port', String(clampInt(wsPortInput.value, 1, 65535, 8765)));
 			var bind = wsBindSel.value === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1';
 			set('websocket_bind', bind);
 			set('websocket_allow_wan', bind === '0.0.0.0' ? '1' : '0');

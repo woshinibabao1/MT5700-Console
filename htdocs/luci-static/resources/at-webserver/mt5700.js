@@ -79,6 +79,30 @@ var Mt5700 = (function () {
 		var body = E('div', { 'class': 'mt5700-page-body' });
 		node.appendChild(body);
 		node._body = body;
+
+		/*
+		 * LuCI 没有页面卸载钩子：各视图给的 self._dispose 全仓库零调用点，
+		 * 于是切页只是换掉视图 DOM，定时器与订阅一个都不会停 —— 进几次页面
+		 * 就有几个在后台各跑各的，跟用户操作抢独占的 AT 串口。
+		 *
+		 * 判据用「曾进入文档、现已脱离」这个**转换**，而不是「现在不在文档里」：
+		 * 页面刚构建、尚未插入文档的那一瞬也会被判成不在，只认转换可避免误清。
+		 */
+		var cleanups = [];
+		node._onDispose = function (fn) {
+			if (typeof fn === 'function') cleanups.push(fn);
+		};
+		var ownerDoc = node.ownerDocument || document;
+		var wasInDoc = false;
+		var watchdog = setInterval(function () {
+			if (ownerDoc.contains(node)) { wasInDoc = true; return; }
+			if (!wasInDoc) return;
+			clearInterval(watchdog);
+			for (var ci = 0; ci < cleanups.length; ci++) {
+				try { cleanups[ci](); } catch (e) { /* 清理失败不能影响其余 */ }
+			}
+			cleanups.length = 0;
+		}, 1000);
 		return node;
 	};
 
@@ -473,13 +497,18 @@ var Mt5700 = (function () {
 
 	/* ================= 模态框 ================= */
 
-	api.confirm = function (message, onOk, okText) {
+	/*
+	 * onCancel 是后加的第四个参数，可选：给「点击开关后弹确认」这类场景用，
+	 * 取消时把开关拨回去。没有它时，加了确认反而会让界面状态与实际不符。
+	 */
+	api.confirm = function (message, onOk, okText, onCancel) {
 		var mask = E('div', { 'class': 'mt5700-modal-mask' });
 		var box = E('div', { 'class': 'mt5700-modal' });
 		var text = E('div', { 'class': 'mt5700-modal-body' }, message);
 		var actions = E('div', { 'class': 'mt5700-modal-footer' });
 		var cancel = api.ghostButton('取消', function () {
 			if (mask.parentNode) mask.parentNode.removeChild(mask);
+			if (onCancel) onCancel();
 		});
 		var ok = api.primaryButton(okText || '确定', function () {
 			if (mask.parentNode) mask.parentNode.removeChild(mask);

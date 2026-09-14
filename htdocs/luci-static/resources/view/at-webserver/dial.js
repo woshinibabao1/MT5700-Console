@@ -227,7 +227,8 @@ return L.view.extend({
 		var dmzStatus = E('div', { 'class': 'mt5700-hint' }, 'DMZ 状态：未配置');
 		infCard._body.appendChild(Mt5700.panelActions(
 			Mt5700.primaryButton('设置 DMZ', function () {
-				if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(dmzInput.value.trim())) { Mt5700.error('请输入有效的 IP 地址'); return; }
+				/* 旧正则允许 999.999.999.999：只约束了「1-3 位数字 + 点」的形状 */
+				if (!Parse.isValidIPv4(dmzInput.value.trim())) { Mt5700.error('请输入有效的 IP 地址'); return; }
 				handleDMZ('enable', dmzInput.value.trim());
 			}),
 			Mt5700.dangerButton('关闭 DMZ', function () {
@@ -357,8 +358,9 @@ return L.view.extend({
 
 		function handleApnSettingChange() {
 			staged.set('apn', 'APN 设置更新', function () {
-				var cmd = 'AT^SETAUTODIAL=' + settings.enable + ',' + settings.dialMode + ',"' + settings.protocol + '","' +
-					apnForm.apn + '","' + apnForm.username + '","' + apnForm.password + '",' + apnForm.authType;
+				/* APN/用户名/密码是自由文本，不过滤就能拼出第二条 AT 命令 */
+				var cmd = 'AT^SETAUTODIAL=' + settings.enable + ',' + settings.dialMode + ',"' + Parse.sanitizeAtParam(settings.protocol) + '","' +
+					Parse.sanitizeAtParam(apnForm.apn) + '","' + Parse.sanitizeAtParam(apnForm.username) + '","' + Parse.sanitizeAtParam(apnForm.password) + '",' + (Number(apnForm.authType) || 0);
 				return Ui.sendCmd(cmd).then(function (res) {
 					if (!res.success) throw new Error('APN 设置失败');
 					settings.apn = apnForm.apn; settings.username = apnForm.username;
@@ -493,12 +495,18 @@ return L.view.extend({
 			], function (values) {
 				var cid = Number(values.cid);
 				if (!cid || !values.type) { Mt5700.error('请填写 CID 和协议类型'); return; }
+				/*
+				 * 手册 7.1：cid 取值 0~31，其中 21~31 保留给网络、用户不可定义，
+				 * cid=0 是 LTE 注册必需的默认 PDP、不可删除 —— 用户可用区间只有 1~20。
+				 */
+				if (!(cid >= 1 && cid <= 20)) { Mt5700.error('CID 需在 1-20 之间（0 为默认 PDP，21-31 网络保留）'); return; }
 				if (isNew && pdpList.some(function (ctx) { return ctx.cid === cid; })) {
 					Mt5700.error('CID 已存在，请选择其他 CID');
 					return;
 				}
-				var cmd = 'AT+CGDCONT=' + cid + ',"' + values.type + '","' + (values.apn || '') + '",' +
-					(values.pdp_addr || '') + ',0,0';
+				/* PDP_addr 是字符串参数，原先没加引号，填了地址就拼成 ,1.2.3.4,0,0 → ERROR */
+				var cmd = 'AT+CGDCONT=' + cid + ',"' + Parse.sanitizeAtParam(values.type) + '","' + Parse.sanitizeAtParam(values.apn || '') + '","' +
+					Parse.sanitizeAtParam(values.pdp_addr || '') + '",0,0';
 				staged.set('pdp-' + cid, 'PDP 上下文 CID ' + cid, function () {
 					return Ui.sendCmd(cmd).then(function (res) {
 						if (!res.success) throw new Error('PDP 上下文保存失败');

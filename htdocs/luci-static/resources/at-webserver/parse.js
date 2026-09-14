@@ -387,6 +387,32 @@ var Parse = (function () {
 		return digits || normalized;
 	};
 
+	/*
+	 * AT 命令「参数」转义 —— 前端是 AT 通道的唯一入口，凡把用户输入拼进 AT 命令
+	 * 的地方都必须过一遍，否则一个带引号或换行的值就能闭合字符串、续接第二条命令。
+	 * 例如下面这个 APN 会让模组在设拨号参数的同时把射频关掉：
+	 *     cmnet\r\nAT+CFUN=0\r\n
+	 * 剥掉的四个字符各有讲究：
+	 *   "    闭合字符串参数，是注入的基础；
+	 *   \r\n  另起一行写下一条命令（后端按行下发，等于一次请求发两条）；
+	 *   ; ,  参数分隔符，会让一个值变成多个参数。
+	 * 只用于「参数值」；整条命令不能过这个函数（命令本身需要引号与逗号）。
+	 */
+	/* 逐段判 0-255：只约束形状的正则会把 999.999.999.999 也放行。 */
+	api.isValidIPv4 = function (v) {
+		var parts = String(v == null ? '' : v).trim().split('.');
+		if (parts.length !== 4) return false;
+		for (var i = 0; i < 4; i++) {
+			if (!/^\d{1,3}$/.test(parts[i])) return false;
+			if (Number(parts[i]) > 255) return false;
+		}
+		return true;
+	};
+
+	api.sanitizeAtParam = function (value) {
+		return String(value == null ? '' : value).replace(/["\r\n;,]/g, '');
+	};
+
 	api.isValidPhoneNumber = function (number) {
 		return /^\d{5,19}$/.test(api.normalizePhoneNumber(number));
 	};
@@ -556,9 +582,17 @@ var Parse = (function () {
 		pos += 7;
 		if (pos >= raw.length) return null;
 		var udl = raw[pos]; pos += 1;
+		/*
+		 * 长度口径必须和下面的解码口径同源。旧实现用 dcs & 0x0C 推长度、又用
+		 * dcsEncoding 决定怎么解，两者对 0xF 组（数据编码/消息类别组）结论相反：
+		 * 该组的 bit3-2 是消息类别、不是编码，固定按 GSM7 处理，而旧的长度分支
+		 * 会当 8bit/UCS2 取字节数，正文因此被截断或读到界外。
+		 * 已按 256 个 DCS 全量自检：差异只落在 0xF 组，常见 DCS 完全等价。
+		 */
+		var enc = dcsEncoding(dcs);
 		var udLen;
-		if ((dcs & 0x0C) === 0x04) udLen = udl;
-		else if ((dcs & 0x0C) === 0x08) udLen = udl * 2;
+		if (enc === 1) udLen = udl;
+		else if (enc === 2) udLen = udl * 2;
 		else udLen = Math.ceil(udl * 7 / 8);
 		var ud = raw.slice(pos, Math.min(pos + udLen, raw.length));
 
@@ -587,7 +621,6 @@ var Parse = (function () {
 			}
 		}
 
-		var enc = dcsEncoding(dcs);
 		if (enc === 2) {
 			content = decodeUcs2Bytes(userData);
 		} else if (enc === 1) {

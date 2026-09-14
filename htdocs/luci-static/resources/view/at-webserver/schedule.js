@@ -193,12 +193,18 @@ return L.view.extend({
 
 			var checkIntervalInput = Mt5700.input('number', '10', String(draft.check_interval));
 			checkIntervalInput.min = 10;
-			checkIntervalInput.addEventListener('input', function () { draft.check_interval = Number(checkIntervalInput.value) || 10; });
+			/* min 属性只在表单提交时生效，这里没有表单 —— 键入 1 或 -5 会直接进 AT+SCHED 载荷，
+			   后端就按 1 秒周期下发检测，和独占串口上的其它命令抢通道。*/
+			checkIntervalInput.addEventListener('input', function () {
+				draft.check_interval = Math.max(10, parseInt(checkIntervalInput.value, 10) || 10);
+			});
 			formBody.appendChild(Mt5700.formGroup('检测间隔（秒）', checkIntervalInput, '多久检查一次当前时段'));
 
 			var timeoutInput = Mt5700.input('number', '30', String(draft.timeout));
 			timeoutInput.min = 30;
-			timeoutInput.addEventListener('input', function () { draft.timeout = Number(timeoutInput.value) || 30; });
+			timeoutInput.addEventListener('input', function () {
+				draft.timeout = Math.max(30, parseInt(timeoutInput.value, 10) || 30);
+			});
 			formBody.appendChild(Mt5700.formGroup('无服务超时（秒）', timeoutInput, '模组无服务超过此时长自动解锁'));
 
 			var unlockLte = mkCheck(function (checked) { draft.unlock_lte = checked; });
@@ -386,6 +392,7 @@ return L.view.extend({
 		}, 15000);
 
 		self._dispose = function () { clearInterval(statusTimer); };
+		page._onDispose(self._dispose);
 
 		return page;
 	}

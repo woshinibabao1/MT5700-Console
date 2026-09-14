@@ -19,6 +19,7 @@ mod schedule;
 mod serial_linux;
 #[cfg(target_os = "linux")]
 mod serialdetect;
+mod smsclean;
 mod transport;
 mod urc;
 
@@ -163,7 +164,13 @@ async fn run(verbose: bool) -> Result<(), String> {
         async move { notifier.run(notif_rx, ctx).await }
     });
     let dispatch_task = tokio::spawn({
-        let mut dispatcher = Dispatcher::new(client.clone(), notifier.clone(), broadcaster, ctx_rx.clone());
+        let mut dispatcher = Dispatcher::new(
+            client.clone(),
+            notifier.clone(),
+            broadcaster,
+            ctx_rx.clone(),
+            cfg.notification.sms_auto_clean,
+        );
         async move { dispatcher.run(urc_rx).await }
     });
     let sched_task = tokio::spawn({

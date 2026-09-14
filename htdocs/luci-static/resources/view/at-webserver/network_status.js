@@ -1118,6 +1118,7 @@ return L.view.extend({
 			if (onVisibility) document.removeEventListener('visibilitychange', onVisibility);
 			if (AtWs.client && AtWs.client.clearReadCache) AtWs.client.clearReadCache();
 		};
+		page._onDispose(self._dispose);
 
 		return page;
 	}

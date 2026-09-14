@@ -366,9 +366,16 @@ return L.view.extend({
 				return;
 			}
 			var kind = cell.rat === 'LTE' ? 'lte' : 'nr';
-			var cmd = Parse.buildLockCommand(kind, 2, 0, [{
-				band: band, arfcn: String(cell.arfcn), pci: String(cell.pci), scs: Parse.getDefaultScsType(band)
-			}]);
+			var cmd;
+			try {
+				cmd = Parse.buildLockCommand(kind, 2, 0, [{
+					band: band, arfcn: String(cell.arfcn), pci: String(cell.pci), scs: Parse.getDefaultScsType(band)
+				}]);
+			} catch (err) {
+				/* ARFCN/PCI 缺失时 buildLockCommand 会抛，异常逃出点击回调就表现为「点了没反应」 */
+				Mt5700.error((err && err.message) || '构建锁频命令失败');
+				return;
+			}
 			Mt5700.confirm('确定锁定 ' + cell.rat + ' ' + (kind === 'nr' ? 'n' : 'B') + band
 				+ '（ARFCN ' + cell.arfcn + '，PCI ' + cell.pci + '）？', function () {
 				var radioOff = false;
@@ -649,6 +656,7 @@ return L.view.extend({
 			if (neighAutoTimer) clearInterval(neighAutoTimer);
 			AtWs.client.unsubscribe(rejectHandler);
 		};
+		page._onDispose(self._dispose);
 
 		return page;
 	}

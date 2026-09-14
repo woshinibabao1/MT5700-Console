@@ -60,6 +60,9 @@ pub struct NotificationConfig {
     pub wechat_webhook: String,
     pub log_file: String,
     pub types: NotifyTypes,
+    /// 短信存储满时是否自动删除最旧的短信腾出空间（默认 true）。
+    /// 关掉后存储满就只会推送通知，不做任何删除。
+    pub sms_auto_clean: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +149,7 @@ pub fn default_config() -> Config {
                 memory_full: true,
                 signal: true,
             },
+            sms_auto_clean: true,
         },
         websocket: WebSocketConfig {
             port: 8765,
@@ -346,6 +350,7 @@ pub async fn load_config() -> Config {
         memory_full: values.bool("notify_memory_full", true),
         signal: values.bool("notify_signal", true),
     };
+    cfg.notification.sms_auto_clean = values.bool("sms_auto_clean", true);
 
     let s = &mut cfg.schedule;
     s.enabled = values.bool("schedule_enabled", false);

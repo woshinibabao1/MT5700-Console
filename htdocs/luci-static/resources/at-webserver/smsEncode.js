@@ -329,7 +329,9 @@ var SmsEncode = (function () {
 	 * + hex 正文可用；把引号也写成 hex 会让模组卡在数据输入态）。
 	 */
 	api.buildTextSendCommand = function (opts) {
-		var da = String(opts.destination || '').trim().replace(/[\s()-]/g, '');
+		/* 只滤空白与括号的话，号码里带引号会拼出 AT+CMGS="10086"OK" 破坏命令；
+		   非数字字符一概不要（PDU 路径的 encodeAddress 本来也会滤）。*/
+		var da = String(opts.destination || '').trim().replace(/[^\d+]/g, '');
 		var text = String(opts.message || '');
 		if (!needsUcs2(text)) {
 			return { pre: [], cmd: 'AT+CMGS="' + da + '"' + DATA_SEP + text, post: [] };

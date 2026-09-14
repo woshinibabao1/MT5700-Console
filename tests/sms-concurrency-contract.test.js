@@ -1,0 +1,180 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * 短信竞态 + 前端安全 + 数值钳制 契约测试
+ * ---------------------------------------------------------------------------
+ * 这一轮修的都是「不报语法错、跑起来才出事」的问题，所以全部钉成静态守卫 + 纯函数行为测试。
+ *
+ * ① **长短信不能同时出现「残缺版 + 完整版」**（真机 BUG）
+ *    长短信分段陆续到达，若在到齐前读取列表就会拼出残缺消息；随后服务端拼完整推送过来，
+ *    若不剔除残缺项，同一条短信会在界面上出现两条（实测：刷新前多一条「2/4 段（部分缺失）」）。
+ *
+ * ② **AT 命令注入**（安全）
+ *    前端是 AT 通道的唯一入口，用户输入拼进命令前必须过 Parse.sanitizeAtParam；
+ *    否则 APN 填 `x\r\nAT+CFUN=0\r\n` 就能在设拨号参数的同时关掉射频。
+ *
+ * ③ **数值钳制**
+ *    input 的 min/max 只是属性、不参与 JS 校验：端口填 99999 会被写进 UCI 并重载服务，
+ *    CID 填 99 会让 AT+CGDCONT 必然 ERROR（手册 7.1：21~31 保留给网络，0 是默认 PDP）。
+ *
+ * ④ **页面卸载清理**
+ *    LuCI 没有卸载钩子，各视图的 self._dispose 曾全仓库零调用点，切页后定时器持续累积。
+ *
+ * 用法：node tests/sms-concurrency-contract.test.js
+ */
+
+const fs = require('fs');
+const path = require('path');
+
+const ROOT = path.join(__dirname, '..');
+const V = path.join(ROOT, 'htdocs/luci-static/resources/view/at-webserver');
+const A = path.join(ROOT, 'htdocs/luci-static/resources/at-webserver');
+
+function read(p) { return fs.readFileSync(p, 'utf8'); }
+const PARSE = read(path.join(A, 'parse.js'));
+const SMS = read(path.join(V, 'sms_center.js'));
+const DIAL = read(path.join(V, 'dial.js'));
+const UPG = read(path.join(V, 'upgrade.js'));
+const MODEM = read(path.join(V, 'modem_settings.js'));
+const SMSSET = read(path.join(V, 'sms_settings.js'));
+const SVC = read(path.join(V, 'service.js'));
+const SCHED = read(path.join(V, 'schedule.js'));
+const MT = read(path.join(A, 'mt5700.js'));
+const RUST = read(path.join(ROOT, 'src/rust/src/smsclean.rs'));
+
+let pass = 0, fail = 0;
+function ok(name) { pass++; console.log('  ok   ' + name); }
+function no(name, why) { fail++; console.log('  FAIL ' + name + '  → ' + why); }
+function has(name, cond, why) { cond ? ok(name) : no(name, why); }
+
+/* ------------------------------------------------------------------ */
+console.log('== A. 长短信竞态（真机 BUG） ==');
+
+has('mergeConcatenated 会标出未收齐', /partialPending:\s*incomplete/.test(SMS),
+	'未收齐的分段必须标记，否则无法与随后的完整消息区分');
+has('推送完整消息时剔除同号码残缺项',
+	/partialPending && normalizeNumber\(m\.number\) === msg\.number/.test(SMS),
+	'不剔除就会出现「残缺版 + 完整版」两条');
+has('有延迟补齐机制', /function schedulePartialRetry/.test(SMS), '分段未到齐时应自动重拉一次');
+has('补齐有次数上限，不会无限重拉', /partialRetryLeft\s*<=?\s*0/.test(SMS) || /partialRetryLeft--/.test(SMS),
+	'缺段若永久缺失，重试必须有上限');
+has('补齐成功后复位重试配额', /else partialRetryLeft = 2;/.test(SMS) || /partialRetryLeft = 2;/.test(SMS),
+	'否则下一条长短信就没有补齐机会了');
+has('合并后保留未读标记', /anyUnread/.test(SMS) && /unread:\s*anyUnread/.test(SMS),
+	'长短信各段的 unread 必须在合并后归并');
+has('卸载时清理补齐定时器', /clearTimeout\(partialRetryTimer\)/.test(SMS), '切页后不应继续发 AT');
+
+/* ------------------------------------------------------------------ */
+console.log('== B. 发送与删除 ==');
+
+has('发送有 in-flight 守卫', /if \(sending\) return;/.test(SMS) && /sending = true;/.test(SMS),
+	'回车发送绕得开按钮 disabled，长短信多片下发期间会并行插入多组 AT+CMGS');
+has('守卫在函数末尾复位', /sending = false; sendBtn\.disabled = false;/.test(SMS), '不复位会永久锁死发送');
+has('单条删除检查 AT 成败', /AT\+CMGD=.*[\s\S]{0,200}res\.success === false/.test(SMS) || /delFail\+\+/.test(SMS),
+	'不判 success 会「提示删除成功、模组上还在」');
+has('批量删除按真实结果报数', /delFail\) Mt5700\.error\('删除/.test(SMS), '不应按勾选条数报成功');
+has('批量删除弹窗可被卸载清理', /openMask/.test(SMS) && /removeChild\(openMask\)/.test(SMS),
+	'弹窗挂在 body 上，切页会残留并挡住后续页面');
+
+/* ------------------------------------------------------------------ */
+console.log('== C. AT 命令注入防护（安全） ==');
+
+const m = PARSE.match(/var Parse = \((function[\s\S]*?)\)\(\);/);
+if (!m) { no('提取 Parse 模块', 'parse.js 结构变了'); }
+else {
+	/* eslint-disable no-eval */
+	const Parse = eval('(' + m[1] + ')')();
+	const sp = Parse.sanitizeAtParam;
+	has('存在 sanitizeAtParam', typeof sp === 'function', 'parse.js 缺少参数转义函数');
+	if (typeof sp === 'function') {
+		has('剥掉引号', sp('a"b') === 'ab', '得到 ' + JSON.stringify(sp('a"b')));
+		has('剥掉换行（防续接第二条命令）', sp('a\r\nAT+CFUN=0') === 'aAT+CFUN=0',
+			'得到 ' + JSON.stringify(sp('a\r\nAT+CFUN=0')));
+		has('剥掉分号与逗号', sp('a;b,c') === 'abc', '得到 ' + JSON.stringify(sp('a;b,c')));
+		has('null/ undefined 兜底', sp(null) === '' && sp(undefined) === '', '应回落空串');
+		has('保留加号（国际号码）', sp('+8613800755500') === '+8613800755500', '不应吃掉 +');
+	}
+	const ip = Parse.isValidIPv4;
+	has('存在 isValidIPv4', typeof ip === 'function', 'parse.js 缺少 IP 校验');
+	if (typeof ip === 'function') {
+		has('接受正常 IP', ip('192.168.1.1') === true, '192.168.1.1 应合法');
+		has('拒绝 999.999.999.999', ip('999.999.999.999') === false, '只约束形状的正则会放行它');
+		has('拒绝 256 段', ip('256.1.1.1') === false, '逐段必须判 0-255');
+		has('拒绝三段', ip('1.2.3') === false, '段数必须为 4');
+	}
+}
+
+has('APN/用户名/密码过转义', /sanitizeAtParam\(apnForm\.apn\)/.test(DIAL) && /sanitizeAtParam\(apnForm\.password\)/.test(DIAL),
+	'dial.js 的 AT^SETAUTODIAL 直接拼自由文本');
+has('PDP 参数过转义', /sanitizeAtParam\(values\.apn/.test(DIAL) && /sanitizeAtParam\(values\.pdp_addr/.test(DIAL),
+	'dial.js 的 AT+CGDCONT 直接拼自由文本');
+has('PDP 地址加引号', /sanitizeAtParam\(values\.pdp_addr \|\| ''\) \+ '",0,0'/.test(DIAL),
+	'<PDP_addr> 是字符串参数，不加引号填了地址就 ERROR');
+has('CID 限定 1-20', /cid >= 1 && cid <= 20/.test(DIAL),
+	'手册 7.1：21~31 保留给网络，0 是默认 PDP 不可删除');
+has('FOTA 地址过转义', /sanitizeAtParam\(formatted\)/.test(UPG), '只校验 http:// 前缀挡不住引号/换行');
+has('PIN 码过转义', /sanitizeAtParam\(values\.pin\)/.test(MODEM), 'PIN 直接拼进 AT+CPIN/AT+CLCK');
+has('短信中心号码过转义', /sanitizeAtParam\(num\)/.test(SMSSET) || /sanitizeAtParam\(centerInput\.value/.test(SMSSET),
+	'中心号码直接拼进 AT+CSCA');
+has('Text 模式号码滤非数字', /replace\(\/\[\^\\d\+\]\/g, ''\)/.test(read(path.join(A, 'smsEncode.js'))),
+	'号码带引号会破坏 AT+CMGS 命令结构');
+
+/* ------------------------------------------------------------------ */
+console.log('== D. 数值钳制 ==');
+
+has('service.js 有 clampInt', /function clampInt/.test(SVC), '端口钳制引用了它，缺定义会 ReferenceError');
+has('网络端口被钳制', /clampInt\(netPortInput\.value, 1, 65535/.test(SVC), '填 99999 会让后端绑端口失败');
+has('RPC 端口被钳制', /clampInt\(wsPortInput\.value, 1, 65535/.test(SVC), '同上');
+has('检测间隔有下限', /Math\.max\(10, parseInt\(checkIntervalInput\.value/.test(SCHED),
+	'min 属性只在表单提交时生效，键入 1 会让后端按 1 秒周期抢串口');
+has('无服务超时有下限', /Math\.max\(30, parseInt\(timeoutInput\.value/.test(SCHED), '同上');
+
+/* ------------------------------------------------------------------ */
+console.log('== E. 页面卸载清理 ==');
+
+has('Mt5700.page 提供 _onDispose', /node\._onDispose = function/.test(MT), '缺少注册入口');
+has('卸载判据是「曾进入文档、现已脱离」', /wasInDoc/.test(MT),
+	'只判「现在不在文档里」会把尚未插入文档的页面误清');
+has('confirm 支持取消回调', /if \(onCancel\) onCancel\(\);/.test(MT),
+	'否则「加确认」后取消会让开关状态与实际不符');
+['network_status.js', 'upgrade.js', 'logs.js', 'network_settings.js', 'sms_center.js', 'schedule.js'].forEach((n) => {
+	has(n + ' 注册了卸载钩子', /page\._onDispose\(self\._dispose\);/.test(read(path.join(V, n))),
+		'切页后定时器/订阅会持续累积并抢独占串口');
+});
+
+/* ------------------------------------------------------------------ */
+console.log('== F. 其他确凿缺陷 ==');
+
+has('PIN 未就绪不再谎报 READY', !/if \(!ready\) pinStatusEl\.textContent = 'PIN 状态：READY'/.test(MODEM),
+	'卡等输 PIN 时会被显示成 READY，用户无从下手');
+has('PIN 正则能匹配 "SIM PIN"', /\\\+CPIN:\\s\*\(\[A-Za-z \]\+\)/.test(MODEM),
+	'(\\w+) 匹配不到空格，只能解出 SIM');
+has('AT^FWUP 检查成败', /AT\^FWUP'\)\.then\(function \(res\)[\s\S]{0,300}res\.success === false/.test(UPG),
+	'不判 success 会把下发被拒报成「升级已开始」，且 fwupSent 已封死重试');
+has('清空短信不再漏第一个存储', /\+CPMS:\\s\*\(\.\*\)/.test(SMSSET),
+	'旧正则要求存储名前有逗号，而第一个存储紧跟 ": "');
+has('清空短信检查成败', /missed\) Mt5700\.error\('清空/.test(SMSSET), '不检查就报「已清空」');
+has('锁定邻区捕获构建异常', /catch \(err\)[\s\S]{0,160}构建锁频命令失败/.test(read(path.join(V, 'network_settings.js'))),
+	'buildLockCommand 抛错逃出点击回调会表现为「点了没反应」');
+has('终端输出有上限', /entries\.splice\(0, entries\.length - 300\)/.test(read(path.join(V, 'terminal.js'))),
+	'无上限会越攒越多，而每次渲染都是全量重建 DOM');
+has('飞行模式二次确认', /开启飞行模式会立即关闭射频/.test(MODEM), 'AT+CFUN=0 误点等于整机断网');
+
+/* ------------------------------------------------------------------ */
+console.log('== G. 短信自动清理（后端，保守策略） ==');
+
+has('清理按时间升序删除', /sort_by_key\(\|e\| e\.1\)/.test(RUST), '必须按短信中心时间、不是存储索引');
+has('单次删除有上限', /MAX_DELETE_PER_ROUND/.test(RUST), '不能为收一条把收件箱清空');
+has('取不到时间就不删', /宁可不删|取不到时间|is_empty\(\)/.test(RUST), '存储位置会被复用，索引小不代表时间早');
+has('非 PDU 模式跳过而非强切', /非 PDU 模式/.test(RUST), 'AT+CMGF 是全局设置，临时切换会干扰其它操作');
+has('每条删除都查应答', /r\.ok\(\) => deleted \+= 1/.test(RUST), '被拒不能计入删除条数');
+
+/* ------------------------------------------------------------------ */
+console.log('');
+if (fail === 0) {
+	console.log('PASS 全部通过（' + pass + ' 项）');
+	process.exit(0);
+}
+console.log('FAILED ' + fail + ' / ' + (pass + fail) + ' 项');
+process.exit(1);

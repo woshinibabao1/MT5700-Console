@@ -93,7 +93,7 @@ return L.view.extend({
 			Mt5700.primaryButton('保存中心号码', function () {
 				var num = centerInput.value.trim();
 				if (!num) { Mt5700.error('请输入短信中心号码'); return; }
-				AtWs.client.sendCommand('AT+CSCA="' + num + '"').then(function (res) {
+				AtWs.client.sendCommand('AT+CSCA="' + Parse.sanitizeAtParam(num) + '"').then(function (res) {
 					if (res.success) Mt5700.success('短信中心号码已保存');
 					else Mt5700.error('保存失败');
 				}).catch(function () { Mt5700.error('保存失败'); });
@@ -129,7 +129,13 @@ return L.view.extend({
 					AtWs.client.sendCommand('AT+CPMS?').then(function (res) {
 						var storages = [];
 						if (res.success && res.data) {
-							var m = String(res.data).match(/(?:,"(\w+)",\d+,\d+)/g) || [];
+							/*
+							 * 旧正则要求存储名前有逗号，而第一个存储紧跟在 ": " 之后
+							 * （+CPMS: "SM",0,50,...），于是 mem1 永远匹配不到 —— SIM 卡上的
+							 * 短信一条没删，界面还提示「已清空」。改为先取整行再逐项提取。
+							 */
+							var line = String(res.data).match(/\+CPMS:\s*(.*)/);
+							var m = line ? (line[1].match(/"(\w+)",\d+,\d+/g) || []) : [];
 							for (var i = 0; i < m.length; i++) {
 								var s = m[i].match(/"(\w+)"/);
 								if (s) storages.push(s[1]);
@@ -138,14 +144,22 @@ return L.view.extend({
 						if (!storages.length) storages = ['SM', 'ME', 'MT'];
 						var unique = storages.filter(function (v, i, a) { return a.indexOf(v) === i; });
 						var chain = Promise.resolve();
+						var cleaned = 0;
+						var missed = 0;
 						unique.forEach(function (st) {
 							chain = chain.then(function () { return AtWs.client.sendCommand('AT+CMGF=0'); })
-								.then(function () { return AtWs.client.sendCommand('AT+CPMS="' + st + '","' + st + '","' + st + '"'); })
-								.then(function () { return AtWs.client.sendCommand('AT+CMGD=1,4'); });
+									.then(function () { return AtWs.client.sendCommand('AT+CPMS="' + st + '","' + st + '","' + st + '"'); })
+									.then(function () {
+									return AtWs.client.sendCommand('AT+CMGD=1,4').then(function (r) {
+										if (r && r.success === false) missed++; else cleaned++;
+									});
+								});
 						});
-						return chain;
-					}).then(function () {
-						Mt5700.success('已清空全部短信');
+						return chain.then(function () {
+							/* 不判成败就报「已清空」，等于把失败也粉饰成成功 */
+							if (missed) Mt5700.error('清空 ' + cleaned + ' 个存储成功、' + missed + ' 个失败');
+							else Mt5700.success('已清空全部短信');
+						});
 						loadStorage();
 					}).catch(function () { Mt5700.error('清空短信失败'); });
 				});
@@ -198,7 +212,16 @@ return L.view.extend({
 									typeof m.time === 'string' && (m.type === 'sent' || m.type === 'received');
 							});
 							if (!valid.length) { Mt5700.error('文件中没有有效的短信记录'); return; }
-							var list = Parse.getCachedSentMessages().concat(valid);
+							/* 导入不走 saveSentMessageToCache，上限与去重都要自己补，
+							   否则反复导入能把 localStorage 撑爆（写失败还被吞掉）。*/
+							var seen = {};
+							var list = Parse.getCachedSentMessages().concat(valid).filter(function (m) {
+								var k = (m.time || '') + '|' + (m.number || '') + '|' + (m.content || '');
+								if (seen[k]) return false;
+								seen[k] = 1;
+								return true;
+							});
+							if (list.length > Parse.MAX_SMS_CACHE) list = list.slice(0, Parse.MAX_SMS_CACHE);
 							localStorage.setItem(Parse.SMS_CACHE_KEY, JSON.stringify(list));
 							Mt5700.success('导入成功，共 ' + valid.length + ' 条');
 							refreshCacheCount();
@@ -228,7 +251,7 @@ return L.view.extend({
 				['AT^IMSSWITCH=1,0,0', 2000, '开启 IMS'],
 				['AT+CFUN=1', 2000, '恢复射频'],
 				['AT+CGDCONT=5,"IPV4V6","","",0,0,0,0,1,1,1,,,,,,0,,0,0,0,0', 1000, '配置数据承载'],
-				['AT+CSCA="' + (centerInput.value || '') + '"', 0, '配置中心号码']
+				['AT+CSCA="' + Parse.sanitizeAtParam(centerInput.value || '') + '"', 0, '配置中心号码']
 			] : [
 				['AT+CEUS=0', 500, '关闭 CEUS'],
 				['AT^IMSSWITCH=0,0,0', 500, '关闭 IMS'],

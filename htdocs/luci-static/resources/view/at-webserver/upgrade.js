@@ -355,7 +355,13 @@ return L.view.extend({
 		 *   混在一起写，就会让人（和契约测试）分不清到底是谁结束了轮询。
 		 */
 		function beginFirmwareUpgrade() {
-			AtWs.client.sendCommand('AT^FWUP').then(function () {
+			AtWs.client.sendCommand('AT^FWUP').then(function (res) {
+				/* 不判 success 就把「下发被拒」报成「升级已开始」；而 fwupSent 一旦
+				   置位就封死了重发，失败无法自愈，只能干等轮询超时。*/
+				if (res && res.success === false) {
+					Mt5700.error('触发升级失败：' + String(res.error || '模组未接受'));
+					return;
+				}
 				Mt5700.success('固件升级已开始，设备即将重启');
 				renderUpgrade();
 			}).catch(function () {
@@ -534,7 +540,8 @@ return L.view.extend({
 				}
 				step = 2;
 				renderUpgrade();
-				return AtWs.client.sendCommand('AT^FOTAOEMDL="' + formatted + '"');
+				/* 只校验 http:// 前缀挡不住引号/换行：值里带 \r\n 就能续接第二条 AT */
+				return AtWs.client.sendCommand('AT^FOTAOEMDL="' + Parse.sanitizeAtParam(formatted) + '"');
 			}).then(function (res) {
 				if (!res.success) {
 					Mt5700.error('设置 FOTA 地址失败');
@@ -570,6 +577,7 @@ return L.view.extend({
 		});
 
 		self._dispose = function () { stopTimer(); };
+		page._onDispose(self._dispose);
 
 		return page;
 	}

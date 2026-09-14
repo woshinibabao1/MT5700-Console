@@ -154,12 +154,12 @@ return L.view.extend({
 			}
 			Ui.promptModal(titles[op], fields, function (values) {
 				var cmd;
-				if (op === 'verify') cmd = 'AT+CPIN="' + values.pin + '"';
+				if (op === 'verify') cmd = 'AT+CPIN="' + Parse.sanitizeAtParam(values.pin) + '"';
 				else if (op === 'change') {
 					if (values['new'] !== values.confirm) { Mt5700.error('两次输入的 PIN 码不一致'); return; }
-					cmd = 'AT+CPIN="' + values.old + '","' + values['new'] + '"';
-				} else if (op === 'disable') cmd = 'AT+CLCK="SC",0,"' + values.pin + '"';
-				else cmd = 'AT+CLCK="SC",1,"' + values.pin + '"';
+					cmd = 'AT+CPIN="' + Parse.sanitizeAtParam(values.old) + '","' + Parse.sanitizeAtParam(values['new']) + '"';
+				} else if (op === 'disable') cmd = 'AT+CLCK="SC",0,"' + Parse.sanitizeAtParam(values.pin) + '"';
+				else cmd = 'AT+CLCK="SC",1,"' + Parse.sanitizeAtParam(values.pin) + '"';
 				send(cmd).then(function (res) {
 					if (res.success) {
 						Mt5700.success('操作成功');
@@ -199,11 +199,24 @@ return L.view.extend({
 		function fetchPinStatus() {
 			return send('AT+CPIN?').then(function (res) {
 				var ready = false;
+				var got = false;
 				if (res.success && res.data) {
-					var m = atText(res).match(/\+CPIN:\s*(\w+)/);
-					if (m) { ready = m[1] === 'READY'; pinStatusEl.textContent = 'PIN 状态：' + m[1]; }
+					/* 原正则 (\w+) 匹配不到空格，'+CPIN: SIM PIN' 只解出 SIM，
+					   于是「等输 PIN」被当成未知、再被下面的兜底硬写成 READY。*/
+					var m = atText(res).match(/\+CPIN:\s*([A-Za-z ]+)/);
+					if (m) {
+						got = true;
+						var st = m[1].trim();
+						ready = st === 'READY';
+						pinStatusEl.textContent = 'PIN 状态：' + st;
+					}
 				}
-				if (!ready) pinStatusEl.textContent = 'PIN 状态：READY';
+				/*
+				 * 不能把非 READY 一律写成 READY：卡等着输 PIN（SIM PIN）/ 被锁（SIM PUK）
+				 * 时 ready 为 false，硬写成 READY 会让界面谎报「卡已就绪」，用户看到
+				 * 「卡插着却上不了网」而无从下手。取不到应答时才显示未知。
+				 */
+				if (!got) pinStatusEl.textContent = 'PIN 状态：未知';
 				return send('AT+CLCK="SC",2');
 			}).then(function (res) {
 				if (res.success && res.data) {
@@ -223,7 +236,13 @@ return L.view.extend({
 		rfCard._body.appendChild(rfBody);
 		body.appendChild(rfCard);
 
+		/*
+		 * AT+CFUN=0 会立刻关掉射频、数据面中断，恢复可能要重启模组 —— 一次误点
+		 * 等于整机断网。这里必须二次确认，且取消时把开关拨回去（用 confirm 的
+		 * onCancel，否则界面状态与实际不符）。
+		 */
 		var airplaneSwitch = makeSwitch(function (checked, input) {
+			function apply() {
 			send('AT+CFUN=' + (checked ? '0' : '1')).then(function (res) {
 				if (res.success) Mt5700.success((checked ? '开启' : '关闭') + '飞行模式成功');
 				else {
@@ -231,6 +250,13 @@ return L.view.extend({
 					input.checked = !checked;
 				}
 			}).catch(function () { Mt5700.error('飞行模式设置失败'); });
+			}
+			if (checked) {
+				Mt5700.confirm('开启飞行模式会立即关闭射频、数据连接中断，恢复可能需要重启模组。确定开启？',
+					apply, '确定开启', function () { input.checked = false; });
+			} else {
+				apply();
+			}
 		});
 		rfBody.appendChild(Mt5700.formGroup('飞行模式', airplaneSwitch, '开启后关闭射频，恢复网络连接'));
 		var airplaneChk = airplaneSwitch.querySelector('input');

@@ -179,6 +179,19 @@ return L.view.extend({
 				var last = parts[parts.length - 1];
 				var idxs = [];
 				for (var p = 0; p < parts.length; p++) if (parts[p].index != null) idxs.push(parts[p].index);
+				/*
+				 * 未读状态按「任一分段未读即未读」归并：parseCMGL 会给每段单独置
+				 * unread（<stat>=0），合并后不继承的话，服务停止期间到达的长短信
+				 * 永远进不了未读统计（buildContacts 的来源 B 只读 msg.unread）。
+				 */
+				var anyUnread = false;
+				for (var u = 0; u < parts.length; u++) if (parts[u].unread) anyUnread = true;
+				/*
+				 * 分段没到齐：这只是一个「读取时机偏早」的中间态，不是真的缺段。
+				 * 标出来给两处消费 ——① 安排一次延迟重拉补齐；② 服务端拼完整推送
+				 * 过来时把这条剔掉。不标记就会出现「残缺版 + 完整版」两条并排。
+				 */
+				var incomplete = first.concatenatedTotal != null && parts.length < first.concatenatedTotal;
 				result.push({
 					index: first.index,
 					partIndices: idxs,
@@ -186,12 +199,14 @@ return L.view.extend({
 					number: first.number,
 					time: last.time,
 					type: 'received',
+					unread: anyUnread,
 					isConcatenated: false,
 					concatenatedRef: first.concatenatedRef,
 					concatenatedTotal: undefined,
 					concatenatedSeq: undefined,
 					partsCount: parts.length,
-					partsExpected: first.concatenatedTotal
+					partsExpected: first.concatenatedTotal,
+					partialPending: incomplete
 				});
 			}
 			return result;
@@ -294,6 +309,24 @@ return L.view.extend({
 			}).catch(function () {});
 		}
 
+		/*
+		 * 长短信是逐段到达的，若在片段到齐前读取列表就会拼出一条残缺消息。
+		 * 这里给它一次自愈机会：延迟 1.5s 重拉一次，最多 2 次。
+		 * 只在确实存在残缺时才排期 —— 正常路径一次都不会多打 AT，
+		 * 不会增加稳态的串口压力。
+		 */
+		var partialRetryTimer = null;
+		var partialRetryLeft = 2;
+		function schedulePartialRetry() {
+			if (partialRetryTimer) return;
+			if (partialRetryLeft <= 0) return;
+			partialRetryLeft--;
+			partialRetryTimer = setTimeout(function () {
+				partialRetryTimer = null;
+				refresh();
+			}, 1500);
+		}
+
 		function refresh() {
 			return AtWs.client.sendCommand('AT+CMGL=4').then(function (res) {
 				if (!res.success) {
@@ -369,6 +402,14 @@ return L.view.extend({
 			list2.sort(function (a, b) {
 				return Parse.parseMessageTime(b.lastTime).getTime() - Parse.parseMessageTime(a.lastTime).getTime();
 			});
+			/*
+			 * 存在未收齐的分段 → 安排重拉；已经齐了 → 把重试配额复位，
+			 * 这样下一条长短信到来时还能再享受 2 次补齐机会。
+			 */
+			var pendingParts = 0;
+			for (var pp = 0; pp < list.length; pp++) if (list[pp] && list[pp].partialPending) pendingParts++;
+			if (pendingParts > 0) schedulePartialRetry();
+			else partialRetryLeft = 2;
 			state.contacts = list2;
 			if (state.selectedContact) {
 				var sel = null;
@@ -546,6 +587,8 @@ return L.view.extend({
 			);
 		}
 
+		var sending = false;
+
 		function send(explicitTarget) {
 			var content = msgInput.value.trim();
 			if (!content) { Mt5700.warning('请输入短信内容'); return; }
@@ -553,6 +596,14 @@ return L.view.extend({
 			if (!target) { Mt5700.warning('请输入联系人号码'); return; }
 			if (!Parse.isValidPhoneNumber(target)) { Mt5700.warning('请输入正确的 5-19 位手机号码'); return; }
 
+			/*
+			 * 回车发送绕得开按钮的 disabled：textarea 的 keydown 不看按钮状态。
+			 * 长短信多片串行下发期间连按回车会并行插入多组 AT+CMGS，既造成重复
+			 * 短信、也打乱独占串口上的命令顺序。守卫放在校验之后，保证校验失败
+			 * 不会把标志卡死。
+			 */
+			if (sending) return;
+			sending = true;
 			sendBtn.disabled = true;
 			/*
 			 * ★ 时间戳必须在「点下发送」这一刻就固定，不能等 chain 跑完再取。
@@ -591,7 +642,7 @@ return L.view.extend({
 				refresh();
 			}).catch(function (err) {
 				Mt5700.error((err && err.message) || '发送失败');
-			}).then(function () { sendBtn.disabled = false; });
+			}).then(function () { sending = false; sendBtn.disabled = false; });
 		}
 
 		/* ---------- 删除 ---------- */
@@ -602,12 +653,26 @@ return L.view.extend({
 				: (msg.index != null && msg.index >= 0 ? [msg.index] : []);
 			if (storedIndices.length) {
 				var chain = Promise.resolve();
+				var delOk = 0;
+				var delFail = 0;
 				storedIndices.forEach(function (ix) {
 					if (ix != null && ix >= 0) {
-						chain = chain.then(function () { return AtWs.client.sendCommand('AT+CMGD=' + ix); });
+						chain = chain.then(function () {
+							/*
+							 * sendCommand 以 {success:false} 而非 rejection 表示失败，
+							 * 不判就会「提示删除成功、模组上的短信还在」。
+							 */
+							return AtWs.client.sendCommand('AT+CMGD=' + ix).then(function (res) {
+								if (res && res.success === false) delFail++; else delOk++;
+							});
+						});
 					}
 				});
-				chain.then(function () { Mt5700.success('删除成功'); refresh(); })
+				chain.then(function () {
+					if (delFail) Mt5700.error('删除 ' + delOk + ' 段成功、' + delFail + ' 段失败');
+					else Mt5700.success('删除成功');
+					refresh();
+				})
 					.catch(function () { Mt5700.error('删除失败'); });
 			} else {
 				// 缓存中的已发消息
@@ -618,8 +683,11 @@ return L.view.extend({
 			}
 		}
 
+		var openMask = null;
+
 		function batchDelete() {
 			var mask = E('div', { 'class': 'mt5700-modal-mask' });
+			openMask = mask;
 			var box = E('div', { 'class': 'mt5700-modal' });
 			box.appendChild(E('div', { 'class': 'mt5700-modal-title' }, '批量删除短信'));
 			var listEl = E('div', { 'class': 'mt5700-agree-list' });
@@ -643,19 +711,27 @@ return L.view.extend({
 			if (!state.messages.length) listEl.appendChild(Mt5700.empty('当前会话没有可删除的短信'));
 			var actions = E('div', { 'class': 'mt5700-modal-footer' });
 			actions.appendChild(Mt5700.ghostButton('取消', function () {
+				if (openMask === mask) openMask = null;
 				if (mask.parentNode) mask.parentNode.removeChild(mask);
 			}));
 			actions.appendChild(Mt5700.dangerButton('删除所选', function () {
+				if (openMask === mask) openMask = null;
 				if (mask.parentNode) mask.parentNode.removeChild(mask);
 				if (!checked.length) { Mt5700.warning('请先选择要删除的短信'); return; }
 				var chain = Promise.resolve();
+				var delOk = 0;
+				var delFail = 0;
 				checked.forEach(function (m) {
 					var idxs = (m.partIndices && m.partIndices.length)
 						? m.partIndices
 						: (m.index != null && m.index >= 0 ? [m.index] : []);
 					idxs.forEach(function (ix) {
 						if (ix != null && ix >= 0) {
-							chain = chain.then(function () { return AtWs.client.sendCommand('AT+CMGD=' + ix); });
+							chain = chain.then(function () {
+								return AtWs.client.sendCommand('AT+CMGD=' + ix).then(function (res) {
+									if (res && res.success === false) delFail++; else delOk++;
+								});
+							});
 						}
 					});
 				});
@@ -665,7 +741,9 @@ return L.view.extend({
 						var updated = Parse.getCachedSentMessages().filter(function (m) { return cachedIds.indexOf(m.index) < 0; });
 						try { localStorage.setItem(Parse.SMS_CACHE_KEY, JSON.stringify(updated)); } catch (e) {}
 					}
-					Mt5700.success('成功删除 ' + checked.length + ' 条短信');
+					/* 报的是真实删除结果，不是勾选条数 */
+					if (delFail) Mt5700.error('删除 ' + delOk + ' 段成功、' + delFail + ' 段失败');
+					else Mt5700.success('成功删除 ' + checked.length + ' 条短信');
 					refresh();
 				}).catch(function () { Mt5700.error('批量删除失败'); });
 			}));
@@ -673,7 +751,10 @@ return L.view.extend({
 			box.appendChild(actions);
 			mask.appendChild(box);
 			mask.addEventListener('click', function (e) {
-				if (e.target === mask && mask.parentNode) mask.parentNode.removeChild(mask);
+				if (e.target === mask && mask.parentNode) {
+					if (openMask === mask) openMask = null;
+					mask.parentNode.removeChild(mask);
+				}
 			});
 			document.body.appendChild(mask);
 		}
@@ -694,13 +775,29 @@ return L.view.extend({
 			// 完整消息直接进列表；长短信由服务端拼接后推送（isComplete=true）
 			if (d.isComplete !== false) {
 				markUnread(msg.number);   // 刚到达、用户尚未点开 → 未读
-				buildContacts(state.contacts.reduce(function (acc, c) { return acc.concat(c.messages); }, []).concat([msg]));
+				/*
+				 * 完整消息到达时，同号码尚未收齐的残缺合并消息必须剔除。
+				 * 那只是「某次读取时片段还没到齐」的中间态，留着会与这条完整消息
+				 * 并排显示成两条 —— 实测到的现象就是刷新前多出一条
+				 * 「长短信已合并 2/4 段（部分缺失）」。
+				 */
+				var base = state.contacts.reduce(function (acc, c) { return acc.concat(c.messages); }, [])
+					.filter(function (m) {
+						return !(m.partialPending && normalizeNumber(m.number) === msg.number);
+					});
+				buildContacts(base.concat([msg]));
 				Mt5700.info('收到来自 ' + msg.number + ' 的新短信');
 			}
 		};
 		AtWs.client.subscribe(newSmsHandler);
 
-		self._dispose = function () { AtWs.client.unsubscribe(newSmsHandler); };
+		self._dispose = function () {
+			AtWs.client.unsubscribe(newSmsHandler);
+			if (partialRetryTimer) { clearTimeout(partialRetryTimer); partialRetryTimer = null; }
+			if (openMask && openMask.parentNode) openMask.parentNode.removeChild(openMask);
+			self._dispose = function () {};
+		};
+		page._onDispose(self._dispose);
 
 		/* ---------- 初始化 ---------- */
 

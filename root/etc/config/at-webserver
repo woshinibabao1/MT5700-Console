@@ -67,6 +67,8 @@ config at-webserver 'config'
 	option notify_call '1'
 	option notify_memory_full '1'
 	option notify_signal '1'
+	# 短信存储满时按时间从旧到新自动删除，腾出接收空间（0=只通知不删）
+	option sms_auto_clean '1'
 
 	# 定时锁频配置
 	option schedule_enabled '0'              # 启用定时锁频
