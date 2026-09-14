@@ -94,6 +94,67 @@ return L.view.extend({
 
 		function normalizeNumber(n) { return Parse.normalizePhoneNumber(n); }
 
+		/* ---------- 未读标记 ---------- */
+		/*
+		 * 为什么不能只依赖模组的状态位：鼎桥 AT 手册 9.8 / 9.10 写明，本模组的
+		 * +CMGL 与 +CMGR 读取成功后都会把「收到的未读短信」置为「已读」。
+		 * 而服务端收到 +CMTI 后会立刻 AT+CMGR 取内容用于通知，前端每次刷新又是一次
+		 * AT+CMGL=4 —— 短信往往还没等用户看到，状态就已经被读成「已读」了。
+		 * 实测也印证：真机 17 条短信的 <stat> 全是 1，一条未读都没有。
+		 *
+		 * 所以这里以「号码」为键自行记录未读，两个来源取并集：
+		 *   A. 新短信推送：短信刚到达、用户还没点开，必然是未读；
+		 *   B. 列表里仍带着未读状态（<stat>=0）的短信：服务未运行期间到达的情形。
+		 *
+		 * 用号码而不是 index 做键：短信删除后存储位置会被复用，用 index 会张冠李戴。
+		 */
+		var UNREAD_KEY = 'mt5700_sms_unread_numbers';
+		var unreadNumbers = (function () {
+			try {
+				var arr = JSON.parse(localStorage.getItem(UNREAD_KEY) || '[]');
+				return Array.isArray(arr) ? arr.filter(function (x) { return typeof x === 'string'; }) : [];
+			} catch (e) { return []; }
+		})();
+
+		function saveUnread() {
+			try { localStorage.setItem(UNREAD_KEY, JSON.stringify(unreadNumbers.slice(-200))); } catch (e) {}
+		}
+
+		function markUnread(num) {
+			num = normalizeNumber(num || '');
+			if (!num || unreadNumbers.indexOf(num) >= 0) return;
+			unreadNumbers.push(num);
+			saveUnread();
+		}
+
+		function clearUnread(num) {
+			num = normalizeNumber(num || '');
+			var i = unreadNumbers.indexOf(num);
+			if (i >= 0) { unreadNumbers.splice(i, 1); saveUnread(); }
+			/*
+			 * 同时清掉内存里这些短信自带的未读标记。否则同一次会话内再调
+			 * buildContacts 时，来源 B 会依据仍是 true 的 msg.unread 把它们标回未读，
+			 * 表现为「点开了，未读徽章却又冒出来」。
+			 */
+			for (var ci = 0; ci < state.contacts.length; ci++) {
+				if (state.contacts[ci].number !== num) continue;
+				var c = state.contacts[ci];
+				var msgs = c.messages;
+				for (var mi = 0; mi < msgs.length; mi++) msgs[mi].unread = false;
+				/*
+				 * 会话自己缓存的未读数也要一起清零。renderContacts 读的是 c.unread，
+				 * 它是 buildContacts 时算好的；只清名单和 msg.unread 的话，
+				 * 徽章会一直留在屏幕上（真机实测到过：名单已空，徽章还在）。
+				 */
+				c.unreadCount = 0;
+				c.unread = false;
+			}
+		}
+
+		function isUnread(num) {
+			return unreadNumbers.indexOf(normalizeNumber(num || '')) >= 0;
+		}
+
 		// 长短信拼接：把同一发件人、同一拼接引用号的各段合并为一条完整消息
 		function mergeConcatenated(list) {
 			var groups = {};
@@ -149,7 +210,13 @@ return L.view.extend({
 				var item = E('div', {
 					'class': 'mt5700-sms-item' + (c.number === state.selectedContact ? ' active' : '')
 				});
-				item.appendChild(E('div', { 'class': 'mt5700-sms-item-number' }, c.number));
+				var numEl = E('div', { 'class': 'mt5700-sms-item-number' }, c.number);
+				if (c.unread) {
+					numEl.appendChild(document.createTextNode(' '));
+					numEl.appendChild(Mt5700.badge(
+						c.unreadCount > 1 ? ('未读 ' + c.unreadCount) : '未读', 'info'));
+				}
+				item.appendChild(numEl);
 				item.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' }, c.lastMessage || ''));
 				item.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' }, c.lastTime || ''));
 				item.addEventListener('click', function (num) {
@@ -240,6 +307,8 @@ return L.view.extend({
 				var msg = list[i];
 				var num = normalizeNumber(msg.number);
 				if (!num) continue;
+				// 来源 B：列表里确实还带着未读状态（<stat>=0）的短信
+				if (msg.unread) markUnread(num);
 				if (!map[num]) {
 					map[num] = { number: num, lastMessage: msg.content, lastTime: msg.time, unreadCount: 0, messages: [] };
 				}
@@ -256,8 +325,24 @@ return L.view.extend({
 				c.messages.sort(function (a, b) {
 					return Parse.parseMessageTime(a.time).getTime() - Parse.parseMessageTime(b.time).getTime();
 				});
+				/*
+				 * 未读数优先按短信自身的状态位统计；一条都没标时，若该号码被新短信
+				 * 推送标过未读，至少算 1 条（那种情况只知道号码、不知道具体哪几条）。
+				 */
+				var unreadN = 0;
+				for (var mi = 0; mi < c.messages.length; mi++) {
+					if (c.messages[mi].unread) unreadN++;
+				}
+				c.unreadCount = unreadN || (isUnread(c.number) ? 1 : 0);
+				c.unread = c.unreadCount > 0;
 				list2.push(c);
 			}
+
+			// 短信删掉后把它的号码从未读名单里摘掉，避免名单无界增长
+			var known = {};
+			for (var k2 in map) known[k2] = 1;
+			var kept = unreadNumbers.filter(function (n) { return known[n]; });
+			if (kept.length !== unreadNumbers.length) { unreadNumbers = kept; saveUnread(); }
 			list2.sort(function (a, b) {
 				return Parse.parseMessageTime(b.lastTime).getTime() - Parse.parseMessageTime(a.lastTime).getTime();
 			});
@@ -275,6 +360,7 @@ return L.view.extend({
 
 		function selectContact(num) {
 			state.selectedContact = num;
+			clearUnread(num);        // 打开会话即视为已读
 			state.messages = [];
 			for (var i = 0; i < state.contacts.length; i++) {
 				if (normalizeNumber(state.contacts[i].number) === normalizeNumber(num)) {
@@ -522,6 +608,7 @@ return L.view.extend({
 			};
 			// 完整消息直接进列表；长短信由服务端拼接后推送（isComplete=true）
 			if (d.isComplete !== false) {
+				markUnread(msg.number);   // 刚到达、用户尚未点开 → 未读
 				buildContacts(state.contacts.reduce(function (acc, c) { return acc.concat(c.messages); }, []).concat([msg]));
 				Mt5700.info('收到来自 ' + msg.number + ' 的新短信');
 			}

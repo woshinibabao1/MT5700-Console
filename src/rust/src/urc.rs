@@ -223,12 +223,22 @@ impl Dispatcher {
                     memory_full: false,
                 })
                 .await;
+            /*
+             * index 必须带：前端用它定位这条短信，删除时下发 AT+CMGD=<index>。
+             * 此前推送里没有这个字段，前端只能退化成负数占位，删除因此落到
+             * 「已发缓存」分支——提示删除成功，模组上的短信其实还在。
+             *
+             * 长短信（走 assemble_partial 分支）仍不带 index：拼接后的完整消息在
+             * 存储里是多段，只给一个索引会「删一段、留一段」，反而更糟，
+             * 保持现状（前端不发起删除）比删坏要好。
+             */
             self.ws(serde_json::json!({
                 "type": "new_sms",
                 "data": {
                     "sender": sms.sender,
                     "content": sms.content,
                     "time": sms.date.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    "index": index.parse::<u32>().ok(),
                 }
             }));
         }
@@ -622,5 +632,39 @@ fn or_unknown(s: &str) -> &str {
         "未知"
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /*
+     * new_sms 推送给前端的 index 就来自 cmti_capture，前端拿它下发 AT+CMGD=<index>
+     * 删除短信；index 为负或缺失时删除会静默落到「已发缓存」分支。所以要锁住：
+     * 解析出来的索引既是纯数字、也能被 parse::<u32>() 接受。
+     */
+    #[test]
+    fn cmti_capture_解析存储区与索引() {
+        let (storage, index) = cmti_capture("+CMTI: \"ME\",12").expect("应解析出存储区与索引");
+        assert_eq!(storage, "ME");
+        assert_eq!(index, "12");
+        assert_eq!(index.parse::<u32>().ok(), Some(12u32));
+    }
+
+    #[test]
+    fn cmti_capture_支持_sim_存储区与空格() {
+        let (storage, index) = cmti_capture("+CMTI: \"SM\", 3").expect("应容忍逗号后的空格");
+        assert_eq!(storage, "SM");
+        assert_eq!(index.parse::<u32>().ok(), Some(3u32));
+    }
+
+    /// URC 里夹带换行/命令时不能放过，否则等于允许模组喂进来一条 AT 命令。
+    #[test]
+    fn cmti_capture_拒绝非纯数字索引() {
+        assert!(cmti_capture("+CMTI: \"ME\",12\rAT+CFUN=0").is_none());
+        assert!(cmti_capture("+CMTI: \"ME\",abc").is_none());
+        assert!(cmti_capture("+CMTI: \"ME\",").is_none());
+        assert!(cmti_capture("+CMT: \"ME\",12").is_none());
     }
 }

@@ -172,6 +172,34 @@ eq('NRRCCAPQRY=3 解析 NR CA', Parse.parseNrrcCapQry('^NRRCCAPQRY: 3,1,0,0,0,0,
 eq('NRRCCAPQRY=2 解析 VoNR', Parse.parseNrrcCapQry('^NRRCCAPQRY: 2,1,0,0,0,0,0,0,0,0,0,0', 2), 1);
 eq('NRRCCAPQRY=5 解析 DSS', Parse.parseNrrcCapQry('^NRRCCAPQRY: 5,1,0,0,0,0,0,0,0,0,0,0', 5), 1);
 
+/* ---------- 10. +CMGL 状态位 <stat>（鼎桥手册 9.8 / 真机实测） ----------
+ * 0=收到的未读短信，1=已读，2=存储的未发送，3=存储的已发送。
+ * PDU 模式形如 `+CMGL: 1,0,,81`，文本模式形如 `+CMGL: 1,"REC UNREAD",...`。
+ *
+ * 重要前提：本模组的 +CMGL 与 +CMGR 在读取后都会把「未读」置为「已读」
+ * （手册 9.8 / 9.10 明文），所以 unread=true 只会出现在「尚未被任何读取
+ * 操作碰过」的短信上——这正是它需要被解析出来、而不是被丢掉的理由。
+ */
+const CMGL_PDU = '0891683108901705F16410A101968448007069740008629011221024233C0500035202025C0F7A0B5E8F62168005661F5DF4514B00410050005067E5770B548C4F7F752860A87684597D793C300262D265368BF756DE590D0052';
+const cmglRead = Parse.parseCMGL('+CMGL: 1,1,,81\r\n' + CMGL_PDU + '\r\nOK');
+const cmglUnread = Parse.parseCMGL('+CMGL: 1,0,,81\r\n' + CMGL_PDU + '\r\nOK');
+eq('CMGL PDU 模式解析出 1 条（真机原文）', cmglRead.length, 1);
+eq('CMGL PDU 索引不因新增状态位而错位', cmglRead[0] && cmglRead[0].index, 1);
+eq('CMGL PDU stat=1（已读）unread=false', cmglRead[0] && cmglRead[0].unread, false);
+eq('CMGL PDU stat=0（未读）unread=true', cmglUnread[0] && cmglUnread[0].unread, true);
+
+const TXT_TAIL = ',"+8613800138000",,"25/09/10,10:30:00+32"\r\n你好\r\nOK';
+const txtRead = Parse.parseCMGL('+CMGL: 1,"REC READ"' + TXT_TAIL);
+const txtUnread = Parse.parseCMGL('+CMGL: 1,"REC UNREAD"' + TXT_TAIL);
+eq('CMGL 文本模式 REC READ → unread=false', txtRead[0] && txtRead[0].unread, false);
+eq('CMGL 文本模式 REC UNREAD → unread=true', txtUnread[0] && txtUnread[0].unread, true);
+/* 文本模式第二字段以引号开头，不该被「数字状态位」正则命中而串味 */
+eq('CMGL 文本模式不误判为 sent（type 仍 received）', txtRead[0] && txtRead[0].type, 'received');
+
+/* 拿不到状态位时保守：宁可不标未读，也不能把已读的误标成未读 */
+const cmglNoStat = Parse.parseCMGL('+CMGL: 1\r\n' + CMGL_PDU + '\r\nOK');
+eq('CMGL 缺状态位时不标未读（保守）', cmglNoStat[0] && cmglNoStat[0].unread, false);
+
 /* ---------- 汇总 ---------- */
 console.log('通过 ' + pass + ' 项，失败 ' + fails.length + ' 项');
 if (fails.length) {

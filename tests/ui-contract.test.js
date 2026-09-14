@@ -177,6 +177,34 @@ ok('状态卡的 SIM 轮询把 card 作为作用域传入',
 	/api\.interval\(15000,\s*refreshSimStatus,\s*card\)/.test(mt5700));
 ok('clearAll 遍历副本（清理过程中会 splice 自身）', /_timers\.slice\(\)\.forEach/.test(mt5700));
 
+/*
+ * ---------- 短信未读标记 ----------
+ * 背景：本模组的 +CMGL / +CMGR 读取成功后都会把「未读」置为「已读」（鼎桥 AT
+ * 手册 9.8 / 9.10），真机 17 条短信的 <stat> 全是 1。所以未读不能只靠模组状态位，
+ * 必须由前端以「号码」为键自行记录。以下断言固定这套约定。
+ */
+ok('未读标记具备 标记/清除/查询 三个基本操作',
+	/function markUnread\(/.test(smsJs) && /function clearUnread\(/.test(smsJs) && /function isUnread\(/.test(smsJs));
+ok('会话未读数按真实数据计算（不再恒为 0）', /c\.unreadCount\s*=\s*unreadN\s*\|\|/.test(smsJs));
+ok('未读名单以号码为键（短信删除后 index 会被复用，不能用 index）',
+	/unreadNumbers\.indexOf\(normalizeNumber/.test(smsJs));
+ok('未读名单持久化到 localStorage', /localStorage\.setItem\(UNREAD_KEY/.test(smsJs));
+ok('短信删除后把号码从未读名单摘掉（避免名单无限增长）',
+	/kept\.length !== unreadNumbers\.length/.test(smsJs));
+ok('新短信推送时标记未读', /markUnread\(msg\.number\)/.test(smsJs));
+ok('打开会话即清除未读', /function selectContact\(num\)[\s\S]{0,160}clearUnread\(num\)/.test(smsJs));
+/* 关键：只清名单不清 msg.unread 的话，同一次会话内再次 buildContacts 会把未读标回来，
+   表现为「点开了，徽章却又冒出来」 */
+ok('清除未读时同步清掉短信自带的未读标记（防止徽章复现）',
+	/msgs\[mi\]\.unread = false/.test(smsJs));
+/* 真机实测到的坑：只清名单和 msg.unread，徽章仍不消失——因为 renderContacts
+   读的是 buildContacts 算好并缓存在会话上的 c.unread，必须一并清零 */
+ok('清除未读时同步重置会话缓存的未读数（否则徽章不消失）',
+	/c\.unreadCount = 0;[\s\S]{0,400}?c\.unread = false;/.test(smsJs));
+ok('未读会话渲染徽章', /Mt5700\.badge\(/.test(smsJs) && /'未读'/.test(smsJs));
+ok('徽章 variant 在 CSS 里有定义（否则落到无配色的基类）',
+	/\.mt5700-badge-info\s*\{/.test(css));
+
 /* ---------- 汇总 ---------- */
 console.log('通过 ' + pass + ' 项，失败 ' + fails.length + ' 项');
 if (fails.length) {

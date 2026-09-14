@@ -628,6 +628,13 @@ var Parse = (function () {
 			var idx = idxM ? parseInt(idxM[1], 10) : null;
 			if (!idxM) continue;
 
+			/* 状态位 <stat>：PDU 模式是数字，文本模式是带引号的 "REC UNREAD" 等。
+			   按鼎桥《AT 命令手册》9.8/9.10：0=收到的未读短信，1=已读，
+			   2/3=存储的未发送/已发送。
+			   文本模式第二字段以引号开头，不会被这条数字正则命中，故不会串味。 */
+			var statM = block.match(/\+CMGL:\s*\d+\s*,\s*(\d+)\s*,/);
+			var stat = statM ? parseInt(statM[1], 10) : null;
+
 			// 已解码文本行：+CMGL: idx,"REC READ","<number>",,"<time>"
 			var simple = block.match(/\+CMGL:\s*\d+,"([^"]*)","([^"]*)",,"([^"]*)"/);
 			if (simple) {
@@ -636,7 +643,8 @@ var Parse = (function () {
 					content: block.split('\n').slice(1).join('\n').trim(),
 					number: api.normalizePhoneNumber(simple[2] || ''),
 					time: simple[3] || '',
-					type: simple[1].indexOf('REC') === 0 ? 'received' : 'sent'
+					type: simple[1].indexOf('REC') === 0 ? 'received' : 'sent',
+					unread: /UNREAD/i.test(simple[1] || '')
 				});
 				continue;
 			}
@@ -656,6 +664,7 @@ var Parse = (function () {
 						number: api.normalizePhoneNumber(decoded.sender || ''),
 						time: api.formatPDUTime(decoded.date),
 						type: 'received',
+						unread: stat === 0,
 						isConcatenated: !!decoded.partial,
 						concatenatedRef: decoded.partial ? decoded.partial.reference : undefined,
 						concatenatedSeq: decoded.partial ? decoded.partial.part_number : undefined,
