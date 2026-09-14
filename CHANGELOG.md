@@ -5,6 +5,51 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.0.5] - 2026-09-14
+
+### 修复 - 服务拿不到本地时区，时间比系统慢一整个时区
+
+日志里同一条记录会打两个时间戳，它们差了整整 8 小时：
+
+```
+Mon Sep 14 02:39:53 2026 daemon.err at-webserver-rust[5955]: 2026-09-13 18:39:53.133 [INF] ...
+└─ logd 打的（本地 CST，正确）                              └─ 服务自己打的（UTC，慢 8 小时）
+```
+
+**影响面远不止日志**：短信的收发时间、以及定时锁频（靠 `Local::now()` 判断白天/黑夜）
+全都慢 8 小时 —— 定时锁频一旦启用，用户设的 23:00 会在北京时间 07:00 触发。
+
+**根因**：后端用 `chrono::Local::now()` 取本地时间，而 chrono 判定本地时区只有三条路
+（读 chrono 0.4.45 的 `src/offset/local/unix.rs` 确认）：
+
+1. `TZ` 环境变量
+2. 把 `/etc/localtime` 当 TZif 文件读
+3. `iana-time-zone` 取时区名，再去 `/usr/share/zoneinfo` 读同名文件
+
+本固件这三条**全断**：`TZ` 没设（实测服务进程 `environ` 只有 `HOME/TERM/PATH/LD_PRELOAD`）、
+`/etc/localtime` 是指向并不存在的 `/tmp/localtime` 的断链、`/usr/share/zoneinfo` 不存在。
+于是 chrono 静默回落 **UTC**。busybox 的 `date` 不受影响，是因为它读 OpenWrt 特有的
+`/etc/TZ`（内容 `CST-8`）—— 这正是「系统时间看着对、服务时间却错」的原因。
+
+**修法**：init 脚本把 `/etc/TZ` 的值注入服务进程（`procd_set_param env TZ=`）；Rust 侧再加
+一道兜底 —— 手动直接运行二进制时拿不到注入，就在创建 tokio 运行时之前（此时还是单线程）
+读 `/etc/TZ` 自己设上。启动日志新增一行 `本地时区：UTC+08:00（TZ=CST-8）`，一眼可核对。
+
+⚠️ **一个反直觉的坑**：拿不到值时必须干脆不注入，**绝不能注入空串** —— chrono 把空的
+`TZ` 解释为 UTC，那比不设置更糟（不设置至少还会去试 `/etc/localtime`）。这一点实测过：
+busybox 遇到空 `TZ` 仍会回落到 `/etc/TZ` 拿到 CST+0800，两者行为不同，很容易照着 shell
+的直觉写错。
+
+**验证**：真机 `ash -n` 语法通过；时区取值实测 `CST-8`，该值解读为 `utc+0800`，与系统默认
+完全一致；`cargo check --target x86_64-unknown-linux-gnu --all-targets` 零错误零警告。
+
+### 有意未改 - 短信 PDU 时间戳的时区字节
+
+`pdu.rs::decode_timestamp` 只取前 6 个 BCD 字段（年月日时分秒），忽略第 7 个字节的时区
+偏移，按本地时区解释。模组与短信中心给的时间戳本身就是本地时间，两者一致时结果正确；
+严格解析要处理半字节交换，一旦解析错反而更糟，故维持现状。前端 `parse.js` 用
+`new Date(y, m-1, d, ...)` 按浏览器本地时区构造，与修好后的后端口径一致，无需改动。
+
 ## [1.0.4] - 2026-09-14
 
 对全部代码（前端 JS / rpcd ucode / Rust 后端 / init 与看门狗脚本 / CI）做了一轮通读审计，

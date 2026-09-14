@@ -35,8 +35,62 @@ use tokio::sync::watch;
 /// 构建时通过 -ldflags 注入版本（与 Go 一致的 CLI 行为）。
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// 让 chrono 拿得到正确的本地时区。
+///
+/// chrono 判定本地时区依次尝试：TZ 环境变量 → 把 /etc/localtime 当 TZif 读 →
+/// iana-time-zone 取时区名、再去 /usr/share/zoneinfo 读同名文件。OpenWrt 上后
+/// 两条经常是断的（/etc/localtime 可能是指向不存在的 /tmp/localtime 的断链，
+/// zoneinfo 目录也可能压根没有），此时 chrono 静默回落 UTC —— 于是日志、短信
+/// 时间、定时锁频会整个慢一个时区，而 busybox 的 `date` 反而是对的，因为它读
+/// OpenWrt 特有的 /etc/TZ（内容是 POSIX TZ 字符串，如 `CST-8`）。
+///
+/// 这里在还没有任何其它线程时用 libc::setenv 把同一个值补上（stdlib 的
+/// `set_var` 有多线程下的安全争议，故直接走 libc）。
+///
+/// 两点注意：
+/// - 已经设过 TZ 就不动，尊重调用方（init 脚本会注入）；
+/// - 空串绝不能设 —— chrono 把空的 TZ 解释为 UTC，那比不设更糟（不设至少还会
+///   去试 /etc/localtime）。
+#[cfg(unix)]
+fn ensure_local_timezone() {
+    if std::env::var("TZ").map(|v| !v.is_empty()).unwrap_or(false) {
+        return;
+    }
+    let Ok(raw) = std::fs::read_to_string("/etc/TZ") else {
+        return;
+    };
+    let tz = raw.trim();
+    if tz.is_empty() {
+        return;
+    }
+    if let Ok(c_tz) = std::ffi::CString::new(tz) {
+        // 只 setenv 就够了：chrono 是读 TZ 后自己按 POSIX 规则解析的，
+        // 不走 libc 的 localtime，所以不必（libc 里也没有可移植的）tzset。
+        unsafe {
+            libc::setenv(b"TZ\0".as_ptr() as *const libc::c_char, c_tz.as_ptr(), 1);
+        }
+    }
+}
+
+// 非 Unix 没有 setenv/tzset，也没有 /etc/TZ；这类平台只用于跑单元测试，直接空实现。
+#[cfg(not(unix))]
+fn ensure_local_timezone() {}
+
+/// 当前生效的本地时区偏移，形如 `UTC+08:00`。启动时打一条，核对服务与系统的
+/// 时区是否一致 —— 两者不一致时，日志里的时间会和 logd 打的时间戳明显对不上。
+fn tz_desc() -> String {
+    format!("UTC{}", chrono::Local::now().format("%:z"))
+}
+
+fn main() {
+    // 必须早于 tokio runtime 的创建：runtime 会 spawn worker 线程，
+    // 而修改进程环境不该与别的线程并发进行。此时还只有主线程。
+    ensure_local_timezone();
+    async_main();
+}
+
 #[tokio::main]
-async fn main() {
+async fn async_main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "-version" || a == "--version") {
         println!("at-webserver {} (rustc {})", VERSION, rustc_version());
@@ -61,6 +115,11 @@ fn rustc_version() -> &'static str {
 
 async fn run(verbose: bool) -> Result<(), String> {
     log_info!("at-webserver {} 启动中 (pid {})", VERSION, std::process::id());
+    log_info!(
+        "本地时区：{}（TZ={}）",
+        tz_desc(),
+        std::env::var("TZ").unwrap_or_else(|_| "未设置".to_string())
+    );
 
     let cfg = config::load_config().await;
     if !cfg.enabled {

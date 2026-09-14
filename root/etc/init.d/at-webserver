@@ -70,8 +70,34 @@ start_service() {
 	fi
 
 	logger -t at-webserver "配置 procd 实例..."
+
+	# ---- 时区 ----
+	# Rust 侧用 chrono::Local 取本地时间，而 chrono 判定本地时区只有三条路：
+	#   1) TZ 环境变量
+	#   2) 把 /etc/localtime 当 TZif 文件读
+	#   3) iana-time-zone 拿到时区名，再去 /usr/share/zoneinfo 读同名文件
+	# OpenWrt 上后两条经常是断的 —— 本固件的 /etc/localtime 指向并不存在的
+	# /tmp/localtime，zoneinfo 目录也不存在，于是 chrono 静默回落 UTC：
+	# 日志、短信时间、定时锁频会整整慢一个时区（实测 Rust 日志打
+	# 2026-09-13 18:39:53，同一条记录 logd 打的是 Mon Sep 14 02:39:53）。
+	# busybox 的 date 不受影响，是因为它读 OpenWrt 特有的 /etc/TZ。
+	# 这里把同一个值注入给子进程，chrono 就能拿到正确偏移。
+	#
+	# 注意：拿不到值就必须干脆不注入，绝不能注入空串 —— chrono 把空的 TZ
+	# 解释为 UTC，那比不设置更糟（不设置至少还会去试 /etc/localtime）。
+	local sys_tz
+	sys_tz=$(cat /etc/TZ 2>/dev/null | tr -d '[:space:]')
+	[ -n "$sys_tz" ] || sys_tz=$(uci -q get system.@system[0].timezone)
+	[ -n "$sys_tz" ] || sys_tz=$(uci -q get system.@system[0].zonename)
+
 	procd_open_instance
 	procd_set_param command "$PROG"
+	if [ -n "$sys_tz" ]; then
+		procd_set_param env TZ="$sys_tz"
+		logger -t at-webserver "本地时区：TZ=$sys_tz"
+	else
+		logger -t at-webserver "警告：未能确定系统时区，日志与定时功能将按 UTC 计"
+	fi
 	procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-5}
 	procd_set_param stdout 1
 	procd_set_param stderr 1
