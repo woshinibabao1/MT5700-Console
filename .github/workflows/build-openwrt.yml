@@ -46,6 +46,9 @@ jobs:
         run: cargo check --all-targets
 
   build:
+    # 闸门：rust-check 挂了就不打包、更不发布。没有 needs 的话两个 job 并行跑，
+    # 检查结果只能靠人盯着看，等于没拦。
+    needs: rust-check
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
