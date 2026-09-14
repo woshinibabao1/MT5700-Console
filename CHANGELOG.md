@@ -90,6 +90,10 @@ ucode 代理 / 打包脚本四路并行审查），外加 SIM PIN 页面按设�
 `sanitizeAtParam` 再拼命令。新增 `.mt5700-notice`（success/warning/danger）与
 `.mt5700-danger-zone` 两个样式组件。
 
+随后按用户要求移除了同批加的「SIM 卡信息」卡片（状态 / ICCID / IMSI / 运营商）：
+这四项在「网络状态」页已经完整展示（且不打码），模组设置页不必再重复一份，
+也省掉每次进页面额外的 `AT^ICCID?` / `AT+CIMI` / `AT+COPS?` 三次查询。
+
 ### 测试
 
 新增 `tests/run-all.js`（一次跑完全部契约测试）与 `tests/syntax-check.js`

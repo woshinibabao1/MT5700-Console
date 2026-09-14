@@ -115,8 +115,6 @@ return L.view.extend({
 
 		var simSqEl = E('span', { 'class': 'mt5700-hint' }, 'SIM 状态：—');
 		simBody.appendChild(simSqEl);
-		/* SIM 卡状态徽章：卡片头一个，同时复用在「SIM 卡信息」表的状态行 */
-		var pinStatusEl = Mt5700.badge('未知', 'neutral');
 
 		var simSlotSel = Mt5700.select([
 			{ label: '外置 SIM', value: '0' },
@@ -287,49 +285,6 @@ return L.view.extend({
 			pinNoticeEl.textContent = txt;
 		}
 
-		/* ================= SIM 卡信息 ================= */
-
-		var simInfoBadge = Mt5700.badge('未知', 'neutral');
-		var simInfoCard = Mt5700.card('SIM 卡信息', 'ICCID、IMSI 与运营商', simInfoBadge);
-		var simInfoBody = E('div');
-		simInfoCard._body.appendChild(simInfoBody);
-		body.appendChild(simInfoCard);
-
-		var simIccidEl = E('span', { 'class': 'mt5700-mono' }, '—');
-		var simImsiEl = E('span', { 'class': 'mt5700-mono' }, '—');
-		var simOperEl = E('span', {}, '—');
-
-		function renderSimInfo() {
-			simInfoBody.innerHTML = '';
-			simInfoBody.appendChild(Mt5700.table(
-				['项目', '值'],
-				[
-					['状态', pinStatusEl],
-					['ICCID', simIccidEl],
-					['IMSI', simImsiEl],
-					['运营商', simOperEl]
-				]
-			));
-		}
-		renderSimInfo();
-
-		function fetchSimInfo() {
-			function txt(res) { return String((res && res.data) || ''); }
-			return Promise.all([
-				send('AT^ICCID?'),
-				send('AT+CIMI'),
-				send('AT+COPS?')
-			]).then(function (r) {
-				var iccid = txt(r[0]).match(/(\d{19,20})/);
-				if (iccid) simIccidEl.textContent = iccid[1];
-				var imsi = txt(r[1]).match(/(\d{15})/);
-				if (imsi) simImsiEl.textContent = imsi[1];
-				/* +COPS: <mode>,<format>,"<oper>" —— 只取引号里的运营商名 */
-				var op = txt(r[2]).match(/\+COPS:\s*[^,]+,[^,]+,"([^"]*)"/);
-				if (op && op[1]) simOperEl.textContent = op[1];
-			}).catch(function () { /* 读不到就保持上一次的值，不弹错打扰 */ });
-		}
-
 		function handleSimSwitch(target) {
 			Mt5700.confirm('切换 SIM 卡需要重启射频与模组，确定切换到' + (target === 0 ? '外置' : '内置') + ' SIM 卡？', function () {
 				var chain = Promise.resolve();
@@ -385,26 +340,10 @@ return L.view.extend({
 					var m = atText(res).match(/,(\d+)/);
 					if (m) enabled = m[1] === '1';
 				}
-				renderSimBadge(cpinText, cpinReady);
 				renderPinState(cpinText, cpinReady, enabled);
 			}).catch(function () {
-				renderSimBadge('', false);
 				renderPinState('', false, null);
 			});
-		}
-
-		/* SIM 卡状态徽章：卡片头一个，「SIM 卡信息」表的状态行共用同一套判定 */
-		function renderSimBadge(cpinText, cpinReady) {
-			var variant = 'neutral';
-			var label = '未知';
-			if (cpinText === 'SIM PUK') { label = '已锁定'; variant = 'danger'; }
-			else if (cpinText === 'SIM PIN') { label = '等待 PIN'; variant = 'warning'; }
-			else if (cpinReady) { label = '已就绪'; variant = 'success'; }
-			else if (cpinText) { label = cpinText; }
-			pinStatusEl.textContent = label;
-			pinStatusEl.className = 'mt5700-badge mt5700-badge-' + variant;
-			simInfoBadge.textContent = label;
-			simInfoBadge.className = 'mt5700-badge mt5700-badge-' + variant;
 		}
 
 		/* ================= 飞行模式 ================= */
@@ -1007,7 +946,6 @@ return L.view.extend({
 			return Promise.resolve()
 				.then(fetchDeviceInfo)
 				.then(fetchSimConfig)
-				.then(fetchSimInfo)
 				.then(fetchAirplane)
 				.then(fetchDeviceControl)
 				.then(fetchNRCapability)
