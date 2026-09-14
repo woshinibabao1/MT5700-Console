@@ -266,6 +266,83 @@ var SmsEncode = (function () {
 		return { encoding: 'UCS2', parts: partsU, chars: chars };
 	};
 
+	/*
+	 * ========================================================================
+	 * 下发命令的构造（PDU 模式 / Text 模式）
+	 * ------------------------------------------------------------------------
+	 * ★ 命令与数据之间的分隔符必须是**字面反斜杠 + r**（0x5C 0x72），
+	 *   绝不能是回车 0x0D。
+	 *
+	 * 真机实测（MT5700M-CN，固件 V200R001C20B025，用 AT+CMGW 只写存储验证）：
+	 *   ① AT+CMGS=19<CR>0891…PDU<CR>
+	 *      → 模组只回显 "AT+CMGS=19" 后再无应答。它把 <CR> 视为命令行结束，
+	 *        随即进入「等待 PDU」的数据输入态；按 3GPP 该态只认
+	 *        Ctrl-Z(0x1A) 结束，而我们并不发 0x1A，于是永远等不到 +CMGS。
+	 *   ② AT+CMGS=19<0x5C><0x72>0891…PDU<CR>
+	 *      → 模组把整行当**一条**命令解析：取 <length>，再把后面的十六进制
+	 *        当 PDU，立即提交并返回 +CMGS: <mr> / OK。
+	 * 官方 WEBUI 2.2.0 正是形态 ②（其前端写的是字面 "\\r"，真回车由后端补在
+	 * 末尾），本实现与之逐字节对齐；末尾那个 <CR> 由 Rust 后端统一补
+	 * （atclient::send_command 里 "不以 \r 结尾就补一个"）。
+	 *
+	 * 结论：整条命令里**只能有一个真回车，且必须在最末**，由后端补。
+	 * ========================================================================
+	 */
+	var DATA_SEP = '\\r';
+
+	/** PDU 模式（AT+CMGF=0）的单条发送命令 */
+	api.buildPduSendCommand = function (part) {
+		return 'AT+CMGS=' + part.tpduLength + DATA_SEP + part.pdu;
+	};
+
+	/** 字符串转 UCS2 十六进制（Text 模式 + AT+CSCS="UCS2" 时的参数写法） */
+	api.toUcs2Hex = function (s) {
+		var out = '';
+		for (var i = 0; i < String(s).length; i++) {
+			out += String(s).charCodeAt(i).toString(16).padStart(4, '0');
+		}
+		return out.toUpperCase();
+	};
+
+	/** 该内容是否必须用 UCS2（含 GSM7 表达不了的字符） */
+	api.usesUcs2 = function (message) { return needsUcs2(message); };
+
+	/*
+	 * Text 模式的单条容量上限。
+	 * 超过就必须分片，而 Text 模式没有分片语法（UDH 拼接头只能自己写 PDU），
+	 * 所以调用方在超长时应改用 PDU 模式发送。
+	 */
+	api.TEXT_MAX_ASCII = 160;
+	api.TEXT_MAX_UCS2 = 70;
+
+	/*
+	 * Text 模式（AT+CMGF=1）的发送命令。
+	 *
+	 * 返回 { pre, cmd, post }：
+	 *   pre  —— 发送前必须下发的设置（字符集 / CSMP 的 DCS）
+	 *   cmd  —— 真正的 AT+CMGS
+	 *   post —— 发送后用来恢复现场的命令（**无论成败都要执行**）
+	 *
+	 * 中文为什么必须切 AT+CSCS="UCS2"：Text 模式下模组按当前 TE 字符集解释
+	 * 我们送过去的字节。IRA（默认，ASCII）装不下中文，所以要先切 UCS2，
+	 * 并且**号码与正文都要写成 UCS2 十六进制**（实测：ASCII 引号 + hex 号码
+	 * + hex 正文可用；把引号也写成 hex 会让模组卡在数据输入态）。
+	 */
+	api.buildTextSendCommand = function (opts) {
+		var da = String(opts.destination || '').trim().replace(/[\s()-]/g, '');
+		var text = String(opts.message || '');
+		if (!needsUcs2(text)) {
+			return { pre: [], cmd: 'AT+CMGS="' + da + '"' + DATA_SEP + text, post: [] };
+		}
+		// 号码只编码数字部分：'+' 是格式符，由 <toda> 表达，不进 UCS2 串
+		var daDigits = da.replace(/^\+/, '');
+		return {
+			pre: ['AT+CSCS="UCS2"', 'AT+CSMP=17,167,0,8'],
+			cmd: 'AT+CMGS="' + api.toUcs2Hex(daDigits) + '"' + DATA_SEP + api.toUcs2Hex(text),
+			post: ['AT+CSCS="IRA"', 'AT+CSMP=17,167,0,0']
+		};
+	};
+
 	// 构建发送分片，等价 buildSubmitParts
 	api.buildSubmitParts = function (opts) {
 		var message = opts.message || '';
