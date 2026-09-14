@@ -159,8 +159,14 @@ return L.view.extend({
 							/* 不判成败就报「已清空」，等于把失败也粉饰成成功 */
 							if (missed) Mt5700.error('清空 ' + cleaned + ' 个存储成功、' + missed + ' 个失败');
 							else Mt5700.success('已清空全部短信');
+							/*
+							 * 必须等清空完成再回读用量。
+							 * 原先 loadStorage() 写在 return 之后 —— 那一行根本执行不到；
+							 * 就算执行到，它发的 AT+CMGF=? / AT+CPMS? 也会排在删除命令
+							 * 之前，界面显示的还是删除前的占用。
+							 */
+							return loadStorage();
 						});
-						loadStorage();
 					}).catch(function () { Mt5700.error('清空短信失败'); });
 				});
 			})

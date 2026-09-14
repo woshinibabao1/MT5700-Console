@@ -14,8 +14,18 @@ LUCI_DEPENDS:=
 LUCI_PKGARCH:=
 
 PKG_NAME:=luci-app-mt5700
-PKG_VERSION:=1.1.7
+# ─────────────────────────────────────────────────────────────
+# 版本号是**发布契约**：make / CI / opkg 升级都认它。改动一旦合入 main
+# 就必须递增（PKG_RELEASE 用于同版本重新打包）。详见 CHANGELOG.md。
+# ─────────────────────────────────────────────────────────────
+PKG_VERSION:=2.0.0
 PKG_RELEASE:=1
+
+# 许可与维护者：opkg/apk 的元数据与 OpenWrt 包索引都读这两个字段。
+# 缺失时部分 SDK 会告警，且使用者无法判断授权条款、也无法联系维护者。
+PKG_LICENSE:=MIT
+PKG_LICENSE_FILES:=LICENSE
+PKG_MAINTAINER:=woshinibabao1 <ajmd007@qq.com>
 
 # 兼容旧版：已安装 at-webserver-rust 的系统升级到单包后，声明提供同名能力，
 # 避免残留依赖指向不存在的包。

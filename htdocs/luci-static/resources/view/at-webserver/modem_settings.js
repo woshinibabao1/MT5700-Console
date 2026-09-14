@@ -766,6 +766,12 @@ return L.view.extend({
 		 * 写命令，白占一次独占串口。这里停手 600ms 才发，且空值/非法值不发。
 		 */
 		var thermIntervalTimer = null;
+		/*
+		 * 本页是否已卸载。防抖回调 600ms 后才真正下发命令，那个时刻页面可能
+		 * 早被切走了 —— 没有这个标志，回调会往独占串口发一条谁也不会看的写命令。
+		 * 由 page._onDispose 置真（见文件末尾）。
+		 */
+		var disposed = false;
 		thermIntervalInput.addEventListener('input', function () {
 			if (thermIntervalTimer) clearTimeout(thermIntervalTimer);
 			var n = parseInt(thermIntervalInput.value, 10);
@@ -971,6 +977,18 @@ return L.view.extend({
 			}
 		}).then(function () {
 			loadAll();
+		});
+
+		/*
+		 * 页面卸载钩子。
+		 *
+		 * 下面「温度检测间隔」的防抖回调里会读 disposed：防抖是 600ms 后才发命令，
+		 * 这个时间点页面很可能已经切走了，此时再往独占串口下发一条写命令纯属
+		 * 打扰。同时清掉还没触发的定时器。
+		 */
+		page._onDispose(function () {
+			disposed = true;
+			if (thermIntervalTimer) { clearTimeout(thermIntervalTimer); thermIntervalTimer = null; }
 		});
 
 		return page;

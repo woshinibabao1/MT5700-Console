@@ -301,6 +301,16 @@ return L.view.extend({
 			if (lockType === 0) return { lockType: 0, mobility: 0, items: [{}] };
 			var nm = (lines[head + 1] || '0,0').split(',').map(Number);
 			var mobility = nm[0], num = nm[1];
+			/*
+			 * 条目数取自模组应答，必须夹住。
+			 * 应答异常（例如 `0,255`）会凭空生成 255 个字段全 undefined 的条目，
+			 * 界面上立刻多出 255 行空输入框，且「保存」时会把这些空值一起下发。
+			 * 天然上界是「后面还剩几行」—— 一条锁频占一行；再叠一个 32 的硬上限
+			 * 兜住任何离谱取值（正常配置远小于此）。
+			 */
+			var avail = Math.max(0, lines.length - head - 2);
+			if (!isFinite(num) || num < 0) num = 0;
+			num = Math.min(num, avail, 32);
 			var items = [];
 			for (var j = 0; j < num; j++) {
 				var parts = (lines[head + j + 2] || '').split(',').map(function (v) { return v ? Number(v) : undefined; });

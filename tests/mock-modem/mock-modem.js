@@ -238,6 +238,13 @@ const server = net.createServer(function (socket) {
 	});
 });
 
-server.listen(PORT, '0.0.0.0', function () {
-	console.log('[mock] MT5700 AT modem simulator listening on 0.0.0.0:' + PORT);
+/*
+ * 只监听回环。
+ *
+ * 这是测试用的模组模拟器，任何能连到它的人都可以喂假应答。绑 0.0.0.0 等于
+ * 把「假模组」暴露到局域网，同网段的机器都能连上来，与真机验证的结果混在一起。
+ * 本机链路（Rust 后端 → mock、e2e 客户端 → 后端）全在 127.0.0.1 上，无需对外。
+ */
+server.listen(PORT, '127.0.0.1', function () {
+	console.log('[mock] MT5700 AT modem simulator listening on 127.0.0.1:' + PORT);
 });

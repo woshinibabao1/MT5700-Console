@@ -13,6 +13,12 @@ use tokio::sync::RwLock;
 
 /// 扫频结束后留给模组重新驻留的时间，这段时间内不做无服务判定。
 const SCAN_RECOVERY_GRACE: Duration = Duration::from_secs(60);
+/// 因「无服务」自动解锁后，重新尝试用户锁频配置前的等待时间下限。
+///
+/// 实际冷却取本值与用户配置的 `no_service_limit` 中较大的一个。
+const LOCK_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
+/// 一轮 `has_service` 的总预算，详见该函数内的说明。
+const HAS_SERVICE_BUDGET: Duration = Duration::from_secs(6);
 
 /// SSB 默认按 30kHz 子载波间隔的频段（sub-6 的 TDD 中高频段）。
 const NR_30KHZ_BANDS: &[i64] = &[41, 48, 77, 78, 79];
@@ -48,6 +54,12 @@ pub struct SchedState {
     /// 每 `check_interval` 一条——日志落在 tmpfs 上会持续膨胀。
     /// 用它把通知收敛成「只在失败状态翻转时推一条」。
     pub apply_failed: bool,
+    /// 因「无服务」自动解锁后的重试冷却截止时刻。
+    ///
+    /// 非空表示：在这个时刻之前**不主动下发任何锁频命令**，把频段完全交还给模组
+    /// 自行搜网。没有这道闸门就会锁→解锁→锁地反复震荡，而每次重锁都还会带上
+    /// 一轮飞行模式开关（CFUN=0/1）。详见 `tick()` 的解锁分支。
+    pub retry_after: Option<Instant>,
 }
 
 impl Scheduler {
@@ -70,6 +82,7 @@ impl Scheduler {
                 applied: false,
                 announced: false,
                 apply_failed: false,
+                retry_after: None,
             })),
         })
     }
@@ -83,6 +96,12 @@ impl Scheduler {
         let mut s = self.state.write().await;
         s.cfg = cfg;
         s.announced = false;
+        /*
+         * 用户主动改配置就立刻撤销「无服务解锁」的冷却。
+         * 冷却防的是本模块自己反复重试造成的震荡；用户既然重新下了指令，
+         * 就该马上按新配置下发一次，而不是让他干等几分钟才看到效果。
+         */
+        s.retry_after = None;
     }
 
     pub async fn status(&self) -> SchedStatusDto {
@@ -168,7 +187,22 @@ impl Scheduler {
             (s.current_mode.clone(), s.applied, s.last_applied.clone())
         };
 
-        if target != mode || !applied || want != last {
+        /*
+         * 冷却期内不下发任何锁频命令。
+         *
+         * 冷却只在「因无服务自动解锁」之后设置：那时 applied 被置回 false，
+         * 而这正是下一周期的触发条件之一，于是会变成
+         * 「解锁 → 下一拍立刻重锁 → 又无服务 → 再等 no_service_limit → 再解锁」
+         * 的震荡；若用户开了 toggle_airplane，每一轮还要多做一次 CFUN=0/1，
+         * 射频被反复开关。冷却期内把频段交还模组自行搜网，到点后再试一次
+         * 用户配置 —— 万一只是临时故障，也还有机会自己恢复。
+         */
+        let cooling_down = {
+            let s = self.state.read().await;
+            s.retry_after.map_or(false, |until| Instant::now() < until)
+        };
+
+        if !cooling_down && (target != mode || !applied || want != last) {
             let ok = if !target.is_empty() {
                 log_info!("时段切换: {} -> {}", or_none(&mode), target);
                 self.apply_lock(&want, &target).await
@@ -224,6 +258,13 @@ impl Scheduler {
             // 在本次时段内就永久失效了，而 status() 仍对外报 applied=true，
             // 界面显示与实际完全相反，要等到下一次时段切换才自愈。
             s.applied = false;
+            /*
+             * ★ 光把 applied 置回 false 还不够 —— 它同时就是下一周期的重锁触发
+             * 条件。必须再上冷却，让模组先自由搜网注册，否则就是锁→解锁→锁的
+             * 震荡（每轮还带一次飞行模式开关）。冷却取「用户容忍的无服务时长」
+             * 与 5 分钟中较大的一个：前者尊重配置，后者是搜网注册的合理下限。
+             */
+            s.retry_after = Some(Instant::now() + LOCK_RETRY_COOLDOWN.max(s.cfg.no_service_limit));
         }
     }
 
@@ -259,14 +300,42 @@ impl Scheduler {
 
     /// 通过注册状态判断是否有网络服务。C5GREG 覆盖 SA，CEREG 覆盖 LTE/NSA，CREG 兜底。
     async fn has_service(&self) -> bool {
-        for cmd in ["AT+C5GREG?", "AT+CEREG?", "AT+CREG?"] {
-            if let Ok(resp) = self.client.send_command(&self.ctx, cmd, crate::atclient::COMMAND_TIMEOUT, None).await {
-                if registered(&resp.text()) {
-                    return true;
+        /*
+         * 三条查询共用一个总预算。
+         *
+         * 每条最坏「排队 8s + 等应答 2s」，三条串行能到 30s —— 已经接近甚至超过
+         * no_service_limit 本身。而这个查询的返回值是用来推进 last_service_at 的：
+         * 它自己耗掉的时间会被算进「无服务已持续」，于是越查越像无服务，
+         * 最终把用户配的锁频当成「锁死」给擦掉。
+         *
+         * 6 秒 = 三条各 2 秒，正常一轮远用不完（C5GREG 通常第一条就命中），
+         * 只在通道拥堵时才兜底。预算用完仍查不到就当作无服务，下一周期再试。
+         */
+        let probe = async {
+            for cmd in ["AT+C5GREG?", "AT+CEREG?", "AT+CREG?"] {
+                if let Ok(resp) = self
+                    .client
+                    .send_command(&self.ctx, cmd, crate::atclient::COMMAND_TIMEOUT, None)
+                    .await
+                {
+                    if registered(&resp.text()) {
+                        return true;
+                    }
                 }
             }
+            false
+        };
+
+        match tokio::time::timeout(HAS_SERVICE_BUDGET, probe).await {
+            Ok(v) => v,
+            Err(_) => {
+                log_warn!(
+                    "注册状态查询超出 {}s 预算，本轮按无服务处理",
+                    HAS_SERVICE_BUDGET.as_secs()
+                );
+                false
+            }
         }
-        false
     }
 
     /// 下发一次完整的锁频切换。返回是否成功（全部实际下发的锁频命令均 OK）。

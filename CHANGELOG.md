@@ -5,6 +5,95 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.0] - 2026-09-15
+
+**本版起，MT5700 Console 作为独立项目对外发布。** 早期版本曾以 MIT 授权的
+`LianXia233/luci-app-mt5700` 为起点，此后经过持续重构，现已独立维护、不再同步其提交；
+原作者版权按 MIT 条款保留（见 README「许可与致谢」与 LICENSE）。
+
+**关于版本号**：跳到 2.0.0 是为了标记这次身份变更这一里程碑，不是因为有不兼容改动 ——
+功能上完全向后兼容，从 1.1.x 直接升级即可，无需手工迁移配置。
+
+本版同时是一次全量代码审查的产物：前端 / Rust 后端 / ucode 代理 / 测试基建四路
+并行审查，逐条核实后再修，每条修复都补了能真正失败的回归断言。
+
+### 修复 - Rust 后端
+
+- **扫频计数泄漏**（`atclient.rs`）：`send_long_command` 的 `fetch_sub` 写在 `.await`
+  之后，外层一超时整个 future 被 drop，递减永不执行 —— `long_command_active()`
+  从此恒为真，定时锁频与无服务自动解锁**永久停摆**，日志里还看不出异常。
+  改为 RAII 守卫，正常返回 / `?` 提前返回 / future 被 drop 三条路径都会递减。
+- **超时被当成成功**（`atclient.rs`）：应答判定是 `if !lines.is_empty() { return Ok }`，
+  于是模组回了哪怕一行、结束码没到也算成功 —— 上层拿到的是**截断的应答**。
+  `AT+CMGL=4` 列 50 条短信在 115200 下约 1.7s，已逼近 2s 超时，截断真实发生，
+  表现为短信静默少几条。改为超时优先报错。
+- **锁频解锁震荡**（`schedule.rs`）：无服务自动解锁后把 `applied` 置回 false，
+  而这正是下一周期的重锁触发条件，于是「解锁 → 下一拍立刻重锁 → 又无服务 → 再解锁」
+  循环；开了飞行模式开关时每轮还多做一次 `CFUN=0/1`。加入重试冷却
+  （`no_service_limit` 与 5 分钟取大者），用户主动改配置则立即生效。
+- **注册状态查询拖长判据**（`schedule.rs`）：三条查询串行最坏 30s，比 `no_service_limit`
+  本身还长，它自己耗的时间会被算进「无服务已持续」，越查越像无服务。加 6s 总预算。
+- **自动清理会删未读短信**（`smsclean.rs`）：按时间升序删最旧，不区分已读。
+  改为**已读优先**，只有已读全删完仍不够时才动未读，并留警告日志。
+- `long_cmd_end` 改用进程内单调时间记录扫频结束时刻，不再受 NTP 校时跳变影响。
+
+### 修复 - 前端
+
+- **温度检测间隔永不下发**（`modem_settings.js`）：防抖回调里读了未声明的 `disposed`，
+  `'use strict'` 下直接抛 `ReferenceError`，命令永远发不出去且无任何提示。
+- **`^MONSC` 制式带引号时字段整体错位**（`rpc.js`）：3GPP 字符串参数模组会带引号回
+  （`<sysmode>` 回 `"NR"`），未去引号导致 NR/LTE 分支全落空，PCI 被当 Cell_ID 解析、
+  RSRP 变 NaN，一路传到界面变成 `width:NaN%`。改为在解析入口统一剥引号。
+- **PCI 字段缺失时给出 NaN**（`parse.js`）：`parseInt(undefined, 16)` 的结果被当有效值，
+  界面显示「NaN」，点「锁定」还会被校验拒掉。改为 `hexOrNull`，缺字段显示「—」。
+- **空字段被当成 0**（`parse.js`）：`Number('')` 是 0 且 `isFinite(0)` 为真，功率缺字段
+  会显示「0 dBm」。改为返回 null。
+- **RRC 状态显示「状态 NaN」**（`parse.js`）：单字段应答时拼接出字面 NaN。
+- **连接状态回调只增不减**（`rpc.js` / `mt5700.js`）：`onConnectionStateChange` 没有退订，
+  每进一次页面就多一个常驻回调，闭包还攥着已脱离文档的 DOM。改为返回退订函数，
+  并新增 `api.onDetach`（沿用「曾进入文档→现已脱离」转换判据）在页面卸载时摘掉。
+- **标识类命令拿不到缓存、还会清掉状态缓存**（`rpc.js`）：`AT+CGSN` / `AT+CIMI` /
+  `AT+CGMM` / `AT+CGMR` 只登记在分档缓存名单、没进 `isRetryableRead`，于是走写命令
+  分支 —— 每查一次 IMEI 就把状态类缓存全清一遍。两份名单改为统一引用，消除漂移。
+- **手动刷新偶发无反应**（`network_status.js`）：自动刷新在跑时 `refreshFast` 直接返回
+  空 promise，整条 `.then` 链瞬间走完、一条命令都没发。改为复用在跑的那一轮。
+- **锁频条目数无上限**（`network_settings.js`）：条目数直接取自模组应答，异常值
+  （如 `0,255`）会生成 255 行空输入框。按剩余行数与硬上限夹住。
+- **速率采样重叠**（`network_status.js`）：1Hz 采样但 RPC 可能更慢，重叠时用错配的
+  时间差与字节差算速率，曲线出尖刺。加在飞守卫，失败路径也放开。
+- **清空短信后读到旧用量**（`sms_settings.js`）：`loadStorage()` 写在 `return` 之后，
+  是永远执行不到的死代码。移入链尾。
+
+### 修复 - 测试基建
+
+- **`run-all.js` 漏跑 4 个资产**：只扫当前目录、只认 `*.test.js`，于是
+  `tests/mock-modem/parse-extra-test.js`（仓里少数**跑真实行为**而非正则匹配源码的测试，
+  含 REJINFO / SIMSQ 共 19 项）一直没被跑到。改为递归收集 + 同时认 `*-test.js`，
+  并接上 `syntax-check.js`。（`e2e-test.js` 需 mock 服务端，仍由 `run-e2e.sh` 单独跑。）
+- **两条恒真断言**：`ui-contract` 判「网络时间字段已移除」时用了
+  `… || /已整条移除/.test(statusJs)`，而源码注释里恰好同时含这两个词，后半永远为真；
+  `at-cache` 取 `split('sendCommand')[1]` 等于拿整个文件剩余部分，断言形同虚设。
+  均已改为先剥注释 / 取函数体，并验证过对错误写法确实会失败。
+- **补真实行为断言**：`parse-extra-test.js` 新增 7 项（缺字段给 null、`^MONSC` 带引号时
+  字段不错位等），直接执行解析函数而不是匹配源码文本。
+- `mock-modem` 由监听 `0.0.0.0` 改为 `127.0.0.1`（测试用的假模组不该对局域网开放）。
+- `run-e2e.sh` 加真机守卫：检测到真实模组串口或运行中的 `at-webserver` 服务就拒绝执行
+  （脚本会用 `fuser -k` 清端口，在真机上等于杀掉线上服务）；并修掉 `set -e` 导致
+  失败时日志与清理不可达的问题。
+
+### 变更 - 打包与文档
+
+- `Makefile` 补 `PKG_LICENSE` / `PKG_LICENSE_FILES` / `PKG_MAINTAINER`（原先缺失，
+  部分 SDK 会告警，使用者也无法判断授权）。
+- README 重写身份表述、修正停留在 v1.0 的版本号与安装示例（此前示例里的文件名并不存在）。
+- `CLAUDE.md` 移除 fork 定位、上游同步流程与本机内网地址 / 绝对路径（发布物不应包含）。
+
+### 测试
+
+全量 14 个测试文件通过：邻区 63 / 缓存 57 / 解析 53 / UI 244 / 短信 PDU 92 /
+系统配置 31 / 短信模式 26 / 渲染 12 / 解析行为 26；17 个前端 JS 语法 0 错误；
+Rust `cargo check --all-targets` 通过。
+
 ## [1.1.7] - 2026-09-15
 
 移除模组设置页的「SIM 卡信息」卡片（状态 / ICCID / IMSI / 运营商）。
@@ -2458,4 +2547,4 @@ ImmortalWrt/OpenWrt 实机适配、LuCI 界面修复、RPC 可对外监听版。
 - LuCI 页面 JS 语法、菜单/ACL JSON、init.d/uci-defaults shell 语法全部通过
 - 说明：OpenWrt SDK 交叉编译 / IPK·APK 实编译 / 真机安装验证需通过 GitHub Actions 云编译或本机 SDK 执行（见 `docs/02`）
 
-[1.0.0]: https://github.com/LianXia233/luci-app-mt5700/releases/tag/v1.0.0
+[1.0.0]: https://github.com/woshinibabao1/MT5700-Console/releases

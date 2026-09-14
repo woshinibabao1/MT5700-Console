@@ -102,7 +102,19 @@ ok('mock 的 ^SYSCFGEX 应答是真格式（首段带引号）',
  */
 ok('network_status.js 不再查询 AT^NWTIME?', statusJs.indexOf("sendCommand('AT^NWTIME?')") < 0);
 ok('network_status.js 不再有 parseNetTime', statusJs.indexOf('parseNetTime') < 0);
-ok('network_status.js 不再有网络时间字段', statusJs.indexOf('网络时间') < 0 || /已整条移除/.test(statusJs));
+/*
+ * 必须先剥注释再判。
+ *
+ * 上一版写的是 `statusJs.indexOf('网络时间') < 0 || /已整条移除/.test(statusJs)`，
+ * 而 network_status.js:149 的注释里恰好同时含这两个词（正是这段说明），
+ * 于是后半永远为真 —— 断言一次都不会失败，等于把这条守约删掉了。
+ * 注释里提到「网络时间已移除」不构成复活，真正要防的是代码里再出现这个字段。
+ */
+const statusNoComment = statusJs
+	.replace(/\/\*[\s\S]*?\*\//g, '')
+	.replace(/^\s*\/\/.*$/gm, '');
+ok('network_status.js 不再有网络时间字段', statusNoComment.indexOf('网络时间') < 0,
+	'剥离注释后仍出现「网络时间」');
 const TERMINAL = path.join(ROOT, 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'terminal.js');
 ok('终端快捷命令里也没有网络时间',
 	fs.readFileSync(TERMINAL, 'utf8').indexOf('AT^NWTIME?') < 0);

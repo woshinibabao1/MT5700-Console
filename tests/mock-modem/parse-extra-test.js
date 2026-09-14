@@ -126,6 +126,37 @@ try {
 	const rejType = parsed.filter(function (p) { return p.type === 'REJINFO'; });
 	check('parseRawData 拆分 REJINFO 类型', rejType.length === 1 && rejType[0].parsed && rejType[0].parsed.plmn === '46000',
 		rejType.length + ' 条');
+	/* ---- 数值健壮性：缺字段 / 带引号，都不能产出 NaN ----
+	 * 这几条跑的是真实解析结果（不是正则匹配源码），因为 NaN 一旦漏出就会被
+	 * 当成有效值一路显示到界面上（信号条宽度会变成 width:NaN%，功率显示成 0dBm）。
+	 */
+
+	const ncNoPci = Parse.parseMonncAll('^MONNC: NR,524910\r\n')[0];
+	check('MONNC 缺 PCI 字段时给 null（不能是 NaN）',
+		ncNoPci && ncNoPci.pci === null, 'pci=' + (ncNoPci && ncNoPci.pci));
+	const ncTrail = Parse.parseMonncAll('^MONNC: NR,524910,100,\r\n')[0];
+	check('MONNC 尾随逗号不会解析出 NaN',
+		ncTrail && ncTrail.pci === 0x100 && !Number.isNaN(ncTrail.pci),
+		'pci=' + (ncTrail && ncTrail.pci));
+
+	const txEmpty = Parse.parseNrTxPower('^NTXPOWER: 1,2,3,,5');
+	check('发射功率缺字段时给 null（不能算成 0dBm）',
+		!txEmpty.length || txEmpty[0].prach === null,
+		'prach=' + (txEmpty.length ? txEmpty[0].prach : 'n/a'));
+
+	const rrcOne = Parse.parseRrcstat('^RRCSTAT: 1');
+	check('RRC 只有单字段时状态文案不含 NaN',
+		!!rrcOne && rrcOne.rrc === null && String(rrcOne.rrcText).indexOf('NaN') < 0,
+		rrcOne ? String(rrcOne.rrcText) : 'null');
+
+	/* 3GPP 字符串参数带引号：^MONSC 的 <sysmode> 会回 "NR" */
+	const monQuoted = AtWs.parseMONSC('^MONSC: "NR",460,00,524910,1,C027F5065,114,14225C,-73,-9,24');
+	check('MONSC 制式带引号时仍能识别为 NR',
+		!!monQuoted && monQuoted.sysMode === 'NR', monQuoted ? monQuoted.sysMode : 'null');
+	check('MONSC 带引号时字段不错位（PCI 按十六进制解出 276）',
+		!!monQuoted && monQuoted.pci === 276, monQuoted ? String(monQuoted.pci) : 'null');
+	check('MONSC 带引号时 RSRP 正常（-73，不是 NaN）',
+		!!monQuoted && monQuoted.rsrp === -73, monQuoted ? String(monQuoted.rsrp) : 'null');
 } catch (e) {
 	check('单测执行', false, String(e && e.stack || e));
 }

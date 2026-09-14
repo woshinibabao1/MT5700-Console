@@ -214,10 +214,16 @@ ok('写命令后物理标识不受影响（IMEI 不该被连带清掉）',
 ok('写命令不影响连续量缓存的既有条目（由 TTL 管）',
 	c4._cacheGet('AT^HCSQ?') !== null);
 
-ok('sendCommand 在写分支调用 _dropStateCache',
-	/_dropStateCache\(\)/.test(
-		fs.readFileSync(RPC_JS, 'utf8').split('ATClient.prototype.sendCommand')[1] || ''
-	));
+/*
+ * 只取 sendCommand 函数体本身。
+ *
+ * 上一版用 `split('ATClient.prototype.sendCommand')[1]`，取的是首次出现之后的
+ * **整个文件剩余部分** —— 只要下文任何一处（甚至注释里）出现 _dropStateCache()
+ * 就算通过，等于没断言。
+ */
+const sendCmdBody = (rpcSrc.match(/ATClient\.prototype\.sendCommand = function[\s\S]*?\n};/) || [''])[0];
+ok('能定位到 sendCommand 函数体', sendCmdBody.length > 0);
+ok('sendCommand 在写分支调用 _dropStateCache', /_dropStateCache\(\)/.test(sendCmdBody));
 
 /* ---------- E. 缓存只用于只读命令 ---------- */
 
@@ -230,6 +236,21 @@ ok('查询命令可缓存',
 	isRetryableRead('AT+CPIN?') === true &&
 	isRetryableRead('AT^MONSC') === true &&
 	isRetryableRead('AT^DSFLOWQRY') === true);
+/*
+ * 不带 '?' 的标识类命令也必须可缓存。
+ *
+ * 这里钉的是一个真实踩过的坑：AT+CGSN / AT+CIMI / AT+CGMM / AT+CGMR（IMEI/IMSI/
+ * 型号/固件）只登记在分档缓存名单里、没进 isRetryableRead 的白名单，于是它们
+ * cacheable=false —— 既拿不到 10 分钟缓存，还会走 sendCommand 的**写命令分支**，
+ * 每查一次 IMEI 就把状态类缓存全清一遍。两份名单现在已由 isRetryableRead 统一引用，
+ * 这条断言防止它们再次漂移。
+ */
+ok('不带 ? 的标识类命令也可缓存（IMEI/IMSI/型号/固件）',
+	isRetryableRead('AT+CGSN') === true &&
+	isRetryableRead('AT+CIMI') === true &&
+	isRetryableRead('AT+CGMM') === true &&
+	isRetryableRead('AT+CGMR') === true,
+	'这几条曾漏在名单外，导致查一次 IMEI 就清一次状态缓存');
 ok('sendCommand 以 isRetryableRead 决定缓存与否',
 	/var cacheable = !opt\.fresh && isRetryableRead\(command\);/.test(rpcSrc));
 ok('fresh 选项可强制绕过缓存', /opt\.fresh/.test(rpcSrc));

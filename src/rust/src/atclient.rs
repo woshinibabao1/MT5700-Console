@@ -10,7 +10,7 @@
 use crate::{log_info, log_warn};
 use crate::config::AtConfig;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex, Notify};
@@ -116,6 +116,31 @@ pub struct PendingCmd {
     pub done: Arc<Notify>,
     /// 非空时每收到一行应答就回调一次（^CELLSCAN 边扫边显示用）。
     pub stream: Option<Box<dyn Fn(String) + Send + Sync>>,
+}
+
+/// 扫频计数的 RAII 守卫，见 `send_long_command` 内的说明。
+///
+/// 持有引用的生命周期比任何一次调用都短，不存在跨 await 持有的风险。
+struct LongCmdGuard<'a>(&'a AtomicI32);
+
+impl Drop for LongCmdGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 进程内的单调时间（纳秒），用于记录「扫频什么时候结束的」。
+///
+/// 这里**不能**用 `SystemTime`（墙钟）：NTP 校时会让它前跳或后跳，
+/// 而 `Instant` 是单调钟但没法直接存进原子整数。取进程首次调用时的
+/// `Instant` 作基准，之后一律用相对值 —— 单调、可存、无锁。
+fn mono_ns() -> i64 {
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    let base = BASE.get_or_init(Instant::now);
+    Instant::now()
+        .checked_duration_since(*base)
+        .unwrap_or_default()
+        .as_nanos() as i64
 }
 
 #[allow(dead_code)] // describe 保留给诊断输出
@@ -382,15 +407,21 @@ impl AtClient {
         stream: Option<Box<dyn Fn(String) + Send + Sync>>,
     ) -> Result<AtResponse, String> {
         self.long_cmd.fetch_add(1, Ordering::SeqCst);
+        /*
+         * ★ 递减必须挂在 Drop 上，不能写在 .await 之后。
+         *
+         * 本函数是 async：外层一旦超时/取消，整个 future 被 drop，写在
+         * `send_command_inner(...).await` 后面的 fetch_sub 就永远不会执行。
+         * 计数从此停在 1，long_command_active() 恒为真 —— schedule 每周期都走
+         * 「扫频中」分支，定时锁频与无服务自动解锁双双永久停摆，日志里没有任何
+         * 报错，只能重启服务才能恢复。扫频命令抢锁等得久（排队预算 8s + 写入 3s）
+         * 时很容易顶到外层 10s 余量，这个窗口并不窄。
+         *
+         * 用守卫后，正常返回、? 提前返回、future 被 drop 三条路径都会递减。
+         */
+        let _guard = LongCmdGuard(&self.long_cmd);
         let result = self.send_command_inner(ctx, command, timeout, stream).await;
-        self.long_cmd_end.store(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as i64,
-            Ordering::SeqCst,
-        );
-        self.long_cmd.fetch_sub(1, Ordering::SeqCst);
+        self.long_cmd_end.store(mono_ns(), Ordering::SeqCst);
         result
     }
 
@@ -403,12 +434,9 @@ impl AtClient {
         if ns == 0 {
             return None;
         }
-        let now_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as i64;
+        let now_ns = mono_ns();
         if now_ns < ns {
-            // 时钟回拨：视为刚结束
+            // 单调钟不该回拨；真发生了就视为刚结束
             return Some(Instant::now());
         }
         let delta = (now_ns - ns) as u64;
@@ -587,19 +615,32 @@ impl AtClient {
         let pending = self.pending.lock().await.take();
         let lines = pending.map(|p| p.lines).unwrap_or_default();
 
-        if !lines.is_empty() {
-            return Ok(AtResponse { lines });
-        }
-        if answered {
-            // 收到过结束码但没攒到任何内容（例如模组只回一个空结束码）。
-            Err(format!("模组未返回内容: {}", command.trim()))
-        } else {
-            Err(format!(
-                "模组无响应（已等待 {}ms）: {}",
+        /*
+         * ★ 超时判定必须优先于「收到了点东西」。
+         *
+         * 原写法是 `if !lines.is_empty() { return Ok(...) }`：只要模组回了哪怕一行，
+         * 即便结束码（OK/ERROR）没到，超时也被当成成功返回。上层于是拿到一份
+         * **被截断的应答**却毫不知情 —— `AT+CMGL=4` 列 50 条短信在 115200 波特下
+         * 约 1.7s，已经逼近 2s 的命令超时，截断是真实会发生的；短信列表因此少几条、
+         * 新短信的 PDU 因此缺半截，全都是静默的数据丢失。
+         *
+         * 「结束码没到 == 应答不完整」没有例外：notify 只在 is_terminator() 为真时
+         * 发生，而所有 AT 命令都以 OK / ERROR 收尾（`>` 提示符按设计不 notify，
+         * 它本就不代表命令完成，见 consume() 内注释）。
+         */
+        if !answered {
+            return Err(format!(
+                "模组无响应（已等待 {}ms，收到 {} 行不完整数据）: {}",
                 timeout.as_millis(),
+                lines.len(),
                 command.trim()
-            ))
+            ));
         }
+        if lines.is_empty() {
+            // 收到过结束码但没攒到任何内容（例如模组只回一个空结束码）。
+            return Err(format!("模组未返回内容: {}", command.trim()));
+        }
+        Ok(AtResponse { lines })
     }
 
     /// 唯一读取模组的地方。阻塞在 tokio netpoller 上，空闲时不占 CPU。

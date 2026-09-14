@@ -234,15 +234,30 @@ ATClient.prototype.handlePush = function (ev) {
  * 失败后自动重试若干次；写类命令绝不重试——重复下发可能造成重复操作
  * （例如短信重复发送、锁频命令重复生效）。
  */
+/*
+ * 不带 '?' 的纯读命令。
+ *
+ * 这里与下面 IDENTIFIER_COMMANDS / STATE_COMMANDS 一起构成「读命令」的完整名单，
+ * 判断的是同一件事 —— 这条命令**没有副作用**，失败可以再发一次、结果可以缓存。
+ * 三份名单必须集中在一处由 isRetryableRead 统一引用：早先这里和分档缓存各抄了一份，
+ * 结果 IMEI / IMSI / 型号 / 固件（AT+CGSN / AT+CIMI / AT+CGMM / AT+CGMR）只进了
+ * 缓存名单、没进重试名单，于是它们既拿不到 10 分钟缓存，还会走 sendCommand 的
+ * 写命令分支 —— 每查一次 IMEI 就把状态类缓存全清一遍，分档等于白做。
+ */
+var NON_QUESTION_READS = [
+	'AT+CSQ', 'AT^MONSC', 'AT^MONNC', 'AT^MONSSC', 'AT^DSFLOWQRY'
+];
+
+/* 判断一条命令是否「可安全重试」，同时决定它是否可缓存（见 sendCommand）。 */
 function isRetryableRead(command) {
 	var cmd = String(command == null ? '' : command).trim();
 	if (!cmd) return false;
 	if (cmd === 'AT' || cmd === 'ATI') return true;
 	if (cmd.charAt(cmd.length - 1) === '?') return true;
-	// 少数查询命令不带 '?'，单独放行
-	if (cmd === 'AT+CSQ' || cmd === 'AT^MONSC' || cmd === 'AT^MONNC' ||
-		cmd === 'AT^MONSSC' || cmd === 'AT^DSFLOWQRY') return true;
-	return false;
+	var k = normalizeCommand(cmd);
+	return NON_QUESTION_READS.indexOf(k) >= 0
+		|| IDENTIFIER_SET[k] === true
+		|| STATE_SET[k] === true;
 }
 
 /* 模组把错误当普通文本返回时的判定（ERROR / +CME ERROR / +CMS ERROR） */
@@ -480,6 +495,22 @@ ATClient.prototype.emitPush = function (resp) {
 ATClient.prototype.onConnectionStateChange = function (cb) {
 	this.stateCallbacks.push(cb);
 	cb(this.state, this.error);
+	/*
+	 * 返回退订函数。
+	 *
+	 * 此前只进不出：每个页面进来都 push 一个闭包，闭包又持有该页的 DOM 节点，
+	 * 于是进十次页面就积累十个永不回收的回调；而 connect() 在已就绪时仍会
+	 * setConnectionState('connected')，每次渲染都会把历史回调全部触发一遍 ——
+	 * 它们各自去更新一堆早已脱离文档的节点。
+	 */
+	var self = this;
+	var detached = false;
+	return function () {
+		if (detached) return;
+		detached = true;
+		var i = self.stateCallbacks.indexOf(cb);
+		if (i >= 0) self.stateCallbacks.splice(i, 1);
+	};
 };
 
 ATClient.prototype.dispatchRawData = function (text) {
@@ -892,19 +923,33 @@ function parseMONSC(data) {
 	 *      PCI 与 ^NRSSBID 的服务小区 PCI 276 交叉验证一致。
 	 * 注意：<PCI> 与 <TAC> 是**十六进制**（LTE/NR 皆然），必须按 hex 解析/展示。
 	 */
+	/*
+	 * 3GPP 的字符串型参数模组会带引号回（实测 `^MONSC` 的 <sysmode> 回 `"NR"`，
+	 * 同文件 `^HCSQ` 的解析里就是这么处理的）。若不在入口统一剥掉：
+	 *   ① `rat` 变成 '"NR"'，NR / LTE 三个分支全落空，后面的字段整体错位
+	 *      —— PCI 会被当成十六进制去解析 Cell_ID，rsrp 拿到 NaN；
+	 *   ② 而 NaN 会一路传到界面（信号条宽度变成 `width:NaN%`）。
+	 * 在每个分支里各剥一次容易漏，所以在解析入口统一剥。
+	 */
+	var stripQuote = function (v) {
+		return String(v === undefined || v === null ? '' : v).trim().replace(/"/g, '');
+	};
 	var hexInt = function (v) {
-		if (v === undefined || v === null || v === '') return null;
-		var s = String(v).trim();
+		var s = stripQuote(v);
+		if (s === '') return null;
 		var n = parseInt(s, 16);
 		return isNaN(n) ? null : n;
 	};
 	var num = function (v) {
-		return (v === undefined || v === null || v === '') ? null : parseFloat(v);
+		var s = stripQuote(v);
+		if (s === '') return null;
+		var n = parseFloat(s);
+		return isNaN(n) ? null : n;   /* 空串与非数字一律转 null，不让 NaN 往界面传 */
 	};
-	var hasLeadingMode = p.length > 0 && !/^-?\d+$/.test(p[0]);
+	var hasLeadingMode = p.length > 0 && !/^-?\d+$/.test(stripQuote(p[0]));
 	var d;
 	if (hasLeadingMode) {
-		var rat = String(p[0] || '').toUpperCase();
+		var rat = stripQuote(p[0]).toUpperCase();
 		if (rat === 'NR') {
 			d = {
 				sysMode: 'NR',

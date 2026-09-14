@@ -26,6 +26,25 @@ chmod +x mock-modem.js e2e-test.js mock-uci
 ln -sf mock-uci "$MOCK_DIR/uci"
 export PATH="$MOCK_DIR:$PATH"
 
+#
+# ⚠️ 安全守卫（永恒铁律：所有测试禁止高危操作）
+#
+# 下面要用 `fuser -k 20249/tcp 8765/tcp` 清掉端口占用 —— 在真机上那正是
+# 正在运行的 AT 后端，一杀就是线上服务中断。所以先确认这里不是真机：
+# 有真实模组串口、或有注册中的 at-webserver 服务，就拒绝执行。
+for dev in /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2; do
+	if [ -e "$dev" ]; then
+		echo "检测到真实模组串口 $dev，拒绝执行（本脚本会 fuser -k 清端口）" >&2
+		exit 1
+	fi
+done
+if command -v ubus >/dev/null 2>&1; then
+	if ubus list service 2>/dev/null | grep -q at-webserver; then
+		echo "检测到真实的 at-webserver 服务在运行，拒绝执行" >&2
+		exit 1
+	fi
+fi
+
 echo "==> 1/4 清理残留并启动 mock 模组 (TCP 20249)"
 fuser -k 20249/tcp 2>/dev/null || true
 fuser -k 8765/tcp 2>/dev/null || true
@@ -41,8 +60,12 @@ RUST_PID=$!
 sleep 1.5
 
 echo "==> 3/4 运行 RPC 端到端测试"
+# set -e 下 node 一旦失败会立刻退出脚本，后面的清理与日志打印全部不可达，
+# 排查时看不到后端日志。这里临时放开，自己接住退出码。
+set +e
 node e2e-test.js 8765 test-key-123
 E2E_RC=$?
+set -e
 
 echo "==> 4/4 清理"
 kill $RUST_PID $MOCK_PID 2>/dev/null || true

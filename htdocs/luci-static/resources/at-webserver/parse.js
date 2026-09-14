@@ -30,7 +30,14 @@ var Parse = (function () {
 
 	var INVALID_POWER = 999;
 	var power = function (v) {
-		var n = Number((v || '').trim());
+		/*
+		 * 空字段必须当「无测量」返回 null。
+		 * Number('') 是 0 且 isFinite(0) 为真，缺字段（`1,2,3,,5`）会被算成
+		 * 0 dBm —— 界面上就是「发射功率 0」，看着像故障，其实是没测到。
+		 */
+		var t = String(v == null ? '' : v).trim();
+		if (t === '') return null;
+		var n = Number(t);
 		if (!isFinite(n) || n === INVALID_POWER) return null;
 		return n;
 	};
@@ -380,7 +387,12 @@ var Parse = (function () {
 		return {
 			enable: Number(f[0]),
 			rrc: isFinite(rrc) ? rrc : null,
-			rrcText: api.RRC_TEXT[rrc] || ('状态 ' + rrc),
+			/*
+			 * rrc 解析失败时不能拼出「状态 NaN」：NaN 是解析失败的产物，
+			 * 不是模组报上来的状态值，显示出来只会让人以为是某种未知状态。
+			 * `^RRCSTAT: 1`（只有一个字段、没有 <state>）时就会走到这里。
+			 */
+			rrcText: isFinite(rrc) ? (api.RRC_TEXT[rrc] || ('状态 ' + rrc)) : null,
 			camp: (camp != null && isFinite(camp)) ? camp : null,
 			campText: api.CAMP_TEXT[camp] || null
 		};
@@ -909,6 +921,19 @@ var Parse = (function () {
 		var n = Number(t);
 		return isFinite(n) ? n : null;
 	};
+	/*
+	 * 十六进制字段（PCI / TAC / Cell-ID 都是）。
+	 *
+	 * 必须先判空再用 parseInt：parseInt(undefined, 16) 是 NaN，而 NaN 会一路
+	 * 传到界面变成字面上的「NaN」，还会让「锁定小区」的校验把它当成非法值拒掉。
+	 * 字段缺失（`^MONNC: NR,524910` 或尾随逗号）时应当显示「—」而不是 NaN。
+	 */
+	var hexOrNull = function (v) {
+		var t = String(v == null ? '' : v).trim().replace(/"/g, '');
+		if (t === '') return null;
+		var n = parseInt(t, 16);
+		return isFinite(n) ? n : null;
+	};
 
 	/*
 	 * 解析 ^NRSSBID（手册 13.28）：SA 连接态且网侧配置测量时，报服务小区
@@ -977,7 +1002,7 @@ var Parse = (function () {
 			var m = line.match(/\^MONNC:\s*(\w+)\s*(?:,(.+))?/);
 			if (!m || m[1] === 'NONE' || !m[2]) return;
 			var v = m[2].split(',').map(function (s) { return s.trim().replace(/"/g, ''); });
-			var cell = { rat: m[1], arfcn: numOrNull(v[0]), pci: parseInt(v[1], 16) };
+			var cell = { rat: m[1], arfcn: numOrNull(v[0]), pci: hexOrNull(v[1]) };
 			/* 无效码按「无测量」处理：RSRP -157/-1256、RSRQ -44/-348、SINR -24/-188 */
 			var fix = function (raw, big, invalid) {
 				var n = numOrNull(raw);

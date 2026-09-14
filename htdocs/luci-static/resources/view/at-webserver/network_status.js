@@ -989,8 +989,20 @@ return L.view.extend({
 		rateExtra.appendChild(E('div', { 'class': 'at-autorefresh' },
 			E('label', {}, rateChk, document.createTextNode(' 实时监测'))));
 
+		/*
+		 * 1Hz 采样，但一次 netRate 往返可能长得多（它的超时是 5s）。
+		 * 没有在飞守卫就会多个采样重叠：后一次覆盖 rateSample 之后，先回来的那次
+		 * 拿新基准配自己的旧时刻，dt 与字节差不是同一段区间 —— 速率曲线出现
+		 * 尖刺，甚至因为差分为负而被抹成 0。重叠期间直接跳过即可，
+		 * 下一拍（1 秒后）自然会用最新基准继续，不会丢数据。
+		 */
+		var rateInFlight = false;
 		function sampleRate() {
+			if (rateInFlight) return Promise.resolve();
+			rateInFlight = true;
+			var settle = function () { rateInFlight = false; };
 			return AtWs.netRate('').then(function (r) {
+				settle();
 				if (!r.success) {
 					/* 失败时清空基准，下次采样重新起算，避免用过期基准算出离谱速率 */
 					rateSample = null;
@@ -1022,6 +1034,14 @@ return L.view.extend({
 				}
 				/* 首拍或设备变更：只记基准，不产生速率 */
 				rateSample = { t: now, rx: r.rx_bytes, tx: r.tx_bytes, device: r.device };
+			}, function (err) {
+				void err;
+				/* 请求失败同样要放开守卫，否则速率监测会永久停摆 */
+				settle();
+				rateSample = null;
+				state.rtDown = 0;
+				state.rtUp = 0;
+				renderSpeed();
 			});
 		}
 
@@ -1052,8 +1072,18 @@ return L.view.extend({
 		var SLOW_MS = 30000;
 
 		var refreshing = false;
+		/*
+		 * 在跑的那一轮刷新。
+		 *
+		 * 原先撞车时直接 `return Promise.resolve()`，于是用户手动点「刷新」
+		 * 而自动刷新正好在跑的话，整条 .then 链瞬间走完、一条命令都没发 ——
+		 * 界面上按钮按了、转圈都没有，表现为「刷新按钮偶发没反应」。
+		 * 现在撞车就复用在跑的那一轮：用户等到的仍是这一轮的真实数据，
+		 * 自动刷新之间也依旧互斥，不会叠加着抢独占串口。
+		 */
+		var fastRunning = null;
 		function refreshFast() {
-			if (refreshing) return Promise.resolve();
+			if (fastRunning) return fastRunning;
 			refreshing = true;
 			var chain = Promise.resolve();
 			/* 只保留「用户盯着看、需要秒级新鲜」的内容：信号与小区信息。
@@ -1061,8 +1091,9 @@ return L.view.extend({
 			   已移到 30 秒慢档——实时速率另有 1Hz 的网卡计数采样，不受影响。 */
 			[updateNetworkInfo]
 				.forEach(function (fn) { chain = chain.then(fn); });
-			return chain.catch(function () { /* 刷新失败保留上一次数据 */ })
-				.then(function () { refreshing = false; });
+			fastRunning = chain.catch(function () { /* 刷新失败保留上一次数据 */ })
+				.then(function () { refreshing = false; fastRunning = null; });
+			return fastRunning;
 		}
 
 		/*
@@ -1078,8 +1109,9 @@ return L.view.extend({
 		   否则「某一项一直失败」又会退化成看不见的静默问题。 */
 		var slowFailures = {};
 		var slowRefreshing = false;
+		var slowRunning = null;   /* 同 refreshFast：撞车时复用在跑的那一轮 */
 		function refreshSlow() {
-			if (slowRefreshing) return Promise.resolve();
+			if (slowRunning) return slowRunning;
 			slowRefreshing = true;
 			/*
 			 * 串行，但**每个环节各自兜错**。
@@ -1096,7 +1128,8 @@ return L.view.extend({
 						.catch(function (err) { slowFailures[fn.name || '匿名任务'] = err; });
 				});
 			});
-			return chain.then(function () { slowRefreshing = false; });
+			slowRunning = chain.then(function () { slowRefreshing = false; slowRunning = null; });
+			return slowRunning;
 		}
 
 		/* 手动点「刷新」时全量拉一次（含设备信息，绕过 60s 节流） */

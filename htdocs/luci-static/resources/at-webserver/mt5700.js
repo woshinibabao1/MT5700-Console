@@ -467,7 +467,15 @@ var Mt5700 = (function () {
 		}
 
 		apply('connecting');
-		cl.onConnectionStateChange(apply);
+		/*
+		 * 退订句柄必须拿到手：这个回调是 push 进客户端全局数组的，页面切走后
+		 * 照样会被 connect() / 重连触发，闭包还一直攥着本页的 card。
+		 * 进十次页面就多十个永不回收的回调，每次状态变化还要全跑一遍。
+		 */
+		var detachConnState = cl.onConnectionStateChange(apply);
+		api.onDetach(card, function () {
+			if (detachConnState) detachConnState();
+		});
 
 		/*
 		 * 兜底发起连接（connect() 幂等：已就绪时直接置 connected 并返回）。
@@ -642,6 +650,38 @@ var Mt5700 = (function () {
 	api.clearAll = function () {
 		_timers.slice().forEach(function (fn) { try { fn(); } catch (e) { /* ignore */ } });
 		_timers = [];
+	};
+
+	/*
+	 * 元素离开文档后执行一次 fn（订阅类资源的卸载钩子）。
+	 *
+	 * 定时器有句柄可清，订阅没有 —— 像「连接状态回调」是一旦 push 就常驻在
+	 * 客户端全局数组里的，页面切走后照样会被触发，闭包还一直攥着本页的 DOM。
+	 * api.interval 的 scopeEl 解决不了这类资源，故补一个统一的退出钩子。
+	 *
+	 * 判据沿用 page 的做法：认「曾经进入过文档、现在脱离了」这个**转换**，
+	 * 而不是「现在不在文档里」—— 节点刚构建、尚未插入文档的那一瞬本来就不在，
+	 * 只认转换才不会把刚建好的页面误清掉。
+	 */
+	api.onDetach = function (el, fn) {
+		if (!el || typeof fn !== 'function') return function () {};
+		var doc = el.ownerDocument || document;
+		var wasInDoc = false;
+		var done = false;
+		var id = setInterval(function () {
+			if (doc.contains(el)) { wasInDoc = true; return; }
+			if (!wasInDoc) return;
+			clearInterval(id);
+			if (done) return;
+			done = true;
+			try { fn(); } catch (e) { /* 清理失败不能影响其余 */ }
+		}, 1000);
+		return function () {
+			clearInterval(id);
+			if (done) return;
+			done = true;
+			try { fn(); } catch (e) { /* 同上 */ }
+		};
 	};
 
 	/* ================= 图表 ================= */

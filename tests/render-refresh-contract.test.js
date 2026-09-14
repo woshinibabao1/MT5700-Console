@@ -88,10 +88,19 @@ ok('renderConn 函数存在', /function renderConn\(\)/.test(statusJs));
 
 /* ---------- ② 刷新链不能出现漏点号的 then ---------- */
 
-ok('快档刷新链把复位语句正确串上', /\.then\(function \(\) \{ refreshing = false; \}\);/.test(statusJs),
-	'缺少 .then(…refreshing = false…)');
-ok('慢档刷新链把复位语句正确串上', /\.then\(function \(\) \{ slowRefreshing = false; \}\);/.test(statusJs),
-	'缺少 .then(…slowRefreshing = false…)');
+/*
+ * 钉的是「复位语句必须挂在链的 .then 回调里」这一性质，而不是某一种拼接文本：
+ * 早先精确匹配 `.then(function () { refreshing = false; });`，后来复位语句里
+ * 多了一句（同时清在跑的那一轮 promise），断言就误报了 —— 而复位其实好端端
+ * 地在 .then 里。漏掉复位的后果是刷新标志永久为真、此后所有刷新都空转，
+ * 这才是这条断言真正要守的东西。
+ */
+ok('快档刷新链把复位语句串在 then 回调里',
+	/\.then\(function \(\) \{[^}]*refreshing = false/.test(statusJs),
+	'refreshing 复位必须挂在 .then 回调里，否则刷新标志永久为真');
+ok('慢档刷新链把复位语句串在 then 回调里',
+	/\.then\(function \(\) \{[^}]*slowRefreshing = false/.test(statusJs),
+	'slowRefreshing 复位必须挂在 .then 回调里，否则刷新标志永久为真');
 
 const jsFiles = collectJs(RES_DIR);
 const bareThen = [];

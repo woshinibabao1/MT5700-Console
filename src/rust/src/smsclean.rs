@@ -53,12 +53,16 @@ pub fn parse_cpms_usage(resp: &AtResponse) -> Option<(u32, u32)> {
     None
 }
 
-/// 从 `+CMGL` 应答里取出 `(存储索引, 短信中心时间戳)`。
+/// 从 `+CMGL` 应答里取出 `(存储索引, 短信中心时间戳, 是否已读)`。
 ///
 /// 只认 PDU 模式：`+CMGL: <idx>,...` 的下一行是 PDU 串，解码后才能拿到
 /// 短信中心时间（SCTS）。解不出时间的不进列表 —— 宁可不删，也不能按
 /// 存储索引大小猜「谁最旧」（存储位置会被复用，索引小不代表时间早）。
-pub fn parse_cmgl_entries(resp: &AtResponse) -> Vec<(u32, i64)> {
+///
+/// `已读` 取自 `+CMGL` 的第二个字段 `<stat>`（`1` = REC READ）。调用方据此
+/// 先删已读、后删未读：存储写满时本就不得不腾地方，但没有理由先动用户
+/// 还没看过的短信。
+pub fn parse_cmgl_entries(resp: &AtResponse) -> Vec<(u32, i64, bool)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i + 1 < resp.lines.len() {
@@ -67,10 +71,14 @@ pub fn parse_cmgl_entries(resp: &AtResponse) -> Vec<(u32, i64)> {
             i += 1;
             continue;
         }
-        let idx = line
+        let fields: Vec<&str> = line
             .find(':')
-            .and_then(|p| line[p + 1..].split(',').next())
-            .and_then(|s| s.trim().parse::<u32>().ok());
+            .map(|p| line[p + 1..].split(',').map(|s| s.trim()).collect())
+            .unwrap_or_default();
+        let idx = fields.first().and_then(|s| s.parse::<u32>().ok());
+        // <stat>: 0=未读 1=已读 2=草稿 3=已发。只有「已读」才允许被优先清理；
+        // 未读、草稿、已发一律按未读对待，绝不优先删。
+        let read = fields.get(1).and_then(|s| s.parse::<u32>().ok()) == Some(1);
         let pdu = resp.lines[i + 1].trim();
         i += 2;
         let idx = match idx {
@@ -78,7 +86,7 @@ pub fn parse_cmgl_entries(resp: &AtResponse) -> Vec<(u32, i64)> {
             None => continue,
         };
         if let Ok(sms) = decode_incoming_pdu(pdu) {
-            out.push((idx, sms.date.timestamp()));
+            out.push((idx, sms.date.timestamp(), read));
         }
     }
     out
@@ -149,15 +157,23 @@ pub async fn clean_oldest(client: &AtClient, ctx: &watch::Receiver<bool>) -> usi
         log_warn!("短信自动清理：列表为空或取不到时间，跳过（不会盲删）");
         return 0;
     }
-    // 时间升序：最旧的排前面
-    entries.sort_by_key(|e| e.1);
+    /*
+     * 排序键：已读的排在最前，同为已读/未读的再按时间从旧到新。
+     *
+     * 存储写满时模组会拒绝新短信，必须腾地方；但「腾」的对象应该先是看过的。
+     * 只有已读全删完还不够时，才会轮到未读 —— 那时删未读也比收不到新短信好。
+     */
+    entries.sort_by(|a, b| b.2.cmp(&a.2).then(a.1.cmp(&b.1)));
 
     let target = ((total as f64) * TARGET_USAGE).floor() as u32;
     let need = used.saturating_sub(target).max(1) as usize;
     let n = need.min(MAX_DELETE_PER_ROUND).min(entries.len());
 
     let mut deleted = 0usize;
-    for (idx, _) in entries.into_iter().take(n) {
+    for (idx, _, read) in entries.into_iter().take(n) {
+        if !read {
+            log_warn!("短信自动清理：已读短信已删完仍不够，将删除未读短信 {}", idx);
+        }
         match client
             .send_command(ctx, &format!("AT+CMGD={idx}"), SMS_TIMEOUT, None)
             .await

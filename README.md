@@ -6,7 +6,7 @@
 
 11 个页面 · Rust 常驻后端 · 前后端单包交付
 
-<sub>fork 自 [LianXia233/luci-app-mt5700](https://github.com/LianXia233/luci-app-mt5700)（MIT）· 当前版本 **v1.0**</sub>
+<sub>独立项目 · 当前版本 **v2.0.0** · [MIT](LICENSE) 授权</sub>
 
 </div>
 
@@ -23,7 +23,7 @@
 
 > **为什么叫 MT5700 Console**：它不只是「一个 LuCI 页面」——串口常开、AT 命令队列、
 > URC 事件分发、短信 PDU 收发、定时锁频、通知推送都跑在常驻后端里，前端只是它的操作台。
-> 包名 `luci-app-mt5700` 沿用上游以便 OpenWrt 生态识别，**仓库名与项目名**独立为 MT5700 Console。
+> 包名沿用 `luci-app-mt5700`，与 OpenWrt 生态里同类插件保持一致，便于识别与共存。
 
 ---
 
@@ -64,6 +64,19 @@
 
 ---
 
+## 环境要求
+
+| 项 | 要求 |
+|:--|:--|
+| 系统 | OpenWrt 23.05（opkg/ipk）或 24.10+（apk） |
+| 架构 | `x86_64` · `aarch64_cortex-a53`（含架构相关二进制，无 `noarch` 包） |
+| 已含依赖 | 后端二进制随主包安装；`rpcd` + `ucode` 由 `luci-base` 传递依赖 |
+| 需自行确认 | 回环 RPC 用的是 busybox 的 `nc`（几乎各映像都带）；精简映像请先 `which nc` |
+| 硬件 | 鼎桥 MT5700M-CN 5G 模组（默认走 PCUI 串口 `/dev/ttyUSB1`） |
+
+> 未把 `nc` / `usbutils` 写成硬依赖：一旦目标源没有同名包，`opkg` 会直接安装失败，
+> 代价大于收益。缺 `nc` 时 ucode 会给出明确报错，是可诊断的，不会静默失败。
+
 ## 快速安装
 
 从 [Releases](https://github.com/woshinibabao1/MT5700-Console/releases) 下载**与目标架构匹配**的主包
@@ -85,13 +98,13 @@
 
 ```sh
 # 以 aarch64_cortex-a53 为例
-apk add --allow-untrusted ./aarch64_cortex-a53-luci-app-mt5700-1.0-r1.apk
+apk add --allow-untrusted ./aarch64_cortex-a53-luci-app-mt5700-2.0.0-r1.apk
 ```
 
 ### OpenWrt 23.05（opkg / ipk）
 
 ```sh
-opkg install ./aarch64_cortex-a53-luci-app-mt5700_1.0_aarch64_cortex-a53.ipk
+opkg install ./aarch64_cortex-a53-luci-app-mt5700_2.0.0_aarch64_cortex-a53.ipk
 ```
 
 ### 启动与确认
@@ -297,13 +310,14 @@ workflow：`.github/workflows/build-openwrt.yml` · 镜像：官方 `openwrt/sdk
 
 | 目标系统 | 包格式 | 架构 | 产物示例 |
 |:--|:--|:--|:--|
-| 主线 snapshot | `.apk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700-1.0-r1.apk` |
-| 23.05.5 | `.ipk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700_1.0_x86_64.ipk` |
+| 主线 snapshot | `.apk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700-2.0.0-r1.apk` |
+| 23.05.5 | `.ipk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700_2.0.0_x86_64.ipk` |
 
 **触发方式**：push 到 `main` / 打 `v*` 标签 / Actions 手动 `Run workflow`。
 
 **编译成功后自动发布 Release**：标签推送用标签名；`main` 推送用 `Makefile` 里的
-`PKG_VERSION`（当前 `v1.0`）；同名 Release 先删后建；资产统一加架构前缀，避免同名冲突。
+`PKG_VERSION`（当前 `v2.0.0`，四处必须同步：`Makefile` / `src/rust/Cargo.toml` /
+`src/rust/Cargo.lock` / `CHANGELOG.md`）；同名 Release 先删后建；资产统一加架构前缀，避免同名冲突。
 
 交叉编译：容器内 rustup + **zig** 作 musl 链接器；`src/Makefile` 在包编译时
 `cargo build --release` 并装入 `usr/bin/at-webserver-rust`。
@@ -568,20 +582,19 @@ Release：`opt-level=s` + LTO + strip，musl 静态链接，适合嵌入式。
 
 ---
 
-## 上游与许可
+## 许可与致谢
 
-本项目 **fork 自 [LianXia233/luci-app-mt5700](https://github.com/LianXia233/luci-app-mt5700)**，
-在其 LuCI 页面与 Rust 后端基础上继续开发：补齐/修正 AT 应答解析、重构短信 PDU 编码、
-清理无效功能与重复查询、收紧轮询与样式契约，并补充三套不依赖真机的契约测试。
-
-原项目的版权与许可一并保留：
+以 **[MIT License](LICENSE)** 发布（Rust 后端在 `Cargo.toml` 中同样声明 `license = "MIT"`，两层一致）。
 
 ```text
 Copyright (c) 2026 LianXia233
 Copyright (c) 2026 MT5700 Console contributors
 ```
 
-以 **[MIT License](LICENSE)** 发布（Rust 后端在 `Cargo.toml` 中同样声明 `license = "MIT"`，两层一致）。
+早期版本曾以 [LianXia233/luci-app-mt5700](https://github.com/LianXia233/luci-app-mt5700)
+（MIT）的 LuCI 页面与 Rust 后端为起点，此后经过持续重构：重写 AT 应答解析与短信 PDU
+编码、移除无效功能与重复查询、重做缓存与轮询策略、补上不依赖真机的契约测试。
+按 MIT 条款，原作者的版权声明在此一并保留。
 
 **MT5700M** 相关 AT 行为以厂商《MT5700M-CN 5G 系列模组 AT 命令手册》为准；
-本项目在无官方 OpenWrt 包源的前提下提供管理界面与后端。
+本项目在无官方 OpenWrt 包源的前提下提供管理界面与后端，与设备厂商无隶属关系。
