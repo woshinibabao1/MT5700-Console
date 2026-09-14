@@ -357,7 +357,33 @@ return L.view.extend({
 
 		var ssb = null;
 		var monncCells = [];
+		var hfreqCarriers = [];
 		var neighBusy = false;
+
+		/*
+		 * 邻区带宽：^MONNC 与 ^NRSSBID 都不报邻区带宽 —— 3GPP 上 UE 不读邻区 SIB1
+		 * （frequencyInfoDL 才带带宽），本模组 238 条命令里也没有任何一条暴露它。
+		 * 唯一可靠来源是 ^HFREQINFO 的**当前工作载波**：若邻区 SSB 频点落在某载波的
+		 * 下行频带内，它必然与该载波同频同带宽，可以如实标注；落在工作载波之外
+		 * 的异频邻区（本机如 n28 / n79）无从得知，显示「—」而不是猜一个数。
+		 */
+		function neighborBandwidth(rat, arfcn) {
+			if (rat !== 'NR' || !hfreqCarriers.length) return null;
+			var mhz = Parse.nrArfcnToMHz(arfcn);
+			if (mhz == null) return null;
+			for (var i = 0; i < hfreqCarriers.length; i++) {
+				var c = hfreqCarriers[i];
+				if (c.sysMode !== 'NR' || !c.dlBwKHz || c.dlFreqMHz == null) continue;
+				/* 载波带宽按中心频点对称展开，半宽 = dlBwKHz/2 换算成 MHz */
+				if (Math.abs(mhz - c.dlFreqMHz) <= c.dlBwKHz / 2000) return c.dlBwKHz;
+			}
+			return null;
+		}
+
+		function fmtBw(khz) {
+			if (khz == null) return '—';
+			return khz >= 1000 ? (khz / 1000) + ' MHz' : khz + ' kHz';
+		}
 
 		function lockNeighbor(cell) {
 			var band = cell.band != null ? cell.band : Parse.arfcnToBand(cell.rat, cell.arfcn);
@@ -403,18 +429,45 @@ return L.view.extend({
 			neighBody.innerHTML = '';
 			renderSsbInto(neighBody);
 			var merged = [];
-			var seen = {};
+			/*
+			 * MONNC 索引：^NRSSBID 的邻区**不带 RSRQ**（手册 13.28 的邻区字段只有
+			 * PCI/ARFCN/RSRP/SINR + 波束），本机实测 4 个 SSB 邻区全部能按
+			 * (ARFCN, PCI) 在 MONNC 里找到同一小区，故从 MONNC 回填 RSRQ。
+			 * 注：MONNC 的 PCI 是十六进制、NRSSBID 是十进制，两者在各自解析函数里
+			 * 已统一成十进制数值，可直接比较。
+			 */
+			var byCell = {};
 			monncCells.forEach(function (c) {
 				var k = c.rat + '|' + c.arfcn + '|' + c.pci;
-				seen[k] = true;
-				merged.push({ rat: c.rat, arfcn: c.arfcn, pci: c.pci, rsrp: c.rsrp, rsrq: c.rsrq, sinr: c.sinr, src: 'MONNC' });
+				byCell[k] = c;
+				merged.push({
+					rat: c.rat, arfcn: c.arfcn, pci: c.pci,
+					rsrp: c.rsrp, rsrq: c.rsrq, sinr: c.sinr, src: 'MONNC'
+				});
 			});
 			if (ssb && ssb.neighbors) {
 				ssb.neighbors.forEach(function (n) {
 					var k = 'NR|' + n.arfcn + '|' + n.pci;
-					if (seen[k]) return;
-					seen[k] = true;
-					merged.push({ rat: 'NR', arfcn: n.arfcn, pci: n.pci, rsrp: n.rsrp, rsrq: null, sinr: n.sinr, src: 'SSB' });
+					if (byCell[k]) {
+						/*
+						 * 同一小区 MONNC 已列一行，不重复成行；但把 SSB 独有的波束
+						 * 挂上去，以及用它补齐 MONNC 缺测的 RSRP/SINR。
+						 */
+						merged.forEach(function (row) {
+							if (row.rat === 'NR' && row.arfcn === n.arfcn && row.pci === n.pci) {
+								row.beams = n.beams;
+								if (row.rsrp == null) row.rsrp = n.rsrp;
+								if (row.sinr == null) row.sinr = n.sinr;
+								row.src = 'MONNC+SSB';
+							}
+						});
+						return;
+					}
+					byCell[k] = n;
+					merged.push({
+						rat: 'NR', arfcn: n.arfcn, pci: n.pci,
+						rsrp: n.rsrp, rsrq: null, sinr: n.sinr, src: 'SSB', beams: n.beams
+					});
 				});
 			}
 			/* 按信号强度从大到小排（取不到值的排最后）——最该锁的小区排最前 */
@@ -437,6 +490,7 @@ return L.view.extend({
 					c.rat + (c.src === 'SSB' ? '（SSB）' : ''),
 					band != null ? (c.rat === 'NR' ? 'n' + band : 'B' + band) : '—',
 					String(c.arfcn),
+					fmtBw(neighborBandwidth(c.rat, c.arfcn)),
 					String(c.pci),
 					c.rsrp != null ? c.rsrp + ' dBm' : '—',
 					c.rsrq != null ? c.rsrq + ' dB' : '—',
@@ -446,9 +500,13 @@ return L.view.extend({
 				];
 			});
 			neighBody.appendChild(Mt5700.table(
-				['制式', '频段', 'ARFCN', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度', '操作'], rows, { striped: true }));
+				['制式', '频段', 'ARFCN', '带宽', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度', '操作'], rows, { striped: true }));
 			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 				'锁定会先切飞行模式再下发锁频并恢复；同频多个小区时注意区分 PCI。'));
+			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+				'带宽取自 ^HFREQINFO 的当前工作载波：仅当邻区频点落在该载波下行频带内才可知，'
+				+ '异频邻区无测量项，显示「—」。RSRQ 由 ^MONNC 提供（^NRSSBID 邻区不带 RSRQ），'
+				+ '已按 ARFCN+PCI 关联回填。'));
 		}
 
 		function loadNeighbors() {
@@ -460,6 +518,14 @@ return L.view.extend({
 				return AtWs.client.sendCommand('AT^NRSSBID?');
 			}).then(function (res) {
 				ssb = res.success && res.data ? Parse.parseNrssbid(String(res.data)) : null;
+				return AtWs.client.sendCommand('AT^HFREQINFO?');
+			}).then(function (res) {
+				/*
+				 * 带宽只是邻区的附注信息：^HFREQINFO 在 RRC null 态会报错，
+				 * 查不到就置空、整列降级为「—」，绝不能因此拖垮邻区本身。
+				 */
+				hfreqCarriers = (res && res.success && res.data)
+					? AtWs.parseHFREQINFO(String(res.data)) : [];
 				renderNeighbors();
 			}).catch(function () {
 				Mt5700.error('邻区扫描失败');

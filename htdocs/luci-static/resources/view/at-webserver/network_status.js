@@ -95,6 +95,7 @@ return L.view.extend({
 			},
 			carriers: [],
 			nrssbid: null,
+			monnc: [],
 			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
 			temps: { sub3GPA: 0, sub6GPA: 0, mimoPa: 0, tcxo: 0, ap1: 0, ap2: 0, modem1: 0 },
 			flow: { lastDsTime: 0, lastTxFlow: 0, lastRxFlow: 0, totalDsTime: 0, totalTxFlow: 0, totalRxFlow: 0 },
@@ -428,6 +429,20 @@ return L.view.extend({
 			}
 
 			/*
+			 * ^NRSSBID 的邻区不带 RSRQ（手册 13.28 的邻区字段只有 PCI/ARFCN/RSRP/SINR
+			 * + 波束），而 ^MONNC 报同一小区时是带的。本机实测 4/4 能按
+			 * (ARFCN, PCI) 对上，故从这里回填；对不上返回 null 显示「—」，绝不猜值。
+			 */
+			function monncRsrq(nb) {
+				if (!nb || !state.monnc || !state.monnc.length) return null;
+				for (var i = 0; i < state.monnc.length; i++) {
+					var c = state.monnc[i];
+					if (c.rat === 'NR' && c.arfcn === nb.arfcn && c.pci === nb.pci) return c.rsrq;
+				}
+				return null;
+			}
+
+			/*
 			 * 信号列数据源：
 			 *   主载波  主小区实时值（^MONSC；PCI/TAC 是十六进制，已在解析时换算）
 			 *   辅载波  ^NRSSBID 邻区按「SSB 频点落在载波带宽内」配对（无 RSRQ）
@@ -440,7 +455,7 @@ return L.view.extend({
 					sig = { pci: c0.pci || null, rsrp: c0.rsrp, rsrq: c0.rsrq, sinr: c0.sinr };
 				} else {
 					var nb = nrssbidMatch(c);
-					sig = nb ? { pci: nb.pci, rsrp: nb.rsrp, rsrq: null, sinr: nb.sinr } : {};
+					sig = nb ? { pci: nb.pci, rsrp: nb.rsrp, rsrq: monncRsrq(nb), sinr: nb.sinr } : {};
 					if (nb) usedSsbid = true;
 				}
 				return [
@@ -463,7 +478,21 @@ return L.view.extend({
 			));
 
 			var hint = '载波聚合要等到有数据业务时才会激活，空闲时通常只报主载波。';
-			if (usedSsbid) hint += ' 辅载波 PCI/RSRP/SINR 来自 ^NRSSBID 邻区测量（按频点配对），RSRQ 无测量项。';
+			if (usedSsbid) {
+				hint += ' 辅载波 PCI/RSRP/SINR 来自 ^NRSSBID 邻区测量（按频点配对），'
+					+ 'RSRQ 由 ^MONNC 按 ARFCN+PCI 关联回填（^NRSSBID 邻区不带 RSRQ）。';
+			} else if (list.length > 1) {
+				/*
+				 * ^NRSSBID 只报「按波束能量排序的前 4 个」小区，辅载波上的小区
+				 * 常常排不进去（本机 9 次采样里只有 1 次命中）。此时整行空白容易被
+				 * 误读成「没刷新」，必须把原因写出来。
+				 */
+				hint += ' 当前 ^NRSSBID 的前 4 强邻区都不在辅载波频带内，故辅载波信号列为空——'
+					+ '这是该命令只报 4 个小区的固有局限，不是刷新失败。';
+			}
+			if (slowFailures.loadSecondary) {
+				hint += ' 注意：本轮辅载波数据拉取失败（已保留上一次读数）。';
+			}
 			carrierBox.appendChild(E('div', { 'class': 'mt5700-hint' }, hint));
 
 		}
@@ -880,6 +909,12 @@ return L.view.extend({
 			 */
 			return AtWs.client.sendCommand('AT^NRSSBID?').then(function (ssbid) {
 				state.nrssbid = ssbid.success && ssbid.data ? Parse.parseNrssbid(String(ssbid.data)) : null;
+				/* ^MONNC 只为给 SSB 邻区补 RSRQ（SSB 不含该项）；查不到就整列「—」，
+				   不影响辅载波本身的 PCI/RSRP/SINR。 */
+				return AtWs.client.sendCommand('AT^MONNC');
+			}).then(function (monnc) {
+				state.monnc = monnc.success && monnc.data ? Parse.parseMonncAll(String(monnc.data)) : [];
+				delete slowFailures.loadSecondary;   /* 成功一轮就抹掉失败留痕 */
 				renderCarriers();
 			});
 		}
@@ -1030,15 +1065,38 @@ return L.view.extend({
 				.then(function () { refreshing = false; });
 		}
 
+		/*
+		 * 慢档任务顺序：**辅载波（loadSecondary）排在最前**。
+		 * 它过去排在第 9 位，要等前面 8 个函数（十余次串口往返）串行走完才执行，
+		 * 首屏进入页面时辅载波读数要空等一轮，表现为「显示缓慢」。
+		 * 它只依赖快档已取到的 state.carriers，没有前置依赖，放前面是安全的。
+		 */
+		var SLOW_TASKS = [loadSecondary, getPSReg, getFlow, getOperator, getAMBR,
+			getQCI, getDHCP, getTemp, getMCS, loadDiagnostics];
+
+		/* 慢档各任务的失败记录：逐步兜错后失败不再阻断后续，但要留痕，
+		   否则「某一项一直失败」又会退化成看不见的静默问题。 */
+		var slowFailures = {};
 		var slowRefreshing = false;
 		function refreshSlow() {
 			if (slowRefreshing) return Promise.resolve();
 			slowRefreshing = true;
+			/*
+			 * 串行，但**每个环节各自兜错**。
+			 * 过去是 `chain.then(a).then(b)…` 末尾挂一个 catch：任何一步 reject，
+			 * 后面全部静默跳过（含 loadSecondary），界面却毫无提示，
+			 * 表现为「辅载波读数一直不刷新、像是卡住了」。
+			 * 改成逐步兜错后，单点失败只丢那一项，其余照常更新。
+			 */
 			var chain = Promise.resolve();
-			[getPSReg, getFlow, getOperator, getAMBR, getQCI, getDHCP, getTemp, getMCS, loadSecondary, loadDiagnostics]
-				.forEach(function (fn) { chain = chain.then(fn); });
-			return chain.catch(function () { /* 刷新失败保留上一次数据 */ })
-				.then(function () { slowRefreshing = false; });
+			SLOW_TASKS.forEach(function (fn) {
+				chain = chain.then(function () {
+					return Promise.resolve()
+						.then(fn)
+						.catch(function (err) { slowFailures[fn.name || '匿名任务'] = err; });
+				});
+			});
+			return chain.then(function () { slowRefreshing = false; });
 		}
 
 		/* 手动点「刷新」时全量拉一次（含设备信息，绕过 60s 节流） */
