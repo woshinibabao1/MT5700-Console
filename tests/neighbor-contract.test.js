@@ -82,7 +82,7 @@ function loadLuciModule(relPath, returnExpr) {
 const bwFn = extractFunction(settingsJs, 'neighborBandwidth(rat, arfcn)');
 ok('存在 neighborBandwidth 函数', bwFn.length > 0);
 ok('邻区表已加入「带宽」列',
-	/\['制式',\s*'频段',\s*'ARFCN',\s*'带宽'/.test(settingsJs), '表头缺少「带宽」');
+	/\['制式',\s*'频段',\s*'ARFCN',\s*'SCS',\s*'带宽'/.test(settingsJs), '表头缺少「SCS/带宽」');
 ok('邻区行确实输出带宽值', /fmtBw\(neighborBandwidth\(c\.rat, c\.arfcn\)\)/.test(settingsJs));
 ok('存在 fmtBw 格式化（kHz → MHz）', /function fmtBw\(khz\)/.test(settingsJs));
 ok('fmtBw 对空值返回占位符「—」', /if \(khz == null\) return '—';/.test(settingsJs));
@@ -96,10 +96,45 @@ ok('匹配不到时返回 null 而不是猜一个数', /return null;\s*\}\s*$/.t
 ok('只认 NR 载波（跳过 LTE 行）', /c\.sysMode !== 'NR'/.test(bwFn));
 
 const loadNeighbors = extractFunction(settingsJs, 'loadNeighbors()');
-ok('扫描时会拉取 ^HFREQINFO?（带宽的唯一来源）', /sendCommand\('AT\^HFREQINFO\?'\)/.test(loadNeighbors));
+ok('扫描时会拉取 ^HFREQINFO?（带宽的唯一来源）', /AT\^HFREQINFO\?/.test(loadNeighbors));
 ok('^HFREQINFO 失败时降级为空数组，不拖垮邻区',
 	/hfreqCarriers = \(res && res\.success && res\.data\)/.test(loadNeighbors) &&
 	/: \[\]/.test(loadNeighbors), '未做失败降级');
+
+/* ---------- A2. SCS（子载波间隔）列 ---------- */
+
+const scsFn = extractFunction(settingsJs, 'neighborScs(rat, arfcn)');
+ok('存在 neighborScs 函数', scsFn.length > 0);
+ok('邻区行输出 SCS 值', /fmtScs\(neighborScs\(c\.rat, c\.arfcn\)\)/.test(settingsJs));
+ok('LTE 不套用 NR 的 SCS 规则', /if \(rat !== 'NR'\) return null;/.test(scsFn));
+ok('同频邻区复用 ^MONSC 实测值（按 channel 比对）',
+	/servingCell\.channel != null/.test(scsFn) && /measured: true/.test(scsFn),
+	'必须用 parseMONSC 的 channel 字段（不是 arfcn）');
+ok('异频邻区按频段推断并标注 measured:false',
+	/Parse\.getDefaultScsType\(band\)/.test(scsFn) && /measured: false/.test(scsFn));
+ok('未知频段返回 null 而不是编一个值', /if \(band == null\) return null;/.test(scsFn));
+ok('推断值带「*」标记以便与实测区分', /label \+ ' \*'/.test(settingsJs));
+ok('扫描时会拉取 ^MONSC（实测 SCS 的唯一来源）', /AT\^MONSC/.test(loadNeighbors));
+ok('锁频时优先用实测 SCS 而非按频段猜',
+	/var scsInfo = neighborScs\(cell\.rat, cell\.arfcn\);/.test(settingsJs) &&
+	/scsInfo \? scsInfo\.scs : Parse\.getDefaultScsType\(band\)/.test(settingsJs));
+
+/* ---------- A3. 取数链：任一命令失败不得毁掉整表 ---------- */
+
+ok('取数改为逐项兜错（不是链尾单个 catch）',
+	/neighFailures\[job\.key\] = true/.test(settingsJs),
+	'仍是串行 + 链尾单 catch，一条命令失败整表空白');
+ok('失败标记有对应的人话说明', /names = \{ MONNC:/.test(settingsJs));
+ok('渲染不依赖取数成功（失败也 renderNeighbors）',
+	/renderNeighbors\(\);/.test(settingsJs.slice(settingsJs.indexOf('function loadNeighbors'))),
+	'renderNeighbors 未在兜底后调用');
+
+/* ---------- A4. 未测量的占位行 ---------- */
+
+ok('三列信号全空的填充行不再占版面',
+	/c\.rsrp == null && c\.rsrq == null && c\.sinr == null\) unmeasured\+\+/.test(settingsJs));
+ok('被折叠的行有明确说明（避免被读成界面丢数据）',
+	/个小区模组只上报了邻区关系、未给出测量值/.test(settingsJs));
 
 /* ---------- B. SSB 邻区 RSRQ 回填与波束保留 ---------- */
 

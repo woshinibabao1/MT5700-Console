@@ -385,48 +385,180 @@ return L.view.extend({
 			});
 		}
 
-		/* ================= 漫游设置 SYSCFGEX ================= */
+		/* ================= 网络系统配置 SYSCFGEX ================= */
 
-		var sysCard = Mt5700.card('漫游设置', '是否允许漫游上网；接入次序 / 频段 / 服务域等其余参数读取后原样写回，不在此处改动');
+		var sysCard = Mt5700.card('网络系统配置',
+			'决定模组用哪些制式、哪些频段去搜网；改错可能导致注册不上网络');
 		var sysBody = E('div');
 		sysCard._body.appendChild(sysBody);
 		body.appendChild(sysCard);
 
-		/* SYSCFGEX 是「一次性下发整组参数」的接口：这里只暴露漫游一项，
-		 * 其余字段（接入次序 / 频段位图 / 服务域 / LTE 频段位图）从模组读回原值后原样写回，
-		 * 避免用户在本页误改它们。 */
+		/*
+		 * AT^SYSCFGEX 是「一次性下发整组参数」的接口：acqorder / band / roam /
+		 * srvdomain / lteband 必须一起写回，只改一项也会把其余项按当前值重发。
+		 * 因此本卡先读回模组原值，**未读回成功前禁止保存**，避免把空值写下去
+		 * —— 那会直接把模组设成「不搜任何网络」。
+		 */
 		var sysCfg = { acqorder: '', band: '', roam: 1, srvdomain: 2, lteband: '' };
-		var sysCfgReady = false;      // 只有成功读回模组当前参数后才允许保存，避免把空值写下去
+		var sysCfgReady = false;
+		var sysRanges = { roam: null, srvdomain: null };
 
-		var roamSel = Mt5700.select([
-			{ label: '0 · 开启国内国际漫游（旧语义：不支持漫游）', value: '0' },
-			{ label: '1 · 开启国内漫游、关闭国际漫游（旧语义：支持漫游）', value: '1' },
-			{ label: '2 · 关闭国内漫游、开启国际漫游（旧语义：不修改）', value: '2' },
-			{ label: '3 · 关闭国内国际漫游', value: '3' }
-		], '1');
+		/* ---------- 1. 网络接入顺序 ---------- */
+		var ACQ_OPTIONS = [
+			{ value: '080302', label: '080302 · 5G 优先，逐级回落（NR→LTE→WCDMA）' },
+			{ value: '08', label: '08 · 仅 5G' },
+			{ value: '0302', label: '0302 · 4G 优先，可回落 3G' },
+			{ value: '03', label: '03 · 仅 4G' },
+			{ value: '0203', label: '0203 · 3G 优先，可回落 4G' },
+			{ value: '02', label: '02 · 仅 3G' },
+			{ value: '99', label: '99 · 不修改（只保存本页其它项）' }
+		];
+		var ACQ_DESC = {
+			'080302': '有 5G 就用 5G，没有依次回落 4G、3G。绝大多数场景选它。',
+			'08': '只搜 5G。5G 覆盖不稳时会持续重搜，甚至无服务。',
+			'0302': '优先驻留 4G，无 4G 时落 3G。适合 5G 覆盖差又想保速率的地方。',
+			'03': '只搜 4G。信号稳定、耗电较低；离开 4G 覆盖会无服务。',
+			'0203': '优先驻留 3G，无 3G 时落 4G。仅在 3G 覆盖优于 4G 的地区有意义。',
+			'02': '只搜 3G，速率低，仅供排障使用。',
+			'99': '不改动接入顺序，只保存本页其它项。'
+		};
+		var acqSel = Mt5700.select(ACQ_OPTIONS, '080302');
+		var acqHint = E('div', { 'class': 'mt5700-hint' });
+		function paintAcq() {
+			sysCfg.acqorder = acqSel.value;
+			acqHint.textContent = (ACQ_DESC[acqSel.value] || '')
+				+ '（制式代码：08=NR 03=LTE 02=WCDMA，手册 13.2.3）';
+			applySrvConstraint();
+		}
+		acqSel.addEventListener('change', paintAcq);
+		sysBody.appendChild(Mt5700.formGroup('网络接入顺序', acqSel,
+			'模组按什么先后顺序搜索网络制式'));
+		sysBody.appendChild(acqHint);
+
+		/* ---------- 2. 2G / 3G 频段 ---------- */
+		var BAND_OPTIONS = [
+			{ value: '', label: '不修改（保持模组当前设置）' },
+			{ value: '00680380', label: '00680380 · 自动（由模组按运营商选择）' },
+			{ value: '3FFFFFFF', label: '3FFFFFFF · 全部频段（GSM / WCDMA 全频段）' },
+			{ value: '2000000680380', label: '2000000680380 · WCDMA 900 + 1700 + 自动' }
+		];
+		var bandSel = Mt5700.select(BAND_OPTIONS, '');
+		bandSel.addEventListener('change', function () { sysCfg.band = bandSel.value; });
+		sysBody.appendChild(Mt5700.formGroup('2G / 3G 频段', bandSel,
+			'十六进制位图，一般保持「自动」即可'));
+		sysBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+			'这是位图不是数字，手改极易出错；需要精确控制时用下面的只读原始值对照 AT 手册。'));
+
+		/* ---------- 3. 漫游（选项按 =? 实测范围动态生成） ---------- */
+		var roamSel = Mt5700.select(Parse.roamOptions(2), '1');
 		var roamHint = E('div', { 'class': 'mt5700-hint' });
+		var roamNote = E('div', { 'class': 'mt5700-hint' });
 		function paintRoam() {
 			sysCfg.roam = parseInt(roamSel.value, 10);
-			roamHint.textContent = '解读：' + (Parse.ROAM_TEXT[sysCfg.roam] || sysCfg.roam)
-				+ '；是否真的允许漫游还取决于模组 NV 开关';
+			var table = (sysRanges.roam && sysRanges.roam.max >= 3) ? Parse.ROAM_TEXT : Parse.ROAM_TEXT_BASIC;
+			roamHint.textContent = '解读：' + (table[sysCfg.roam] || sysCfg.roam);
 		}
 		roamSel.addEventListener('change', paintRoam);
 		sysBody.appendChild(Mt5700.formGroup('漫游', roamSel,
-			'允许模组在非归属网络（含国际漫游）上接入数据'));
+			'是否允许接入非归属运营商的网络'));
 		sysBody.appendChild(roamHint);
+		sysBody.appendChild(roamNote);
+
+		/* ---------- 4. 服务域 ---------- */
+		var SRV_DESC = {
+			0: '只注册语音网络，无法上网。当前接入制式含 4G / 5G 时模组不允许此值。',
+			1: '只注册数据网络，无法接打电话和收发短信。适合纯上网设备。',
+			2: '语音与数据同时注册，功能最完整。',
+			3: '由网络侧决定注册方式。当前接入制式含 4G / 5G 时模组不允许此值。',
+			4: '不改动服务域，只保存本页其它项。'
+		};
+		var srvSel = Mt5700.select([
+			{ label: '0 · 仅语音（CS_ONLY）', value: '0' },
+			{ label: '1 · 仅数据（PS_ONLY）', value: '1' },
+			{ label: '2 · 语音 + 数据（CS_PS）', value: '2' },
+			{ label: '3 · 不限（ANY）', value: '3' },
+			{ label: '4 · 不修改', value: '4' }
+		], '2');
+		var srvHint = E('div', { 'class': 'mt5700-hint' });
+		var srvNote = E('div', { 'class': 'mt5700-hint' });
+		function paintSrv() {
+			sysCfg.srvdomain = parseInt(srvSel.value, 10);
+			srvHint.textContent = SRV_DESC[sysCfg.srvdomain] || '';
+		}
+		srvSel.addEventListener('change', paintSrv);
+		sysBody.appendChild(Mt5700.formGroup('服务域', srvSel,
+			'注册到语音域、数据域还是两者'));
+		sysBody.appendChild(srvHint);
+		sysBody.appendChild(srvNote);
+
+		/*
+		 * 手册 13.2.3 注 2 的硬约束：设置的模式里含有 L(03) 或 NR(08) 时，
+		 * 服务域**不允许**设为 0 或 3。这条只写在文档里，界面不体现的话用户会
+		 * 选了之后被模组默默拒绝。这里把约束显性化：禁用对应项，且若当前已选中
+		 * 非法值就自动纠正为 2（CS_PS），并说明原因。
+		 */
+		function setSrvDisabled(v, off) {
+			var opt = srvSel.querySelector('option[value="' + v + '"]');
+			if (opt) opt.disabled = !!off;
+		}
+		function applySrvConstraint() {
+			var acq = sysCfg.acqorder || '';
+			var hasLteOrNr = acq.indexOf('03') >= 0 || acq.indexOf('08') >= 0;
+			setSrvDisabled('0', hasLteOrNr);
+			setSrvDisabled('3', hasLteOrNr);
+			if (hasLteOrNr && (sysCfg.srvdomain === 0 || sysCfg.srvdomain === 3)) {
+				srvSel.value = '2';
+				paintSrv();
+			}
+			srvNote.textContent = hasLteOrNr
+				? '当前接入顺序包含 4G / 5G，模组不允许「仅语音(0)」与「不限(3)」，已自动禁用。'
+				: '';
+		}
+
+		/* ---------- 5. 4G / LTE 频段 ---------- */
+		var LTE_OPTIONS = [
+			{ value: '', label: '不修改（保持模组当前设置）' },
+			{ value: '1E200000095', label: '1E200000095 · 常用（BC1/3/5/8/34/38/39/40/41）' },
+			{ value: '7FFFFFFFFFFFFFFF', label: '7FFFFFFFFFFFFFFF · 全部 LTE 频段' }
+		];
+		var lteSel = Mt5700.select(LTE_OPTIONS, '');
+		lteSel.addEventListener('change', function () { sysCfg.lteband = lteSel.value; });
+		sysBody.appendChild(Mt5700.formGroup('4G / LTE 频段', lteSel,
+			'十六进制位图；改为「全部」会明显增加搜网时间'));
+		sysBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+			'本机读回值 1E200000095 即 BC1+BC3+BC5+BC8+BC34+BC38+BC39+BC40+BC41 的叠加。'));
+
+		/* ---------- 模组当前原始值（只读，便于排障对标） ---------- */
+		var sysRaw = E('div', { 'class': 'mt5700-hint' }, '模组当前值：读取中…');
 
 		sysBody.appendChild(Mt5700.panelActions(
-			Mt5700.primaryButton('保存漫游设置', function () {
+			Mt5700.primaryButton('保存网络配置', function () {
 				if (!sysCfgReady) {
 					Mt5700.error('尚未读回模组当前参数，请刷新页面后重试');
 					return;
 				}
 				send(Parse.buildSysCfgCommand(sysCfg)).then(function (res) {
-					if (res.success) Mt5700.success('漫游设置已更新');
-					else Mt5700.error('漫游设置更新失败');
-				}).catch(function () { Mt5700.error('漫游设置更新失败'); });
+					if (res.success) {
+						Mt5700.success('网络系统配置已更新，模组将重新搜网');
+						return fetchSysCfg();
+					}
+					Mt5700.error('网络系统配置更新失败');
+				}).catch(function () { Mt5700.error('网络系统配置更新失败'); });
 			})
 		));
+		sysBody.appendChild(sysRaw);
+
+		/* 下拉里没有的值（模组被手工写过）→ 补一个选项顶上去，绝不静默改写成预设 */
+		function ensureOption(sel, value, label) {
+			if (value === '' || value == null) return;
+			if (!sel.querySelector('option[value="' + value + '"]')) {
+				var o = document.createElement('option');
+				o.value = value;
+				o.textContent = (label || '') + value + ' · 当前值（预设未收录）';
+				sel.appendChild(o);
+			}
+			sel.value = value;
+		}
 
 		function fetchSysCfg() {
 			return send('AT^SYSCFGEX?').then(function (res) {
@@ -434,7 +566,44 @@ return L.view.extend({
 				if (!cfg) return;                 // 读不到就不放行保存，避免把空值写进模组
 				sysCfg = cfg;
 				sysCfgReady = true;
-				roamSel.value = String(sysCfg.roam);
+				ensureOption(acqSel, sysCfg.acqorder, '');
+				ensureOption(bandSel, sysCfg.band, '');
+				ensureOption(lteSel, sysCfg.lteband, '');
+				ensureOption(roamSel, String(sysCfg.roam), '');
+				srvSel.value = String(sysCfg.srvdomain);
+				paintAcq();
+				paintRoam();
+				paintSrv();
+				sysRaw.textContent = '模组当前值：acqorder=' + sysCfg.acqorder
+					+ '，band=' + sysCfg.band + '，roam=' + sysCfg.roam
+					+ '，srvdomain=' + sysCfg.srvdomain + '，lteband=' + sysCfg.lteband;
+			}).catch(function () {});
+		}
+
+		/*
+		 * 漫游与服务域的**取值范围**来自 AT^SYSCFGEX=?（本机实测 roam (0-2)、
+		 * srvdomain (0-4)）。漫游的两套语义由这个范围决定，见 parse.js 的注释：
+		 * 写死一套会在另一种固件上把意思显示反。
+		 */
+		function fetchSysCfgRanges() {
+			return send('AT^SYSCFGEX=?').then(function (res) {
+				if (!res.success) return;
+				sysRanges = Parse.parseSysCfgRanges(atText(res)) || sysRanges;
+				if (!sysRanges.roam) return;
+				var keep = String(sysCfg.roam);
+				roamSel.innerHTML = '';
+				Parse.roamOptions(sysRanges.roam.max).forEach(function (o) {
+					var el = document.createElement('option');
+					el.value = o.value;
+					el.textContent = o.label;
+					roamSel.appendChild(el);
+				});
+				if (sysCfgReady) ensureOption(roamSel, keep, '');
+				roamNote.textContent = '本机 ^SYSCFGEX=? 实报范围 roam ' + sysRanges.roam.min
+					+ '-' + sysRanges.roam.max + '，故按「'
+					+ (sysRanges.roam.max >= 3 ? '国内 / 国际' : '支持 / 不支持')
+					+ '」语义显示；服务域范围 '
+					+ (sysRanges.srvdomain ? sysRanges.srvdomain.min + '-' + sysRanges.srvdomain.max : '未知') + '。';
 				paintRoam();
 			}).catch(function () {});
 		}
@@ -651,6 +820,7 @@ return L.view.extend({
 				.then(fetchDeviceControl)
 				.then(fetchNRCapability)
 				.then(fetchSysCfg)
+				.then(fetchSysCfgRanges)
 				.then(fetchThermConfig)
 				.catch(function () { /* 单项数据失败时保留其余卡片，不打断整页 */ });
 		}

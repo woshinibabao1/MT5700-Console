@@ -358,7 +358,48 @@ return L.view.extend({
 		var ssb = null;
 		var monncCells = [];
 		var hfreqCarriers = [];
+		/* 服务小区（^MONSC）：唯一实测的 SCS 来源，见 neighborScs 注释 */
+		var servingCell = null;
 		var neighBusy = false;
+
+		/*
+		 * 邻区 SCS（子载波间隔，15/30/60/120/240 kHz = ^NRFREQLOCK 的 scstype 0~4）。
+		 *
+		 * 模组**没有任何命令**上报邻区的 SCS —— ^MONNC / ^NRSSBID 都没有该字段
+		 * （手册 13.10 的 NR 邻区字段只有 ARFCN/PCI/RSRP/RSRQ/SINR，手册全篇无
+		 * 「子载波间隔」一词）。只有 ^MONSC 报**服务小区**的 SCS（第 5 个字段）。
+		 *
+		 * 因此分两种情况，且必须区分标注，不能混为一谈：
+		 *   ① 同频邻区（ARFCN 与服务小区相同）：与服务小区同属一个 NR 载波，
+		 *      子载波间隔必然相同 → 可直接用 ^MONSC 的**实测值**。
+		 *   ② 异频邻区：只能按 3GPP TS 38.104 Table 5.4.3.3-1 的 SSB SCS 推断
+		 *      （n41/n77/n78/n79 → 30 kHz；n28/n1/n3/n5/n8 → 15 kHz；
+		 *       FR2 的 n257/258/260/261 → 120 kHz）。这是标准规定的默认值，
+		 *      不是实测，故加「*」以示区别。
+		 *
+		 * 本机交叉验证：^MONSC 实测 SCS=1(30 kHz)，n41 按表推断也是 1 —— 两者一致，
+		 * 说明这套推断在本机是准的；但仍保留标注，因为换频段后未必一致。
+		 */
+		function neighborScs(rat, arfcn) {
+			if (rat !== 'NR') return null;
+			/* parseMONSC 的频点字段叫 channel（不是 arfcn），注意别写错 */
+			if (servingCell && servingCell.scs != null && servingCell.channel != null
+				&& String(servingCell.channel) === String(arfcn)) {
+				return { scs: servingCell.scs, measured: true };
+			}
+			var band = Parse.arfcnToBand('NR', arfcn);
+			if (band == null) return null;
+			return { scs: Parse.getDefaultScsType(band), measured: false };
+		}
+
+		function fmtScs(v) {
+			if (!v || v.scs == null) return '—';
+			var t = (Parse.SCS_TYPES || []).filter(function (o) {
+				return Number(o.value) === Number(v.scs);
+			})[0];
+			var label = t ? t.label : (v.scs + ' kHz');
+			return v.measured ? label : label + ' *';
+		}
 
 		/*
 		 * 邻区带宽：^MONNC 与 ^NRSSBID 都不报邻区带宽 —— 3GPP 上 UE 不读邻区 SIB1
@@ -391,11 +432,18 @@ return L.view.extend({
 				Mt5700.error('无法由 ARFCN ' + cell.arfcn + ' 判断频段，请在锁频设置里手动指定');
 				return;
 			}
+			/*
+			 * SCS 是 ^NRFREQLOCK 的必填参数（手册 13.13 的 scstype 0~4）。
+			 * 同频邻区直接用 ^MONSC 实测值，比按频段推断更可信；
+			 * 拿不到实测才退回 Parse.getDefaultScsType。
+			 */
+			var scsInfo = neighborScs(cell.rat, cell.arfcn);
+			var scs = scsInfo ? scsInfo.scs : Parse.getDefaultScsType(band);
 			var kind = cell.rat === 'LTE' ? 'lte' : 'nr';
 			var cmd;
 			try {
 				cmd = Parse.buildLockCommand(kind, 2, 0, [{
-					band: band, arfcn: String(cell.arfcn), pci: String(cell.pci), scs: Parse.getDefaultScsType(band)
+					band: band, arfcn: String(cell.arfcn), pci: String(cell.pci), scs: scs
 				}]);
 			} catch (err) {
 				/* ARFCN/PCI 缺失时 buildLockCommand 会抛，异常逃出点击回调就表现为「点了没反应」 */
@@ -476,13 +524,29 @@ return L.view.extend({
 				var rb = (b.rsrp != null ? b.rsrp : -999);
 				return rb - ra;
 			});
+			/*
+			 * 模组会为「邻区列表里配置了、但本轮没真正测量」的小区返回填充行：
+			 * RSRP/RSRQ/SINR 全是手册 13.10 的无效值（-157/-44/-24），解析后为 null。
+			 * 这些行只有 PCI 有值，三列信号全空，占着版面且极易被读成「数据丢失」。
+			 * 它们对选小区没有决策价值，故不单列成行，改为末尾统计并说明原因
+			 * —— 让人一眼看出是模组没测，而不是界面把数据弄丢了。
+			 */
+			var shown = [];
+			var unmeasured = 0;
+			merged.forEach(function (c) {
+				if (c.rsrp == null && c.rsrq == null && c.sinr == null) unmeasured++;
+				else shown.push(c);
+			});
 			neighBody.appendChild(E('div', { 'class': 'mt5700-card-subtitle mt5700-mt-md' },
-				'邻区（' + merged.length + ' 个，按 RSRP 从强到弱）'));
-			if (!merged.length) {
-				neighBody.appendChild(Mt5700.empty('暂无邻区数据，点击右上「扫描邻区」'));
+				'邻区（' + shown.length + ' 个，按 RSRP 从强到弱）'));
+			if (!shown.length) {
+				neighBody.appendChild(Mt5700.empty(unmeasured
+					? '模组上报了 ' + unmeasured + ' 个邻区，但都未测量（可能刚驻留或网络未配置测量）'
+					: '暂无邻区数据，点击右上「扫描邻区」'));
+				renderNeighborHints();
 				return;
 			}
-			var rows = merged.map(function (c) {
+			var rows = shown.map(function (c) {
 				var band = Parse.arfcnToBand(c.rat, c.arfcn);
 				var btn = Mt5700.button('锁定', function () { lockNeighbor(c); }, 'secondary');
 				btn.disabled = band == null;
@@ -490,6 +554,7 @@ return L.view.extend({
 					c.rat + (c.src === 'SSB' ? '（SSB）' : ''),
 					band != null ? (c.rat === 'NR' ? 'n' + band : 'B' + band) : '—',
 					String(c.arfcn),
+					fmtScs(neighborScs(c.rat, c.arfcn)),
 					fmtBw(neighborBandwidth(c.rat, c.arfcn)),
 					String(c.pci),
 					c.rsrp != null ? c.rsrp + ' dBm' : '—',
@@ -500,39 +565,83 @@ return L.view.extend({
 				];
 			});
 			neighBody.appendChild(Mt5700.table(
-				['制式', '频段', 'ARFCN', '带宽', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度', '操作'], rows, { striped: true }));
+				['制式', '频段', 'ARFCN', 'SCS', '带宽', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度', '操作'], rows, { striped: true }));
+			if (unmeasured) {
+				neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'另有 ' + unmeasured + ' 个小区模组只上报了邻区关系、未给出测量值'
+					+ '（RSRP/RSRQ/SINR 均为无效填充值），故未列出——这不是界面丢数据。'));
+			}
+			renderNeighborHints();
+		}
+
+		/* 表格下方的说明。早退路径（无邻区）也要调用，故抽成函数。 */
+		function renderNeighborHints() {
+			var names = { MONNC: '邻区列表 ^MONNC', NRSSBID: 'SSB 测量 ^NRSSBID',
+				HFREQINFO: '工作载波 ^HFREQINFO（带宽列）', MONSC: '服务小区 ^MONSC（同频实测 SCS）' };
+			var failed = Object.keys(neighFailures).filter(function (k) { return neighFailures[k]; });
+			if (failed.length) {
+				neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'本轮以下数据源查询失败，相关列已降级显示（其余照常）：'
+					+ failed.map(function (k) { return names[k] || k; }).join('、')));
+			}
 			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 				'锁定会先切飞行模式再下发锁频并恢复；同频多个小区时注意区分 PCI。'));
+			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+				'SCS = 子载波间隔（^NRFREQLOCK 的 scstype，15/30/60/120/240 kHz）：'
+				+ '与当前服务小区同频点的邻区用 ^MONSC 的实测值，异频邻区只能按 3GPP TS 38.104'
+				+ '规定的 SSB SCS 推断并加「*」标注——模组不报邻区 SCS，这是唯一不猜的做法。'));
 			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 				'带宽取自 ^HFREQINFO 的当前工作载波：仅当邻区频点落在该载波下行频带内才可知，'
 				+ '异频邻区无测量项，显示「—」。RSRQ 由 ^MONNC 提供（^NRSSBID 邻区不带 RSRQ），'
 				+ '已按 ARFCN+PCI 关联回填。'));
 		}
 
+		var neighFailures = {};
 		function loadNeighbors() {
 			if (neighBusy) return;
 			neighBusy = true;
 			neighRefreshBtn.disabled = true;
-			return AtWs.client.sendCommand('AT^MONNC').then(function (res) {
-				monncCells = res.success && res.data ? Parse.parseMonncAll(String(res.data)) : [];
-				return AtWs.client.sendCommand('AT^NRSSBID?');
-			}).then(function (res) {
-				ssb = res.success && res.data ? Parse.parseNrssbid(String(res.data)) : null;
-				return AtWs.client.sendCommand('AT^HFREQINFO?');
-			}).then(function (res) {
-				/*
-				 * 带宽只是邻区的附注信息：^HFREQINFO 在 RRC null 态会报错，
-				 * 查不到就置空、整列降级为「—」，绝不能因此拖垮邻区本身。
-				 */
-				hfreqCarriers = (res && res.success && res.data)
-					? AtWs.parseHFREQINFO(String(res.data)) : [];
-				renderNeighbors();
-			}).catch(function () {
-				Mt5700.error('邻区扫描失败');
-			}).then(function () {
-				neighBusy = false;
-				neighRefreshBtn.disabled = false;
+			neighFailures = {};
+			/*
+			 * 四个数据源彼此独立，逐个兜错：
+			 * 过去是 `then(a).then(b).then(c)` 串行 + **链尾单个 catch**，任一条命令
+			 * reject 后面的就全部跳过、连 renderNeighbors 都不执行 —— 整张表空白，
+			 * 只弹一句「邻区扫描失败」。^NRSSBID 在空闲态/非 NR 组网、^HFREQINFO 在
+			 * RRC null 态都会 ERROR，一次偶发失败就表现为「数据全丢了」。
+			 * 现在：谁失败只丢谁那一部分，其余照常渲染，并在页面上点明是哪一项。
+			 */
+			var jobs = [
+				{ key: 'MONNC', cmd: 'AT^MONNC', apply: function (res) {
+					monncCells = res.success && res.data ? Parse.parseMonncAll(String(res.data)) : [];
+				} },
+				{ key: 'NRSSBID', cmd: 'AT^NRSSBID?', apply: function (res) {
+					ssb = res.success && res.data ? Parse.parseNrssbid(String(res.data)) : null;
+				} },
+				{ key: 'HFREQINFO', cmd: 'AT^HFREQINFO?', apply: function (res) {
+					/* 只影响带宽列；RRC null 态会报错，降级为整列「—」 */
+					hfreqCarriers = (res && res.success && res.data)
+						? AtWs.parseHFREQINFO(String(res.data)) : [];
+				} },
+				{ key: 'MONSC', cmd: 'AT^MONSC', apply: function (res) {
+					/* 只影响同频邻区的实测 SCS；拿不到就整列退回按频段推断 */
+					servingCell = (res && res.success && res.data)
+						? AtWs.parseMONSC(String(res.data)) : null;
+				} }
+			];
+			var chain = Promise.resolve();
+			jobs.forEach(function (job) {
+				chain = chain.then(function () {
+					return AtWs.client.sendCommand(job.cmd)
+						.then(job.apply)
+						.catch(function () { neighFailures[job.key] = true; });
+				});
 			});
+			return chain.catch(function () { /* 兜底：下面的渲染无论如何都要跑 */ })
+				.then(function () {
+					renderNeighbors();
+					neighBusy = false;
+					neighRefreshBtn.disabled = false;
+				});
 		}
 
 		/*

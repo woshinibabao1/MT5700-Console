@@ -291,6 +291,51 @@ var Parse = (function () {
 		3: '3 · 关闭国内国际漫游'
 	};
 
+	/*
+	 * 漫游有**两套语义**（手册 13.2.3），取决于 NV 项「漫游特性」是否激活：
+	 *   未激活（AT^SYSCFGEX=? 报 0-2）：0 不支持漫游 / 1 支持漫游 / 2 无变化
+	 *   已激活（报 0-3）               ：0 开启国内国际 / 1 开国内关国际 /
+	 *                                    2 关国内开国际 / 3 关闭国内国际
+	 *
+	 * ⚠️ 同一个数值在两套语义下含义**完全相反**：0 在前者是「禁止漫游」、
+	 * 在后者是「国内国际全开」。因此下拉项与文案必须由模组实报的取值范围决定，
+	 * 写死任何一套都会在另一台设备上把意思显示反 —— 这正是下面两个函数存在的理由。
+	 */
+	api.ROAM_TEXT_BASIC = {
+		0: '0 · 不支持漫游',
+		1: '1 · 支持漫游',
+		2: '2 · 不修改'
+	};
+
+	/*
+	 * 解析 AT^SYSCFGEX=? 的取值范围（只需 roam 与 srvdomain）。
+	 * 实测应答：^SYSCFGEX: ("01","02","03","08"),((...),(...)),(0-2),(0-4),((...),(...))
+	 * 只有这两项是 (a-b) 形式，其余都是枚举串，故直接抓所有 (a-b) 即可。
+	 */
+	api.parseSysCfgRanges = function (text) {
+		var all = String(text == null ? '' : text).match(/\((\d+)\s*-\s*(\d+)\)/g) || [];
+		var ranges = all.map(function (t) {
+			var m = t.match(/\((\d+)\s*-\s*(\d+)\)/);
+			return { min: Number(m[1]), max: Number(m[2]) };
+		});
+		return { roam: ranges[0] || null, srvdomain: ranges[1] || null };
+	};
+
+	/*
+	 * 按实测上限生成漫游下拉项。范围未知时退回基础语义（0-2）：
+	 * 本机 =? 实测就是 (0-2)，且基础语义是两台设备都支持的交集，取它最保守。
+	 */
+	api.roamOptions = function (max) {
+		var table = (max != null && max >= 3) ? api.ROAM_TEXT : api.ROAM_TEXT_BASIC;
+		var upper = (max != null ? max : 2);
+		var out = [];
+		for (var i = 0; i <= upper; i++) {
+			if (table[i] == null) continue;
+			out.push({ label: table[i], value: String(i) });
+		}
+		return out;
+	};
+
 	api.SRV_DOMAIN_TEXT = {
 		0: '0 · CS_ONLY（仅电路域）',
 		1: '1 · PS_ONLY（仅分组域）',
