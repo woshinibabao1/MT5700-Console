@@ -58,9 +58,12 @@ impl AsyncWrite for TcpWriter {
 
     fn poll_shutdown(
         self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
+        // 必须转发给内层 socket：空实现会让 shutdown() 直接返回 Ok 而不发出 FIN，
+        // 对端永远读不到 EOF。
+        let this = self.get_mut();
+        std::pin::Pin::new(&mut this.stream).poll_shutdown(cx)
     }
 }
 

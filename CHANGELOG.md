@@ -5,6 +5,89 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.1.1] - 2026-09-14
+
+Rust 后端全面审查与加固（13 个文件 / 5141 行）。每条均附行号证据，
+并用 `cargo check` 与阴性对照验证过；正常路径输出保持一致，确认无负优化。
+
+### 修正
+
+- **定时锁频：无服务自愈解锁后状态不同步**（`schedule.rs:215`）
+  解锁后内存里的 `applied` / `current_mode` / `last_applied` 仍是解锁前的值，
+  下一周期「`target != mode || !applied || want != last`」三个条件全部不成立 ——
+  用户配置的锁频在本次时段内**永久失效**，而状态接口仍报 `applied: true`
+  （界面显示与实际相反），要等下一次时段切换才自愈。现在解锁后同步置 `applied = false`。
+- **定时锁频：关掉解锁开关后"解锁"退化成空操作**（`schedule.rs:340`）
+  同时关闭 `unlock_lte` / `unlock_nr` 时解锁时段一条命令都不生成，被判成"下发失败"：
+  模组保持旧锁频不动，且每个检测周期重放一次空切换、反复污染日志。
+  现在区分「本次无需下发（用户显式关闭解锁）」与「配置有误」，前者按成功处理。
+- **RPC 事件总线：取号与入队非原子，事件会永久丢失**（`rpcserver.rs:112`）
+  `push()` 先在锁外 `fetch_add` 取号再入队，`since()` 可能读到"号已分配、事件未入队"
+  的中间态，前端游标因此推进到一个不存在的 seq，该条新短信 / 来电上报再也拉不到。
+  改为在持有队列锁时取号。
+- **RPC：超长请求行的排空没有上限**（`rpcserver.rs:778`）
+  单行 8192B 限制只管"读多少"，超限后还要排空该行剩余数据；原先排空用无界
+  `read_until`，对端只要持续发不含换行的字节流就能把服务撑爆。新增 64KB 排空上限。
+- **RPC：写应答失败 / 超时不断开连接**（`rpcserver.rs:270`）
+  原先 `let _ =` 丢弃写结果；`write_all` 被 5s 超时打断时可能已写出半包，
+  继续复用会让半包与下一条应答粘在一起，破坏 newline-JSON 分帧。现在一律断开。
+- **RPC：`at` 方法未过滤控制字符，可注入第二条 AT 命令**（`rpcserver.rs:295`）
+  AT 以 CR 结束命令行，而 `cmd` 串内的 CR/LF/NUL 未清理，一次请求即可携带
+  `AT+CSQ\r\nAT+CFUN=0`。短信通道用的「字面 \r」是两个字符，不受影响。
+- **`AT^SYSCFGEX` 规范化：全局删除 "OK" 且大小写敏感**（`rpcserver.rs:742`）
+  `replace("OK","")` 会抹掉参数里合法的 "OK"（`"OK"` 被改写成 `""`）；
+  `starts_with` 大小写敏感，小写 `at^syscfgex` 可绕过规范化。改为只剥末尾 OK、忽略大小写。
+- **PDU 解包：尾部填充位被当成真实字符**（`pdu.rs:62`）
+  循环结束残留的 1~6 bit 是填充位，原实现据此补一个字符，短信正文尾部莫名多出
+  '@' 之类并进入企业微信推送。正常 PDU 不受影响（阴性对照已验证）。
+- **通知日志写失败节流用墙钟，NTP 回拨期间永久静默**（`notify.rs:200`）
+  路由器无 RTC，墙钟可能大幅回拨，回拨后 `now - last` 恒为 0，导致 `/tmp` 写满这类
+  最该报警的错误被永久吞掉。改用单调时钟做节流基准。
+- **后台任务 panic 被完全吞掉**（`main.rs:190`）
+  `if let Some(Ok(Err(e)))` 只认业务错误，任务 panic 的 `JoinError` 无人处理；
+  其余任务一律 `let _ = .await`。现在统一记录。
+  *有意不改变退出码*：非 0 退出会让 procd 判定崩溃并反复 respawn，
+  攒满重试后永久放弃拉起，反而更糟。
+- **TCP 通道半关闭失效**（`transport.rs:59`）
+  `poll_shutdown` 是空实现，不转发给内层 socket，`shutdown()` 直接返回 Ok 而不发 FIN，
+  对端永远读不到 EOF。
+- **串口自动探测：日志与事实相反**（`serialdetect.rs:55`）
+  端口应答正常但重新打开失败时，会落到末尾打印「无有效应答，跳过」，排查时严重误导。
+- **串口波特率非法值直接失败**（`serial_linux.rs:144`）
+  不在支持档位内时 `open_serial` 直接返回错误，AT 通道永久建不起来（配置写错一次
+  就再也连不上）。现在回退到 115200 并告警。
+- **`Cargo.lock` 版本号一直停留在 1.0.3**：自 1.0.4 起每次发版都漏改，
+  导致二进制 `-version` 报旧版本。本次同步为 1.1.1。
+
+### 改进 - 配置默认值与 UCI / 前端对齐（`config.rs`）
+
+- `serial_port`：内置默认由写死的 `/dev/ttyUSB1` 改为 `auto`（UCI 与前端本就是 `auto`）。
+  UCI 读取失败时原行为会跳过探测、死盯 ttyUSB1，该口不可用时服务永远连不上；
+  auto 的候选排序仍把 ttyUSB1 排在最前，无额外开销。
+- `log_file`：内置默认由空串改为 `/tmp/at-notifications.log`，与 UCI 一致
+  （原先 UCI 读不到时通知日志被静默关闭）。
+- `serial_baudrate`：clamp 下界由 0 改为 9600（最小支持档位）。
+
+### 验证
+
+- `cargo check --target x86_64-unknown-linux-gnu --all-targets` → **0 error / 0 warning**。
+- 阴性对照（Python 复现改动前后算法）：
+  - PDU 解包：正常 PDU（UDL=9 / 8 字节）输出**完全一致**；截断数据旧实现多造 1 个字符，新实现不再造。
+  - SYSCFGEX 规范化：正常输入一致；参数含 `"OK"` 时旧实现删成 `""`，新实现保留。
+- 8 套测试全绿（ui 235 / parse 53 / sms-pdu 92 / sms-mode 26 / upgrade-poll 49 /
+  sim-status 69 / watchdog 51 / parse-extra 19）。
+
+### 有意未改（避免负优化）
+
+- `urc.rs::handle_new_sms` 在分发循环里 await `AT+CMGR` 的队头阻塞：改动需动
+  Dispatcher 的 `&mut self` 所有权，风险高于收益，维持 v1.0.4 的决定。
+- `notify.rs` 日志轮转与追加缺互斥：并发调用可能丢记录，但要重构 `append_log`
+  的句柄管理，留待后续。
+- `schedconfig.rs` 的 `uci commit` / `revert` 作用于整个包：改 `uci batch` 涉及较大重构，
+  且当前无并发写入方。
+- TCP keepalive：当前依赖组合下 `tokio::net::TcpStream` 无 `set_keepalive`，
+  且该路径仅在 `connection_type` 非 SERIAL 时使用。
+
 ## [1.1.0] - 2026-09-14
 
 > ** breaking**：移除了「SIM 卡状态自愈」（UCI `sim_heal_enable`）。理由与证据见下。

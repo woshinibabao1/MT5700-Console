@@ -215,7 +215,16 @@ impl Scheduler {
         // 锁频锁到了没有覆盖的小区会一直无服务，这时解锁比守着配置更重要。
         log_warn!("网络无服务已持续 {}s，解锁频段恢复", down.as_secs());
         self.apply_lock(&unlock_config(), "恢复").await;
-        self.state.write().await.last_service_at = Instant::now();
+        {
+            let mut s = self.state.write().await;
+            s.last_service_at = Instant::now();
+            // ★ 模组已被解锁，内存状态必须跟着变。
+            // 否则下一周期 tick 的「target != mode || !applied || want != last」
+            // 三个条件全部不成立，于是不再下发任何命令 —— 用户配置的锁频
+            // 在本次时段内就永久失效了，而 status() 仍对外报 applied=true，
+            // 界面显示与实际完全相反，要等到下一次时段切换才自愈。
+            s.applied = false;
+        }
     }
 
     fn modem_busy_recently(&self) -> bool {
@@ -336,8 +345,16 @@ impl Scheduler {
             }
         }
 
-        // 一条锁频命令都未下发（如 type=3 且 bands 为空）视为失败，避免空操作被标成 applied
-        if lock_attempts == 0 {
+        // 一条锁频命令都未下发时，要区分两种成因：
+        //  (a) 用户关闭了 unlock_lte / unlock_nr，本次切换本就「什么都不该下发」——正常；
+        //  (b) 配置有误（如 type=3 但 bands 为空），命令生成不出来——必须判失败好重试。
+        // 原先不区分，(a) 会被判成失败：模组保持旧锁频不动，且 applied 始终为 false，
+        // 于是每个 check_interval 重放一次空切换，日志被反复污染。
+        let expected = [cfg.lte.type_ > 0, cfg.nr.type_ > 0]
+            .iter()
+            .filter(|&&v| v)
+            .count();
+        if lock_attempts == 0 && expected > 0 {
             log_warn!("未生成任何锁频命令（配置可能为空），视为下发失败");
             lock_ok = false;
         }

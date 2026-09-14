@@ -52,7 +52,12 @@ pub async fn detect_at_port(cfg: &SerialConfig) -> Result<Box<dyn Transport>, St
             // 探测用的连接已随函数返回而关闭，这里重新打开一条正式连接。
             match crate::serial_linux::open_serial(&probe).await {
                 Ok(tp) => return Ok(tp),
-                Err(e) => log_warn!("  重新打开 {} 失败: {}", port, e),
+                Err(e) => {
+                    // 必须 continue：落到循环末尾会打印「无有效应答，跳过」，
+                    // 与事实正好相反（它应答正常，只是重开失败），排查时严重误导。
+                    log_warn!("  {} 应答正常但重新打开失败: {}，跳过", port, e);
+                    continue;
+                }
             }
         }
         log_info!("  {} 无有效应答，跳过", port);

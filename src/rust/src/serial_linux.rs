@@ -2,6 +2,7 @@
 //! 打开后拆成读写两半：读侧由 tokio AsyncFd 事件驱动，空闲不占 CPU。
 
 use crate::config::SerialConfig;
+use crate::log_warn;
 use crate::transport::{Transport, TransportParts};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::pin::Pin;
@@ -141,11 +142,20 @@ pub struct SerialTransport {
 }
 
 pub async fn open_serial(cfg: &SerialConfig) -> Result<Box<dyn Transport>, String> {
+    // 波特率不在支持档位内时回退到 115200，而不是直接失败：
+    // 直接失败会让 AT 通道永久建不起来（配置写错一次就再也连不上模组，
+    // 日志里还只有一句「不支持的波特率」），属于典型的失败放大。
+    let baud = if BAUDS.iter().any(|(b, _)| *b == cfg.baudrate) {
+        cfg.baudrate
+    } else {
+        log_warn!("不支持的波特率 {}，回退到 115200", cfg.baudrate);
+        115200
+    };
     let speed = BAUDS
         .iter()
-        .find(|(b, _)| *b == cfg.baudrate)
+        .find(|(b, _)| *b == baud)
         .map(|(_, s)| *s)
-        .ok_or_else(|| format!("不支持的波特率 {}", cfg.baudrate))?;
+        .ok_or_else(|| format!("不支持的波特率 {}", baud))?;
 
     let cpath = std::ffi::CString::new(cfg.port.as_str()).map_err(|e| e.to_string())?;
     // O_CLOEXEC：本进程会 fork/exec `uci` 读写配置（config.rs / schedconfig.rs），

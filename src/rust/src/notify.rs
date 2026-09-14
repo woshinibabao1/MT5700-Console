@@ -6,7 +6,7 @@ use crate::config::NotificationConfig;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const NOTIFY_INTERVAL: Duration = Duration::from_secs(60);
@@ -25,8 +25,19 @@ const NOTIFY_LOG_MAX_BYTES: u64 = 256 * 1024;
 /// /tmp 满时每条通知都会失败，不节流就会每条再刷一条错误日志，雪上加霜。
 const LOG_ERROR_THROTTLE_SECS: u64 = 60;
 
-/// 上次上报「写日志失败」的 epoch 秒（0 = 从未上报）。
+/// 上次上报「写日志失败」的时刻（0 = 从未上报），单位是**单调**秒。
 static LAST_LOG_ERROR_AT: AtomicU64 = AtomicU64::new(0);
+/// 单调时钟起点。
+///
+/// 用 Instant 而不是 SystemTime 的 epoch 秒：路由器没有 RTC，靠 NTP 对时，
+/// 墙钟可能大幅向后跳。若用 epoch 秒做节流基准，回拨后 `now - last` 恒为 0，
+/// 「/tmp 写满」这类最需要报警的错误会被永久静默，直到墙钟重新追上才恢复。
+static MONO_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// 进程启动以来的单调秒数。
+fn mono_secs() -> u64 {
+    MONO_EPOCH.get_or_init(Instant::now).elapsed().as_secs()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifyKind {
@@ -197,10 +208,7 @@ fn prepare_log_file(path: &str) -> Result<String, String> {
 
 /// 上报写日志失败，按 [`LOG_ERROR_THROTTLE_SECS`] 节流。
 fn report_log_error(detail: &str) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = mono_secs();
     let last = LAST_LOG_ERROR_AT.load(Ordering::Relaxed);
     if now.saturating_sub(last) < LOG_ERROR_THROTTLE_SECS {
         return;

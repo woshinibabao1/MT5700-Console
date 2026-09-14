@@ -7,6 +7,8 @@ use std::time::Duration;
 
 pub const AUTO_SERIAL_PORT: &str = "auto";
 pub const PREFERRED_AT_PORT: &str = "/dev/ttyUSB1";
+/// 通知日志默认路径，与 root/etc/config/at-webserver 的 `option log_file` 保持一致。
+pub const DEFAULT_NOTIFY_LOG: &str = "/tmp/at-notifications.log";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BandLock {
@@ -121,7 +123,11 @@ pub fn default_config() -> Config {
                 timeout: Duration::from_secs(10),
             },
             serial: SerialConfig {
-                port: PREFERRED_AT_PORT.into(),
+                // 默认走自动探测：UCI 默认配置与前端默认值都是 'auto'，
+                // 这里此前写死 ttyUSB1，一旦 UCI 读取失败就会跳过探测死盯这一个口，
+                // 而该口不存在或不回 AT 时服务永远连不上。
+                // auto 的候选排序仍把 ttyUSB1 排在最前（见 serialdetect），无额外开销。
+                port: AUTO_SERIAL_PORT.into(),
                 baudrate: 115200,
                 timeout: Duration::from_secs(10),
             },
@@ -131,7 +137,9 @@ pub fn default_config() -> Config {
         },
         notification: NotificationConfig {
             wechat_webhook: String::new(),
-            log_file: String::new(),
+            // 与 UCI 的 option log_file 对齐：此前默认空串，UCI 读不到时
+            // 通知日志会被静默关闭，与文档和界面行为都不一致。
+            log_file: DEFAULT_NOTIFY_LOG.into(),
             types: NotifyTypes {
                 sms: true,
                 call: true,
@@ -286,7 +294,9 @@ pub async fn load_config() -> Config {
     }
     // "auto" 是哨兵值，交给 detect_at_port 逐个探测。
     cfg.at.serial.port = serial_port;
-    cfg.at.serial.baudrate = values.int("serial_baudrate", 115200).clamp(0, 4000000) as u32;
+    // 下界取 9600（最小支持档位），原先的 0 会让非法值一路通过校验，
+    // 直到 open_serial 才失败。非支持档位的兜底回退在 serial_linux::open_serial 内。
+    cfg.at.serial.baudrate = values.int("serial_baudrate", 115200).clamp(9600, 4000000) as u32;
     cfg.at.serial.timeout = values.seconds("serial_timeout", cfg.at.serial.timeout, Duration::from_secs(1));
 
     // 自动拨号：默认开启。模组不拨号则不会给 USB 网口下发 DHCP，接口拿不到 IP。
@@ -329,7 +339,7 @@ pub async fn load_config() -> Config {
     cfg.websocket.scan_timeout = values.seconds("cellscan_timeout", cfg.websocket.scan_timeout, Duration::from_secs(10));
 
     cfg.notification.wechat_webhook = values.str("wechat_webhook", "");
-    cfg.notification.log_file = values.str("log_file", "");
+    cfg.notification.log_file = values.str("log_file", DEFAULT_NOTIFY_LOG);
     cfg.notification.types = NotifyTypes {
         sms: values.bool("notify_sms", true),
         call: values.bool("notify_call", true),

@@ -27,6 +27,12 @@ use tokio::sync::Mutex as AsyncMutex;
 const RPC_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// RPC 请求行长度上限（防异常长行撑爆内存；Go 版 WebSocket 是 64KB 读限）。
 const MAX_RPC_LINE: usize = 8192;
+/// 超长请求行的排空上限。
+///
+/// 只限制「单行最多读多少」是不够的：超长之后还要把该行剩余部分排掉才能继续分帧，
+/// 而这个排空若没有上限，对端只要持续发不含换行的字节流就能让服务把整条流读进内存
+/// （路由器上直接 OOM）。超过本上限就停止排空并交由上层断开连接。
+const MAX_RPC_DRAIN: usize = 64 * 1024;
 const CELLSCAN_ABORT_TOKEN: &str = "abcd";
 const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -109,8 +115,13 @@ impl EventBus {
     }
 
     fn push(&self, value: serde_json::Value) {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        // ★ 取号必须在持有队列锁之后。
+        // 原写法先 fetch_add 再加锁，于是存在这样的窗口：号已分配、事件尚未入队，
+        // 而此时 since() 读到这个新 seq 却看不到对应事件，前端据此把游标推进到该
+        // seq —— 那条事件（新短信 / 来电）就永久拉不到了。
+        // 与 since() 的「加锁 → 读号 → 读队列」在同一把锁下互斥后，中间态不可见。
         let mut q = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         q.push_back((seq, value));
         while q.len() > self.max {
             q.pop_front();
@@ -267,8 +278,28 @@ impl RpcServer {
                     continue;
                 }
             };
-            let _ = tokio::time::timeout(Duration::from_secs(5), write_half.write_all(format!("{payload}\n").as_bytes())).await;
-            let _ = write_half.flush().await;
+            // 写失败/超时必须断开：write_all 被超时打断时可能已经写出去半包，
+            // 继续复用这条连接会让半包与下一条应答粘在一起，破坏 newline-JSON 分帧。
+            let written = tokio::time::timeout(
+                Duration::from_secs(5),
+                write_half.write_all(format!("{payload}\n").as_bytes()),
+            )
+            .await;
+            match written {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    log_warn!("写 RPC 应答失败，断开连接: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    log_warn!("写 RPC 应答超时(5s)，断开连接");
+                    break;
+                }
+            }
+            if let Err(e) = write_half.flush().await {
+                log_warn!("刷新 RPC 应答失败，断开连接: {}", e);
+                break;
+            }
         }
         Ok(())
     }
@@ -295,6 +326,15 @@ impl RpcServer {
                 let cmd = req.params.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
                 if cmd.is_empty() {
                     return serde_json::json!({ "id": id, "error": { "code": -32602, "message": "缺少参数 cmd" } });
+                }
+                // ★ AT 以 CR 作为命令行结束符。若 cmd 串内还含有 CR/LF/NUL，
+                // 一次请求就等价于下发多条指令（JSON 里 \r\n 是合法转义），
+                // 例如 "AT+CSQ\r\nAT+CFUN=0"。项目在 cmti_capture 与
+                // normalize_syscfgex 都防过这个，主命令通道此前漏了。
+                // 短信用的「字面 \r」是两个字符(0x5C 0x72)，不受此过滤影响。
+                if cmd.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+                    log_warn!("拒绝含控制字符的 AT 命令: {:?}", cmd);
+                    return serde_json::json!({ "id": id, "error": { "code": -32602, "message": "cmd 不允许包含换行或控制字符" } });
                 }
                 let resp = self.run_command(cmd).await;
                 serde_json::json!({ "id": id, "result": {
@@ -740,10 +780,18 @@ fn is_sms_data_command(command: &str) -> bool {
 }
 
 fn normalize_syscfgex(command: &str) -> String {
-    if !command.starts_with("AT^SYSCFGEX") {
+    // 大小写不敏感：is_cell_scan 同样按大写判定，小写 at^syscfgex 不该绕过规范化。
+    if !command.to_uppercase().starts_with("AT^SYSCFGEX") {
         return command.to_string();
     }
-    let cleaned = command.replace('\r', "").replace('\n', "").replace("OK", "");
+    let mut cleaned = command.replace('\r', "").replace('\n', "");
+    // 只剥掉末尾的 OK —— 原先的 replace("OK", "") 是全局删除，会把参数里
+    // 合法出现的 "OK" 一并抹掉，命令因此被改写。
+    let trimmed = cleaned.trim_end();
+    if trimmed.to_uppercase().ends_with("OK") {
+        // "OK" 是两个 ASCII 字节，此处切片一定落在字符边界上。
+        cleaned = trimmed[..trimmed.len() - 2].to_string();
+    }
     if cleaned.contains(",\"\",\"\"") {
         let parts: Vec<&str> = cleaned.split(',').collect();
         if parts.len() >= 5 {
@@ -775,7 +823,8 @@ where
         if raw.len() >= max {
             overlong = true;
             let mut drain = Vec::new();
-            let _ = (&mut *reader).read_until(b'\n', &mut drain).await;
+            let mut limited = (&mut *reader).take(MAX_RPC_DRAIN as u64);
+            let _ = limited.read_until(b'\n', &mut drain).await;
         }
     } else {
         raw.pop();

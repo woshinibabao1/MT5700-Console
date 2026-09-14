@@ -187,23 +187,41 @@ async fn run(verbose: bool) -> Result<(), String> {
     // 触发优雅关闭。
     let _ = ctx_tx.send(true);
 
-    if let Some(Ok(Err(e))) = serve_result {
-        log_error!("LuCI RPC 服务异常退出: {}", e);
+    match serve_result {
+        // RPC 服务正常结束（关闭信号触发），无需处理。
+        Some(Ok(Ok(()))) => {}
+        Some(Ok(Err(e))) => log_error!("LuCI RPC 服务异常退出: {}", e),
+        // 任务 panic 时 await 返回的是 Err(JoinError)，原先的 if let 只认
+        // Ok(Err(..))，panic 会被整个吞掉。
+        Some(Err(e)) => log_error!("LuCI RPC 服务任务 panic: {}", e),
+        None => {}
     }
 
     // 给后台任务一点时间优雅收尾。
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
-        let _ = client_task.await;
-        let _ = notify_task.await;
-        let _ = dispatch_task.await;
-        let _ = sched_task.await;
-        let _ = serve_handle.await;
+        join_log(client_task.await, "AT 客户端");
+        join_log(notify_task.await, "通知");
+        join_log(dispatch_task.await, "URC 分发");
+        join_log(sched_task.await, "定时锁频");
+        join_log(serve_handle.await, "RPC 服务");
     })
     .await;
 
     crate::logger::set_level(crate::logger::Level::Info);
     log_info!("服务已停止");
     Ok(())
+}
+
+/// 后台任务若 panic，await 返回的是 Err(JoinError)。
+/// 一律 `let _ =` 丢掉的话，任务死后服务看起来还在跑、但功能已经死了，
+/// 日志里什么线索都没有。这里把 panic 暴露出来。
+///
+/// 注意：只在日志里报错，**不改变进程退出码** —— 正常关闭时若返回非 0，
+/// procd 会判定为崩溃并反复 respawn，攒满重试后永久放弃拉起，反而更糟。
+fn join_log<T>(result: Result<T, tokio::task::JoinError>, name: &str) {
+    if let Err(e) = result {
+        log_error!("后台任务「{}」异常结束: {}", name, e);
+    }
 }
 
 #[cfg(unix)]
