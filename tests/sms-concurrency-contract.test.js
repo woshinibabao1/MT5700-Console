@@ -111,8 +111,22 @@ has('PDP 参数过转义', /sanitizeAtParam\(values\.apn/.test(DIAL) && /sanitiz
 	'dial.js 的 AT+CGDCONT 直接拼自由文本');
 has('PDP 地址加引号', /sanitizeAtParam\(values\.pdp_addr \|\| ''\) \+ '",0,0'/.test(DIAL),
 	'<PDP_addr> 是字符串参数，不加引号填了地址就 ERROR');
-has('CID 限定 1-20', /cid >= 1 && cid <= 20/.test(DIAL),
-	'手册 7.1：21~31 保留给网络，0 是默认 PDP 不可删除');
+has('CID 上限为 20', /cid > 20/.test(DIAL), '手册 7.1：21~31 保留给网络，超过必然 ERROR');
+/*
+ * 下面两条钉的是「CID 0 可编辑、不可删除」，分开写是因为它们由不同代码保证。
+ * 注意别用 /默认承载/ 之类匹配整篇 —— 解释性注释里也写了这个词，断言会恒真
+ * （ui-contract 的「网络时间」那条就是这么失效的）。要钉到具体函数/表达式上。
+ */
+/*
+ * 「列表不再隐藏 CID 0」必须只看过滤那一句。整篇搜 /cid !== 0/ 会命中
+ * renderPDP 里「对 CID 0 摘掉删除按钮」的判断 —— 那是想要的，不是要挡的。
+ */
+const PDP_FILTER = DIAL.split('pdpList = list.filter')[1].split(';')[0];
+has('列表不再隐藏 CID 0', !/cid !== 0/.test(PDP_FILTER),
+	'CID 0 可改 APN（物联网卡要用），整行藏掉等于堵死改默认承载的唯一入口');
+const DEL_FN = DIAL.split('function handleDeletePdp')[1].split('\n\t\tfunction ')[0];
+has('删除入口挡住 CID 0', /cid === 0/.test(DEL_FN) && /return/.test(DEL_FN),
+	'AT+CGDCONT=0 必然 ERROR，按钮之外被别的入口调到也要挡住');
 has('FOTA 地址过转义', /sanitizeAtParam\(formatted\)/.test(UPG), '只校验 http:// 前缀挡不住引号/换行');
 /*
  * PIN 码必须过转义。这里钉的是**语义**——凡是拼进 AT+CPIN/AT+CLCK 的值都得

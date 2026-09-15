@@ -238,7 +238,7 @@ return L.view.extend({
 		infCard._body.appendChild(dmzStatus);
 
 		/* ---------- 卡片：PDP 上下文 ---------- */
-		var pdpCard = Mt5700.card('PDP 上下文', 'CGDCONT 列表：新增、编辑、删除、激活 / 去激活');
+		var pdpCard = Mt5700.card('PDP 上下文', 'CGDCONT 列表：新增、编辑、删除、激活 / 去激活（CID 0 为默认承载，可改不可删）');
 		body.appendChild(pdpCard);
 
 		pdpCard._body.appendChild(Mt5700.panelActions(
@@ -280,16 +280,39 @@ return L.view.extend({
 			var rows = pdpList.map(function (ctx) {
 				var opWrap = E('div', { 'class': 'mt5700-inline' });
 				opWrap.appendChild(Mt5700.button('编辑', function () { openEdit(ctx); }, 'secondary'));
-				opWrap.appendChild(Mt5700.dangerButton('删除', function () {
-					Mt5700.confirm('确定删除 CID ' + ctx.cid + ' 的 PDP 上下文？', function () {
-						handleDeletePdp(ctx.cid);
-					}, '确认删除');
-				}));
+				/*
+				 * CID 0 不可删除：手册 7.1「LTE 注册需要一个默认的 PDP 上下文，
+				 * 该 PDP 上下文不能被删除」，下发 AT+CGDCONT=0 必然 ERROR。
+				 * 但手册只禁删除、不禁定义 —— 改它的 APN 是允许的，而默认承载
+				 * 恰恰是物联网卡最需要改 APN 的那条，所以整行显示、只摘掉删除。
+				 */
+				if (ctx.cid !== 0) {
+					opWrap.appendChild(Mt5700.dangerButton('删除', function () {
+						Mt5700.confirm('确定删除 CID ' + ctx.cid + ' 的 PDP 上下文？', function () {
+							handleDeletePdp(ctx.cid);
+						}, '确认删除');
+					}));
+				}
 				opWrap.appendChild(Mt5700.button(ctx.active ? '去激活' : '激活', function () {
+					/* 默认承载一去激活整机就断网，比删一条配置严重得多，要二次确认 */
+					if (ctx.cid === 0 && ctx.active) {
+						Mt5700.confirm('CID 0 是默认承载，去激活会中断网络连接。确定继续？', function () {
+							handleActivePdp(ctx.cid, false);
+						}, '确认去激活');
+						return;
+					}
 					handleActivePdp(ctx.cid, !ctx.active);
 				}, 'secondary'));
+				var cidCell;
+				if (ctx.cid === 0) {
+					cidCell = E('span', { 'class': 'mt5700-inline' });
+					cidCell.appendChild(E('span', {}, '0'));
+					cidCell.appendChild(Mt5700.badge('默认承载', 'neutral'));
+				} else {
+					cidCell = String(ctx.cid);
+				}
 				return [
-					String(ctx.cid),
+					cidCell,
 					getPdpTypeText(ctx.type),
 					ctx.apn || '-',
 					Mt5700.badge(ctx.active ? '已激活' : '未激活', ctx.active ? 'success' : 'neutral'),
@@ -485,7 +508,11 @@ return L.view.extend({
 						});
 					}
 					list.forEach(function (ctx) { ctx.active = !!actives[ctx.cid]; });
-					pdpList = list.filter(function (ctx) { return ctx.cid !== 0 && ctx.cid < 21; });
+					/*
+					 * 只滤掉 21~31（网络侧保留）。CID 0 要留着 —— 它是默认承载，
+					 * 不可删除但可改 APN，藏起来等于堵死改默认承载的唯一入口。
+					 */
+					pdpList = list.filter(function (ctx) { return ctx.cid < 21; });
 					renderPDP();
 				});
 			}).catch(function () { Mt5700.error('获取PDP上下文失败'); });
@@ -502,13 +529,17 @@ return L.view.extend({
 				{ key: 'apn', label: 'APN', value: edit.apn, placeholder: '请输入 APN' },
 				{ key: 'pdp_addr', label: 'PDP 地址', value: edit.pdp_addr, placeholder: '可留空' }
 			], function (values) {
-				var cid = Number(values.cid);
-				if (!cid || !values.type) { Mt5700.error('请填写 CID 和协议类型'); return; }
+				var cidRaw = String(values.cid == null ? '' : values.cid).trim();
+				var cid = Number(cidRaw);
+				/* 不能用 !cid 判空：CID 0 是合法且重要的一条，会被当成没填 */
+				if (cidRaw === '' || !isFinite(cid) || !values.type) { Mt5700.error('请填写 CID 和协议类型'); return; }
+				cid = Math.trunc(cid);
 				/*
-				 * 手册 7.1：cid 取值 0~31，其中 21~31 保留给网络、用户不可定义，
-				 * cid=0 是 LTE 注册必需的默认 PDP、不可删除 —— 用户可用区间只有 1~20。
+				 * 手册 7.1：cid 取值 0~31，21~31 保留给网络、用户不可定义。
+				 * 上界取 20；下界取 0 —— 默认承载不可删除，但改它的 APN 是允许的
+				 * （物联网卡换卡时改的就是这条）。新增 CID 0 会被下面的重复检查挡住。
 				 */
-				if (!(cid >= 1 && cid <= 20)) { Mt5700.error('CID 需在 1-20 之间（0 为默认 PDP，21-31 网络保留）'); return; }
+				if (cid < 0 || cid > 20) { Mt5700.error('CID 需在 0-20 之间（21-31 为网络保留）'); return; }
 				if (isNew && pdpList.some(function (ctx) { return ctx.cid === cid; })) {
 					Mt5700.error('CID 已存在，请选择其他 CID');
 					return;
@@ -526,6 +557,8 @@ return L.view.extend({
 		}
 
 		function handleDeletePdp(cid) {
+			/* 兜底：按钮已对 CID 0 隐藏，这里再挡一道，防止其它入口误调 */
+			if (cid === 0) { Mt5700.error('CID 0 是默认承载，不可删除'); return; }
 			staged.set('pdp-del-' + cid, '删除 PDP 上下文 CID ' + cid, function () {
 				return Ui.sendCmd('AT+CGDCONT=' + cid).then(function (res) {
 					if (!res.success) throw new Error('PDP 上下文删除失败');
