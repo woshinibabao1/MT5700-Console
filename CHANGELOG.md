@@ -57,6 +57,28 @@
 喂真机 CGDCONT/CGACT 样本跑出 `pdpList`，断言 CID 0 的 `active === null`。
 关键断言做过回退验证：把实现改回 `!!actives[ctx.cid]` 后，3 项如期失败。
 
+### 修复 - 升版本号误改 Cargo.lock 里的依赖版本（v2.0.2 CI 编译失败）
+
+本版发布后 CI 的 rust-check 9 秒即失败：
+
+```
+error: failed to select a version for the requirement `shlex = "^2.0.1"` (locked to 2.0.2)
+candidate versions found which didn't match: 2.0.1, 2.0.0, 1.3.0, ...
+```
+
+原因：升版本号时对 `Cargo.lock` 做了全局字符串替换 `version = "2.0.1"` →
+`version = "2.0.2"`，而 Cargo.lock 里**主包和依赖长得一模一样**（都是
+`version = "x.y.z"`），第三方依赖 `shlex 2.0.1` 被一起改成了 crates.io 上
+不存在的 2.0.2。已把 shlex 改回 2.0.1。
+
+防复发：
+
+- 新增 `tools/bump-version.py`：按 `[[package]]` 块精确定位，**只改主包那一个块**，
+  改完自检三处一致，且断言新版本号在 lock 里只出现一次。升版本请用它。
+- 新增 `tests/version-consistency.test.js`（13 项）：钉住 Makefile / Cargo.toml /
+  Cargo.lock 主包 / CHANGELOG 顶部四处一致，并**禁止除主包外还有包与本项目同版本号**
+  —— 那正是全局替换留下的指纹。已回退验证：把 shlex 改回 2.0.2 即失败。
+
 ## [2.0.1] - 2026-09-15
 
 ### 修复 - PDP 上下文列表不再隐藏 CID 0
