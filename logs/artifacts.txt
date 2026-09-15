@@ -1,0 +1,2 @@
+out/aarch64_cortex-a53/luci-app-mt5700_2.0.4_aarch64_cortex-a53.ipk
+out/aarch64_cortex-a53/luci-i18n-mt5700-zh-cn_260915.60543_all.ipk
