@@ -68,6 +68,28 @@ uci -q commit at-webserver
 chmod 0755 /usr/share/mt5700/watchdog.sh 2>/dev/null
 chmod 0755 /etc/hotplug.d/net/99-mt5700-renew 2>/dev/null
 chmod 0755 /etc/init.d/mt5700-watchdog 2>/dev/null
+chmod 0755 /etc/init.d/at-webserver 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# AT 服务开机自启
+# ---------------------------------------------------------------------------
+# 真机故障（2026-09-15）：固件里 /etc/rc.d/S99at-webserver 链接是存在的（构建时
+# 已 enable），但 /etc/init.d/at-webserver **没有可执行位** —— 该文件在 git 里
+# 是 100644。rc 序列调用它时直接 `Permission denied`，于是每次开机都起不来，
+# 只能手动 `sh /etc/init.d/at-webserver start` 救场。
+# 根因修复：仓库里已把该文件标成 100755。这里是运行时兜底 —— 老固件/手工拷贝
+# 部署仍可能丢 +x，补一次再 enable，避免同一故障换个环境复发。
+if [ -x /etc/init.d/at-webserver ]; then
+	/etc/init.d/at-webserver enable 2>/dev/null
+	logger -t mt5700-uci "at-webserver 已设为开机自启（S99at-webserver）"
+else
+	logger -t mt5700-uci "警告：/etc/init.d/at-webserver 不存在或不可执行，开机将无法自启"
+fi
+
+# 安装场景（opkg/apk 直接装包）没有 rc 序列，这里显式拉起一次。
+# 开机场景由 S99 负责；start_service 内部有「已在运行则跳过」保护，
+# 两条路径撞上也不会起第二个实例。延迟 5s 是为了避开 boot 早期的串口枚举。
+( sleep 5; [ -x /etc/init.d/at-webserver ] && /etc/init.d/at-webserver start ) >/dev/null 2>&1 &
 
 # 让 hotplug 与看门狗在本次安装后立即生效（无需重启）
 [ -x /etc/init.d/mt5700-watchdog ] && /etc/init.d/mt5700-watchdog enable 2>/dev/null

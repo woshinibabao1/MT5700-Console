@@ -12,7 +12,7 @@
 
 11 个页面 · Rust 常驻后端 · 前后端单包交付 · 886 项契约测试（无需真机）
 
-当前版本 **v2.0.2** · 授权 **[MIT](LICENSE)**
+当前版本 **v2.0.3** · 授权 **[MIT](LICENSE)**
 
 </div>
 
@@ -92,13 +92,13 @@ MT5700M-CN 这类 5G 模组没有官方 OpenWrt 包源，想看信号、改锁�
 
 ```sh
 # 以 aarch64_cortex-a53 为例
-apk add --allow-untrusted ./aarch64_cortex-a53-luci-app-mt5700-2.0.2-r1.apk
+apk add --allow-untrusted ./aarch64_cortex-a53-luci-app-mt5700-2.0.3-r1.apk
 ```
 
 ### OpenWrt 23.05（opkg / ipk）
 
 ```sh
-opkg install ./aarch64_cortex-a53-luci-app-mt5700_2.0.2_aarch64_cortex-a53.ipk
+opkg install ./aarch64_cortex-a53-luci-app-mt5700_2.0.3_aarch64_cortex-a53.ipk
 ```
 
 ### 启动与确认
@@ -231,7 +231,7 @@ ls -l /usr/bin/at-webserver-rust                     # 单包自检：后端二�
 
 ```text
 MT5700-Console/                      # 仓库根 = OpenWrt 单包
-├── Makefile                         # PKG_NAME=luci-app-mt5700 · PKG_VERSION=2.0.2
+├── Makefile                         # PKG_NAME=luci-app-mt5700 · PKG_VERSION=2.0.3
 ├── .github/workflows/build-openwrt.yml
 ├── scripts/sdk-build.sh             # Actions 容器内：SDK + zig + cargo + 校验
 ├── docs/screenshots/                # README 用截图（已打码）
@@ -330,13 +330,13 @@ workflow：`.github/workflows/build-openwrt.yml` · 镜像：官方 `openwrt/sdk
 
 | 目标系统 | 包格式 | 架构 | 产物示例 |
 |:--|:--|:--|:--|
-| 主线 snapshot | `.apk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700-2.0.2-r1.apk` |
-| 23.05.5 | `.ipk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700_2.0.2_x86_64.ipk` |
+| 主线 snapshot | `.apk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700-2.0.3-r1.apk` |
+| 23.05.5 | `.ipk` | x86_64 · aarch64_cortex-a53 | `x86_64-luci-app-mt5700_2.0.3_x86_64.ipk` |
 
 **触发方式**：push 到 `main` / 打 `v*` 标签 / Actions 手动 `Run workflow`。
 
 **编译成功后自动发布 Release**：标签推送用标签名；`main` 推送用 `Makefile` 里的
-`PKG_VERSION`（当前 `2.0.2`，四处必须同步：`Makefile` / `src/rust/Cargo.toml` /
+`PKG_VERSION`（当前 `2.0.3`，四处必须同步：`Makefile` / `src/rust/Cargo.toml` /
 `src/rust/Cargo.lock` / `CHANGELOG.md`）；同名 Release 先删后建；资产统一加架构前缀，避免同名冲突。
 
 交叉编译：容器内 rustup + **zig** 作 musl 链接器；`src/Makefile` 在包编译时

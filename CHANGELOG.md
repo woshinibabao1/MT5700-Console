@@ -5,6 +5,37 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.3] - 2026-09-15
+
+### 修复 - AT 服务开机不自启（init 脚本缺可执行位）
+
+真机（Hiveton H5000M + 本次 CI 固件）：`/etc/rc.d/S99at-webserver` 链接是在的
+（构建时已 enable），但 `/etc/init.d/at-webserver` **没有可执行位** —— 该文件在
+git 里是 `100644`。rc 序列调用它时直接 `Permission denied`，于是每次开机 AT
+服务都起不来，只能手动 `sh /etc/init.d/at-webserver start` 救场。同目录的
+`mt5700-watchdog` 是 `100755`，所以它能正常自启 —— 两相对比即可定位。
+
+- 根因修复：把 `root/etc/init.d/at-webserver` 标成 100755。
+- 运行时兜底：包内 `uci-defaults` 补 `chmod 0755` 并重新 `enable`，
+  老固件或手工拷贝部署仍丢 +x 时也能自愈，并写 logger 留痕。
+  安装场景（opkg/apk 直接装包）没有 rc 序列，额外延迟 5s 拉起一次。
+
+### 修复 - 固件没带 MT5700M 接口时，插件自己把接口建出来
+
+刷完新固件直接没网的场景：`/etc/config/network` 里只有 loopback / lan /
+wan(eth1) / wan6，**没有 MT5700M** —— netifd 不接管 eth2 → 没人把它 up →
+cdc_ncm 拿不到 carrier → 没人发 DHCP → 路由表里一条 default 都没有。
+而模组侧完全正常（`AT+CGACT?` → `1,1`、`AT^NDISSTATQRY?` → `1,1`），
+看门狗日志里那句「已重启 MT5700M」其实每次都是对空气挥拳。
+
+`ensure_modem_interface()` 原先遇到「接口不存在」直接跳过，现在改为：
+
+- 等模组网口出现（最多 15s，设备名从 UCI 取，取不到再回退 `eth2`）；
+- 按 `device + dhcp + auto=1 + defaultroute + peerdns + metric 20` 创建；
+- 新增 `ensure_wan_zone()`：把接口加进防火墙 wan 区并 reload ——
+  少了这一步是「路由器自己能上网、手机电脑全断」，因为 nft 的 srcnat
+  链只匹配 `eth1`，5G 出口的流量不做 NAT，出去就回不来。
+
 ## [2.0.2] - 2026-09-15
 
 ### 修复 - CID 0「未激活」是界面编出来的，不是它没连上

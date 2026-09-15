@@ -208,6 +208,35 @@ at_webserver_post_start() {
 	logger -t at-webserver "后台防火墙/串口初始化完成"
 }
 
+# 把接口加进防火墙 wan 区（幂等）。
+#
+# 症状：接口建好了、也拿到 IP 了，路由器自己能上网，但手机电脑全断。
+# 原因是 wan 区的 network 列表里没有这个接口，nft 的 srcnat 链只匹配 eth1，
+# 5G 出口的流量不做 NAT —— 出去就回不来。
+# 处理：找到 name='wan' 的 zone，列表里没有该接口就 add_list 进去并重载防火墙。
+ensure_wan_zone() {
+	local iface="$1"
+	local idx list
+
+	idx=$(uci show firewall 2>/dev/null | grep -E "@zone\[[0-9]+\]\.name='wan'$" \
+		| head -n1 | sed "s/.*@zone\[\([0-9]*\)\].*/\1/")
+	[ -n "$idx" ] || {
+		logger -t at-webserver "警告：未找到防火墙 wan 区，$iface 不会做 NAT"
+		return 0
+	}
+
+	list=$(uci -q get "firewall.@zone[$idx].network")
+	case " $list " in
+		*" $iface "*) return 0 ;;
+	esac
+
+	uci -q add_list "firewall.@zone[$idx].network=$iface"
+	uci -q commit firewall
+	logger -t at-webserver "已将 $iface 加入防火墙 wan 区（否则出口流量不做 NAT）"
+	# 后台 reload，避免阻塞；失败不致命
+	timeout 10 /etc/init.d/firewall reload >/dev/null 2>&1 || true
+}
+
 # 确保 MT5700M / MT5700Mv6 接口处于「开机自启」状态并在等待模组网口就绪后拉起。
 #
 # 症状（问题二）：LuCI 上模组显示在线，但「网络 → 接口」里 MT5700M 没有 IP，
@@ -228,8 +257,48 @@ ensure_modem_interface() {
 	local ifname_6g='MT5700Mv6'
 	local i auto_val need_commit=0
 
+	# 设备名从 UCI 取，不写死 eth2：驱动/固件不同的机器上它可能叫别的名字。
+	# device 允许是多值，只取第一个。取不到再回退 eth2，老行为不变。
+	local modem_dev
+	modem_dev=$(uci -q get "network.$ifname_4g.device" 2>/dev/null)
+	[ -n "$modem_dev" ] || modem_dev=$(uci -q get "network.$ifname_4g.ifname" 2>/dev/null)
+	[ -n "$modem_dev" ] || modem_dev='eth2'
+	modem_dev=${modem_dev%% *}
+
+	# ① 接口压根不存在时，按「模组网口 + DHCP」创建
+	#
+	# 症状：刷完新固件直接没网。取证见 /etc/config/network 里没有 MT5700M ——
+	# netifd 不认识 eth2 → 没人把它 up → cdc_ncm 拿不到 carrier → 没人发 DHCP →
+	# 路由表里一条 default 都没有。而模组侧完全正常（PDP 已激活、NCM 已连接），
+	# 看门狗与 hotplug 日志里那句「已重启 MT5700M」其实每次都是对空气挥拳。
+	# 机型定制包没带上这条接口时，这里兜底建出来。
+	if ! uci -q get "network.$ifname_4g" >/dev/null 2>&1; then
+		local waited=0
+		while [ "$waited" -lt 15 ]; do
+			[ -e "/sys/class/net/$modem_dev" ] && break
+			sleep 1
+			waited=$((waited + 1))
+		done
+
+		if [ ! -e "/sys/class/net/$modem_dev" ]; then
+			logger -t at-webserver "警告：未发现模组网口 $modem_dev，跳过自动创建 $ifname_4g"
+			return 0
+		fi
+
+		uci -q set "network.$ifname_4g=interface"
+		uci -q set "network.$ifname_4g.device=$modem_dev"
+		uci -q set "network.$ifname_4g.proto=dhcp"
+		uci -q set "network.$ifname_4g.auto=1"
+		uci -q set "network.$ifname_4g.defaultroute=1"
+		uci -q set "network.$ifname_4g.peerdns=1"
+		uci -q set "network.$ifname_4g.metric=20"
+		need_commit=1
+		logger -t at-webserver "配置缺少 $ifname_4g，已自动创建（$modem_dev + dhcp, metric 20）"
+		ensure_wan_zone "$ifname_4g"
+	fi
+
 	for i in "$ifname_4g" "$ifname_6g"; do
-		# 接口不存在则跳过（机型未定制该接口时不能凭空创建）
+		# 接口不存在则跳过（6G 接口不由本插件凭空创建）
 		if ! uci -q get "network.$i" >/dev/null 2>&1; then
 			continue
 		fi
@@ -251,16 +320,7 @@ ensure_modem_interface() {
 	fi
 
 	# 模组网口可能还没枚举完成，先等设备出现（最多 15s）
-	#
-	# 设备名从 UCI 取，不写死 eth2：驱动/固件不同的机器上它可能叫别的名字，
-	# 写死的话这里会白等满 15s，ifup 在网口就绪之前就发出去了。
-	# 取不到再回退 eth2，老行为不变。device 允许是多值，只取第一个。
-	local modem_dev
-	modem_dev=$(uci -q get "network.$ifname_4g.device" 2>/dev/null)
-	[ -n "$modem_dev" ] || modem_dev=$(uci -q get "network.$ifname_4g.ifname" 2>/dev/null)
-	[ -n "$modem_dev" ] || modem_dev='eth2'
-	modem_dev=${modem_dev%% *}
-
+	#（设备名已在函数开头算好，这里不再重复取）
 	local waited=0
 	while [ "$waited" -lt 15 ]; do
 		[ -e "/sys/class/net/$modem_dev" ] && break
