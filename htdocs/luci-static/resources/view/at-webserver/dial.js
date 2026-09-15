@@ -39,7 +39,13 @@ return L.view.extend({
 		}
 
 		/* ---------- 常量 ---------- */
+		/*
+		 * 手册 16.18：<dial_mode> 0=模组内部拨号，1=上位机拨号（USB 数传），
+		 * 2=上位机拨号（网口数传）。原先只放了 1/2，遇到 0 会显示「未知」，
+		 * 且 syncAutodialDefault 会把 0 强行改写成 1 回写 UCI —— 等于改设备配置。
+		 */
 		var DIAL_MODE_OPTIONS = [
+			{ label: '模组内部拨号', value: 0 },
 			{ label: 'USB网络接口', value: 1 }, { label: '转网口模式', value: 2 }
 		];
 		var USB_MODE_OPTIONS = [
@@ -62,7 +68,7 @@ return L.view.extend({
 
 		function getDialModeText(mode) {
 			if (mode == null) return '未识别';
-			var map = { 1: 'USB网络接口', 2: '转网口模式' };
+			var map = { 0: '模组内部拨号', 1: 'USB网络接口', 2: '转网口模式' };
 			return map[mode] || '未知';
 		}
 		function getUSBModeText(mode) {
@@ -91,17 +97,35 @@ return L.view.extend({
 			if (type === 'IPV4V6') return 'IPv4/IPv6';
 			return type;
 		}
+		/*
+		 * 下拉只有 IP/IPV6/IPV4V6 三项（手册 16.18 <protocol>）。模组若回了别的值
+		 * （或空），直接塞给 select 会变成「空选中」，看着像没配；统一回落到 IPV4V6。
+		 */
+		function normalizePdpType(type) {
+			return (type === 'IP' || type === 'IPV6' || type === 'IPV4V6') ? type : 'IPV4V6';
+		}
 
 		/* ---------- 状态 ---------- */
 		var settings = { enable: 0, protocol: '', apn: '', username: '', password: '', authType: 0 };
-		var apnForm = { apn: '', username: '', password: '', authType: 0 };
+		/*
+		 * protocol 是 AT^SETAUTODIAL 的第 3 个参数（手册 16.18：<protocol>
+		 * "IP"/"IPV6"/"IPV4V6"），原来只当徽章文本读出来，没有控件能改它。
+		 */
+		var apnForm = { protocol: 'IPV4V6', apn: '', username: '', password: '', authType: 0 };
 		var dmzConfig = { enabled: false, host: '' };
 		var pdpList = [];
 
 		/* ---------- 解析 ---------- */
+		/*
+		 * 手册 16.18 的查询应答语法里写的是 ^SETAUTODAIL:（少一个 I），举例用的却是
+		 * ^SETAUTODIAL:（本机实测即后者）。两种拼写都认，否则碰上 DAIL 版本整页
+		 * 只能报「获取拨号配置失败」，连当前拨号方式都读不回来。
+		 */
 		function parseAutoDialResponse(raw) {
 			var line = raw.replace(/\r/g, '').split('\n').map(function (i) { return i.trim(); })
-				.filter(function (i) { return i.indexOf('^SETAUTODIAL:') === 0; })[0];
+				.filter(function (i) {
+					return i.indexOf('^SETAUTODIAL:') === 0 || i.indexOf('^SETAUTODAIL:') === 0;
+				})[0];
 			if (!line) return null;
 			var payload = line.slice(line.indexOf(':') + 1).trim();
 			var fields = (payload.match(/(?:[^,"]+|"[^"]*")+/g) || []).map(function (f) {
@@ -141,7 +165,7 @@ return L.view.extend({
 		 *   2. 自动拨号改用统一的 .mt5700-switch 开关（原先混在 2 列表单里的裸 checkbox）
 		 *   3. APN 表单独立成 2 列网格；「暂存 APN 更改」归位到卡片头部
 		 */
-		var dialSaveBtn = Mt5700.primaryButton('暂存 APN 更改', function () { handleApnSettingChange(); });
+		var dialSaveBtn = Mt5700.primaryButton('暂存 APN / 协议更改', function () { handleApnSettingChange(); });
 		var dialCard = Mt5700.card('自动拨号与 APN', '开启后设备自动保持网络连接，建议保持开启', dialSaveBtn);
 		body.appendChild(dialCard);
 
@@ -171,12 +195,20 @@ return L.view.extend({
 		passInput.maxLength = 31;
 		passInput.addEventListener('input', function () { apnForm.password = passInput.value; });
 
-		var authSel = Mt5700.select(AUTH_OPTIONS.map(function (o) {
-			return { value: String(o.value), label: o.label };
-		}), '0');
-		authSel.addEventListener('change', function () { apnForm.authType = parseInt(authSel.value, 10); });
+	var authSel = Mt5700.select(AUTH_OPTIONS.map(function (o) {
+		return { value: String(o.value), label: o.label };
+	}), '0');
+	authSel.addEventListener('change', function () { apnForm.authType = parseInt(authSel.value, 10); });
 
-		dialBody.appendChild(Mt5700.formGroup('APN', apnInput, '运营商接入点，例：cmnet / 3gnet'));
+	/* 协议类型：与 PDP 上下文同一套取值，写进 AT^SETAUTODIAL 的第 3 个参数 */
+	var protoSel = Mt5700.select(PDP_TYPE_OPTIONS.map(function (o) {
+		return { value: o.value, label: o.label };
+	}), 'IPV4V6');
+	protoSel.addEventListener('change', function () { apnForm.protocol = protoSel.value; });
+
+	dialBody.appendChild(Mt5700.formGroup('协议类型', protoSel,
+		'IP 类型由运营商与套餐决定，选错会拨不上号'));
+	dialBody.appendChild(Mt5700.formGroup('APN', apnInput, '运营商接入点，例：cmnet / 3gnet'));
 		dialBody.appendChild(Mt5700.formGroup('认证方式', authSel));
 		dialBody.appendChild(Mt5700.formGroup('用户名', userInput, '无认证时可留空'));
 		dialBody.appendChild(Mt5700.formGroup('密码', passInput, '无认证时可留空'));
@@ -238,10 +270,17 @@ return L.view.extend({
 		infCard._body.appendChild(dmzStatus);
 
 		/* ---------- 卡片：PDP 上下文 ---------- */
-		var pdpCard = Mt5700.card('PDP 上下文', 'CGDCONT 列表：新增、编辑、删除、激活 / 去激活（CID 0 为默认承载，可改不可删）');
+		var pdpCard = Mt5700.card('PDP 上下文', 'CGDCONT 列表：新增、编辑、删除、激活 / 去激活（CID 0 为默认承载：可改不可删，状态随网络附着）');
 		body.appendChild(pdpCard);
 
-		pdpCard._body.appendChild(Mt5700.panelActions(
+		/*
+	 * 手册 16.18 注 3：APN 建议只用 ^SETAUTODIAL 配，不要再用 CGDCONT 同时配，
+	 * 否则实际生效的 APN 可能与预期不一致。本卡片改的就是 CGDCONT，先把话说在前面。
+	 */
+	pdpCard._body.appendChild(E('div', { 'class': 'mt5700-hint' },
+		'APN 建议只在上方「自动拨号与 APN」里设置；此处改 CGDCONT 只用于 IMS / 专线等特殊承载。'));
+
+	pdpCard._body.appendChild(Mt5700.panelActions(
 			Mt5700.primaryButton('+ 新增', function () { openEdit(null); }),
 			Mt5700.ghostButton('刷新', function () { fetchPDPContexts(); })
 		));
@@ -254,9 +293,10 @@ return L.view.extend({
 			dialStatus.appendChild(Mt5700.badge(settings.enable === 1 ? '已开启' : '已关闭',
 				settings.enable === 1 ? 'success' : 'warning'));
 			dialStatus.appendChild(Mt5700.badge('拨号方式：' + getDialModeText(settings.dialMode), 'info'));
-			dialStatus.appendChild(Mt5700.badge('协议：' + (settings.protocol || '-'), 'neutral'));
+			dialStatus.appendChild(Mt5700.badge('协议：' + (getPdpTypeText(normalizePdpType(settings.protocol)) || '-'), 'neutral'));
 			dialStatus.appendChild(Mt5700.badge('认证：' + getAuthTypeText(settings.authType), 'neutral'));
 
+			protoSel.value = normalizePdpType(apnForm.protocol);
 			apnInput.value = apnForm.apn || '';
 			userInput.value = apnForm.username || '';
 			passInput.value = apnForm.password || '';
@@ -293,16 +333,23 @@ return L.view.extend({
 						}, '确认删除');
 					}));
 				}
-				opWrap.appendChild(Mt5700.button(ctx.active ? '去激活' : '激活', function () {
-					/* 默认承载一去激活整机就断网，比删一条配置严重得多，要二次确认 */
-					if (ctx.cid === 0 && ctx.active) {
-						Mt5700.confirm('CID 0 是默认承载，去激活会中断网络连接。确定继续？', function () {
-							handleActivePdp(ctx.cid, false);
-						}, '确认去激活');
-						return;
-					}
-					handleActivePdp(ctx.cid, !ctx.active);
-				}, 'secondary'));
+				/*
+				 * active 为 null 表示 CGACT? 根本没报这条（默认承载的典型情况）：
+				 * 此时激活 / 去激活按钮没有意义，下发 AT+CGACT 只会拿 ERROR 或
+				 * 动到一个不该由这边管理的承载，所以直接不给按钮。
+				 */
+				if (ctx.active !== null) {
+					opWrap.appendChild(Mt5700.button(ctx.active ? '去激活' : '激活', function () {
+						/* 默认承载一去激活整机就断网，比删一条配置严重得多，要二次确认 */
+						if (ctx.cid === 0 && ctx.active) {
+							Mt5700.confirm('CID 0 是默认承载，去激活会中断网络连接。确定继续？', function () {
+								handleActivePdp(ctx.cid, false);
+							}, '确认去激活');
+							return;
+						}
+						handleActivePdp(ctx.cid, !ctx.active);
+					}, 'secondary'));
+				}
 				var cidCell;
 				if (ctx.cid === 0) {
 					cidCell = E('span', { 'class': 'mt5700-inline' });
@@ -314,8 +361,15 @@ return L.view.extend({
 				return [
 					cidCell,
 					getPdpTypeText(ctx.type),
-					ctx.apn || '-',
-					Mt5700.badge(ctx.active ? '已激活' : '未激活', ctx.active ? 'success' : 'neutral'),
+					/*
+					 * 手册 7.1：APN 为空表示「使用签约值」。写「-」会让人以为没配 APN，
+					 * 实测本机 CID 0/1 的 APN 都是空的，卡照样上网。
+					 */
+					ctx.apn || '（签约值）',
+					/* CGACT 没报这条时不能写「未激活」，那是把「不适用」读成「断了」 */
+					ctx.active === null
+						? Mt5700.badge('随附着建立', 'neutral')
+						: Mt5700.badge(ctx.active ? '已激活' : '未激活', ctx.active ? 'success' : 'neutral'),
 					opWrap
 				];
 			});
@@ -340,6 +394,7 @@ return L.view.extend({
 			}).then(function (parsed) {
 				if (parsed) {
 					Object.keys(parsed).forEach(function (k) { settings[k] = parsed[k]; });
+					if (parsed.protocol != null) apnForm.protocol = parsed.protocol;
 					if (parsed.apn != null) apnForm.apn = parsed.apn;
 					if (parsed.username != null) apnForm.username = parsed.username;
 					if (parsed.password != null) apnForm.password = parsed.password;
@@ -353,9 +408,10 @@ return L.view.extend({
 
 		// 把自动拨号期望状态写入 UCI，供后端在每次连上模组后对齐
 		function syncAutodialDefault(enabled, mode) {
-			var wantEnable = enabled ? '1' : '0';
-			var wantMode = String(mode != null ? mode : 1);
-			if (wantMode !== '1' && wantMode !== '2') wantMode = '1';
+		var wantEnable = enabled ? '1' : '0';
+		var wantMode = String(mode != null ? mode : 1);
+		/* 0/1/2 都是手册里的合法值（0=模组内部拨号），只有读不回来时才兜底 1 */
+		if (wantMode !== '0' && wantMode !== '1' && wantMode !== '2') wantMode = '1';
 
 			var curEnable = L.uci.get('at-webserver', 'config', 'autodial_enable');
 			var curMode = L.uci.get('at-webserver', 'config', 'autodial_mode');
@@ -391,10 +447,12 @@ return L.view.extend({
 				 */
 				var mode = settings.dialMode != null ? settings.dialMode : 1;
 				var enable = settings.enable != null ? settings.enable : 0;
-				var cmd = 'AT^SETAUTODIAL=' + enable + ',' + mode + ',"' + Parse.sanitizeAtParam(settings.protocol) + '","' +
+				/* 协议取用户在下拉里选的值，不是上次解析回来的旧值 */
+				var cmd = 'AT^SETAUTODIAL=' + enable + ',' + mode + ',"' + Parse.sanitizeAtParam(normalizePdpType(apnForm.protocol)) + '","' +
 					Parse.sanitizeAtParam(apnForm.apn) + '","' + Parse.sanitizeAtParam(apnForm.username) + '","' + Parse.sanitizeAtParam(apnForm.password) + '",' + (Number(apnForm.authType) || 0);
 				return Ui.sendCmd(cmd).then(function (res) {
 					if (!res.success) throw new Error('APN 设置失败');
+					settings.protocol = normalizePdpType(apnForm.protocol);
 					settings.apn = apnForm.apn; settings.username = apnForm.username;
 					settings.password = apnForm.password; settings.authType = apnForm.authType;
 				});
@@ -507,7 +565,17 @@ return L.view.extend({
 							if (match) actives[Number(match[1])] = match[2] === '1';
 						});
 					}
-					list.forEach(function (ctx) { ctx.active = !!actives[ctx.cid]; });
+					/*
+				 * 「CGACT 没报」不等于「没激活」——实测（本机 2026-09-15）：AT+CGACT?
+				 * 只返回 1、5、6、21~31，**没有 CID 0**。默认承载是 LTE 附着时由网络
+				 * 建立的，不归 CGACT 管（手册 7.1：cid 0 是注册必需的默认 PDP）。
+				 * 用 !!actives[0] 会把它显示成「未激活」，看着像断网，其实 NDIS 早就
+				 * 拿到 IPv4/IPv6 在跑。所以没报到记 null=不适用，只有明确报 0 才是未激活。
+				 */
+				list.forEach(function (ctx) {
+					ctx.active = Object.prototype.hasOwnProperty.call(actives, String(ctx.cid))
+						? actives[ctx.cid] : null;
+				});
 					/*
 					 * 只滤掉 21~31（网络侧保留）。CID 0 要留着 —— 它是默认承载，
 					 * 不可删除但可改 APN，藏起来等于堵死改默认承载的唯一入口。

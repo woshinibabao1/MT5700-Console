@@ -5,6 +5,58 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.2] - 2026-09-15
+
+### 修复 - CID 0「未激活」是界面编出来的，不是它没连上
+
+真机实测（2026-09-15）：`AT+CGACT?` 只返回 `1,1 / 5,1 / 6,0 / 21~31,0`，
+**压根没有 CID 0 这一行**；同一次采样里 `AT^NDISSTATQRY?` 是
+`^NDISSTATQRY: 1,1,,,"IPV4",1,,,"IPV6"` —— IPv4/IPv6 都拿到了，网是通的。
+
+原因：默认承载是 LTE 附着时由网络建立的，不归 CGACT 管（手册 7.1：cid 0 是注册
+必需的默认 PDP，不可删除）。旧代码 `ctx.active = !!actives[ctx.cid]` 把「CGACT
+没报这条」当成 `false`，界面就写了「未激活」。
+
+现在：
+
+- 「CGACT 没报」记为 `null`（不适用），只有**明确报 0** 才是未激活。
+- 状态列对 `null` 渲染「随附着建立」，不再写成「未激活」。
+- `active === null` 时不给激活 / 去激活按钮 —— 对默认承载下发 `AT+CGACT` 要么
+  ERROR，要么动到一个不该由这边管理的承载。
+
+### 修复 - APN 为空是「使用签约值」，不是没配
+
+手册 7.1 原文：`<APN>` 若该值为空，则使用签约值。本机 CID 0/1 的 APN 都是空串，
+照样上网，原界面渲染成 `-` 容易被读成漏配，改为「（签约值）」。
+
+### 新增 - 自动拨号支持协议类型（IPv4 / IPv6 / IPv4v6）
+
+手册 16.18 `AT^SETAUTODIAL=<enable>,<dial_mode>,[[<protocol>],...]`，`<protocol>`
+取值 `"IP"` / `"IPV6"` / `"IPV4V6"`；本机实测 `^SETAUTODIAL:1,1,"IPV4V6",...`。
+这个参数原先只在状态徽章里读出来显示，**没有任何控件能改**。现已补上下拉，
+写进 SETAUTODIAL 的第 3 个参数；取值非法或为空时回落到 `IPV4V6`，避免下拉空选中。
+
+### 修复 - 拨号方式补齐 `dial_mode=0`（模组内部拨号）
+
+手册 16.18：0=模组内部拨号、1=上位机拨号（USB 数传）、2=上位机拨号（网口数传），
+举例即 `AT^SETAUTODIAL=1,0`。旧代码只有 1/2，遇到 0 显示「未知」，而
+`syncAutodialDefault()` 还会把非 1/2 的值强行改写成 1 回写 UCI —— 等于偷偷改设备
+配置。现在 0/1/2 都是合法值，只有读不回来时才兜底 1。
+
+### 其它
+
+- 解析兼容手册查询语法里的 `^SETAUTODAIL:` 拼写（少一个 I，举例里又是
+  `^SETAUTODIAL:`）：只认一种的话，碰上另一种整页只能报「获取拨号配置失败」。
+- PDP 卡片加了提示：APN 建议只在上方「自动拨号与 APN」里设置（手册 16.18 注 3：
+  不要同时用 CGDCONT 配 APN，否则实际生效值可能与预期不一致）。
+
+### 测试
+
+新增 `tests/dial-contract.test.js`（33 项），用真机实测应答做输入：
+`parseAutoDialResponse` 直接执行断言；`fetchPDPContexts` 在 vm 里用桩 `Ui.sendCmd`
+喂真机 CGDCONT/CGACT 样本跑出 `pdpList`，断言 CID 0 的 `active === null`。
+关键断言做过回退验证：把实现改回 `!!actives[ctx.cid]` 后，3 项如期失败。
+
 ## [2.0.1] - 2026-09-15
 
 ### 修复 - PDP 上下文列表不再隐藏 CID 0
