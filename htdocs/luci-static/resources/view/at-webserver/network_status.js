@@ -347,34 +347,25 @@ return L.view.extend({
 			return (sysMode === 'LTE' ? 'B' : 'n') + band;
 		}
 		/*
-		 * 频点列 = ARFCN，附 MHz 换算。
+		 * 频点列 = ARFCN 数值本身，**不附 MHz 换算**。
+		 *
+		 * 换算值（504990 → 2524.95 MHz）是派生量，行内再放一个数字反而干扰：
+		 * ARFCN 才是与工参、锁频配置、手机工程软件对齐的那个值，给一个就够。
+		 * 手机里看到 504990、页面也写 504990，一眼就能对上。
 		 *
 		 * ★ 取值必须区分「服务小区频点」与「载波中心频点」，两者不是一回事：
 		 *   - ^MONSC 的 <channel>（手册 13.9.3 注明是 SSB/服务小区 ARFCN），
 		 *     与 ^NRSSBID 的服务小区 ARFCN、手机工程软件显示的都是同一个值；
 		 *   - ^HFREQINFO 的 <dl_fcn> 是**载波中心**，13.16 注明「与上下行频点可不一致」。
-		 *   本机实测 n41 100MHz：服务小区 504990(≈2524.95MHz) vs 载波中心 513000(≈2565.0MHz)，
-		 *   相差约 40 MHz 属正常。此前本列直接取 <dl_fcn>，用户拿手机一对就以为页面算错了。
+		 *   本机实测 n41 100MHz：服务小区 504990 vs 载波中心 513000，相差约 40 MHz 属正常。
+		 *   此前本列直接取 <dl_fcn>，用户拿手机一对就以为页面算错了。
 		 *
 		 * 故：主载波行取 ^MONSC 的 channel（对得上手机）；辅载波没有服务小区测量
 		 * （^MONSSC 本固件恒回 NONE），只能退回 <dl_fcn>，并在提示里写明。
-		 *
-		 * 换算按 3GPP TS 38.104 全局栅格：FR1 步进 5 kHz → MHz = ARFCN / 200。
-		 * LTE 的 channel 是 EARFCN（按频段各自偏移，本表没有偏移表），
-		 * 故 LTE 直接用 ^HFREQINFO 自带的 <dl_freq>，绝不猜值。
 		 */
-		function freqCell(fcn, sysMode, fallbackMHz) {
+		function freqCell(fcn) {
 			if (!fcn) return '—';
-			var mhz = null;
-			if (sysMode === 'LTE') {
-				mhz = fallbackMHz != null ? Number(fallbackMHz) : null;
-			} else {
-				mhz = Parse.nrArfcnToMHz(fcn);
-				if (mhz == null && fallbackMHz != null) mhz = Number(fallbackMHz);
-			}
-			if (mhz == null || !isFinite(mhz)) return String(fcn);
-			/* 先乘 100 取整再除：2565 不会显示成 2565.00，2524.95 又能保留两位 */
-			return String(fcn) + '\u00a0\u00b7\u00a0' + (Math.round(mhz * 100) / 100) + '\u00a0MHz';
+			return String(fcn);
 		}
 		function renderCarriers() {
 			carrierBox.innerHTML = '';
@@ -493,7 +484,7 @@ return L.view.extend({
 				return [
 					c.sysMode || c.kind || '—',
 					bandLabel(c.sysMode, c.band),
-					freqCell(fcn, c.sysMode, c.dlFreqMHz),
+					freqCell(fcn),
 					fmtBw(c.dlBwKHz),
 					c.downlinkOnly ? '仅下行' : fmtBw(c.ulBwKHz),
 					sig.pci != null ? String(sig.pci) : '—',
@@ -518,11 +509,8 @@ return L.view.extend({
 			var cellFcn = c0.channel ? Number(c0.channel) : null;
 			var centerFcn = list.length ? list[0].dlFcn : null;
 			if (cellFcn && centerFcn && cellFcn !== centerFcn) {
-				var centerMHz = list[0].dlFreqMHz != null ? Number(list[0].dlFreqMHz) : Parse.nrArfcnToMHz(centerFcn);
-				hint += ' 主载波 ARFCN 取服务小区（SSB）频点，与手机工程软件一致；载波中心为 '
-					+ centerFcn + (centerMHz != null && isFinite(centerMHz)
-						? '\uff08' + centerMHz.toFixed(1) + ' MHz\uff09' : '')
-					+ '，两者相差属正常。';
+				hint += ' 主载波 ARFCN 取服务小区（SSB）频点，与手机工程软件一致；载波中心为 ARFCN '
+					+ centerFcn + '，两者相差属正常。';
 			}
 			if (usedSsbid) {
 				hint += ' 辅载波 PCI/RSRP/SINR 来自 ^NRSSBID 邻区测量（按频点配对），'
