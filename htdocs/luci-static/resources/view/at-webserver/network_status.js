@@ -444,39 +444,6 @@ return L.view.extend({
 						'style': 'width:' + pct + '%;background:' + color }));
 			}
 
-			/*
-			 * 频点列：ARFCN，并附 MHz 换算。
-			 *
-			 * ★ 主载波必须取 ^MONSC 的 <channel>，不能取 ^HFREQINFO 的 <dl_fcn>。
-			 *   两者都是 NR-ARFCN，但含义不同：
-			 *     ^MONSC: NR,460,00,504990,...    → 服务小区（SSB）频点 504990 ≈ 2524.95 MHz
-			 *     ^HFREQINFO: 0,7,41,513000,...   → 载波中心      513000 ≈ 2565.0 MHz
-			 *   手册 13.9.3 明确注明 ^MONSC 的 ARFCN 是 SSB 频点，13.16 的 <dl_fcn> 是载波中心，
-			 *   「与上下行频点可不一致」。100 MHz 带宽下两者相差约 40 MHz 完全正常
-			 *   （SSB 只要落在载波带宽内即可，不必在中心）。
-			 *   此前本列直接取 <dl_fcn>，与手机工程软件（显示 SSB 频点）对不上，被判为「值错误」。
-			 *
-			 * 辅载波没有服务小区测量（^MONSSC 本固件恒回 NONE），只能退回 <dl_fcn>。
-			 *
-			 * 换算按 3GPP TS 38.104 全局栅格：FR1 步进 5 kHz → MHz = ARFCN / 200。
-			 * LTE 的 <channel> 是 EARFCN（各频段偏移不同，本表没有偏移表），
-			 * 故 LTE 直接用 ^HFREQINFO 自带的 <dl_freq>，绝不猜值。
-			 */
-			function freqCell(c, i) {
-				var useCell = (i === 0 && c0.channel);
-				var fcn = useCell ? Number(c0.channel) : c.dlFcn;
-				if (!fcn) return '—';
-				var mhz = null;
-				if (useCell && c.sysMode !== 'LTE') {
-					mhz = Parse.nrArfcnToMHz(fcn);
-				} else if (c.dlFreqMHz != null) {
-					mhz = Number(c.dlFreqMHz);
-				}
-				if (mhz == null || !isFinite(mhz)) return String(fcn);
-				/* 先乘 100 取整再除，避免 2565.00 这种尾随零（2524.95 又需要两位） */
-				return String(fcn) + '\u00a0\u00b7\u00a0' + (Math.round(mhz * 100) / 100) + '\u00a0MHz';
-			}
-
 			/* ^NRSSBID 邻区按「SSB 频点落在载波下行带宽内」配对；同频有多个邻区时取 RSRP 最强者 */
 			function nrssbidMatch(c) {
 				var nb = state.nrssbid && state.nrssbid.neighbors;
