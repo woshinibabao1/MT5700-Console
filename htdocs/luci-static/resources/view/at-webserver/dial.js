@@ -426,7 +426,15 @@ return L.view.extend({
 		function handleAutoDialChange(checked) {
 			/* 暂存而非立即下发，应用时才发送 AT 命令 */
 			staged.set('autodial', '自动拨号：' + (checked ? '开启' : '关闭'), function () {
-				var cmd = checked ? 'AT^SETAUTODIAL=1,' + (settings.dialMode || 1) : 'AT^SETAUTODIAL=0';
+				/*
+				 * 这里**不能**写 (settings.dialMode || 1)：dialMode 的 0 是合法值
+				 * （模组内部拨号），而 0 在布尔上下文里是 falsy，会被 || 换成 1 ——
+				 * 于是「开一下自动拨号」顺手把设备的拨号方式从 0 改成了 1。
+				 * 只判 null/undefined（与下面 handleApnApply 的 mode 取法一致）。
+				 */
+				var cmd = checked
+					? 'AT^SETAUTODIAL=1,' + (settings.dialMode != null ? settings.dialMode : 1)
+					: 'AT^SETAUTODIAL=0';
 				return Ui.sendCmd(cmd).then(function (res) {
 					if (!res.success) throw new Error('设置自动拨号失败');
 					settings.enable = checked ? 1 : 0;
@@ -443,7 +451,8 @@ return L.view.extend({
 				 * 没判定出激活）时是 undefined，直接拼进命令会变成
 				 * 'AT^SETAUTODIAL=1,undefined,"cmnet"...' —— 模组只会回 ERROR，
 				 * 界面却报「APN 设置失败」，看不出是命令拼错了。这里与上面
-				 * handleAutoDialChange 的 '(settings.dialMode || 1)' 保持一致兜底。
+				 * handleAutoDialChange 的 dialMode 兜底口径一致：都是「判 null」，
+				 * 不是「判真假」（0 是合法值，写成 || 1 会被悄悄改成 1）。
 				 */
 				var mode = settings.dialMode != null ? settings.dialMode : 1;
 				var enable = settings.enable != null ? settings.enable : 0;
@@ -484,7 +493,13 @@ return L.view.extend({
 		function fetchUSBMode() {
 			return Ui.sendCmd('AT^SETMODE?').then(function (res) {
 				if (res.success && res.data) {
-					var mode = parseInt(String(res.data).trim(), 10);
+					/*
+					 * 应答是 '^SETMODE: 0\r\nOK' 这样一整段，不是光秃秃一个数字。
+					 * 直接 parseInt 的话首字符 '^' 非数字 → NaN（MDN: parseInt），
+					 * usbMode 永远是 undefined，下拉一直显示「未知」。
+					 */
+					var mm = String(res.data).match(/\^SETMODE:\s*(\d+)/);
+					var mode = mm ? parseInt(mm[1], 10) : NaN;
 					if (!isNaN(mode)) { settings.usbMode = mode; renderDialStatus(); }
 				}
 			}).catch(function () { Mt5700.error('获取USB模式失败'); });
