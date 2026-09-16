@@ -18,6 +18,11 @@
   --mt5700-border: rgba(255, 255, 255, 0.75);
   --mt5700-border-subtle: rgba(203, 213, 225, 0.55);
   --mt5700-divider: rgba(0, 0, 0, 0.06);
+  /* iOS 风格开关专用：关态轨道要的是「一块浅灰填充」，不是描边色。
+     复用 --mt5700-border-subtle 的话暗色下只有 0.08 alpha，轨道几乎看不见，
+     所以单列两个变量随主题切换。开态沿用 --mt5700-accent，与页面按钮同色。 */
+  --mt5700-switch-off: rgba(120, 120, 128, 0.16);
+  --mt5700-switch-knob-sh: 0 3px 8px rgba(0, 0, 0, 0.15), 0 1px 1px rgba(0, 0, 0, 0.16);
 
   /* 玻璃效果 */
   --mt5700-blur: 18px;
@@ -99,6 +104,8 @@
     --mt5700-border: rgba(255, 255, 255, 0.1);
     --mt5700-border-subtle: rgba(255, 255, 255, 0.08);
     --mt5700-divider: rgba(255, 255, 255, 0.06);
+    --mt5700-switch-off: rgba(120, 120, 128, 0.32);
+    --mt5700-switch-knob-sh: 0 3px 8px rgba(0, 0, 0, 0.45), 0 1px 1px rgba(0, 0, 0, 0.3);
     --mt5700-sh-1: 0 1px 2px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.3);
     --mt5700-sh-2: 0 2px 4px rgba(0, 0, 0, 0.25), 0 4px 12px rgba(0, 0, 0, 0.32);
     --mt5700-sh-3: 0 4px 8px rgba(0, 0, 0, 0.28), 0 8px 24px rgba(0, 0, 0, 0.38), 0 16px 48px rgba(0, 0, 0, 0.24);
@@ -790,17 +797,24 @@
   cursor: pointer;
 }
 
+/*
+ * 开关按 iOS 的几何做：轨道 51×31、旋钮 27×27、左右各留 2px。
+ * 位移量 20px = 51 - 2(左) - 27(旋钮) - 2(右)，旋钮到两端边距相等；
+ * 之前 44×24 / 旋钮 20 的比例偏扁，滑到位时两侧留白不一致。
+ * 开态色沿用 --mt5700-accent（项目蓝），不照搬 iOS 的 #34C759 —— 页面上
+ * 按钮、链接、焦点环都是这一支蓝，单独给开关上绿会破坏整套配色的一致性。
+ */
 .mt5700-switch input[type="checkbox"] {
   position: relative;
-  width: 44px;
-  height: 24px;
+  width: 51px;
+  height: 31px;
   margin: 0;
   appearance: none;
-  background: var(--mt5700-border-subtle);
+  background: var(--mt5700-switch-off);
   border: none;
   border-radius: var(--mt5700-radius-full);
   cursor: pointer;
-  transition: background var(--mt5700-transition-fast);
+  transition: background-color var(--mt5700-transition-base);
 }
 
 .mt5700-switch input[type="checkbox"]:checked {
@@ -812,17 +826,28 @@
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 20px;
-  height: 20px;
+  width: 27px;
+  height: 27px;
   background: white;
   border: none;
   border-radius: 50%;
-  transition: transform var(--mt5700-transition-fast);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  transition: transform var(--mt5700-transition-base), width var(--mt5700-transition-fast);
+  box-shadow: var(--mt5700-switch-knob-sh);
 }
 
 .mt5700-switch input[type="checkbox"]:checked::before {
   transform: translateX(20px);
+}
+
+/* 按下时旋钮横向撑开 —— iOS 的按压反馈。
+   on 态要把位移从 20px 收到 16px，否则 31px 宽的旋钮会捅出轨道右边。 */
+.mt5700-switch input[type="checkbox"]:active::before {
+  width: 31px;
+}
+
+.mt5700-switch input[type="checkbox"]:checked:active::before {
+  transform: translateX(16px);
+  width: 31px;
 }
 
 /* 屏蔽 LuCI 主题（如 Aurora）对复选框伪元素的串扰绘制：
