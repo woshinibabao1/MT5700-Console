@@ -328,13 +328,33 @@ var SmsEncode = (function () {
 	 * 并且**号码与正文都要写成 UCS2 十六进制**（实测：ASCII 引号 + hex 号码
 	 * + hex 正文可用；把引号也写成 hex 会让模组卡在数据输入态）。
 	 */
+	/*
+	 * Text 模式（IRA/ASCII）分支的正文消毒。
+	 *
+	 * 只剥「会破坏 AT 命令分帧」的控制字符，**不能**用 Parse.sanitizeAtParam 代替：
+	 * 那个函数连 , 和 ; 一起剥（它防的是参数注入），用在正文上会把
+	 * "hello, world" 变成 "hello world" —— 那是擅自改动用户的短信内容。
+	 *
+	 * 必剥的四个（理由见上面 DATA_SEP 那段：整条命令里只能有一个真回车，且必须在最末）：
+	 *   CR 0x0D / LF 0x0A —— 正文里出现真换行，一条命令就被截成两条，
+	 *     后面的内容会被模组当作**新的 AT 命令行**解析 → AT 命令注入；
+	 *   NUL 0x00          —— 部分固件按 C 字符串截断；
+	 *   Ctrl-Z 0x1A       —— 3GPP 里它是「数据输入结束」，会让模组提前提交。
+	 *
+	 * UCS2 分支不受影响：走 toUcs2Hex 之后只剩 [0-9A-F]，天然安全。
+	 */
+	function sanitizeSmsText(text) {
+		return String(text == null ? '' : text).replace(/[\r\n\x00\x1a]/g, '');
+	}
+	api.sanitizeSmsText = sanitizeSmsText;
+
 	api.buildTextSendCommand = function (opts) {
 		/* 只滤空白与括号的话，号码里带引号会拼出 AT+CMGS="10086"OK" 破坏命令；
 		   非数字字符一概不要（PDU 路径的 encodeAddress 本来也会滤）。*/
 		var da = String(opts.destination || '').trim().replace(/[^\d+]/g, '');
 		var text = String(opts.message || '');
 		if (!needsUcs2(text)) {
-			return { pre: [], cmd: 'AT+CMGS="' + da + '"' + DATA_SEP + text, post: [] };
+			return { pre: [], cmd: 'AT+CMGS="' + da + '"' + DATA_SEP + sanitizeSmsText(text), post: [] };
 		}
 		// 号码只编码数字部分：'+' 是格式符，由 <toda> 表达，不进 UCS2 串
 		var daDigits = da.replace(/^\+/, '');
