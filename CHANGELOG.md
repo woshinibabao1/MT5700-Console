@@ -5,6 +5,48 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.8] - 2026-09-17
+
+本轮是**全仓系统性审查**（71 文件 / 30,109 行，前端 + Rust 后端 + Shell 集成 + 测试工程），
+采用四路并行分诊 → Proposer 定级 → Reviewer 挑刺 → 主控复核的会审流程。
+完整结论（含 22 项待人工决策）见仓库根 `FRONTEND_REVIEW_REPORT.md`。
+
+### 修复
+
+- **看门狗：AT 复位指令其实从未下发**（`root/usr/share/mt5700/watchdog.sh`）
+  `rpc_send()` 里写的是 `nc -w 5`，而本固件的 busybox nc 是精简版、**不认 `-w`**
+  （传了只打印 usage 并以 rc=1 退出）。于是「连续失败达阈值 → 下发复位命令」整条链路
+  静默失效，界面上「连接恢复失败」与「模组无响应」长得一样。
+  同规则在 ucode 侧早有守卫测试，watchdog.sh 漏在守卫之外 —— 本次一并补上
+  `tests/watchdog-nc-contract.test.js`。
+
+- **短信正文含 "error" 会被判成命令失败**（`rpc.js`）
+  `isErrorText` 的分隔符含 `\s`（空格也算行首），Text 模式下 `AT+CMGL=4` 的应答里
+  一条正文含 error 的短信会让整份列表判失败。改为**行锚定 + 去掉 `/i`**。
+
+- **PIN 锁只能启用、永远关不掉**（`modem_settings.js`）
+  `+CLCK` 应答用 `/,(\d+)/` 解析：① `+CLCK: 0` 没逗号解不出；② 有回显时先撞上
+  **回显行**里的 `,2`（那是查询参数）。改为行锚定 + 兼容可选 facility。
+
+- **升级页密钥填错 = 永久锁死**（`upgrade.js`）
+  拿到 `REQUIRE_AUTH_KEY` 只报错就 return，而其余 7 个页面都是弹输入框补密钥。
+  同时补上 `AT^FOTADLQ` 进度查询缺失的 `catch`（否则 unhandled rejection + 进度假卡死）。
+
+- **删掉一条字面量恒真的假断言**（`tests/dial-contract.test.js`）
+  `ok(..., true)` 永远 pass，看着有覆盖其实零覆盖。改用合成样本真正验证
+  「CGACT 报 0 → active === false」，并做了变异测试确认新断言不是又一条恒真。
+
+### 测试
+
+新增 `watchdog-nc-contract.test.js`(6) / `at-error-text-contract.test.js`(16) /
+`clck-parse-contract.test.js`(12)，扩充 `upgrade-poll.test.js`(+4)、改造
+`dial-contract.test.js`(+1 真实断言)。全量：21 个测试文件全部通过，语法错误 0。
+
+### 文档
+
+`FRONTEND_REVIEW_REPORT.md` 重写为全仓审查报告（含 22 项待决策、1 条确认误报、
+1 条定级下调、与上一轮报告的对照表、手册索引与未验证声明）。
+
 ## [2.0.7] - 2026-09-16
 
 ### 修复 - 开态开关中间有个对勾：主题的 `background-image` 带 `!important`
