@@ -7,6 +7,56 @@
 
 ## [2.0.4] - 2026-09-16
 
+### 新增 - 自动刷新支持自定义间隔
+
+`Ui.autoRefresh` 原先只有 3/5/10/15/30/60 六个固定档位，想要 20 秒、120 秒都做不到。
+现增加「自定义…」：选中后展开数字输入框，可填任意秒数。
+
+- **必须钳制在 2~3600 秒**：调用方把 interval 直接当 `setInterval` 的毫秒基数
+  （`network_status.js` 的 `resetTimers`），而按 HTML 标准定时器延时为 0 时会被钳到
+  约 4ms —— 真落到 0，「自动刷新」就变成每 4 毫秒打一次串口，AT 通道独占，等于把自己打死；
+- 填非法值（空 / 非数字 / 越界）一律拒绝并回填当前真值，界面不显示与真实间隔不符的数；
+- 顺带修掉一个真 BUG：`setInterval()` 原先只改内部变量、**不通知调用方**，定时器根本不重建。
+  `network_settings.js` 的 `neighAr.setInterval(15)` 因此一直是「界面显示 15 秒、实际一次都不跑」。
+  现在 `setInterval()` / `setEnabled()` 都会回调，定时器随之重建。
+
+新增 `tests/autorefresh-contract.test.js`（29 项）：钳制函数从源码抽出跑真值
+（0 / 负数 / 1 / 999999 / 'abc' / '' / undefined 逐个验），并断言
+`setInterval`/`setEnabled` 必须触发回调、既有 API（`getInterval`/`isEnabled`/`el`/预设档位）不得改坏。
+
+### 修复 - 短信正文可注入 AT 命令（安全）
+
+Text 模式（`AT+CMGF=1`）下发时，正文是**直接拼进 AT 命令字符串**的。按 `smsEncode.js`
+里 `DATA_SEP` 那段实测结论：整条命令里只能有一个真回车、且必须在最末（由后端补）。
+正文里只要出现 CR/LF，一条命令就被截成两条，后面的内容会被模组当成**新的 AT 命令行**
+执行 —— 短信正文是本项目唯一完全由外部输入决定的内容，这是真正的 AT 命令注入。
+
+- 新增 `sanitizeSmsText()`：只剥 CR(0x0D) / LF(0x0A) / NUL(0x00) / Ctrl-Z(0x1A)
+  这四个会破坏分帧的控制字符；
+- **没有**复用 `Parse.sanitizeAtParam`：那个会连 `,` `;` 一起剥（它防的是参数注入），
+  用在正文上会把 `hello, world` 变成 `hello world`，属于擅自改动用户短信内容；
+- UCS2 分支走 `toUcs2Hex` 后只剩 `[0-9A-F]`，本就安全，加了断言防回归。
+
+新增 `tests/sms-text-injection.test.js`（19 项），直接 eval 真实编码模块跑边界值。
+
+### 修复 - 拨号方式 0 被悄悄改成 1
+
+`dial.js` 的 `handleAutoDialChange` 写的是 `(settings.dialMode || 1)`。`dialMode` 的
+`0`（模组内部拨号）是**合法值**，但在布尔上下文里是 falsy，会被 `||` 换成 `1` ——
+于是「开一下自动拨号」顺手把设备的拨号方式从 0 改成了 1。改为判 `null`。
+
+### 修复 - USB 模式永远读不回来
+
+`fetchUSBMode()` 用 `parseInt(String(res.data).trim(), 10)` 解析 `AT^SETMODE?` 的应答，
+而应答是 `^SETMODE: 0\r\nOK` 一整段，首字符 `^` 非数字 → `NaN`（MDN: parseInt），
+`settings.usbMode` 恒为 undefined、下拉一直显示「未知」。改为先用正则抠出数字。
+
+### 修复 - 注释与代码矛盾
+
+`modem_settings.js` 的网卡 PHY 值域上方**并存两段结论相反的注释**
+（一段说「按 `=?` 实报生成选项」，紧接着一段说「不取 `=?` 的实报」），实现取后者。
+删掉前一段废弃注释 —— 它正是当初把 2.5G 那一档藏起来的思路残留。
+
 ### 修复 - 「载波与聚合」表格的频点取值错误（取了载波中心，应为服务小区频点）
 
 真机（n41 / 100 MHz）同一时刻三条命令的原始应答：
