@@ -318,7 +318,31 @@ var Ui = (function () {
 
 	/* ---------- 自动刷新（等价原 AutoRefresh 组件） ---------- */
 
-	// 自动刷新开关 + 间隔选择。返回 { el, setEnabled, setInterval }
+	/*
+	 * 自定义间隔的上下限（秒）。
+	 *
+	 * 下限不能是 0，这不是洁癖：调用方（network_status.js 的 resetTimers）把
+	 * interval 直接当 setInterval 的毫秒基数，而按 HTML 标准，定时器延时为 0
+	 * 时会被钳到约 4ms（嵌套层级下的最小值）。真落到 0，「自动刷新」就变成
+	 * 每 4 毫秒打一次串口 —— AT 通道是独占的，等于把自己打死。
+	 * 上限只防手滑多敲几个 0，换来一个永远等不到的刷新。
+	 */
+	var AR_MIN_SEC = 2;
+	var AR_MAX_SEC = 3600;
+	var AR_CUSTOM_VALUE = 'custom';
+
+	/*
+	 * 把任意输入收敛成合法秒数；解析不出数字返回 null（由调用方保持原值，
+	 * 不猜一个数、也不让界面显示与真实间隔不符）。
+	 * parseInt 首位非数字即 NaN（MDN: parseInt），故 '' / 'abc' 都会走 null。
+	 */
+	function clampRefreshSec(value) {
+		var n = parseInt(value, 10);
+		if (isNaN(n)) return null;
+		return Math.min(AR_MAX_SEC, Math.max(AR_MIN_SEC, n));
+	}
+
+	// 自动刷新开关 + 间隔（六档预设 + 自定义秒数）。返回 { el, setEnabled, setInterval, getInterval, isEnabled }
 	api.autoRefresh = function (onChange) {
 		var wrap = E('div', { 'class': 'at-autorefresh' });
 		var enabled = true;
@@ -330,7 +354,7 @@ var Ui = (function () {
 		label.insertBefore(chk, label.firstChild);
 		var sel = document.createElement('select');
 		sel.className = 'cbi-input-select';
-		sel.style.width = '90px';
+		sel.style.width = '110px';
 		[3, 5, 10, 15, 30, 60].forEach(function (s) {
 			var opt = document.createElement('option');
 			opt.value = String(s);
@@ -338,20 +362,83 @@ var Ui = (function () {
 			if (s === interval) opt.selected = true;
 			sel.appendChild(opt);
 		});
+		var customOpt = document.createElement('option');
+		customOpt.value = AR_CUSTOM_VALUE;
+		customOpt.textContent = '自定义…';
+		sel.appendChild(customOpt);
+
+		/* 自定义秒数：只在选中「自定义…」时才出现，平时不占版面。
+		   用 number 而不是 text：由浏览器先挡掉一批非法输入，
+		   真值仍以 clampRefreshSec 为准（type=number 挡不住手敲的 0）。 */
+		var custom = document.createElement('input');
+		custom.type = 'number';
+		custom.className = 'cbi-input-text';
+		custom.min = String(AR_MIN_SEC);
+		custom.max = String(AR_MAX_SEC);
+		custom.step = '1';
+		custom.style.width = '72px';
+		custom.style.display = 'none';
+		custom.title = '自定义刷新间隔，' + AR_MIN_SEC + '~' + AR_MAX_SEC + ' 秒';
+
+		function emit() { if (onChange) onChange(enabled, interval); }
+
+		/* 把 interval 反映到控件上：命中预设就选预设，否则切到「自定义…」并回填秒数。
+		   回填是必须的 —— 用户填 1 得到 2，界面必须写 2，否则界面在说谎。 */
+		function syncControls() {
+			var hit = false;
+			for (var i = 0; i < sel.options.length; i++) {
+				if (sel.options[i].value === String(interval)) { hit = true; break; }
+			}
+			if (hit) sel.value = String(interval);
+			else { sel.value = AR_CUSTOM_VALUE; custom.value = String(interval); }
+			custom.style.display = sel.value === AR_CUSTOM_VALUE ? '' : 'none';
+		}
+
+		function applyCustom() {
+			var v = clampRefreshSec(custom.value);
+			/* 非法输入：回填当前真值即可，不改间隔、不通知调用方 */
+			if (v == null) { syncControls(); return; }
+			interval = v;
+			syncControls();
+			emit();
+		}
+
 		sel.addEventListener('change', function () {
+			if (sel.value === AR_CUSTOM_VALUE) {
+				/* 只展开输入框并预填当前值，等用户填完再改间隔 ——
+				   选中的瞬间就改会让间隔莫名其妙跳一次 */
+				custom.style.display = '';
+				custom.value = String(interval);
+				custom.focus();
+				return;
+			}
 			interval = parseInt(sel.value, 10);
-			if (onChange) onChange(enabled, interval);
+			custom.style.display = 'none';
+			emit();
+		});
+		/* 用 change（失焦/回车）而不是 input：逐字符通知会不停地重建定时器 */
+		custom.addEventListener('change', applyCustom);
+		custom.addEventListener('keydown', function (e) {
+			if (e.key === 'Enter') { e.preventDefault(); applyCustom(); }
 		});
 		chk.addEventListener('change', function () {
 			enabled = chk.checked;
-			if (onChange) onChange(enabled, interval);
+			emit();
 		});
 		label.appendChild(sel);
+		label.appendChild(custom);
 		wrap.appendChild(label);
 		return {
 			el: wrap,
-			setEnabled: function (v) { enabled = v; chk.checked = v; },
-			setInterval: function (s) { interval = s; sel.value = String(s); },
+			setEnabled: function (v) { enabled = !!v; chk.checked = !!v; emit(); },
+			setInterval: function (s) {
+				/* 非法值直接拒绝，保留当前间隔（不猜值） */
+				var v = clampRefreshSec(s);
+				if (v == null) return;
+				interval = v;
+				syncControls();
+				emit();
+			},
 			getInterval: function () { return interval; },
 			isEnabled: function () { return enabled; }
 		};
