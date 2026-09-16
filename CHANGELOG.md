@@ -5,6 +5,38 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.6] - 2026-09-16
+
+### 修复 - 开关被挤成 16×16：Argon 主题用 `!important` 压过了我们的几何
+
+现象：2.0.5 缓存问题解决后，用户看到的开关「像被挤压了，已经不是原来的形状」——
+轨道塌成一小团，旋钮（27px）整个盖在上面，只剩一个白球。
+
+真因不是缓存，是**层叠优先级**。`mt5700.css` 里写的是 `width:51px;height:31px`，
+但 Argon 主题 `/luci-static/argon/css/cascade.css` 里有：
+
+```css
+input[type="checkbox"] {
+  appearance: none !important;
+  border: 1px solid var(--primary);
+  width: 1rem !important;   /* = 16px */
+  height: 1rem !important;  /* = 16px */
+}
+```
+
+带 `!important` 的声明无条件压过不带 `!important` 的声明，**与选择器特异性无关**。
+我们的规则特异性再高（`.mt5700-switch input[type="checkbox"]`）也赢不了，
+于是轨道被压成 16×16，而旋钮（`::before`，主题没管）仍是 27px。
+
+修复（`mt5700.css`）：轨道的 `width/height` 补 `!important`，并加
+`min-width/min-height: 51px/31px` 作第二道保险 —— 盒子的实际尺寸取
+`max(min-*, width)`，将来再冒出别的 `!important` 也不会塌下去。
+
+- 缓存击穿器 `MT5700_CSS_VERSION` 5.5.3 → **5.5.4**
+- 守卫测试 `tests/css-cachebust-contract.test.js` 新增 3 项：轨道宽、高必须带
+  `!important`，且必须有 `min-width/min-height` 兜底（防止有人把 `!important` 优化掉）
+- 版本 2.0.5 → **2.0.6**
+
 ## [2.0.5] - 2026-09-16
 
 ### 修复 - 改了 CSS 但界面没变：样式表缓存击穿器从未 bump 过

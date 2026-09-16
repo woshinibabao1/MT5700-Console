@@ -813,11 +813,22 @@
  * 之前 44×24 / 旋钮 20 的比例偏扁，滑到位时两侧留白不一致。
  * 开态色沿用 --mt5700-accent（项目蓝），不照搬 iOS 的 #34C759 —— 页面上
  * 按钮、链接、焦点环都是这一支蓝，单独给开关上绿会破坏整套配色的一致性。
+ *
+ * ★ width/height 必须带 !important：
+ *   Argon 主题（/luci-static/argon/css/cascade.css）里有
+ *       input[type="checkbox"]{width:1rem !important;height:1rem !important}
+ *   带 !important，比本规则的选择器特异性再高也压不过它。不加 !important 的后果是
+ *   轨道被压成 16×16，而旋钮仍是 27px —— 看上去就是「被挤扁、只剩一个小白球」。
+ *   min-width/min-height 是第二道保险：即便将来又冒出别的 !important，
+ *   盒子的实际尺寸也取 max(min-*, width)，不会再塌下去。
  */
 .mt5700-switch input[type="checkbox"] {
   position: relative;
-  width: 51px;
-  height: 31px;
+  width: 51px !important;
+  height: 31px !important;
+  min-width: 51px;
+  min-height: 31px;
+  flex: 0 0 auto;
   margin: 0;
   appearance: none;
   background: var(--mt5700-switch-off);

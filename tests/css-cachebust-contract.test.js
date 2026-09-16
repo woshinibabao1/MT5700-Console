@@ -41,7 +41,7 @@ const js = fs.readFileSync(JSP, 'utf8');
  *   ① bump mt5700.js 的 MT5700_CSS_VERSION；
  *   ② 把本常量改成新指纹（用本测试失败时打印出的实际值）。
  */
-const CSS_FINGERPRINT = '678e24a1b7b3e186';
+const CSS_FINGERPRINT = '2cda5cca5b751cb9';
 
 let pass = 0;
 const fails = [];
@@ -80,6 +80,21 @@ ok('轨道为 iOS 几何 51×31（旧值是 44×24）',
 	'实际规则：' + switchRule);
 ok('轨道显式 appearance:none（否则浏览器画原生复选框）',
 	/appearance:\s*none/.test(switchRule));
+/*
+ * ★ 主题压制守卫（2026-09-16 第二次事故）：
+ *   Argon 主题 /luci-static/argon/css/cascade.css 里
+ *       input[type="checkbox"]{width:1rem !important;height:1rem !important}
+ *   带 !important —— 我们选择器特异性再高也压不过它。之前没加 !important，
+ *   51×31 的轨道被压成 16×16，27px 旋钮整个盖在上面，用户看到的就是
+ *   「开关被挤扁、只剩一个小白球」。这条断言防止有人把 !important 优化掉。
+ */
+ok('轨道 width 带 !important（Argon 用 !important 把复选框压成 1rem）',
+	/width:\s*51px\s*!important/.test(switchRule), '实际规则：' + switchRule);
+ok('轨道 height 带 !important（同上）',
+	/height:\s*31px\s*!important/.test(switchRule), '实际规则：' + switchRule);
+ok('轨道有 min-width/min-height 兜底（即便再被 !important 覆盖也不塌）',
+	/min-width:\s*51px/.test(switchRule) && /min-height:\s*31px/.test(switchRule),
+	'实际规则：' + switchRule);
 
 const knobRule = (css.match(/\.mt5700-switch input\[type="checkbox"\]::before\s*\{[^}]*\}/) || [])[0] || '';
 ok('旋钮 27×27（旧值 20×20）',
