@@ -2,6 +2,16 @@
    MT5700 LuCI 前端 - Modern Dimensional Layering 设计系统 v2
    Soft Minimalism + Glassmorphic Materials + Modern Data Dashboard
    Z 轴层级: L1 环境背景 / L2 主容器卡片 / L3 浮动数据卡片 / L4 按钮·图表·气泡
+
+   ⚠️ 改本文件后必须同步 bump `mt5700.js` 里的 MT5700_CSS_VERSION
+   ----------------------------------------------------------------------
+   本样式表由 mt5700.js 以 `/luci-static/resources/at-webserver/mt5700.css?v=<版本>`
+   注入，问号后面那串是唯一的缓存击穿器。固件的 squashfs 里文件 mtime 恒为
+   1970-01-01，uhttpd 又不发 Cache-Control，浏览器按启发式新鲜度（RFC 9111 §4.2.2）
+   会把「1970 年的文件」缓存到近乎永久。2026-09-16 就把开关改成 iOS 几何后，
+   设备上的 CSS 内容已经是新的（实测 width:51px 在位），但浏览器仍在用旧副本
+   —— 表现就是「代码改了、界面没变」。只 bump 版本号才有效，等缓存自然过期没用。
+   守卫：tests/css-cachebust-contract.test.js（对本文件做指纹比对）。
    ========================================================================== */
 
 /* ---------- CSS Variables ---------- */

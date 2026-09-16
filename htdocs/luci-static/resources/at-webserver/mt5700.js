@@ -11,7 +11,15 @@
  */
 
 // 注入新样式
-var MT5700_CSS_VERSION = '5.5.2';
+/*
+ * ⚠️ 改 mt5700.css 后必须 bump 这个常量。
+ * 它是样式表 URL `.../mt5700.css?v=<版本>` 里唯一的缓存击穿器：固件 squashfs 的
+ * 文件 mtime 恒为 1970-01-01，uhttpd 不送 Cache-Control，浏览器按启发式新鲜度
+ * 会把该文件缓存到近乎永久。2026-09-16 的教训：开关改成 iOS 几何（44×24 → 51×31）
+ * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
+ * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
+ */
+var MT5700_CSS_VERSION = '5.5.3';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
