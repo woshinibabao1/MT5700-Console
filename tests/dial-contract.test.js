@@ -119,7 +119,7 @@ const CGACT_SAMPLE = [
 	'+CGACT: 22,0'
 ].join('\r\n') + '\r\nOK';
 
-function runFetchPdp() {
+function runFetchPdp(cgdcont, cgact) {
 	const src = extractFunction(dialJs, 'fetchPDPContexts()');
 	ok('能定位 fetchPDPContexts', src.length > 0);
 	if (!src) return Promise.resolve(null);
@@ -128,7 +128,9 @@ function runFetchPdp() {
 			sendCmd: function (cmd) {
 				return Promise.resolve({
 					success: true,
-					data: cmd.indexOf('CGDCONT') >= 0 ? CGDCONT_SAMPLE : CGACT_SAMPLE
+					data: cmd.indexOf('CGDCONT') >= 0
+						? (cgdcont || CGDCONT_SAMPLE)
+						: (cgact || CGACT_SAMPLE)
 				});
 			}
 		},
@@ -156,7 +158,7 @@ runFetchPdp().then(function (list) {
 
 	const cid1 = list.filter(function (c) { return c.cid === 1; })[0];
 	ok('CGACT 明确报 1 的 CID 1 判为已激活', cid1 && cid1.active === true);
-	ok('CGACT 明确报 0 的 CID 6 判为未激活（样本里 6 不在 CGDCONT，故此条只看实现语义）', true);
+	/* 「报 0 → 未激活」这条另起合成样本验证，见文末（实测样本里没有 CID 6 的 CGDCONT） */
 
 	/* ---------- C. 渲染语义（源码层，钉住写法不回退） ---------- */
 
@@ -203,6 +205,24 @@ runFetchPdp().then(function (list) {
 	ok('UCI 同步不再把 dial_mode=0 改写成 1',
 		/if \(wantMode !== '0' && wantMode !== '1' && wantMode !== '2'\) wantMode = '1';/.test(dialJs),
 		'仍会把 0 当成非法值改写成 1，等于偷偷改设备配置');
+
+	/*
+	 * 合成样本（**不是**实测值，仅用于补齐分支覆盖）：
+	 * 实测的 CGACT 里有 `+CGACT: 6,0`，但实测 CGDCONT 里没有 CID 6 ——
+	 * 列表里根本不会出现它，所以「报 0 → active === false」这条一直没被真正断言，
+	 * 此前甚至留了一条 ok(..., true) 的**字面量恒真**断言（永远 pass，等于没覆盖）。
+	 * 这里在实测样本里插一行 CID 6，把这条真正跑出来。
+	 */
+	const CGDCONT_WITH_CID6 = CGDCONT_SAMPLE.replace('\r\n+CGDCONT: 21',
+		'\r\n+CGDCONT: 6,"IPV4V6","","",0,0,0,0,0,0,1,,,,,,0,,0,0,0,0\r\n+CGDCONT: 21');
+
+	return runFetchPdp(CGDCONT_WITH_CID6, CGACT_SAMPLE);
+}).then(function (list2) {
+	const cid6 = (list2 || []).filter(function (c) { return c.cid === 6; })[0];
+	ok('★ CGACT 明确报 0 的 CID 6 判为未激活（active === false，不是 null）',
+		cid6 && cid6.active === false,
+		cid6 ? '实际 ' + cid6.active + '（null 表示「CGACT 没报到」，语义不同）'
+			: '列表里没有 CID 6，样本没生效');
 
 	finish();
 }).catch(function (err) {
