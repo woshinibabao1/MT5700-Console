@@ -357,11 +357,12 @@ return L.view.extend({
 		 *   - ^MONSC 的 <channel>（手册 13.9.3 注明是 SSB/服务小区 ARFCN），
 		 *     与 ^NRSSBID 的服务小区 ARFCN、手机工程软件显示的都是同一个值；
 		 *   - ^HFREQINFO 的 <dl_fcn> 是**载波中心**，13.16 注明「与上下行频点可不一致」。
-		 *   本机实测 n41 100MHz：服务小区 504990 vs 载波中心 513000，相差约 40 MHz 属正常。
+		 *   本机实测 n41：服务小区 524910 vs 载波中心 528960（60 MHz 载波），
+		 *   辅载波 SSB 504990 vs 载波中心 513000（100 MHz 载波），相差几十 MHz 属正常。
 		 *   此前本列直接取 <dl_fcn>，用户拿手机一对就以为页面算错了。
 		 *
-		 * 故：主载波行取 ^MONSC 的 channel（对得上手机）；辅载波没有服务小区测量
-		 * （^MONSSC 本固件恒回 NONE），只能退回 <dl_fcn>，并在提示里写明。
+		 * 逐行取哪个值由 renderCarriers 内的 ssbFcn(c) 决定（^MONSC 服务小区 →
+		 * ^NRSSBID 邻区配对 → 兜底 <dl_fcn>），本函数只负责渲染成裸值。
 		 */
 		function freqCell(fcn) {
 			if (!fcn) return '—';
@@ -450,6 +451,37 @@ return L.view.extend({
 			}
 
 			/*
+			 * 每个载波行都给 **SSB 频点**——手机工程软件显示的就是它，
+			 * 不能拿 ^HFREQINFO 的 <dl_fcn> 顶上（那是载波中心，见 freqCell 注释）。
+			 *
+			 * 取值优先级：
+			 *   1) ^MONSC 的服务小区频点（最权威），前提是它落在该载波的下行带宽内。
+			 *      本机实测双载波聚合：^MONSC 报 524910（2624.55 MHz），
+			 *      落在 60 MHz 载波（中心 528960 / 2644.8 MHz，带内 2614.8–2674.8）内，
+			 *      不落在 100 MHz 载波（中心 513000 / 2565.0 MHz，带内 2515–2615）内
+			 *      —— 据此自动认出哪一行是主载波，不依赖 ^HFREQINFO 的行序；
+			 *   2) ^NRSSBID 邻区按「SSB 落在载波带宽内」配对（与辅载波信号列同源）。
+			 *      本机实测辅载波命中 504990（2524.95 MHz，RSRP -80）；
+			 *   3) 都取不到才退回 <dl_fcn>（载波中心），并在提示行明确标注。
+			 *
+			 * LTE 不参与 1) 和 2)：<channel> 是 EARFCN（各频段偏移不同，没有偏移表，
+			 * 不能按 NR 全局栅格换算），^NRSSBID 也只报 NR，故 LTE 行直接用 <dl_fcn>。
+			 */
+			function ssbFcn(c) {
+				if (c.sysMode === 'NR' && c0.channel && c.dlFreqMHz != null && c.dlBwKHz) {
+					var m = Parse.nrArfcnToMHz(Number(c0.channel));
+					if (m != null && Math.abs(m - c.dlFreqMHz) <= c.dlBwKHz / 2000) {
+						return { fcn: Number(c0.channel), from: 'cell' };
+					}
+				}
+				if (c.sysMode !== 'LTE') {
+					var nb = nrssbidMatch(c);
+					if (nb && nb.arfcn != null) return { fcn: Number(nb.arfcn), from: 'ssbid' };
+				}
+				return { fcn: c.dlFcn, from: c.dlFcn ? 'center' : 'none' };
+			}
+
+			/*
 			 * ^NRSSBID 的邻区不带 RSRQ（手册 13.28 的邻区字段只有 PCI/ARFCN/RSRP/SINR
 			 * + 波束），而 ^MONNC 报同一小区时是带的。本机实测 4/4 能按
 			 * (ARFCN, PCI) 对上，故从这里回填；对不上返回 null 显示「—」，绝不猜值。
@@ -470,6 +502,7 @@ return L.view.extend({
 			 * 其余数据源（^MONSSC 仅 NSA、^CASCELLINFO 仅 LTE CA）在本机无效，已删除。
 			 */
 			var usedSsbid = false;
+			var centerRows = [];
 			var rows = list.map(function (c, i) {
 				var sig;
 				if (i === 0) {
@@ -479,12 +512,13 @@ return L.view.extend({
 					sig = nb ? { pci: nb.pci, rsrp: nb.rsrp, rsrq: monncRsrq(nb), sinr: nb.sinr } : {};
 					if (nb) usedSsbid = true;
 				}
-				/* 主载波行：有 ^MONSC 的服务小区频点就用它（对得上手机），否则退回载波中心 */
-				var fcn = (i === 0 && c0.channel) ? Number(c0.channel) : c.dlFcn;
+				/* 见 ssbFcn：取该载波的 SSB 频点，取不到才退回载波中心 */
+				var f = ssbFcn(c);
+				if (f.from === 'center') centerRows.push(i + 1);
 				return [
 					c.sysMode || c.kind || '—',
 					bandLabel(c.sysMode, c.band),
-					freqCell(fcn),
+					freqCell(f.fcn),
 					fmtBw(c.dlBwKHz),
 					c.downlinkOnly ? '仅下行' : fmtBw(c.ulBwKHz),
 					sig.pci != null ? String(sig.pci) : '—',
@@ -502,15 +536,16 @@ return L.view.extend({
 
 			var hint = '载波聚合要等到有数据业务时才会激活，空闲时通常只报主载波。';
 			/*
-			 * 主载波行取的是服务小区（SSB）频点，与手机工程软件/^NRSSBID 一致；
-			 * 而 ^HFREQINFO 的 <dl_fcn> 是**载波中心**，两者在 100 MHz 带宽下能差几十 MHz。
-			 * 不把这句写出来，用户拿手机一对就会以为页面算错了（真实报障）。
+			 * ARFCN 列逐行给的是该载波的 **SSB 频点**，与手机工程软件一致；
+			 * ^HFREQINFO 的 <dl_fcn> 是**载波中心**，在 60/100 MHz 带宽下能差几十 MHz
+			 * （本机：SSB 524910 vs 载波中心 528960；SSB 504990 vs 载波中心 513000）。
+			 * 不写出来，用户拿手机一对就会以为页面算错了（这是真实报障，发生过两次）。
 			 */
-			var cellFcn = c0.channel ? Number(c0.channel) : null;
-			var centerFcn = list.length ? list[0].dlFcn : null;
-			if (cellFcn && centerFcn && cellFcn !== centerFcn) {
-				hint += ' 主载波 ARFCN 取服务小区（SSB）频点，与手机工程软件一致；载波中心为 ARFCN '
-					+ centerFcn + '，两者相差属正常。';
+			hint += ' ARFCN 列取各载波的 SSB 频点（与手机工程软件一致）；'
+				+ '^HFREQINFO 的 <dl_fcn> 是载波中心，仅在测不到 SSB 时兜底显示。';
+			if (centerRows.length) {
+				hint += ' 第 ' + centerRows.join('、') + ' 载波本轮没测到 SSB 频点，'
+					+ '显示的是载波中心，与手机的数值会对不上。';
 			}
 			if (usedSsbid) {
 				hint += ' 辅载波 PCI/RSRP/SINR 来自 ^NRSSBID 邻区测量（按频点配对），'
