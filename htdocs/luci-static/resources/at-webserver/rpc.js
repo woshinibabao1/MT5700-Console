@@ -260,11 +260,25 @@ function isRetryableRead(command) {
 		|| STATE_SET[k] === true;
 }
 
-/* 模组把错误当普通文本返回时的判定（ERROR / +CME ERROR / +CMS ERROR） */
+/*
+ * 模组把错误当普通文本返回时的判定（ERROR / +CME ERROR / +CMS ERROR）
+ *
+ * ★ 必须**行锚定**且**不带 /i**。早期写法
+ *     /(^|[\s\r\n])(ERROR|\+CME ERROR|\+CMS ERROR)/i
+ *   的分隔符含 `\s`（空格也算），于是应答**正文**里的英文单词一样会命中：
+ *   Text 模式（CMGF=1）下 `AT+CMGL=4` 返回的一条短信正文含 "error"，
+ *   整份短信列表就被当成「命令失败」，界面表现为列表空白、日志里还查不到 ERROR。
+ *
+ *   行锚定 + 去掉 /i 后：
+ *     "My network error again"        → 不命中（前面是空格，不是行首）
+ *     "\r\nERROR\r\n"                 → 命中
+ *     "\r\n+CME ERROR: 10\r\n"        → 命中（错误码后可跟任意说明文字）
+ *   守卫见 tests/at-error-text-contract.test.js。
+ */
 function isErrorText(data) {
 	if (data == null) return false;
 	var txt = String(data);
-	return /(^|[\s\r\n])(ERROR|\+CME ERROR|\+CMS ERROR)/i.test(txt);
+	return /(^|[\r\n])[ \t]*(ERROR|\+CME ERROR|\+CMS ERROR)(:[^\r\n]*)?[ \t]*(?=[\r\n]|$)/.test(txt);
 }
 
 function delayMs(ms) {
