@@ -832,14 +832,24 @@
   margin: 0;
   appearance: none;
   background: var(--mt5700-switch-off);
-  border: none;
+  border: none !important;
   border-radius: var(--mt5700-radius-full);
   cursor: pointer;
   transition: background-color var(--mt5700-transition-base);
 }
 
+/*
+ * 开态：Argon 用
+ *     input[type="checkbox"]:checked{background-image:url(对勾 SVG) !important;
+ *                                    background-color:var(--primary)}
+ * 给原生复选框画对勾。我们的开关不需要对勾（旋钮位置本身就是状态），
+ * 而 background-image 带 !important，只能用同样带 !important 的 none 压掉，
+ * 光靠 background 简写重置不掉。background-color 同理要 !important，
+ * 否则开态会被主题的主色（紫）顶掉，不是项目蓝。
+ */
 .mt5700-switch input[type="checkbox"]:checked {
-  background: var(--mt5700-accent);
+  background-color: var(--mt5700-accent) !important;
+  background-image: none !important;
 }
 
 .mt5700-switch input[type="checkbox"]::before {

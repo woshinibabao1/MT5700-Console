@@ -5,6 +5,39 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.7] - 2026-09-16
+
+### 修复 - 开态开关中间有个对勾：主题的 `background-image` 带 `!important`
+
+现象：2.0.6 修好几何后，开关打开时蓝色胶囊正中多了一个难看的对勾。
+
+仍是 Argon 主题：
+
+```css
+input[type="checkbox"]:checked {
+  border: 1px solid var(--primary);
+  background-image: url('data:image/svg+xml,...对勾...') !important;
+  background-color: var(--primary);
+  background-size: 70%;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+```
+
+`background-image` 带 `!important`，我们原来的 `background: var(--mt5700-accent)`
+简写（虽然会重置 background-image，但不带 `!important`）压不过它 —— 简写重置
+只在同优先级下有效。
+
+修复：开态改用两条带 `!important` 的独立声明
+`background-color: var(--mt5700-accent) !important` + `background-image: none !important`；
+轨道的 `border: none` 也补 `!important`（主题给勾选态加了 1px 主色描边，选择器
+特异性与我们相同，靠的是「我们的表后加载」才赢，太脆）。
+
+- 缓存击穿器 `MT5700_CSS_VERSION` 5.5.4 → **5.5.5**
+- 守卫测试新增 2 项：开态必须有 `background-image:none !important`、
+  `background-color ... !important`
+- 版本 2.0.6 → **2.0.7**
+
 ## [2.0.6] - 2026-09-16
 
 ### 修复 - 开关被挤成 16×16：Argon 主题用 `!important` 压过了我们的几何
