@@ -380,57 +380,94 @@ return L.view.extend({
 
 		/* ================= 设备控制 ================= */
 
-		var ctrlCard = Mt5700.card('设备控制', '网卡速率与电源管理');
+		var ctrlCard = Mt5700.card('设备控制', '模组内部控制器、指示灯与 PCIe 网卡配置');
 		var ctrlBody = E('div');
 		ctrlCard._body.appendChild(ctrlBody);
 		body.appendChild(ctrlCard);
 
-		var nicSel = Mt5700.select([
-			{ label: '自动协商', value: '0' },
-			{ label: '1000Mbps 全双工', value: '1' },
-			{ label: '100Mbps 全双工', value: '2' },
-			{ label: '10Mbps 全双工', value: '3' }
-		], '0');
-		nicSel.addEventListener('change', function () { handleSetNic(parseInt(nicSel.value, 10)); });
-		ctrlBody.appendChild(Mt5700.formGroup('网卡速率', nicSel));
+		/*
+		 * 本卡三项都在写模组的掉电保存区，其中 LED 与网卡 PHY 还要重启模组才生效。
+		 * 与拨号页保持同一套交互：先暂存，按「保存并应用」才真正下发 —— 逐项立即
+		 * 下发的话，用户连改三项会被弹三次「是否立即重启模组」；顺带也让误触下拉
+		 * 不再等于立刻写模组。
+		 */
+		var ctrlStaged = Mt5700.staged({ onChanged: function () { fetchDeviceControl(); } });
 
-		var pwrSwitch = makeSwitch(function (checked, input) {
-			send('AT^TDPMCFG=' + (checked ? '1' : '0')).then(function (res) {
-				if (res.success) Mt5700.success((checked ? '开启' : '关闭') + '电源管理成功');
-				else {
-					Mt5700.error((checked ? '开启' : '关闭') + '电源管理失败');
-					input.checked = !checked;
-				}
-			}).catch(function () { Mt5700.error('电源管理设置失败'); });
+		/* ---------- 1. LED 指示灯（AT^LEDSWITCH，手册 11.12） ---------- */
+		/* 本卡里唯一对整机可见的开关：模组自身的指示灯。0=关闭（默认）1=打开。 */
+		var ledSwitch = makeSwitch(function (checked) {
+			ctrlStaged.set('led', 'LED 指示灯：' + (checked ? '开启' : '关闭'), function () {
+				return send('AT^LEDSWITCH=' + (checked ? 1 : 0)).then(function (res) {
+					if (!res.success) throw new Error('模组返回失败');
+				});
+			});
 		});
-		ctrlBody.appendChild(Mt5700.formGroup('电源管理', pwrSwitch, '开启后模组在无业务时进入低功耗'));
-
-		/* LED 指示灯（AT^LEDSWITCH，手册 11.12；0=关闭 1=打开，设置后需重启生效） */
-		var ledSwitch = makeSwitch(function (checked, input) {
-			send('AT^LEDSWITCH=' + (checked ? 1 : 0)).then(function (res) {
-				if (res.success) Mt5700.success('LED 指示灯已' + (checked ? '开启' : '关闭') + '，重启模组后生效');
-				else {
-					Mt5700.error('LED 设置失败');
-					input.checked = !checked;
-				}
-			}).catch(function () { Mt5700.error('LED 设置失败'); input.checked = !checked; });
-		});
-		ctrlBody.appendChild(Mt5700.formGroup('LED 指示灯', ledSwitch, '模组指示灯亮灭；厂商手册标注设置后需重启生效'));
-		var pwrChk = pwrSwitch.querySelector('input');
+		ctrlBody.appendChild(Mt5700.formGroup('LED 指示灯', ledSwitch,
+			'模组自身指示灯的亮灭开关（0 关闭 / 1 打开，出厂默认关闭）；厂商手册标注需重启模组生效'));
 		var ledChk = ledSwitch.querySelector('input');
 
-		function handleSetNic(value) {
-			send('AT^TDPCIELANCFG=' + value).then(function (res) {
-				if (!res.success) { Mt5700.error('网卡速率设置失败'); return; }
-				Mt5700.success('网卡速率设置成功，重启后生效');
-				Mt5700.confirm('是否立即重启模组使配置生效？', function () {
-					send('AT^RESET').then(function (r) {
-						if (r.success) Mt5700.success('重启指令已发送');
-						else Mt5700.error('重启指令发送失败');
-					});
-				}, '立即重启');
-			}).catch(function () { Mt5700.error('网卡速率设置失败'); });
-		}
+		/* ---------- 2. PCIe 控制器（AT^TDPMCFG，手册 11.16） ---------- */
+		/*
+		 * 命令是 <mode>,<mode>,<mode>,<mode>：只有 byte[0] 有定义（pcie），其余三位是
+		 * 保留位。原实现只发一个参数（AT^TDPMCFG=1），少发的位行为未定义 —— 这里把
+		 * 读回的保留位原样回写，只改 byte[0]。
+		 */
+		var pcieReserved = ['0', '0', '0'];   /* 保留位当前值，读回后覆盖 */
+		var pwrSwitch = makeSwitch(function (checked) {
+			ctrlStaged.set('pcie-pwr', 'PCIe 控制器：' + (checked ? '开启' : '关闭'), function () {
+				var cmd = 'AT^TDPMCFG=' + (checked ? 1 : 0) + ',' + pcieReserved.join(',');
+				return send(cmd).then(function (res) {
+					if (!res.success) throw new Error('模组返回失败');
+				});
+			});
+		});
+		ctrlBody.appendChild(Mt5700.formGroup('PCIe 控制器', pwrSwitch,
+			'开启或关闭模组内部 PCIe 控制器供电（手册 11.16，关闭可省一点模组功耗）；'
+			+ '本机 5G 模组以 USB 方式供网，此项与上网速率无关，掉电保存'));
+		var pwrChk = pwrSwitch.querySelector('input');
+
+		/* ---------- 3. PCIe 网卡 PHY（AT^TDPCIELANCFG，手册 11.19） ---------- */
+		/*
+		 * 值域**不能写死**：手册 11.19 写的是 (1,2) = RTL8111(1G) / RTL8125(2.5G)，
+		 * 本机固件实测 ^TDPCIELANCFG=? 却只回 (0,1)，两套对不上。这里按 =? 的实报值
+		 * 生成选项（同「网络系统配置」里漫游范围的处理），读不到就禁用下拉，绝不把
+		 * 模组不认的值发下去。
+		 */
+		var NIC_LABEL = { '0': '未定义（0）', '1': 'RTL8111（1G）', '2': 'RTL8125（2.5G）' };
+		var nicSel = Mt5700.select([{ label: '读取中…', value: '' }], '');
+		nicSel.disabled = true;
+		nicSel.addEventListener('change', function () {
+			var v = nicSel.value;
+			ctrlStaged.set('nic', 'PCIe 网卡 PHY：' + (NIC_LABEL[v] || v), function () {
+				return send('AT^TDPCIELANCFG=' + v).then(function (res) {
+					if (!res.success) throw new Error('模组返回失败');
+				});
+			});
+		});
+		ctrlBody.appendChild(Mt5700.formGroup('网卡 PHY 型号', nicSel,
+			'选择模组 PCIe 网口所接的 PHY 型号；厂商界面标注需重启模组生效'));
+		var nicStatus = E('div', { 'class': 'mt5700-hint' }, '网卡 PHY：读取中…');
+		ctrlBody.appendChild(nicStatus);
+
+		var ctrlNote = E('div', { 'class': 'mt5700-hint' },
+			'提示：本机 5G 模组以 USB 方式供网（eth2 = CDC-NCM），没有 PCIe 网卡，'
+			+ '因此「PCIe 控制器」与「网卡 PHY 型号」对上网速率都没有影响，按需保持默认即可。');
+		ctrlBody.appendChild(ctrlNote);
+
+		/* LED 与网卡 PHY 要重启才生效，就近给一个入口，免得再跑去「系统控制」 */
+		ctrlBody.appendChild(Mt5700.panelActions(
+			Mt5700.ghostButton('立即重启模组', function () {
+				Mt5700.confirm('确定重启模组？网络将中断约 10~30 秒，模组重启期间本页可能读不到数据。',
+					function () {
+						send('AT^RESET').then(function (res) {
+							if (res.success) Mt5700.success('重启指令已发送');
+							else Mt5700.error('重启指令发送失败');
+						}).catch(function () { Mt5700.error('重启指令发送失败'); });
+					}, '确定重启');
+			})
+		));
+
+		ctrlBody.appendChild(ctrlStaged.el);
 
 		/* ================= NR 能力 ================= */
 
@@ -927,25 +964,62 @@ return L.view.extend({
 			}).catch(function () {});
 		}
 
+		/*
+		 * 值域只认 =? 的实报；读不到就禁用下拉（同 fetchSysCfg「读不到不放行」的原则）。
+		 * 手册 (1,2) 与本机实报 (0,1) 不一致，说明这组值随固件变，写死任何一套都会错。
+		 */
+		function fetchNicConfig() {
+			return send('AT^TDPCIELANCFG=?').then(function (res) {
+				var vals = res.success ? Parse.parseNicRange(atText(res)) : null;
+				if (!vals) {
+					nicSel.disabled = true;
+					nicStatus.textContent = '网卡 PHY：没读到模组支持的值域，已禁用此项（避免下发了模组不认的值）。';
+					return null;
+				}
+				nicSel.innerHTML = '';
+				vals.forEach(function (v) {
+					var o = document.createElement('option');
+					o.value = v;
+					o.textContent = NIC_LABEL[v] || (v + '（未收录）');
+					nicSel.appendChild(o);
+				});
+				nicSel.disabled = false;
+				return send('AT^TDPCIELANCFG?').then(function (r2) {
+					var cur = r2.success ? atText(r2).match(/\^TDPCIELANCFG:\s*(\d+)/) : null;
+					if (cur) {
+						ensureOption(nicSel, cur[1], '');
+						nicSel.value = cur[1];
+					}
+					nicStatus.textContent = '网卡 PHY：模组实报值域（' + vals.join(',') + '），当前值 '
+						+ (cur ? cur[1] : '—') + '；本机无 PCIe 网卡，此项不影响上网速率。';
+				});
+			}).catch(function () {
+				/* 读不出来宁可禁用：绝不能把模组不认的值发下去 */
+				nicSel.disabled = true;
+				nicStatus.textContent = '网卡 PHY：读取模组参数失败，已禁用此项（刷新页面可重试）。';
+			});
+		}
+
 		function fetchDeviceControl() {
-			return send('AT^TDPCIELANCFG?').then(function (res) {
-				if (res.success && res.data) {
-					var m = atText(res).match(/\^TDPCIELANCFG:\s*(\d+)/);
-					if (m) nicSel.value = String(m[1]);
-				}
-				return send('AT^TDPMCFG?');
-			}).then(function (res) {
-				if (res.success && res.data) {
-					var m = atText(res).match(/\^TDPMCFG:\s*(\d+)/);
-					if (m) pwrChk.checked = m[1] === '1';
-				}
-				return send('AT^LEDSWITCH?');
-			}).then(function (res) {
+			return send('AT^LEDSWITCH?').then(function (res) {
 				if (res.success && res.data) {
 					var m = atText(res).match(/\^LEDSWITCH:\s*(\d+)/);
 					if (m && ledChk) ledChk.checked = m[1] === '1';
 				}
-			}).catch(function () {});
+				return send('AT^TDPMCFG?');
+			}).then(function (res) {
+				if (res.success && res.data) {
+					var m = atText(res).match(/\^TDPMCFG:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+					if (m) {
+						pwrChk.checked = m[1] === '1';
+						pcieReserved = [m[2], m[3], m[4]];
+					}
+				}
+			}).catch(function () {
+			}).then(function () {
+				/* 前两项读失败也要继续读网卡项，否则那个下拉会一直停在「读取中…」 */
+				return fetchNicConfig();
+			});
 		}
 
 		function loadAll() {

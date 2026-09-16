@@ -329,6 +329,37 @@ var Parse = (function () {
 	};
 
 	/*
+	 * 解析 AT^TDPCIELANCFG=? 的实报值域，返回去重后的取值数组（真机为 ['0','1']）。
+	 *
+	 * 为什么必须按 =? 实报取：手册 11.19 写的是 (1,2)（1=RTL8111 1G、2=RTL8125 2.5G），
+	 * 本机固件实测却只回 (0,1)，两套对不上 —— 写死任何一套都可能在别的固件上把模组
+	 * 不认的值发下去。
+	 *
+	 * 两种风格都吃：枚举式 `(0,1)` 与范围式 `(0-1)`（同一固件的 AT^TDPMCFG=? 用的就是
+	 * 范围式，所以这里不能只认枚举）。解析不出（固件回文档占位符
+	 * `(list of supported <n>s)`）或范围宽得不合理时返回 null，由调用方禁用下拉。
+	 */
+	api.parseNicRange = function (text) {
+		var m = String(text == null ? '' : text).match(/\^TDPCIELANCFG:\s*\(([\d,\s-]*)\)/);
+		if (!m) return null;
+		var seen = {};
+		var out = [];
+		function push(v) {
+			if (/^\d+$/.test(v) && !seen[v]) { seen[v] = 1; out.push(v); }
+		}
+		m[1].split(',').forEach(function (part) {
+			var bits = part.trim().split('-');
+			if (bits.length === 1) { push(bits[0].trim()); return; }
+			var a = Number(bits[0]);
+			var b = Number(bits[1]);
+			/* 跨度异常大（固件给了个宽范围）就不展开成几十个选项，交给调用方禁用 */
+			if (b < a || b - a > 8) return;
+			for (var i = a; i <= b; i++) push(String(i));
+		});
+		return out.length ? out : null;
+	};
+
+	/*
 	 * 按实测上限生成漫游下拉项。范围未知时退回基础语义（0-2）：
 	 * 本机 =? 实测就是 (0-2)，且基础语义是两台设备都支持的交集，取它最保守。
 	 */
