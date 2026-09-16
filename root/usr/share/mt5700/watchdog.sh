@@ -284,12 +284,18 @@ json_escape() {
 
 # 把一行 JSON 发到 Rust 服务，回显应答（单行）。
 # 没有 nc 就明确失败，不静默降级成「看起来成功」。
+#
+# ★ 限时只能靠外层的 timeout，不能给 nc 传 -w：本固件的 busybox nc 是精简版，
+#   不认 -w，传了只会打印 usage 并以 rc=1 立刻退出 —— 那样**所有经 nc 的 AT
+#   复位指令都会静默失败**（连不上时表现与「模组没响应」完全一样，极难排查）。
+#   同一条规则在 rpcd ucode 侧已有守卫（tests/ui-contract.test.js），
+#   本文件此前漏了，改由 tests/watchdog-nc-contract.test.js 盯住。
 rpc_send() {
 	command -v nc >/dev/null 2>&1 || return 1
 	if command -v timeout >/dev/null 2>&1; then
-		printf '%s\n' "$1" | timeout 8 nc -w 5 "$W_RPC_HOST" "$W_RPC_PORT" 2>/dev/null
+		printf '%s\n' "$1" | timeout 8 nc "$W_RPC_HOST" "$W_RPC_PORT" 2>/dev/null
 	else
-		printf '%s\n' "$1" | nc -w 5 "$W_RPC_HOST" "$W_RPC_PORT" 2>/dev/null
+		printf '%s\n' "$1" | nc "$W_RPC_HOST" "$W_RPC_PORT" 2>/dev/null
 	fi
 }
 
