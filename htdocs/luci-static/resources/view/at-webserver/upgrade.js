@@ -2,7 +2,8 @@
 'require at-webserver/rpc';
 'require at-webserver/parse';
 'require at-webserver/mt5700';
-/* global L, AtWs, Parse, Mt5700 */
+'require at-webserver/ui';
+/* global L, AtWs, Parse, Mt5700, Ui */
 
 /**
  * 模组升级 - 新 UI 视觉 + 基准 v1.3.4 功能
@@ -458,7 +459,13 @@ return L.view.extend({
 								}
 							}
 						}
-					});
+						/*
+						 * 进度查询失败（模组正忙 / 超时 / RPC reject）不能让 Promise 悬着：
+						 * 没有 catch 就是 unhandled rejection，而界面停在**上一次**的
+						 * 进度数字上 —— 看着像「下载卡死」，实际只是这一轮没读到。
+						 * 静默吞掉即可，下一轮（3s 后）会再查，进度照常继续走。
+						 */
+					}).catch(function () { });
 					break;
 				case 31:
 					sawDownload = true;
@@ -566,9 +573,22 @@ return L.view.extend({
 		/* ---------- 初始化 ---------- */
 		renderUpgrade();
 
+		/*
+		 * 连接密钥：必须与另外 7 个页面（dial / modem_settings / network_settings /
+		 * network_status / schedule / sms_center / sms_settings）保持一致 ——
+		 * 拿到 REQUIRE_AUTH_KEY 就**弹输入框**让用户补密钥，而不是只报一句错。
+		 * 旧实现只 Mt5700.error() 就 return 了，密钥一旦填错，升级页等于
+		 * 永久锁死（刷新也没用，因为不会再问第二次）。
+		 */
 		AtWs.client.connect().catch(function (err) {
 			if (err && err.message === 'REQUIRE_AUTH_KEY') {
-				Mt5700.error('需要提供连接密钥');
+				Ui.promptModal('连接密钥', [{ key: 'key', label: '连接密钥', type: 'password' }], function (values) {
+					if (values.key) {
+						AtWs.client.connect(values.key).catch(function (e) {
+							Mt5700.error((e && e.message) || '认证失败');
+						});
+					}
+				});
 				return;
 			}
 		}).then(function () {

@@ -260,6 +260,25 @@ for (const st of [40, 50]) {
 		'FOTA 指南 5 章：^FOTAOEMDL 需在 ^FOTASTATE:10 时下发；卡住时先 AT^FOTADL=0 复位');
 }
 
+/* ---------- 连接密钥与进度查询的兜底（2026-09-17 全仓审查补） ---------- */
+{
+	/*
+	 * ① 密钥认证必须弹输入框。旧实现拿到 REQUIRE_AUTH_KEY 只 Mt5700.error() 就
+	 *    return 了 —— 密钥填错时升级页**永久锁死**（刷新也不会再问第二次）。
+	 *    其余 7 个页面都是 promptModal 写法，这里对齐。
+	 * ② 进度查询（AT^FOTADLQ）必须 catch：没有就是 unhandled rejection，
+	 *    界面停在上一次进度数字上，看着像下载卡死。
+	 */
+	ok('升级页声明了对 at-webserver/ui 的依赖（要用 Ui.promptModal）',
+		/'require at-webserver\/ui'/.test(src));
+	ok('global 注释里声明了 Ui（避免被当成未定义变量）', /\/\* global [^\n]*\bUi\b/.test(src));
+	ok('★ REQUIRE_AUTH_KEY 时弹密钥输入框，而不是只报错',
+		/REQUIRE_AUTH_KEY[\s\S]{0,400}Ui\.promptModal/.test(code),
+		'只报错会让密钥填错时升级页永久锁死');
+	ok('★ AT^FOTADLQ 进度查询有 catch（否则 unhandled rejection + 进度假卡死）',
+		/AT\^FOTADLQ'\)[\s\S]{0,1200}\}\)\.catch/.test(code));
+}
+
 /* ---------- 结果 ---------- */
 
 if (fails.length) {
