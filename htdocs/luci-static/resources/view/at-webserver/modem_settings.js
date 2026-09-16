@@ -337,8 +337,21 @@ return L.view.extend({
 			}).then(function (res) {
 				var enabled = null;
 				if (res.success && res.data) {
-					var m = atText(res).match(/,(\d+)/);
-					if (m) enabled = m[1] === '1';
+					/*
+					 * 兼容三种真实应答，且必须**行锚定**：
+					 *   +CLCK: 0              部分固件应答不带 facility
+					 *   +CLCK: "SC",0         标准形式
+					 *   AT+CLCK="SC",2 ⏎ +CLCK: 1   带命令回显（回显行里也有 ,2）
+					 *
+					 * 旧写法 /,(\d+)/ 有两个错：
+					 *   ① `+CLCK: 0` 里根本没有逗号 → 解不出，状态恒为 null；
+					 *   ② 带回显时先撞上**回显行**的 `,2`（查询参数），
+					 *      把开关状态恒读成「未启用」—— 表现就是
+					 *      「PIN 锁只能启用、永远关不掉」这个历史故障。
+					 * 行锚定（前面必须是行首）后，回显行因前面有 `AT` 不再参与匹配。
+					 */
+					var m = atText(res).match(/(^|[\r\n])[ \t]*\+CLCK:\s*(?:"[^"]*"\s*,\s*)?(\d+)/);
+					if (m) enabled = m[2] === '1';
 				}
 				renderPinState(cpinText, cpinReady, enabled);
 			}).catch(function () {
