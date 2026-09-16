@@ -433,28 +433,42 @@ return L.view.extend({
 		 * 生成选项（同「网络系统配置」里漫游范围的处理），读不到就禁用下拉，绝不把
 		 * 模组不认的值发下去。
 		 */
-		var NIC_LABEL = { '0': '未定义（0）', '1': 'RTL8111（1G）', '2': 'RTL8125（2.5G）' };
-		var nicSel = Mt5700.select([{ label: '读取中…', value: '' }], '');
-		nicSel.disabled = true;
+		/*
+		 * 值域**不取 =? 的实报**：本机固件 AT^TDPCIELANCFG=? 自称只支持 (0,1)，
+		 * 实测却接受 AT^TDPCIELANCFG=2 并读回 2 —— 自报残缺，不能当值域来源，
+		 * 否则界面永远看不到 2.5G 那一档。
+		 * 改按手册 11.19（1=RTL8111 1G / 2=RTL8125 2.5G）与厂家 HiGoROS 固件
+		 * （只认 1、2，其余判为「无效的网卡配置值」）取 1 / 2，与实测一致。
+		 */
+		var NIC_VALUES = ['1', '2'];
+		var NIC_LABEL = {
+			'1': 'RTL8111（1G · 1000Mbps 全双工）',
+			'2': 'RTL8125（2.5G · 2500Mbps 全双工）'
+		};
+		var nicSel = Mt5700.select(NIC_VALUES.map(function (v) {
+			return { label: NIC_LABEL[v], value: v };
+		}), '1');
 		nicSel.addEventListener('change', function () {
 			var v = nicSel.value;
-			ctrlStaged.set('nic', 'PCIe 网卡 PHY：' + (NIC_LABEL[v] || v), function () {
+			ctrlStaged.set('nic', '网卡速率：' + (NIC_LABEL[v] || v), function () {
 				return send('AT^TDPCIELANCFG=' + v).then(function (res) {
 					if (!res.success) throw new Error('模组返回失败');
 				});
 			});
 		});
-		ctrlBody.appendChild(Mt5700.formGroup('网卡 PHY 型号', nicSel,
-			'选择模组 PCIe 网口所接的 PHY 型号；厂商界面标注需重启模组生效'));
-		var nicStatus = E('div', { 'class': 'mt5700-hint' }, '网卡 PHY：读取中…');
+		ctrlBody.appendChild(Mt5700.formGroup('网卡速率', nicSel,
+			'模组 PCIe 网口所接的 PHY 型号，决定该口能协商到的速率（1G / 2.5G）；'
+			+ '修改后需重启模组才生效'));
+		var nicStatus = E('div', { 'class': 'mt5700-hint' }, '网卡速率：读取中…');
 		ctrlBody.appendChild(nicStatus);
 
 		var ctrlNote = E('div', { 'class': 'mt5700-hint' },
-			'提示：本机 5G 模组以 USB 方式供网（eth2 = CDC-NCM），没有 PCIe 网卡，'
-			+ '因此「PCIe 控制器」与「网卡 PHY 型号」对上网速率都没有影响，按需保持默认即可。');
+			'提示：本机 5G 模组以 USB 方式供网（eth2 = CDC-NCM），PCIe 总线上只有 WiFi 芯片、'
+			+ '没有网卡；「PCIe 控制器」与「网卡速率」作用于模组 PCIe 侧网口，'
+			+ '与 USB 供网这条链路无关。');
 		ctrlBody.appendChild(ctrlNote);
 
-		/* LED 与网卡 PHY 要重启才生效，就近给一个入口，免得再跑去「系统控制」 */
+		/* LED 与网卡速率要重启才生效，就近给一个入口，免得再跑去「系统控制」 */
 		ctrlBody.appendChild(Mt5700.panelActions(
 			Mt5700.ghostButton('立即重启模组', function () {
 				Mt5700.confirm('确定重启模组？网络将中断约 10~30 秒，模组重启期间本页可能读不到数据。',
@@ -965,38 +979,26 @@ return L.view.extend({
 		}
 
 		/*
-		 * 值域只认 =? 的实报；读不到就禁用下拉（同 fetchSysCfg「读不到不放行」的原则）。
-		 * 手册 (1,2) 与本机实报 (0,1) 不一致，说明这组值随固件变，写死任何一套都会错。
+		 * 回填当前值，再读一次 =? 只为把「固件自称的值域」摆出来 —— 它可能与实际不符
+		 * （本机自称 (0,1) 却接受 2），所以只展示、不据此生成选项，也不因读不到而禁用。
 		 */
 		function fetchNicConfig() {
-			return send('AT^TDPCIELANCFG=?').then(function (res) {
-				var vals = res.success ? Parse.parseNicRange(atText(res)) : null;
-				if (!vals) {
-					nicSel.disabled = true;
-					nicStatus.textContent = '网卡 PHY：没读到模组支持的值域，已禁用此项（避免下发了模组不认的值）。';
-					return null;
+			return send('AT^TDPCIELANCFG?').then(function (res) {
+				var cur = res.success ? atText(res).match(/\^TDPCIELANCFG:\s*(\d+)/) : null;
+				if (cur) {
+					/* 当前值可能不在基线值域里（固件确实会回 0）就补一项，免得下拉显示空白 */
+					ensureOption(nicSel, cur[1], NIC_LABEL[cur[1]] || (cur[1] + '（未收录）'));
+					nicSel.value = cur[1];
 				}
-				nicSel.innerHTML = '';
-				vals.forEach(function (v) {
-					var o = document.createElement('option');
-					o.value = v;
-					o.textContent = NIC_LABEL[v] || (v + '（未收录）');
-					nicSel.appendChild(o);
-				});
-				nicSel.disabled = false;
-				return send('AT^TDPCIELANCFG?').then(function (r2) {
-					var cur = r2.success ? atText(r2).match(/\^TDPCIELANCFG:\s*(\d+)/) : null;
-					if (cur) {
-						ensureOption(nicSel, cur[1], '');
-						nicSel.value = cur[1];
-					}
-					nicStatus.textContent = '网卡 PHY：模组实报值域（' + vals.join(',') + '），当前值 '
-						+ (cur ? cur[1] : '—') + '；本机无 PCIe 网卡，此项不影响上网速率。';
-				});
+				return send('AT^TDPCIELANCFG=?');
+			}).then(function (res2) {
+				var claimed = res2.success ? Parse.parseNicRange(atText(res2)) : null;
+				nicStatus.textContent = '网卡速率：当前 ' + nicSel.value
+					+ '；固件自称支持 ' + (claimed ? '(' + claimed.join(',') + ')' : '未读到')
+					+ '，实测接受 2，故按手册与厂商定义给出 1 / 2。'
+					+ '本机模组以 USB 供网，此设置作用于模组 PCIe 侧网口，重启模组后生效。';
 			}).catch(function () {
-				/* 读不出来宁可禁用：绝不能把模组不认的值发下去 */
-				nicSel.disabled = true;
-				nicStatus.textContent = '网卡 PHY：读取模组参数失败，已禁用此项（刷新页面可重试）。';
+				nicStatus.textContent = '网卡速率：读取模组参数失败（刷新页面可重试）。';
 			});
 		}
 
