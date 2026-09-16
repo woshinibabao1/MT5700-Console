@@ -5,6 +5,40 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.5] - 2026-09-16
+
+### 修复 - 改了 CSS 但界面没变：样式表缓存击穿器从未 bump 过
+
+现象：开关改成 iOS 几何（44×24 → 51×31）后，用户反馈「web 没实现」。
+
+真机取证（只读）：设备 `/www/luci-static/resources/at-webserver/mt5700.css`
+**内容已经是新的** —— `width:51px;height:31px`、旋钮 `27px`、`--mt5700-switch-off`
+均在位，`44px` 的旧开关规则已不存在。所以**不是没编译、也不是代码没改上**。
+
+真因是浏览器缓存。样式表由 `mt5700.js` 以
+
+```text
+/luci-static/resources/at-webserver/mt5700.css?v=<MT5700_CSS_VERSION>
+```
+
+注入，问号后那串是唯一的缓存击穿器。而 `MT5700_CSS_VERSION` 自 `fe70b2b`
+引入后**一直是 5.5.2，从未变过** —— 期间 CSS 改过很多次。设备是 squashfs，
+文件 mtime 恒为 `1970-01-01`，uhttpd 又不送 `Cache-Control`，浏览器只能按
+启发式新鲜度缓存（RFC 9111 §4.2.2，按 Last-Modified 推算新鲜期；1970 年的
+文件推算出来的新鲜期近乎无限）→ 新 CSS 躺在磁盘上，浏览器一直在用旧副本。
+**等缓存自然过期没有意义，只有换 URL 才有效。**
+
+处置：
+
+- `MT5700_CSS_VERSION` 5.5.2 → **5.5.3**，URL 变化强制浏览器重新拉取；
+- `mt5700.css` 头部与 `mt5700.js` 常量处各加**警示注释**，写明「改 CSS 必须 bump」；
+- 新增 `tests/css-cachebust-contract.test.js`（13 项）做守卫：
+  对 `mt5700.css` 做 sha256 指纹比对，**内容一变就红**，并打印处置步骤
+  （bump 版本号 → 更新指纹）；同时钉住开关的 iOS 几何、`:active` 位移收 16px、
+  关态不复用描边变量等，防止手滑改回旧值。
+
+（2.0.4 那批改动本身是对的，只是被缓存挡住没显示出来。）
+
 ## [2.0.4] - 2026-09-16
 
 ### 优化 - 开关改为 iOS 几何（51×31），开态沿用项目蓝
