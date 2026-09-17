@@ -5,6 +5,70 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.2.0] - 2026-09-18
+
+### 新增
+
+- **eSIM 管理：添加 Profile（下载）**。在上一版「只能管理已有 Profile」的基础上补齐下载能力。
+
+  四种录入方式都收口到同一个 `parseActivationCode`：粘贴激活码、扫描二维码、上传二维码图片、
+  手动填写（SM-DP+ + 匹配码 + OID + 确认码）。扫码依赖浏览器原生 `BarcodeDetector`，
+  它只在安全上下文（https / localhost）存在；LuCI 通常是 `http://192.168.x.x`，
+  因此不可用时按钮会被**禁用并说明原因**，不给一个点了没反应的假按钮。
+
+  下载全过程按 10 步展示，并把服务器原话与 APDU 状态字原样写进日志 ——
+  下载在 SM-DP+ 侧有副作用（会记一次下载订单），**失败绝不被粉饰成成功**。
+
+  **为什么必须加一条后端通道**：ES9+（LPA ↔ SM-DP+ 的 HTTPS）会被浏览器 CORS 拦掉
+  （SM-DP+ 不发 CORS 头），所以 HTTPS 那一半由路由器代发一次 POST；
+  APDU 那一半仍在浏览器侧经 `AT+CSIM` 完成。新增 ubus 方法 `mt5700.es9p`
+  （`root/usr/share/rpcd/ucode/mt5700.uc`），安全边界：只认 https、
+  主机必须是合法 FQDN（拒绝 IP / localhost / 带端口或斜杠）、
+  路径限定在 5 个 ES9+ 端点白名单、请求体必须合法 JSON 且 ≤256KB、
+  证书校验保持开启（不加 `-k`）、临时文件用 `mktemp` 创建。
+  真机已确认：`curl` 可用、CA 证书齐全、HTTPS 出站通。
+
+  ★ **当前卡槽里的不是 eUICC 卡**（普通 USIM，`SELECT ISD-R` 返回 `6A82`），
+  下载链路没有真卡可跑；协议骨架、分块与失败路径已用 mock 钉住（76 项断言），
+  真实 SM-DP+ 的字段细节仍待实测，已知不确定点记在 `FRONTEND_REVIEW_REPORT.md`。
+
+- **「处理待发回执」入口**。装完 Profile 后卡上会生成安装回执，服务器收不到就会一直挂着未确认
+  （Profile 可能被回收）。这个按钮用于补发；回执的目标地址读的是通知里自带的 SM-DP+ 地址（`0C`）。
+
+### 修复
+
+- **短信设置 → 存储位置「配置无法保存」**（用户反馈）。真机实测确认两个独立成因：
+  ① 界面给了「自动（SIM 优先）」= `MT`，而本机 `AT+CPMS=?` 只报 `("SM","ME")`，
+  选它就必然 ERROR；② 下拉框从不回写模组当前值，永远停在默认值 `SM`，
+  保存成功看着也像没保存。现在选项由 `AT+CPMS=?` 生成，并同步当前 `mem1`，
+  失败提示带上模组原话。
+- eSIM 下载链路 4 个缺陷：`pickTagValue` 不下钻构造 tag（取不到 `BF2E` 里的挑战值，
+  第一步就挂）、下载里嵌套开了第二条逻辑通道、`hexToBase64('')` 误抛异常、
+  「处理待发回执」按钮因拿不到 host 必然失败。
+- ES9+ 转发的临时文件名可预测（`/tmp/mt5700-es9p-<tag>-<秒>.tmp`），`/tmp` 是 1777，
+  本地用户可预先放符号链接让 `curl -o` 以 root 覆盖任意文件。改用 `mktemp`。
+
+### 变更
+
+- **网络状态 → 连接状态三表合一**：原来的「连接诊断 / PDP 地址 / IP 与 DNS」三张表合成一张，
+  去掉 CID 与「来源」两列，地址按值去重（实测 CID 1 与 `AT^DHCP` 都是同一个 IPv4，
+  分两处显示就是同一串数字占两行）。
+- **「空口健康」卡换成「连接质量」卡**：去掉 `^FASTDORM`（只是复述一个用户改不了也无需改的
+  模组开关，每轮白搭一次串口往返），保留空口丢包增量与短信承载域，
+  补上本轮会话均速与速率波动。
+- `Mt5700.table` 支持直接塞 DOM 节点单元格（原来只吃字符串），表格里才能放状态标签。
+- CSS 版本 `5.5.9` → `5.5.10`。
+
+**未改动**：`mt5700.css` 组件样式本体、`.mt5700-switch` 全局开关组件、rpcd ACL 的既有授权项
+（本版只按最小权限新增了 `mt5700.es9p` 一项）。
+
+### 测试
+
+- 新增 `tests/euicc-download-contract.test.js`（76 项）、`tests/connection-quality-contract.test.js`（79 项）；
+  删除过时的 `tests/air-health-contract.test.js`。
+- `node tests/run-all.js` → 30 个测试文件全部通过；`tests/syntax-check.js` → 19 个 JS 零语法错误；
+  `ucode -c` 真机校验 `mt5700.uc` → `SYNTAX_OK`。
+
 ## [2.1.4] - 2026-09-18
 
 ### 新增

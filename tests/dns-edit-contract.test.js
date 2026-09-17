@@ -74,7 +74,7 @@ ok('拿不到时有 MT5700M 兜底', /var netIface = 'MT5700M';/.test(js));
 ok('单元格显示取「自定义 ?? 运营商下发」',
 	/custom \|\| peerValue \|\| '—'/.test(js));
 ok('自定义生效时打「自定义」徽章', /Mt5700\.badge\('自定义'/.test(js));
-ok('renderDHCP 的 主/备 DNS 走 dnsCell 而不是裸值',
+ok('连接明细表里的 主/备 DNS 走 dnsCell 而不是裸值',
 	/\['主 DNS', dnsCell\(0, v4\.primaryDNS\)\]/.test(js) &&
 	/\['备 DNS', dnsCell\(1, v4\.secondaryDNS\)\]/.test(js));
 
