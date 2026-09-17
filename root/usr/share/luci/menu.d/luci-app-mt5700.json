@@ -60,6 +60,14 @@
 			"path": "at-webserver/modem_settings"
 		}
 	},
+	"admin/modem/5g/esim": {
+		"title": "eSIM 管理",
+		"order": 55,
+		"action": {
+			"type": "view",
+			"path": "at-webserver/esim"
+		}
+	},
 	"admin/modem/5g/upgrade": {
 		"title": "模组升级",
 		"order": 60,

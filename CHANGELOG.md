@@ -5,6 +5,57 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.1.4] - 2026-09-18
+
+### 新增
+
+- **「eSIM 管理」页面**（菜单：移动网络 → MT5700M模块管理 → eSIM 管理，排在「模组设置」与「模组升级」之间）。
+  管理卡槽内 eUICC 卡上的 Profile：读 EID、列 Profile、启用 / 禁用 / 删除 / 重命名。
+
+  **实现路线是纯前端 APDU over `AT+CSIM`，零后端改动、零新增二进制。**
+  选型依据（真机实测）：lpac 的 `at` driver 需要 `AT+CCHO/CGLA/CCHC`（本固件未实现，连 USIM AID 都报
+  `no such element`）；`at_csim` driver 会自己 `open(/dev/ttyUSB1)` 抢串口（Rust 服务是唯一持有者，
+  抢了全站 AT 一起挂）；`stdio` driver 要新增常驻进程 + 设备当前无 lpac / 无 libcurl；
+  `pcsc` 无读卡器抽象。而本地操作（GetEID / 列表 / 启用 / 禁用 / 删除 / 改昵称）本质是
+  纯 APDU + BER-TLV 解析，浏览器侧完全够用。
+
+  **不做 Profile 下载**（ES8+/ES9+ 需要 HTTPS + ECDSA 证书链 + ECDH + SCP03t 安全通道，
+  浏览器 JS 做不到），页面给出说明卡片 + 禁用的下载按钮。
+
+  **四种引导态**（本机当前命中第一种）：
+  | 状态 | 说明 |
+  | --- | --- |
+  | 非 eUICC（G1） | 卡上没有 ISD-R（SELECT 返回 `6A82`）。当前卡是普通中国移动 USIM，页面显示实际 ICCID 佐证 |
+  | 不支持 `AT+CSIM`（G2） | 固件不提供 APDU 透传能力；区分「不支持」与「AT 服务未连接」两种文案 |
+  | 卡槽无卡（G3） | 提示插卡，刷新按钮强制绕过读缓存 |
+  | 下载需 lpac（G4） | 说明本页只能管理已有 Profile |
+
+  ★ **当前卡槽里的不是 eUICC 卡**（实测 SELECT ISD-R 返回 `6A82`，ICCID `898600612825F7127691`），
+  所以装好固件后打开本页会看到 G1 引导态 —— 这是预期正确行为，不是故障。
+  换一张可移除 eUICC 卡（5ber / ESTKme / Xesim 等）后本页即可完整使用。
+
+### 变更
+
+- 无破坏性变更。**未改动**：`rpcd` ACL（`mt5700.at` 的 read/write 本就已授权，改它只会扩大攻击面）、
+  `mt5700.css`、`mt5700.js` 全局组件。
+
+### 技术要点
+
+- `AT+CSIM=<length>,<cmd>` 的 `<length>` 是**十六进制字符数**不是字节数（真机样本
+  `AT+CSIM=18,"00A40804047FFF6F07"` = 9 字节 / 18 字符）。写错会让整页 APDU 全灭，
+  且回报是 `ERROR` / `+CME ERROR: 50` 这种**指向错误**的现象，排查会往「卡不支持」方向跑偏。
+- `61xx` 必须循环 GET RESPONSE 取余（最多 8 轮），否则长 Profile 列表被截断成半条。
+- 关闭逻辑通道本机返回 `6200`（不是 `9000`），按警告处理；同时用「通道号是否递增」检测泄漏
+  （逻辑通道最多 19 个，耗尽后整页永久不可用）。
+- 启用 / 禁用 Profile 会触发卡片 refresh → 模组重注册 → **断网约 10~30 秒**；删除**不可逆**。
+  删除需二次确认（输入 ISD-P AID 末 4 位），启用 / 禁用单层确认。
+
+### 测试
+
+- 新增 `tests/euicc-contract.test.js`（63 项）。全部走假 AT 传输（mock `send`），
+  **绝不向真机下发任何命令**。钉住：APDU 逐字节序列、`delete` 无 `A0` 包裹（与 enable/disable 不对称）、
+  `61xx` 拼接、`6A82` 引导态、写操作只下发一次（不重发）、异常 code 集合双向全等。
+
 ## [2.1.3] - 2026-09-18
 
 ### 变更
