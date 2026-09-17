@@ -2766,3 +2766,36 @@
 .mt5700-diag-verdict.is-ok   { color: #22c55e; }
 .mt5700-diag-verdict.is-warn { color: #f59e0b; }
 .mt5700-diag-verdict.is-bad  { color: #ef4444; }
+
+/* ==========================================================================
+   可编辑的自定义 DNS（CSS v5.5.9）
+   --------------------------------------------------------------------------
+   「连接状态」卡的 IP 与 DNS 表里，「主 DNS / 备 DNS」两格可点击就地编辑。
+   ① .mt5700-dns-cell      常态：值 + 「自定义」徽章；可编辑时给指针与 hover 下划线，
+                            让人一眼看出能点（不给任何视觉线索＝没人会去点）
+   ② .mt5700-dns-edit      编辑态：输入框 + 保存/取消，与表格行高对齐（不撑行高）
+   ========================================================================== */
+
+.mt5700-dns-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 4px;
+}
+.mt5700-dns-cell.is-editable { cursor: pointer; }
+.mt5700-dns-cell.is-editable:hover .mt5700-dns-value {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  color: var(--mt5700-accent);
+}
+
+/* 编辑态：行内替换单元格，不换行、不撑高表格 */
+.mt5700-dns-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+.mt5700-dns-edit .mt5700-input { padding: 4px 8px; }
+.mt5700-dns-edit .mt5700-btn { padding: 3px 10px; }

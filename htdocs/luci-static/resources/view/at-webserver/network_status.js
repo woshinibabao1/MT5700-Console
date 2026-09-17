@@ -3,6 +3,7 @@
 'require at-webserver/parse';
 'require at-webserver/ui';
 'require at-webserver/mt5700';
+'require uci';
 /* global L, AtWs, Parse, Ui, Mt5700 */
 
 /**
@@ -1004,6 +1005,130 @@ return L.view.extend({
 			renderDevCard();
 		}
 
+		/* ---------- 自定义 DNS（UCI network.<iface>.dns） ----------
+		 *
+		 * ★ 必须先分清两个「DNS」来源，否则改完会发现界面没变化：
+		 *   ① 表格里的「主/备 DNS」原本来自 AT^DHCP? —— 那是**运营商通过 DHCP 下发的**，
+		 *      模组自己报的，改 UCI 不会让它变。
+		 *   ② 真正能改的是 UCI 里 network.<iface>.dns 的静态项，由 netifd 写入
+		 *      /tmp/resolv.conf.d/resolv.conf.auto，优先级高于运营商下发的。
+		 *   所以显示值取「自定义 ?? 运营商下发」，改完显示立刻跟着自定义项走。
+		 *
+		 * 接口名不写死：取 at-webserver.config.watch_iface（与「服务配置」页同一个），
+		 * 拿不到才回退 MT5700M。
+		 *
+		 * 权限：rpcd ACL 的 uci 读写白名单必须含 network，否则 L.uci.load 会被拒。
+		 * 被拒时这里**静默降级为只读**（dnsEditable=false），页面其余部分照常工作 ——
+		 * 老版本 ACL 的机器上不会出现报错或空白。
+		 */
+		var netIface = 'MT5700M';
+		var dnsCustom = [];      /* UCI 已配置的自定义 DNS：[主, 备] */
+		var dnsEditable = false; /* ACL 允许写 network 才为 true */
+
+		function isIPv4(v) {
+			var p = String(v).trim().split('.');
+			if (p.length !== 4) return false;
+			for (var i = 0; i < 4; i++) {
+				if (!/^\d{1,3}$/.test(p[i])) return false;
+				var n = parseInt(p[i], 10);
+				if (isNaN(n) || n < 0 || n > 255) return false;
+			}
+			return true;
+		}
+
+		function loadDnsConfig() {
+			if (!L.uci || !L.uci.load) return Promise.resolve();
+			return L.uci.load('network').then(function () {
+				/* at-webserver 只用来取接口名，失败也不影响主流程 */
+				return L.uci.load('at-webserver').catch(function () { });
+			}).then(function () {
+				var iface = L.uci.get('at-webserver', 'config', 'watch_iface');
+				if (iface) netIface = String(iface).trim() || netIface;
+				var dns = L.uci.get('network', netIface, 'dns');
+				dnsCustom = Array.isArray(dns) ? dns.slice(0, 2)
+					: (dns ? String(dns).split(/\s+/).filter(Boolean).slice(0, 2) : []);
+				dnsEditable = true;
+			}).catch(function () {
+				dnsEditable = false;
+				dnsCustom = [];
+			});
+		}
+
+		/* 保存自定义 DNS：写 UCI → save → apply。
+		 * apply 会触发 netifd reload，接口重新协商（**短暂断网**），
+		 * 所以按钮文案直接写明「会重连」，不另加确认弹窗（用户偏好少拦一层）。
+		 * 两项都清空 = 删掉 dns 项并把 peerdns 还原成 1，彻底交回运营商下发。 */
+		function saveDns(list) {
+			var cfg = 'network', sec = netIface;
+			if (list.length) {
+				L.uci.set(cfg, sec, 'dns', list);
+				/* peerdns=0：只认用户填的，避免「主/备」语义被下发的 DNS 冲淡 */
+				L.uci.set(cfg, sec, 'peerdns', '0');
+			} else {
+				if (L.uci.unset) L.uci.unset(cfg, sec, 'dns');
+				else L.uci.set(cfg, sec, 'dns', '');
+				L.uci.set(cfg, sec, 'peerdns', '1');
+			}
+			AtWs.uci.markDirty();
+			return AtWs.uci.uciSave('network').then(function () {
+				dnsCustom = list;
+				AtWs.uci.clearDirty();
+				Mt5700.info('已保存并应用，网络正在重连');
+			}, function (err) {
+				AtWs.uci.clearDirty();
+				Mt5700.error('保存失败：' + ((err && err.message) || '未知错误'));
+				throw err;
+			});
+		}
+
+		/* 单元格：常态显示值（自定义优先）＋「自定义」徽章；可编辑时点击变输入框 */
+		function dnsCell(idx, peerValue) {
+			var custom = dnsCustom[idx] || '';
+			var wrap = E('span', { 'class': 'mt5700-dns-cell' });
+			wrap.appendChild(E('span', { 'class': 'mt5700-dns-value' }, custom || peerValue || '—'));
+			if (custom) wrap.appendChild(Mt5700.badge('自定义', 'primary'));
+			if (!dnsEditable) return wrap;   /* 老版本 ACL：只读，不给点击假象 */
+			wrap.classList.add('is-editable');
+			wrap.title = '点击修改（保存会重新连接网络）';
+			wrap.addEventListener('click', function () {
+				startDnsEdit(wrap, idx, custom || '');
+			});
+			return wrap;
+		}
+
+		function startDnsEdit(cell, idx, current) {
+			var form = E('span', { 'class': 'mt5700-dns-edit' });
+			var input = Mt5700.input('text', current);
+			input.value = current;
+			input.setAttribute('placeholder', '留空=恢复自动');
+			input.style.width = '132px';
+
+			var finish = function () { renderDHCP(); };
+			var commit = function () {
+				var v = input.value.trim();
+				if (v && !isIPv4(v)) {
+					Mt5700.error('请填 IPv4 地址，例如 223.5.5.5（留空表示恢复运营商下发）');
+					return;
+				}
+				var next = dnsCustom.slice();
+				next[idx] = v;
+				var list = next.filter(Boolean);   /* 主空备非空时，备自动前提 */
+				input.disabled = true;
+				saveDns(list).then(finish, finish);
+			};
+
+			input.addEventListener('keydown', function (ev) {
+				if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+				else if (ev.key === 'Escape') { ev.preventDefault(); finish(); }
+			});
+			form.appendChild(input);
+			form.appendChild(Mt5700.primaryButton('保存并应用', commit));
+			form.appendChild(Mt5700.ghostButton('取消', finish));
+			cell.parentNode.replaceChild(form, cell);
+			input.focus();
+			input.select();
+		}
+
 		function renderDHCP() {
 			dhcpBox.innerHTML = '';
 			var rows = [];
@@ -1013,8 +1138,8 @@ return L.view.extend({
 				rows.push(['子网掩码', v4.subnetMask]);
 				rows.push(['网关', v4.gateway]);
 				rows.push(['DHCP 服务器', v4.dhcpServer]);
-				rows.push(['主 DNS', v4.primaryDNS]);
-				rows.push(['备 DNS', v4.secondaryDNS]);
+				rows.push(['主 DNS', dnsCell(0, v4.primaryDNS)]);
+				rows.push(['备 DNS', dnsCell(1, v4.secondaryDNS)]);
 			}
 			if (v6) {
 				rows.push(['IPv6 地址', v6.ipv6Address]);
@@ -1025,6 +1150,11 @@ return L.view.extend({
 			if (state.ipv6Cap) rows.push(['IPv6 支持', state.ipv6Cap.description]);
 			if (!rows.length) rows.push(['信息', '暂无数据']);
 			dhcpBox.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
+			if (dnsEditable) {
+				dhcpBox.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'点击「主 DNS / 备 DNS」可修改，写入 network.' + netIface +
+					'.dns 并重新连接网络（短暂断网）；两项都留空即恢复运营商下发的 DNS。'));
+			}
 		}
 
 		/* 调制方式展示：256QAM MCS 27 · 1 层（大小写与格式固定） */
@@ -1592,6 +1722,11 @@ return L.view.extend({
 		renderTemp();
 		renderDHCP();
 		renderMCS();
+
+		/* 自定义 DNS 是 UCI 侧的静态配置，跟 AT 无关，单独加载；
+		   拿到后重绘一次，让「主/备 DNS」显示成自定义值并带上「自定义」徽章。
+		   ACL 不含 network 时静默降级为只读，不影响上面任何渲染。 */
+		loadDnsConfig().then(renderDHCP);
 
 		AtWs.client.connect().catch(function (err) {
 			if (err && err.message === 'REQUIRE_AUTH_KEY') {

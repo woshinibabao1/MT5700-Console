@@ -5,6 +5,27 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.1.2] - 2026-09-18
+
+### 新增
+
+- **「主 DNS / 备 DNS」可点击就地编辑**（连接状态 → IP 与 DNS 表）。
+  ★ 先分清两个来源，否则改完会以为没生效：表里的值原本来自 `AT^DHCP?`，那是**运营商
+  DHCP 下发的**，改 UCI 不会让它变；真正能改的是 `network.<iface>.dns` 静态项。
+  所以显示取「自定义 ?? 运营商下发」，自定义生效时打「自定义」徽章。
+  - 接口名取 `at-webserver.config.watch_iface`（与「服务配置」页同源），不写死 `MT5700M`。
+  - 填了值 → 写 `dns` 且 `peerdns='0'`（只认你填的）；**两项都留空 → 删 `dns` 项并把
+    `peerdns` 还原 `1`**，彻底交回运营商下发，留兜底。
+  - 保存走标准 `AtWs.uci.uciSave('network')`（save + apply），**会重新连接网络、短暂断网**；
+    按钮文案与表下提示都写明了，不另加确认弹窗。
+  - **ACL 放行 `network` 读写**；老版本 ACL 的机器静默降级为只读（不给点了没反应的假按钮）。
+
+### 测试
+
+- 新增 `tests/dns-edit-contract.test.js`（31 项）：ACL 放行、降级不抛、接口名不写死、
+  显示优先级、保存/清空语义、断网提示在位，并把 `isIPv4` 抽出来真跑（256.1.1.1 / 1.2.3 /
+  1.2.3.-1 等边界）。
+
 ## [2.1.1] - 2026-09-17
 
 ### 变更

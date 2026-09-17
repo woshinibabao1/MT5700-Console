@@ -4,7 +4,8 @@
 		"read": {
 			"uci": [
 				"at-webserver",
-				"firewall"
+				"firewall",
+				"network"
 			],
 			"ubus": {
 				"file": [
@@ -77,7 +78,8 @@
 		},
 		"write": {
 			"uci": [
-				"at-webserver"
+				"at-webserver",
+				"network"
 			],
 			"ubus": {
 				"file": [
