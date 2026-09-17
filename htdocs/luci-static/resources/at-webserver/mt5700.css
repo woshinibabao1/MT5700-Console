@@ -2691,12 +2691,13 @@
 }
 
 /* ==========================================================================
-   网络状态页版式调整（CSS v5.5.7）
+   网络状态页版式调整（CSS v5.5.8）
    --------------------------------------------------------------------------
-   ① .mt5700-cards 双列：左「连接状态」、右「SIM 与设备」——两张同类信息卡，
-      高度接近、左右齐平；「速率与流量」整行满宽跟在双列下方（图表回到默认
-      170px）。早先把速率塞进右列做 .mt5700-stack 纵向堆叠，右列两张卡比左列
-      高出一大截，顶部对齐底部一长一短 —— 用户反馈「左右不对称」，已废弃。
+   ① .mt5700-cards 双列：左「连接状态」，右列 .mt5700-stack 纵向堆叠
+      「SIM 与设备」+「一键诊断」；「速率与流量」整行满宽跟在双列下方（图表
+      回到默认 170px）。右列放两张卡是为了补上原先 400px+ 的空白（用户反馈
+      「左右不对称」）。早先右列堆的是「速率与流量」，带 170px 曲线导致右列
+      高出一大截；换成纯表格的诊断卡后高度正好（实测左右差 ≈ 70px）。
    ② 窄屏（<1100px）补 .mt5700-cards 间距 —— 原规则只写在 min-width:1100px 内，
       窄屏既没有 grid 也没有 gap，纵向堆叠的卡片会贴死
    ③ .mt5700-card-body > .mt5700-toolbar 下边距 —— 作用域**必须**限定在
@@ -2704,6 +2705,7 @@
       （.mt5700-card-extra），全局加边距会污染它（会审 R06）
    ④ .mt5700-metrics-flow：流量区 8 项（会话/累计/峰值），宽屏固定 4 列排成
       2×4，避免 auto-fit 在满宽下凑出 6 列、第二行只剩 2 个的参差
+   ⑤ .mt5700-diag-*：一键诊断卡的总体结论块与结论列配色
    ========================================================================== */
 
 /* 「SIM 与设备 删掉多余空白」的正解：
@@ -2729,3 +2731,38 @@
 @media (min-width: 1100px) {
   .mt5700-metrics-flow { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
+
+/* 右列纵向堆叠（SIM 与设备 → 一键诊断）。
+   这个容器早先用来堆「速率与流量」，因 170px 曲线把右列顶高而废弃；
+   现在换纯表格的诊断卡，高度正好，重新启用。min-width:0 防表格把网格撑破。 */
+.mt5700-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mt5700-space-lg);
+  min-width: 0;
+}
+
+/* ⑤ 一键诊断 */
+.mt5700-diag-summary {
+  padding: 12px 14px;
+  border-radius: var(--mt5700-radius-md, 8px);
+  border-left: 3px solid var(--mt5700-accent);
+  background: var(--mt5700-bg-subtle, rgba(148, 163, 184, .12));
+  margin-bottom: var(--mt5700-space-md, 12px);
+}
+.mt5700-diag-summary.is-ok   { border-left-color: #22c55e; }
+.mt5700-diag-summary.is-warn { border-left-color: #f59e0b; }
+.mt5700-diag-summary.is-bad  { border-left-color: #ef4444; }
+
+.mt5700-diag-summary-head { margin-bottom: 5px; }
+.mt5700-diag-summary-text {
+  color: var(--mt5700-text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+/* 结论列：配色取在浅底与深底上都还能看清的中亮度值，不复用 accent 蓝
+   （蓝色在项目里已代表「信息/中性」，拿来当「正常」会和告警色混淆） */
+.mt5700-diag-verdict.is-ok   { color: #22c55e; }
+.mt5700-diag-verdict.is-warn { color: #f59e0b; }
+.mt5700-diag-verdict.is-bad  { color: #ef4444; }

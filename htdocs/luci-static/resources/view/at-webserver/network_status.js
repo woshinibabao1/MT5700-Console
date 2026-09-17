@@ -75,18 +75,28 @@ return L.view.extend({
 		var devBody = E('div');
 		devCard._body.appendChild(devBody);
 
-		/* 版式（用户要求「速率与流量放到 SIM 与设备下面」+「左右要对称」）：
+		/* ⑥ 一键诊断：把本页已有的读数翻译成结论与归因。
+		   头部徽章给总评，正文先一句「最可能的原因」，再逐项「结论 + 依据与建议」。
+		   全部数据来自 state（信号/速率/注册/载波/温度/SIM），**不新增任何串口查询**。 */
+		var diagCard = Mt5700.card('一键诊断', '基于本页实测数据，不额外查询模组');
+		var diagBody = E('div');
+		diagCard._body.appendChild(diagBody);
+
+		/* 版式（「左右要对称」+「SIM 与设备下面的空白要有价值」）：
 		     载波与聚合（满宽，表格含逐载波 RSRP/RSRQ/SINR/强度）
 		     信号质量（满宽）
-		     连接状态 | SIM 与设备     ← 双列卡区 .mt5700-cards（两张同类信息卡，高度接近）
-		     速率与流量（满宽，紧跟在双列下方）
-		   为什么不再把速率塞进右列：右列两张卡（SIM + 速率）会明显高于左列一张卡，
-		   顶部对齐、底部一长一短，看着是歪的（用户反馈）。改成「两卡并排 + 图表满宽」
-		   后左右齐平，曲线也回到 170px 全宽。窄屏单列时顺序仍是
-		   连接状态 → SIM 与设备 → 速率与流量（页面流向的下方）。 */
+		     连接状态 | 右列（SIM 与设备 → 一键诊断）  ← 双列卡区 .mt5700-cards
+		     速率与流量（满宽）
+		   右列两张卡用 .mt5700-stack 纵向堆叠，把左列的空白补上（实测左右差 ≈ 70px）。
+		   之前的「SIM + 速率」右列比左列高一大截，是因为速率卡带着 170px 曲线；
+		   换成诊断卡（纯表格，无图形）后高度正好。窄屏单列时按 DOM 顺序降级：
+		   连接状态 → SIM 与设备 → 一键诊断 → 速率与流量。 */
+		var duoRight = E('div', { 'class': 'mt5700-stack' });
+		duoRight.appendChild(devCard);
+		duoRight.appendChild(diagCard);
 		var duo = E('div', { 'class': 'mt5700-cards' });
 		duo.appendChild(connCard);
-		duo.appendChild(devCard);
+		duo.appendChild(duoRight);
 		body.appendChild(duo);
 		body.appendChild(rateCard);
 		body.insertBefore(carrierCard, signalCard);
@@ -280,6 +290,242 @@ return L.view.extend({
 		function renderDeviceInfo(st) {
 			devState = st;
 			renderDevCard();
+		}
+
+		/* ================= 一键诊断 =================
+		 * 目的不是再罗列一遍参数，而是替用户把读数翻译成「结论 + 最可能的原因」。
+		 * 全部数据取自 state（信号 / 速率 / 注册 / 载波 / 温度 / SIM），
+		 * 不新增任何串口查询——这也是它比「加个探测面板」省的地方。
+		 */
+
+		/* 阈值集中放这里，调判定只动这一处。单位都是字段的原生单位：
+		   RSRP / SINR / PUSCH 为 dBm / dB，温度 ℃，签约速率 kbps，实测速率字节/秒。 */
+		var DIAG_RULES = {
+			rsrpGood: -85, rsrpFair: -95,   /* ≥ -85 良好，≥ -95 一般，否则偏差 */
+			sinrGood: 15, sinrFair: 8,      /* ≥ 15 良好，≥ 8 一般，否则偏差 */
+			puschGood: 15, puschFair: 20,   /* ≤ 15 为佳，≤ 20 偏高，否则过高 */
+			tempWarn: 60, tempBad: 75,      /* 60 起告警，75 起降频 */
+			rateGood: 60, rateFair: 30      /* 实测峰值占签约的百分比 */
+		};
+
+		function diagNum(v) {
+			var n = Number(v);
+			return isFinite(n) ? n : null;
+		}
+
+		function diagSpeed(value, unitMode) {
+			var s = splitSpeedUI(value, unitMode);
+			return s.value + ' ' + s.unit;
+		}
+
+		/*
+		 * 组装诊断项，返回 [{ item, level, verdict, detail }]，level 为 bad / warn / ok。
+		 * 取不到读数的项**整项跳过**——宁可少一行，也不用「—」凑版面，
+		 * 更不能用 0 冒充实测值（0 会被判成「速率 0%」，等于凭空报故障）。
+		 */
+		function buildDiagnostics() {
+			var items = [];
+			var cell = state.cell || {};
+			var d = state.diag || {};
+
+			/* ① 速率达成：本轮实测峰值 vs 签约 AMBR。
+			   峰值只在「实时监测」开着时累计，关着时 peakDown 为 0，该项跳过。 */
+			var ambr = diagNum(state.ambrDown);
+			var peak = diagNum(state.peakDown);
+			if (ambr !== null && ambr > 0 && peak !== null && peak > 0) {
+				var pct = Math.round(peak * 8 / (ambr * 1000) * 100);
+				var lv = pct >= DIAG_RULES.rateGood ? 'ok' : (pct >= DIAG_RULES.rateFair ? 'warn' : 'bad');
+				items.push({
+					item: '速率达成', level: lv,
+					verdict: lv === 'ok' ? '正常' : (lv === 'warn' ? '一般' : '偏低'),
+					detail: '峰值 ' + diagSpeed(peak, 'bytes') + ' / 签约 ' + diagSpeed(ambr, 'kbps')
+						+ '（' + pct + '%）' + (lv === 'bad' ? ' · 建议换时段复测' : '')
+				});
+			}
+
+			/* ② 信号质量 SINR：同样强度下，SINR 直接决定能跑多高的调制阶数 */
+			var sinr = diagNum(cell.sinr);
+			if (sinr !== null) {
+				var sl = sinr >= DIAG_RULES.sinrGood ? 'ok' : (sinr >= DIAG_RULES.sinrFair ? 'warn' : 'bad');
+				items.push({
+					item: '信号质量', level: sl,
+					verdict: sl === 'ok' ? '良好' : (sl === 'warn' ? '一般' : '偏差'),
+					detail: 'SINR ' + sinr + ' dB（良好需 ≥ ' + DIAG_RULES.sinrGood + '）'
+						+ (sl === 'ok' ? '' : ' · 建议调整摆放位置或朝向')
+				});
+			}
+
+			/* ③ 上行发射功率 PUSCH：越高说明离基站越远或遮挡越重，是「看着有信号但上不去」的常见线索 */
+			var pusch = (d.nrTx && d.nrTx.length) ? diagNum(d.nrTx[0].pusch) : null;
+			if (pusch !== null) {
+				var pl = pusch <= DIAG_RULES.puschGood ? 'ok' : (pusch <= DIAG_RULES.puschFair ? 'warn' : 'bad');
+				items.push({
+					item: '发射功率', level: pl,
+					verdict: pl === 'ok' ? '正常' : (pl === 'warn' ? '偏高' : '过高'),
+					detail: 'PUSCH ' + pusch + ' dBm（≤ ' + DIAG_RULES.puschGood + ' 为佳）'
+						+ (pl === 'ok' ? '' : ' · 距基站较远或有遮挡')
+				});
+			}
+
+			/* ④ 信号强度 RSRP */
+			var rsrp = diagNum(cell.rsrp);
+			if (rsrp !== null) {
+				var rl = rsrp >= DIAG_RULES.rsrpGood ? 'ok' : (rsrp >= DIAG_RULES.rsrpFair ? 'warn' : 'bad');
+				items.push({
+					item: '信号强度', level: rl,
+					verdict: rl === 'ok' ? '良好' : (rl === 'warn' ? '一般' : '偏差'),
+					detail: 'RSRP ' + rsrp + ' dBm（≥ ' + DIAG_RULES.rsrpGood + ' 为良好）'
+						+ (rl === 'ok' ? '' : ' · 建议挪到靠窗或高处')
+				});
+			}
+
+			/* ⑤ 网络注册：5GC / EPS / IMS 三处汇总成一行的结论 */
+			var regTexts = [];
+			/* AT+C5GREG? 的 statText 自带「5GC」字样（如「已注册 5GC」），
+			   再拼一次前缀就会显示成「5GC 已注册 5GC」；只在它没写时才补。 */
+			if (d.reg && d.reg.statText) {
+				regTexts.push(/5G/.test(d.reg.statText) ? d.reg.statText : '5GC ' + d.reg.statText);
+			}
+			if (d.creg && d.creg.statText) regTexts.push('EPS ' + d.creg.statText);
+			if (d.cireg) regTexts.push('IMS ' + (d.cireg.info ? '可用' : '不可用'));
+			if (regTexts.length) {
+				var regOk = !!(d.reg && /已注册/.test(d.reg.statText));
+				items.push({
+					item: '网络注册', level: regOk ? 'ok' : 'bad',
+					verdict: regOk ? '正常' : '异常',
+					detail: regTexts.join(' · ')
+				});
+			}
+
+			/* ⑥ 载波聚合：只有单个载波时速率上限受限，值得单独提示 */
+			var cc = (state.carriers || []).length;
+			if (cc > 0) {
+				items.push({
+					item: '载波聚合', level: cc >= 2 ? 'ok' : 'warn',
+					verdict: cc >= 2 ? '已启用' : '未启用',
+					detail: cc + ' 个载波' + (cc >= 2 ? '' : ' · 单载波，速率上限受限')
+				});
+			}
+
+			/* ⑦ 模块温度：12 路取最高，与「SIM 与设备」那一行同源同口径 */
+			var t = state.temps || {};
+			var tv = Object.keys(t)
+				.map(function (k) { return Number(t[k]) || 0; })
+				.filter(function (v) { return v > 0; });
+			if (tv.length) {
+				var mt = Math.max.apply(null, tv);
+				var tl = mt < DIAG_RULES.tempWarn ? 'ok' : (mt < DIAG_RULES.tempBad ? 'warn' : 'bad');
+				items.push({
+					item: '模块温度', level: tl,
+					verdict: tl === 'ok' ? '正常' : (tl === 'warn' ? '偏高' : '过高'),
+					detail: mt + ' ℃（告警 ' + DIAG_RULES.tempWarn + ' · 降频 ' + DIAG_RULES.tempBad + '）'
+						+ (tl === 'ok' ? '' : ' · 注意通风散热')
+				});
+			}
+
+			/* ⑧ SIM 状态：状态码表只有一份，在 parse.js（simShort / simIsWarn） */
+			if (devState) {
+				var simWarn = Parse.simIsWarn(devState.sim);
+				items.push({
+					item: 'SIM 状态', level: simWarn ? 'bad' : 'ok',
+					verdict: simWarn ? '异常' : '正常',
+					detail: Parse.simShort(devState.sim) + (devState.pin ? ' · PIN ' + devState.pin : '')
+				});
+			}
+
+			return items;
+		}
+
+		/* 总评：按最严重的一项定级 */
+		function diagOverall(items) {
+			var bad = 0, warn = 0;
+			items.forEach(function (it) {
+				if (it.level === 'bad') bad++;
+				else if (it.level === 'warn') warn++;
+			});
+			return {
+				level: bad ? 'bad' : (warn ? 'warn' : 'ok'),
+				bad: bad, warn: warn, total: items.length
+			};
+		}
+
+		/*
+		 * 总体结论：不复述各项，只给「最可能的原因」。
+		 * 归因按优先级排：SIM → 温度 → 信号 → 速率。
+		 * 其中「信号都正常但速率远低于签约」是最有价值的一条——
+		 * 它直接把责任指向基站侧/套餐，而不是让用户怀疑设备坏了。
+		 */
+		function diagSummary(items) {
+			var map = {};
+			items.forEach(function (it) { map[it.item] = it; });
+			var rate = map['速率达成'], sig = map['信号强度'],
+				quality = map['信号质量'], temp = map['模块温度'], sim = map['SIM 状态'];
+
+			if (sim && sim.level === 'bad') {
+				return 'SIM 未就绪，这是当前最该解决的一项：请检查卡是否插好、是否被 PIN/PUK 锁定。';
+			}
+			if (temp && temp.level === 'bad') {
+				return '模块温度已进入降频区间，速率下滑很可能是过热保护所致，先解决散热再看速率。';
+			}
+			if (sig && sig.level === 'bad') {
+				return '信号强度是主要短板：先改善接收（挪到靠窗或高处、避开金属遮挡），再谈速率。';
+			}
+			if (rate && rate.level === 'bad') {
+				if ((!sig || sig.level === 'ok') && (!quality || quality.level === 'ok')) {
+					return '信号与温度都正常，速率却远低于签约 —— 基站侧拥塞或套餐限速的可能性大于设备故障，建议换时段复测。';
+				}
+				return '信号与速率都不理想：先按下面各项的建议改善接收，再复测速率。';
+			}
+			if (rate && rate.level === 'warn') {
+				return '整体可用，速率还没跑满签约。若长期如此，按下面各项逐条排查。';
+			}
+			/*
+			 * 没有单一主因、但有需要关注项时（例如只有「载波聚合未启用」），
+			 * 不能回一句「各项指标正常」——总评已经显示「一般」，正文却说正常，
+			 * 两处自相矛盾。这里点出排序最靠前的那一项 warn。
+			 */
+			for (var i = 0; i < items.length; i++) {
+				if (items[i].level === 'warn') {
+					return '整体可用，但「' + items[i].item + '」还没到理想状态：' + items[i].detail + '。';
+				}
+			}
+			return '各项指标正常，未发现需要处理的异常。';
+		}
+
+		function renderDiag() {
+			if (!diagBody) return;
+			diagBody.innerHTML = '';
+			var items = buildDiagnostics();
+			if (!items.length) {
+				diagBody.appendChild(Mt5700.empty('等待数据…（诊断需要信号、速率、温度等至少一项读数）'));
+				return;
+			}
+
+			/* 按严重程度排序：bad → warn → ok，同级保持原始顺序（有问题的排在最前面） */
+			var order = { bad: 0, warn: 1, ok: 2 };
+			items.sort(function (a, b) { return order[a.level] - order[b.level]; });
+
+			var ov = diagOverall(items);
+			var lvText = { bad: '较差', warn: '一般', ok: '良好' };
+			var tail = [];
+			if (ov.bad) tail.push(ov.bad + ' 项异常');
+			if (ov.warn) tail.push(ov.warn + ' 项需关注');
+			var headText = '总体：' + lvText[ov.level] + '　'
+				+ (tail.length ? tail.join(' · ') + ' / 共 ' + ov.total + ' 项' : '共 ' + ov.total + ' 项全部正常');
+
+			var box = E('div', { 'class': 'mt5700-diag-summary is-' + ov.level });
+			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' }, headText));
+			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' }, diagSummary(items)));
+			diagBody.appendChild(box);
+
+			var rows = items.map(function (it) {
+				return [
+					it.item,
+					E('b', { 'class': 'mt5700-diag-verdict is-' + it.level }, it.verdict),
+					it.detail
+				];
+			});
+			diagBody.appendChild(Mt5700.table(['检查项', '结论', '依据与建议'], rows, { striped: true }));
 		}
 
 		/* ---------- 渲染 ---------- */
@@ -1089,6 +1335,9 @@ return L.view.extend({
 			sampleRate();
 		}
 			renderSpeed();
+			/* 峰值随之归零 / 重新起算，「速率达成」这一项要跟着变，
+			   否则会一直挂着上一轮的尖峰，或关掉监测后仍显示旧百分比 */
+			renderDiag();
 		}
 
 		var rateChk = E('input', { 'type': 'checkbox' });
@@ -1104,6 +1353,8 @@ return L.view.extend({
 		 * 下一拍（1 秒后）自然会用最新基准继续，不会丢数据。
 		 */
 		var rateInFlight = false;
+		/* 采样节拍计数：诊断卡依赖峰值速率，但没必要 1Hz 重建表格，用它稀释到 5 秒一次 */
+		var diagSampleTick = 0;
 		function sampleRate() {
 			if (rateInFlight) return Promise.resolve();
 			rateInFlight = true;
@@ -1138,6 +1389,8 @@ return L.view.extend({
 					if (state.rtUp > state.peakUp) state.peakUp = state.rtUp;
 						rateSample = { t: now, rx: r.rx_bytes, tx: r.tx_bytes, device: r.device };
 						renderSpeed();
+						/* 峰值变了，「速率达成」这一项的百分比也要跟着走 */
+						if (++diagSampleTick % 5 === 0) renderDiag();
 						return;
 					}
 					return;
@@ -1238,7 +1491,13 @@ return L.view.extend({
 						.catch(function (err) { slowFailures[fn.name || '匿名任务'] = err; });
 				});
 			});
-			slowRunning = chain.then(function () { slowRefreshing = false; slowRunning = null; });
+			slowRunning = chain.then(function () {
+				slowRefreshing = false;
+				slowRunning = null;
+				/* 诊断吃的是慢档取到的信号 / 注册 / 载波 / 温度 / SIM，
+				   慢档整轮跑完再统一刷一次，避免逐个任务渲染导致的抖动 */
+				renderDiag();
+			});
 			return slowRunning;
 		}
 
