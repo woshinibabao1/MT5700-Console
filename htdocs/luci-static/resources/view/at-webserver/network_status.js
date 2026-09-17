@@ -11,13 +11,24 @@
  *
  * 等价迁移原 WebUI network/Info.tsx，并按「一个主题一张卡片」重新组织，避免信息重叠：
  *   ① 信号质量     主小区 RSRP/RSRQ/SINR + 调制方式(MCS)，头部放刷新控制
- *   ② 连接状态     注册/运营商/签约速率 + 连接诊断(ENDC/5GC/发射功率) + 地址 + IP 与 DNS
+ *   ② 连接状态     注册/运营商/签约速率 + 一张合并表（连接诊断 + 地址 + IP 与 DNS）
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量
  *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
- *   ⑥ 空口健康     空口丢包(^PDCPDATAINFO) + 快速休眠(^FASTDORM) + 短信承载域(+CGSMS)
+ *   ⑥ 连接质量     会话均速（整段平均）+ 空口丢包增量 + 信号波动 + 短信承载域
  * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
- * [连接状态 | 右列（SIM 与设备 → 空口健康）]。
+ * [连接状态 | 右列（SIM 与设备 → 连接质量）]。
+ *
+ * ★ 为什么把「连接诊断 / 地址 / IP 与 DNS」三张表合成一张（2026-09-18）：
+ *   三者的行都是「项目 → 值」，拆三张只是多出两行表头、把同类信息切三刀；
+ *   而「CID」「来源」两列又是纯内部概念 —— CID 1/5 用户无从干预，
+ *   PDP 与 WAN 本来就是同一个地址，标了来源反而让人以为有两份地址。
+ *   合并后按「连接诊断 / 地址 / IP 与 DNS」三个分组标题行分隔。
+ *
+ * ★ 为什么把「空口健康」换成「连接质量」（2026-09-18）：
+ *   原卡的快速休眠只是复述一个不可处置的模组开关，丢包是其中唯一真有价值的项。
+ *   新卡回答「这段时间到底跑得怎么样」：会话均速（整段平均，不是瞬时值）、
+ *   丢包增量、信号波动区间，外加 5G SA 下短信发不出去的那个开关（短信承载域）。
  * 速率与流量位于右列、紧跟 SIM 与设备正下方，不再兜在页面最底部。载波表列与上游快照一致（制式/频段/频点/带宽/PCI/RSRP/RSRQ/SINR/强度）。
  */
 
@@ -45,21 +56,16 @@ return L.view.extend({
 		signalCard._body.appendChild(mcsGrid);
 		body.appendChild(signalCard);
 
-		/* ② 连接状态：注册 / 运营商 / 签约速率 + 连接诊断 + IP 与 DNS（原三张卡合并） */
+		/* ② 连接状态：注册 / 运营商 / 签约速率 + 一张「连接明细」表。
+		 * 连接诊断、地址、IP 与 DNS 三张表已合并成一张（见 renderConnDetail）。 */
 		var connCard = Mt5700.card('连接状态', '注册、诊断与地址');
 		/* 标题节点留个引用：renderConn 里要把它改成「连接状态 ・ 中国移动」 */
 		var connTitleEl = connCard.querySelector('.mt5700-card-title');
 		var connBody = E('div');
 		connCard._body.appendChild(connBody);
-		var diagBox = E('div', { 'class': 'mt5700-mt-md' });
-		connCard._body.appendChild(diagBox);
-		/* 地址表：PDP 上下文地址（AT+CGPADDR）与 WAN 侧在用地址（AT^DHCP?/^DHCPV6?）
-		   **汇聚到一张表并按地址去重** —— 本机这两个来源的 IPv4 是同一个值，
-		   分两处显示就是同一串数字占两行（2026-09-18 实测：CID 1 与 ^DHCP 都是 10.117.101.195）。 */
-		var addrBox = E('div', { 'class': 'mt5700-mt-md' });
-		connCard._body.appendChild(addrBox);
-		var dhcpBox = E('div', { 'class': 'mt5700-mt-md' });
-		connCard._body.appendChild(dhcpBox);
+		/* 合并后只剩一个容器：三张表的行都是「项目 → 值」，分组标题行负责分隔。 */
+		var connDetailBox = E('div', { 'class': 'mt5700-mt-md' });
+		connCard._body.appendChild(connDetailBox);
 
 		/* ③ 载波与聚合：^HFREQINFO 载波列表 + 聚合状态（原「载波聚合」+「辅载波信号」合并） */
 		var carrierCard = Mt5700.card('载波与聚合', '主小区身份与各载波');
@@ -84,28 +90,25 @@ return L.view.extend({
 		var devBody = E('div');
 		devCard._body.appendChild(devBody);
 
-		/* ⑥ 空口健康：模组侧的「丢包 / 休眠 / 短信域」三项，翻成能看懂的结论。
-		   数据来自 ^PDCPDATAINFO? / ^FASTDORM? / +CGSMS? 三条只读查询（慢档 30s 一轮）。
-		   选这三条是因为它们**别处没有、且各能解释一个现象**：
-		     - 空口丢包 → 「信号满格却掉速 / 丢包」；
-		     - 快速休眠 → 「点开网页、APP 第一下总要卡一下」；
-		     - 短信承载域 → 「5G SA 下短信发不出去」。 */
-		var airCard = Mt5700.card('空口健康', '空口丢包、快速休眠与短信承载域');
-		var airBody = E('div');
-		airCard._body.appendChild(airBody);
+		/* ⑥ 连接质量：把「这段时间到底跑得怎么样」讲清楚 ——
+		 * 会话均速（整段平均，不是瞬时值）、空口丢包增量、信号波动区间，
+		 * 外加 5G SA 下短信发不出去的那个开关（短信承载域）。 */
+		var qualityCard = Mt5700.card('连接质量', '会话均速、丢包与信号波动');
+		var qualityBody = E('div');
+		qualityCard._body.appendChild(qualityBody);
 
 		/* 版式（「左右要对称」+「SIM 与设备下面的空白要有价值」）：
 		     载波与聚合（满宽，表格含逐载波 RSRP/RSRQ/SINR/强度）
 		     信号质量（满宽）
-		     连接状态 | 右列（SIM 与设备 → 空口健康）  ← 双列卡区 .mt5700-cards
+		     连接状态 | 右列（SIM 与设备 → 连接质量）  ← 双列卡区 .mt5700-cards
 		     速率与流量（满宽）
 		   右列两张卡用 .mt5700-stack 纵向堆叠，把左列的空白补上（实测左右差 ≈ 70px）。
 		   之前的「SIM + 速率」右列比左列高一大截，是因为速率卡带着 170px 曲线；
 		   换成纯表格的卡后高度正好。窄屏单列时按 DOM 顺序降级：
-		   连接状态 → SIM 与设备 → 空口健康 → 速率与流量。 */
+		   连接状态 → SIM 与设备 → 连接质量 → 速率与流量。 */
 		var duoRight = E('div', { 'class': 'mt5700-stack' });
 		duoRight.appendChild(devCard);
-		duoRight.appendChild(airCard);
+		duoRight.appendChild(qualityCard);
 		var duo = E('div', { 'class': 'mt5700-cards' });
 		duo.appendChild(connCard);
 		duo.appendChild(duoRight);
@@ -124,8 +127,11 @@ return L.view.extend({
 			nrssbid: null,
 			monnc: [],
 			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
-			/* 空口健康：pdcp 是 DRB 数组（可能多条），delta 是相邻两轮的丢包增量 */
-			air: { pdcp: [], pdcpPrev: null, fastdorm: null, cgsms: null, delta: null, deltaReset: false },
+			/* 连接质量：pdcp 是 DRB 数组（可能多条），delta 是相邻两轮的丢包增量 */
+			link: { pdcp: [], pdcpPrev: null, cgsms: null, delta: null, deltaReset: false },
+			/* 信号波动采样：每轮推一个 RSRP，只留最近 30 个（快档 5s → 约 2.5 分钟）。
+			   只看区间不看曲线：瞬时 RSRP 上方环形仪表已经有了，这里要的是「稳不稳」。 */
+			rsrpSamples: [],
 			/* 12 路传感器温度，键名与 Parse.parseCHIPTEMP 的返回严格一一对应
 			   （手册 17.1：sub3G/sub6G/MIMO/TCXO/peri1/peri2/ap1/ap2/modem1/modem2/bbp1/bbp2）。
 			   有守卫 tests/ui-contract.test.js 校验两侧键数一致，补字段时别只改一边。 */
@@ -306,23 +312,29 @@ return L.view.extend({
 			renderDevCard();
 		}
 
-		/* ================= 空口健康 =================
-		 * 目的不是再罗列一遍参数，而是把模组侧三项「别处没有」的读数翻成结论：
-		 *   - AT^PDCPDATAINFO? 空口丢包（按 DRB 统计的累计丢弃包数）
-		 *   - AT^FASTDORM?     快速休眠（无流量多久进休眠 → 解释首包延迟）
-		 *   - AT+CGSMS?       短信承载域（5G SA 下「优先 CS」会让短信发不出去）
-		 * 三条都是只读查询，跟慢档 30 秒走一轮，不订阅、不额外占 AT 通道
+		/* ================= 连接质量 =================
+		 * 回答「这段时间到底跑得怎么样」，只放别处没有、且各能解释一个现象的四项：
+		 *   - 会话均速     AT^DSFLOWQRY 的「本次连接流量 ÷ 本次连接时长」，是**整段平均**；
+		 *                  「速率与流量」卡给的是瞬时值，两者互补（一个看现在、一个看整段）。
+		 *   - 空口丢包     ^PDCPDATAINFO? 的**增量**（累计值本身说明不了任何问题）。
+		 *   - 信号波动     最近 N 次采样的 RSRP 区间（上方环形仪表只给瞬时值）。
+		 *   - 短信承载域   +CGSMS?，5G SA 下「优先 CS」会让短信发不出去，且**可就地改**。
+		 * 两条只读查询跟慢档 30 秒走一轮，不订阅、不额外占 AT 通道
 		 * （订阅式上报才会独占通道，主动查询不会 —— 这是它和 PDCP 速率方案的区别）。
 		 */
 
 		/*
-		 * 判定阈值：**只看增量，不看累计**。
+		 * 丢包判定阈值：**只看增量，不看累计**。
 		 * 累计丢包数本身没有意义（跑上几天总有几千个），只有「这一轮又丢了多少」
 		 * 才能说明现在还在不在丢。真机实测稳态：上行增量个位数/分钟。
 		 */
-		var AIR_DISCARD_WARN = 30;    /* 个/分钟，超过即「偏高」 */
-		var AIR_DISCARD_BAD = 300;    /* 个/分钟，超过即「异常」 */
-		var AIR_QUEUE_WARN = 200;     /* 发送队列瞬时堆积包数，超过即「偏高」 */
+		var LINK_DISCARD_WARN = 30;    /* 个/分钟，超过即「偏高」 */
+		var LINK_DISCARD_BAD = 300;    /* 个/分钟，超过即「异常」 */
+
+		/* 信号波动：区间跨度超过这个值就提示「不稳」（dB）。
+		   静止实测波动 ≤ 3 dB；走动、天线没拧紧或处在切换带时常见 10 dB 以上。 */
+		var RSRP_SWING_WARN = 10;
+		var RSRP_SAMPLES_MAX = 30;
 
 		function airSum(list, key) {
 			var n = 0;
@@ -331,13 +343,40 @@ return L.view.extend({
 		}
 
 		/*
-		 * 组装检查项，返回 [{ item, level, verdict, detail }]，level 为 bad / warn / ok。
+		 * RSRP 采样：只有有效读数才推进。
+		 * 0 是「未上报」（parse.js 里若干命令缺项会给 0），混进来会把区间拉到 -999。
+		 */
+		function pushRsrpSample(v) {
+			var n = Number(v);
+			if (!isFinite(n) || n === 0) return;
+			var s = state.rsrpSamples;
+			s.push(n);
+			if (s.length > RSRP_SAMPLES_MAX) s.shift();
+		}
+
+		/*
+		 * 会话均速：^DSFLOWQRY 给的就是「本次连接」的字节数与秒数，直接相除。
+		 * 返回 null 表示算不出来（时长为 0 / 还没取到），界面整行跳过。
+		 * 单位是字节/秒，与 rtDown/rtUp 同单位，可直接喂 splitSpeedUI。
+		 */
+		function sessionAvgBytes(bytes, seconds) {
+			/* ★ null / undefined 是「没取到」，不是 0：
+			   Number(null) === 0，直接 Number() 会把「没数据」算成「均速 0 B/s」，
+			   界面上从「未知」变成「确定很慢」，是反向误导。 */
+			if (bytes == null || seconds == null) return null;
+			var b = Number(bytes), t = Number(seconds);
+			if (!isFinite(b) || !isFinite(t) || t <= 0 || b < 0) return null;
+			return b / t;
+		}
+
+		/*
+		 * 组装检查项，返回 [{ item, value, level, detail }]，level 为 bad / warn / ok。
 		 * 取不到读数的项**整项跳过** —— 宁可少一行，也不用「—」凑版面。
 		 */
-		function buildAirItems() {
+		function buildQualityItems() {
 			var items = [];
-			var a = state.air || {};
-			var pdcp = a.pdcp || [];
+			var a = state.link || {};
+			var f = state.flow || {};
 			var d = a.delta;
 			var perMin = (d && d.sec > 0)
 				? { ul: Math.round(d.ul / d.sec * 60), dl: Math.round(d.dl / d.sec * 60) }
@@ -347,14 +386,38 @@ return L.view.extend({
 				/* 增量算不出来（首轮、或计数器刚重置）时不参与判定，
 				   否则一个纯粹的「没数据」会被显示成故障。 */
 				if (per == null) return 'ok';
-				return per >= AIR_DISCARD_BAD ? 'bad' : (per >= AIR_DISCARD_WARN ? 'warn' : 'ok');
+				return per >= LINK_DISCARD_BAD ? 'bad' : (per >= LINK_DISCARD_WARN ? 'warn' : 'ok');
 			}
 			function verdictOf(lv) {
 				return lv === 'ok' ? '正常' : (lv === 'warn' ? '偏高' : '异常');
 			}
 
-			/* ① 空口丢包：累计 + 增量一起给。
+			/* ① 会话均速：整段平均，跟瞬时速率不是一个东西 */
+			var avgD = sessionAvgBytes(f.lastRxFlow, f.lastDsTime);
+			var avgU = sessionAvgBytes(f.lastTxFlow, f.lastDsTime);
+			if (avgD != null || avgU != null) {
+				var base = '本次连接已传 ' + AtWs.formatFlow(
+						(Number(f.lastRxFlow) || 0) + (Number(f.lastTxFlow) || 0))
+					+ ' · 已连 ' + AtWs.formatDuration(f.lastDsTime, false);
+				if (avgD != null) {
+					var sd = splitSpeedUI(avgD, 'bytes');
+					items.push({
+						item: '本次连接均速（下行）', level: 'ok', value: sd.value + ' ' + sd.unit,
+						detail: base + ' · 整段平均，不是瞬时值'
+					});
+				}
+				if (avgU != null) {
+					var su = splitSpeedUI(avgU, 'bytes');
+					items.push({
+						item: '本次连接均速（上行）', level: 'ok', value: su.value + ' ' + su.unit,
+						detail: base + ' · 整段平均，不是瞬时值'
+					});
+				}
+			}
+
+			/* ② 空口丢包：累计 + 增量一起给。
 			   只给累计会吓到人（本机 17333 个），只给增量又看不出规模，两项都要。 */
+			var pdcp = a.pdcp || [];
 			if (pdcp.length) {
 				var ul = airSum(pdcp, 'ulDiscardCnt');
 				var dl = airSum(pdcp, 'dlDiscardCnt');
@@ -367,42 +430,30 @@ return L.view.extend({
 					return ' · 本轮 +' + cnt + '（约 ' + per + ' 个/分）';
 				}
 				items.push({
-					item: '上行丢包（空口）', level: ulLv, verdict: verdictOf(ulLv),
+					item: '上行丢包（空口）', level: ulLv, value: verdictOf(ulLv),
 					detail: '累计 ' + ul + ' 个' + tail(perMin ? d.ul : null, ulPer)
 						+ (ulLv === 'ok' ? '' : ' · 上行拥塞或发射功率已到顶，先看信号与 PUSCH，再换时段复测')
 				});
 				items.push({
-					item: '下行丢包（空口）', level: dlLv, verdict: verdictOf(dlLv),
+					item: '下行丢包（空口）', level: dlLv, value: verdictOf(dlLv),
 					detail: '累计 ' + dl + ' 个' + tail(perMin ? d.dl : null, dlPer)
 						+ (dlLv === 'ok' ? '' : ' · 多为基站侧拥塞或空口质量差，可对照 SINR 一起看')
 				});
-
-				/* ② 发送队列堆积：全 0（没有堆积）就不列，列出来只是噪声 */
-				var hiQ = airSum(pdcp, 'highPriQueBuffPktNums');
-				var loQ = airSum(pdcp, 'lowPriQueBuffPktNums');
-				if (hiQ || loQ) {
-					var qLv = (hiQ + loQ) >= AIR_QUEUE_WARN ? 'warn' : 'ok';
-					items.push({
-						item: '发送队列堆积', level: qLv, verdict: qLv === 'ok' ? '正常' : '偏高',
-						detail: '高优先级 ' + hiQ + ' 个 · 低优先级 ' + loQ + ' 个（瞬时值）'
-							+ (qLv === 'ok' ? '' : ' · 包发不出去，通常是上行拥塞或信号弱')
-					});
-				}
 			}
 
-			/* ③ 快速休眠：它是「首包慢」的正解，本身不是故障，所以永不计入异常 */
-			if (a.fastdorm) {
-				var fd = a.fastdorm;
+			/* ③ 信号波动：只给区间与跨度，不画曲线（仪表与曲线别处都有） */
+			var s = state.rsrpSamples || [];
+			if (s.length >= 2) {
+				var worst = Math.min.apply(null, s);
+				var best = Math.max.apply(null, s);
+				var swing = best - worst;
+				var lv = swing >= RSRP_SWING_WARN ? 'warn' : 'ok';
 				items.push({
-					item: '快速休眠', level: 'ok',
-					verdict: fd.enabled ? '已启用' : '已关闭',
-					detail: (fd.enabled
-						? (fd.timer != null ? fd.timer + ' 秒无流量进入休眠' : '已启用（未回时长）')
-						: '已停止休眠')
-						+ ' · ' + (fd.enabled
-							? '休眠后首个数据包要重建 RRC 连接，这就是「点开网页/APP 第一下卡一下」的原因'
-							: '不进休眠，响应最快，代价是功耗更高')
-						+ '（' + fd.typeText + '）'
+					item: '信号波动', level: lv, value: worst + ' ~ ' + best + ' dBm',
+					detail: '最近 ' + s.length + ' 次采样 · 波动 ' + swing + ' dB'
+						+ (lv === 'ok'
+							? '（稳定）'
+							: '（偏大：多为位置/天线松动或处在切换带，先固定位置再复测）')
 				});
 			}
 
@@ -411,7 +462,7 @@ return L.view.extend({
 				var cs = a.cgsms;
 				items.push({
 					item: '短信承载域', level: cs.preferCs ? 'warn' : 'ok',
-					verdict: cs.preferCs ? '需留意' : '正常',
+					value: cs.preferCs ? '需留意' : '正常',
 					detail: cs.text + '（' + cs.service + '）'
 						+ (cs.preferCs
 							? ' · 5G SA 没有 CS 域，建议改为「优先 PS 域」'
@@ -423,7 +474,7 @@ return L.view.extend({
 		}
 
 		/* 总评：按最严重的一项定级 */
-		function airOverall(items) {
+		function qualityOverall(items) {
 			var bad = 0, warn = 0;
 			items.forEach(function (it) {
 				if (it.level === 'bad') bad++;
@@ -434,36 +485,37 @@ return L.view.extend({
 
 		/*
 		 * 总体结论：不复述各项，只说「现在该关注什么」。
-		 * 归因按可处置性排序：正在丢包 → 短信发不出 → 队列堆积 → 一切正常。
+		 * 归因按可处置性排序：正在丢包 → 短信发不出 → 信号不稳 → 一切正常。
 		 */
-		function airSummary(items) {
-			var map = {};
-			items.forEach(function (it) { map[it.item] = it; });
-			var ul = map['上行丢包（空口）'], dl = map['下行丢包（空口）'],
-				q = map['发送队列堆积'], sms = map['短信承载域'];
-
+		function qualitySummary(items) {
+			var by = {};
+			items.forEach(function (it) { by[it.item] = it; });
+			var ul = by['上行丢包（空口）'];
+			var dl = by['下行丢包（空口）'];
+			var sw = by['信号波动'];
+			var cg = by['短信承载域'];
 			if ((ul && ul.level === 'bad') || (dl && dl.level === 'bad')) {
-				return '空口丢包正在快速增长：先看信号与发射功率，再排查基站侧拥塞——上行丢通常伴随 PUSCH 顶格。';
+				return '空口丢包明显偏高：这一轮仍在持续增长，先对照信号与 SINR，再换时段复测。';
+			}
+			if (cg && cg.level !== 'ok') {
+				return '短信承载域是「优先 CS」：5G SA 没有 CS 域，建议改为「优先 PS 域」后重试。';
 			}
 			if ((ul && ul.level === 'warn') || (dl && dl.level === 'warn')) {
-				return '空口有丢包但还不算严重；如果这会儿正觉得掉速，按下面各项顺序排查。';
+				return '空口丢包偏高但还没失控：仍在增长，先观察一轮，持续走高再查信号与拥塞。';
 			}
-			if (sms && sms.level === 'warn') {
-				return '短信承载域为「优先 CS」：5G SA 没有 CS 域，建议改为「优先 PS 域」。';
+			if (sw && sw.level !== 'ok') {
+				return '信号波动偏大：多为位置或天线松动，固定位置后再看丢包是否跟着下降。';
 			}
-			if (q && q.level === 'warn') {
-				return '发送队列有堆积：上行发不出去的典型表现，多为上行拥塞或信号弱。';
-			}
-			return '空口侧未发现异常：丢包没有持续增长，短信承载域与休眠配置也都正常。';
+			return '空口侧未发现异常：丢包没有持续增长，短信承载域与信号波动也都正常。';
 		}
 
-		function renderAirCard() {
-			if (!airBody) return;
-			airBody.innerHTML = '';
-			var items = buildAirItems();
+		function renderQualityCard() {
+			if (!qualityBody) return;
+			qualityBody.innerHTML = '';
+			var items = buildQualityItems();
 			if (!items.length) {
-				airBody.appendChild(Mt5700.empty(
-					'等待数据…（需要 ^PDCPDATAINFO? / ^FASTDORM? / +CGSMS? 至少一条返回）'));
+				qualityBody.appendChild(Mt5700.empty(
+					'等待数据…（需要 AT^DSFLOWQRY / ^PDCPDATAINFO? / +CGSMS? 至少一条返回）'));
 				return;
 			}
 
@@ -471,7 +523,7 @@ return L.view.extend({
 			var order = { bad: 0, warn: 1, ok: 2 };
 			items.sort(function (a, b) { return order[a.level] - order[b.level]; });
 
-			var ov = airOverall(items);
+			var ov = qualityOverall(items);
 			var lvText = { bad: '较差', warn: '一般', ok: '良好' };
 			var tail = [];
 			if (ov.bad) tail.push(ov.bad + ' 项异常');
@@ -481,28 +533,28 @@ return L.view.extend({
 
 			var box = E('div', { 'class': 'mt5700-diag-summary is-' + ov.level });
 			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' }, headText));
-			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' }, airSummary(items)));
-			airBody.appendChild(box);
+			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' }, qualitySummary(items)));
+			qualityBody.appendChild(box);
 
 			var rows = items.map(function (it) {
 				return [
 					it.item,
-					E('b', { 'class': 'mt5700-diag-verdict is-' + it.level }, it.verdict),
+					E('b', { 'class': 'mt5700-diag-verdict is-' + it.level }, it.value),
 					it.detail
 				];
 			});
-			airBody.appendChild(Mt5700.table(['检查项', '结论', '依据与建议'], rows, { striped: true }));
+			qualityBody.appendChild(Mt5700.table(['检查项', '值', '依据与建议'], rows, { striped: true }));
 
 			/* 短信域确需改动时给一个就地入口（改它是掉电保存，所以走一次确认） */
-			if (state.air.cgsms && state.air.cgsms.preferCs) {
+			if (state.link.cgsms && state.link.cgsms.preferCs) {
 				var act = E('div', { 'class': 'mt5700-mt-sm' });
 				act.appendChild(Mt5700.ghostButton('改为「优先 PS 域」', setCgsmsPs));
-				airBody.appendChild(act);
+				qualityBody.appendChild(act);
 			}
 
-			airBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-				'丢包是 PDCP 层的累计值（自本次拨号起），判定看增量；'
-				+ '休眠与短信域是模组配置，来自 ^FASTDORM? / +CGSMS?。'));
+			qualityBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+				'均速是本次连接「总流量 ÷ 总时长」的整段平均，瞬时值见下方「速率与流量」；'
+				+ '丢包是 PDCP 层的累计值（自本次拨号起），判定看增量。'));
 		}
 
 		/*
@@ -519,9 +571,9 @@ return L.view.extend({
 						return;
 					}
 					/* 直接按下发值重建对象：不发第二次查询，也避免旧值残留一帧 */
-					state.air.cgsms = Parse.parseCgsms('+CGSMS: 2');
+					state.link.cgsms = Parse.parseCgsms('+CGSMS: 2');
 					Mt5700.success('已改为「优先 PS 域」');
-					renderAirCard();
+					renderQualityCard();
 				});
 			}, '确认修改');
 		}
@@ -864,10 +916,16 @@ return L.view.extend({
 
 		}
 
-		/* ---------- 连接诊断（已并入「连接状态」卡片，见 renderDiag） ---------- */
+		/* ---------- 连接明细（连接诊断 + 地址 + IP 与 DNS，三张表合并） ----------
+		 *
+		 * 三张表的行本来都是「项目 → 值」，拆开只是多出两行表头、把同类信息切三刀。
+		 * 合并后按分组标题行分隔，并砍掉两列：
+		 *   - CID  ：PDP 上下文编号（本机 1=IPv4、5=IPv6），用户无从干预；
+		 *   - 来源 ：AT+CGPADDR 与 AT^DHCP? 给的是**同一个地址**，标了来源反而
+		 *            让人以为有两份地址（2026-09-18 实测两者完全相同）。
+		 */
 
-		function renderDiag() {
-			diagBox.innerHTML = '';
+		function buildDiagRows() {
 			var d = state.diag;
 			var endcTag = '不适用';
 			if (d.endc) {
@@ -898,45 +956,35 @@ return L.view.extend({
 			(d.nrTx || []).forEach(function (c, i) {
 				rows.push(['NR CC' + (i + 1) + ' PUSCH', dash(c.pusch, ' dBm') + (c.freq ? ' · ' + (c.freq / 1000).toFixed(1) + ' MHz' : '')]);
 			});
-			diagBox.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
-			/* PDP 地址不再以列表挂在诊断下面：它和 WAN 侧在用的地址常常是同一个值
-			   （本机 CID 1 的 IPv4 与 ^DHCP 下发的完全一样），
-			   已合并到下方那张「地址」表，并按地址去重（见 renderAddr）。 */
-			renderAddr();
+			return rows;
 		}
 
-		/* ---------- 地址总览（PDP + WAN 汇聚去重） ----------
-		 *
-		 * 三个来源会给出**同一个地址**：
-		 *   ① AT+CGPADDR     —— PDP 上下文地址（CID 1 → IPv4，CID 5 → IPv6）
-		 *   ② AT^DHCP?       —— 运营商 DHCP 下发的 IPv4（本机与 CID 1 完全相同）
-		 *   ③ AT^DHCPV6?     —— IPv6 地址/前缀（本机该命令直接 ERROR，取不到）
-		 * 以前 ① 挂在诊断下面、② 在下面的 IP 表里，同一串数字出现两次。
-		 * 这里按（类型 + 地址）做键合并，一行只留一个地址，来源写在同一格里。
-		 */
+		/* 地址去重：三个来源会给**同一个地址**：
+		 *   ① AT+CGPADDR  PDP 上下文地址（CID 1 → IPv4，CID 5 → IPv6）
+		 *   ② AT^DHCP?    运营商 DHCP 下发的 IPv4（本机与 CID 1 完全相同）
+		 *   ③ AT^DHCPV6?  IPv6 地址/前缀（本机该命令直接 ERROR，取不到）
+		 * 按（类型 + 地址）做键合并，一行只留一个地址。 */
 		function addrKey(family, addr) {
 			var v = String(addr == null ? '' : addr).trim().toLowerCase();
 			return v ? (family + '|' + v) : '';
 		}
 
-		function buildAddrRows() {
+		function buildAddrList() {
 			var map = {};
 			var order = [];
-			function add(addr, family, cid, src) {
+			function add(addr, family, cid) {
 				var key = addrKey(family, addr);
 				if (!key) return;
 				var e = map[key];
 				if (!e) {
-					e = map[key] = { address: String(addr).trim(), family: family, cids: [], fromWan: false, fromPdp: false };
+					e = map[key] = { address: String(addr).trim(), family: family, cids: [] };
 					order.push(e);
 				}
-				if (src === 'PDP') e.fromPdp = true;
-				if (src === 'WAN') e.fromWan = true;
 				if (cid != null && e.cids.indexOf(cid) < 0) e.cids.push(cid);
 			}
-			(state.diag.addrs || []).forEach(function (a) { add(a.address, a.family, a.cid, 'PDP'); });
-			if (state.dhcpv4 && state.dhcpv4.ipv4Address) add(state.dhcpv4.ipv4Address, 'IPv4', null, 'WAN');
-			if (state.dhcpv6 && state.dhcpv6.ipv6Address) add(state.dhcpv6.ipv6Address, 'IPv6', null, 'WAN');
+			(state.diag.addrs || []).forEach(function (a) { add(a.address, a.family, a.cid); });
+			if (state.dhcpv4 && state.dhcpv4.ipv4Address) add(state.dhcpv4.ipv4Address, 'IPv4', null);
+			if (state.dhcpv6 && state.dhcpv6.ipv6Address) add(state.dhcpv6.ipv6Address, 'IPv6', null);
 
 			order.sort(function (a, b) {
 				if (a.family !== b.family) return a.family === 'IPv4' ? -1 : 1;
@@ -947,29 +995,57 @@ return L.view.extend({
 			return order;
 		}
 
-		function renderAddr() {
-			if (!addrBox) return;
-			addrBox.innerHTML = '';
-			var list = buildAddrRows();
-			if (!list.length) {
-				addrBox.appendChild(E('div', { 'class': 'mt5700-hint' }, '暂无已激活的 PDP 上下文地址。'));
+		function buildAddrRows() {
+			return buildAddrList().map(function (e) {
+				/* 类型并进项目名（「IPv4 地址」），不再单独占一列 */
+				return [e.family + ' 地址', e.address];
+			});
+		}
+
+		function buildDhcpRows() {
+			var rows = [];
+			var v4 = state.dhcpv4, v6 = state.dhcpv6;
+			if (v4) {
+				/* IPv4/IPv6 地址本身不在这里重复：已并进上方「地址」分组 */
+				rows.push(['子网掩码', v4.subnetMask]);
+				rows.push(['网关', v4.gateway]);
+				rows.push(['DHCP 服务器', v4.dhcpServer]);
+				rows.push(['主 DNS', dnsCell(0, v4.primaryDNS)]);
+				rows.push(['备 DNS', dnsCell(1, v4.secondaryDNS)]);
+			}
+			if (v6) {
+				rows.push(['IPv6 前缀', v6.netmask]);
+				rows.push(['IPv6 网关', v6.gateway]);
+				rows.push(['IPv6 DNS', v6.primaryDNS + ' / ' + v6.secondaryDNS]);
+			}
+			if (state.ipv6Cap) rows.push(['IPv6 支持', state.ipv6Cap.description]);
+			return rows;
+		}
+
+		function renderConnDetail() {
+			if (!connDetailBox) return;
+			connDetailBox.innerHTML = '';
+			var rows = [];
+			function pushGroup(title, list) {
+				if (!list.length) return;   /* 整组没数据就别留一个空标题 */
+				rows.push({ group: title });
+				list.forEach(function (r) { rows.push(r); });
+			}
+			pushGroup('连接诊断', buildDiagRows());
+			pushGroup('地址', buildAddrRows());
+			pushGroup('IP 与 DNS', buildDhcpRows());
+			if (!rows.length) {
+				connDetailBox.appendChild(E('div', { 'class': 'mt5700-hint' }, '暂无连接明细数据。'));
 				return;
 			}
-			var rows = list.map(function (e) {
-				var srcs = [];
-				if (e.fromPdp) srcs.push('PDP');
-				if (e.fromWan) srcs.push('WAN（上网在用）');
-				return [
-					e.cids.length ? e.cids.join(' / ') : '—',
-					e.family,
-					e.address,
-					srcs.join(' · ')
-				];
-			});
-			addrBox.appendChild(Mt5700.table(['CID', '类型', '地址', '来源'], rows, { striped: true }));
-			addrBox.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-				'PDP 上下文地址与 WAN 侧在用地址相同时只列一行（来源列会同时标出 PDP 与 WAN）。'));
+			connDetailBox.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
+			if (dnsEditable) {
+				connDetailBox.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'点击「主 DNS / 备 DNS」可修改，写入 network.' + netIface +
+					'.dns 并重新连接网络（短暂断网）；两项都留空即恢复运营商下发的 DNS。'));
+			}
 		}
+
 
 		/*
 		 * 两个面板的渲染互相独立，各自只认自己的数据源：
@@ -1153,7 +1229,7 @@ return L.view.extend({
 			input.setAttribute('placeholder', '留空=恢复自动');
 			input.style.width = '132px';
 
-			var finish = function () { renderDHCP(); };
+			var finish = function () { renderConnDetail(); };
 			var commit = function () {
 				var v = input.value.trim();
 				if (v && !isIPv4(v)) {
@@ -1177,34 +1253,6 @@ return L.view.extend({
 			cell.parentNode.replaceChild(form, cell);
 			input.focus();
 			input.select();
-		}
-
-		function renderDHCP() {
-			dhcpBox.innerHTML = '';
-			var rows = [];
-			var v4 = state.dhcpv4, v6 = state.dhcpv6;
-			if (v4) {
-				/* IPv4 地址不在这里重复：已并入上方「地址」表（两处本来就是同一个值） */
-				rows.push(['子网掩码', v4.subnetMask]);
-				rows.push(['网关', v4.gateway]);
-				rows.push(['DHCP 服务器', v4.dhcpServer]);
-				rows.push(['主 DNS', dnsCell(0, v4.primaryDNS)]);
-				rows.push(['备 DNS', dnsCell(1, v4.secondaryDNS)]);
-			}
-			if (v6) {
-				/* 同理：IPv6 地址也并进上方「地址」表 */
-				rows.push(['IPv6 前缀', v6.netmask]);
-				rows.push(['IPv6 网关', v6.gateway]);
-				rows.push(['IPv6 DNS', v6.primaryDNS + ' / ' + v6.secondaryDNS]);
-			}
-			if (state.ipv6Cap) rows.push(['IPv6 支持', state.ipv6Cap.description]);
-			if (!rows.length) rows.push(['信息', '暂无数据']);
-			dhcpBox.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
-			if (dnsEditable) {
-				dhcpBox.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-					'点击「主 DNS / 备 DNS」可修改，写入 network.' + netIface +
-					'.dns 并重新连接网络（短暂断网）；两项都留空即恢复运营商下发的 DNS。'));
-			}
 		}
 
 		/* 调制方式展示：256QAM MCS 27 · 1 层（大小写与格式固定） */
@@ -1380,8 +1428,7 @@ return L.view.extend({
 				}
 				/* 地址表吃 dhcpv4/dhcpv6，DHCP 拿到新值后要跟着重绘（它与 PDP 地址去重合并） */
 			}).then(function () {
-				renderDHCP();
-				renderAddr();
+				renderConnDetail();
 			});
 		}
 
@@ -1448,8 +1495,11 @@ return L.view.extend({
 						state.cell.rsrp = serving.rsrp != null ? serving.rsrp : state.cell.rsrp;
 						state.cell.rsrq = serving.rsrq != null ? serving.rsrq : state.cell.rsrq;
 						state.cell.sinr = serving.sinr != null ? serving.sinr : state.cell.sinr;
-						state.cell.sysMode = serving.sysMode || state.cell.sysMode;
-						state.cell.signalPercent = serving.signalPercent || '';
+					state.cell.sysMode = serving.sysMode || state.cell.sysMode;
+					state.cell.signalPercent = serving.signalPercent || '';
+					/* 信号波动采样：每轮推一个 RSRP，供「连接质量」卡算区间。
+					   放在赋值之后，确保拿到的是本轮最终值（不是上面被覆盖前的旧值）。 */
+					pushRsrpSample(state.cell.rsrp);
 					}
 					/*
 					 * ^HFREQINFO 解析结果原样带过来（parseHFREQINFO 已按手册
@@ -1522,35 +1572,34 @@ return L.view.extend({
 				return AtWs.client.sendCommand('AT+CGPADDR');
 			}).then(function (pdp) {
 				state.diag.addrs = pdp.success && pdp.data ? Parse.parseCgpaddr(pdp.data) : [];
-				renderDiag();
+				renderConnDetail();
 			});
 		}
 
 		/*
-		 * 空口健康的三条查询（^PDCPDATAINFO? / ^FASTDORM? / +CGSMS?）。
+		 * 连接质量的两条查询（^PDCPDATAINFO? / +CGSMS?）。
+		 * 原来还有一条 ^FASTDORM?（快速休眠）—— 它只是复述一个用户改不了、
+		 * 也不需要改的模组开关，每轮白搭一次串口往返，已去掉。
 		 *
 		 * ★ 都是**主动查询**，不是订阅：订阅式上报会独占 AT 通道（PDCP 速率方案当初
-		 *   就是因为这个被否掉的），主动查询只在慢档这一轮多 3 次往返。
+		 *   就是因为这个被否掉的），主动查询只在慢档这一轮多 2 次往返。
 		 * ★ ^PDCPDATAINFO 手册 5.36 的名字像「设置周期上报」，但它的**读命令**会直接
 		 *   回当前统计（真机实测返回 2 条 DRB），不需要先发 =1 开启。
 		 * ★ +CGSMS? 需要 PIN 就绪（手册属性表：PIN = Y），卡被锁时返回 ERROR ——
 		 *   这是正常情况，静默留空即可，卡片会自动少一行。
 		 */
-		function loadAirHealth() {
+		function loadLinkQuality() {
 			return AtWs.client.sendCommand('AT^PDCPDATAINFO?').then(function (pdcp) {
 				updatePdcpDelta(pdcp.success && pdcp.data ? Parse.parsePdcpDataInfo(String(pdcp.data)) : []);
-				return AtWs.client.sendCommand('AT^FASTDORM?');
-			}).then(function (fd) {
-				state.air.fastdorm = fd.success && fd.data ? Parse.parseFastdorm(String(fd.data)) : null;
 				return AtWs.client.sendCommand('AT+CGSMS?');
 			}).then(function (cs) {
-				state.air.cgsms = cs.success && cs.data ? Parse.parseCgsms(String(cs.data)) : null;
-				renderAirCard();
+				state.link.cgsms = cs.success && cs.data ? Parse.parseCgsms(String(cs.data)) : null;
+				renderQualityCard();
 			});
 		}
 
 		/*
-		 * 丢包增量必须在覆盖 state.air.pdcp **之前**算。
+		 * 丢包增量必须在覆盖 state.link.pdcp **之前**算。
 		 * 计数器的三种「对不上」都要识别出来，否则会凭空报故障：
 		 *   ① 首轮没有上一次读数      → 只记基准，不给增量（delta = null）；
 		 *   ② 重拨 / 计数器归零      → 差值变负，不能显示成「本轮丢了负数个」；
@@ -1558,7 +1607,7 @@ return L.view.extend({
 		 * ②③ 都置 deltaReset，界面写明「增量本轮不做判定」，而不是把累计值报成故障。
 		 */
 		function updatePdcpDelta(list) {
-			var a = state.air;
+			var a = state.link;
 			var prev = a.pdcpPrev;
 			var ul = airSum(list, 'ulDiscardCnt');
 			var dl = airSum(list, 'dlDiscardCnt');
@@ -1731,7 +1780,7 @@ return L.view.extend({
 		 * 它只依赖快档已取到的 state.carriers，没有前置依赖，放前面是安全的。
 		 */
 		var SLOW_TASKS = [loadSecondary, getPSReg, getFlow, getOperator, getAMBR,
-			getQCI, getDHCP, getTemp, getMCS, loadDiagnostics, loadAirHealth];
+			getQCI, getDHCP, getTemp, getMCS, loadDiagnostics, loadLinkQuality];
 
 		/* 慢档各任务的失败记录：逐步兜错后失败不再阻断后续，但要留痕，
 		   否则「某一项一直失败」又会退化成看不见的静默问题。 */
@@ -1759,9 +1808,9 @@ return L.view.extend({
 			slowRunning = chain.then(function () {
 				slowRefreshing = false;
 				slowRunning = null;
-				/* 空口健康吃的是慢档取到的丢包 / 休眠 / 短信域，
+				/* 连接质量吃的是慢档取到的丢包与短信域、快档取到的信号采样，
 				   慢档整轮跑完再统一刷一次，避免逐个任务渲染导致的抖动 */
-				renderAirCard();
+				renderQualityCard();
 			});
 			return slowRunning;
 		}
@@ -1812,18 +1861,18 @@ return L.view.extend({
 		renderConn();
 		renderSignal();
 		renderCarriers();
-		renderDiag();          /* 连接诊断（渲染进「连接状态」卡内，末尾会带出地址表） */
-		renderAirCard();       /* 空口健康（右列独立卡片） */
+		renderConnDetail();    /* 连接明细：诊断 + 地址 + IP 与 DNS（一张表） */
+		renderQualityCard();   /* 连接质量（右列独立卡片） */
 		renderSpeed();
 		renderFlow();
 		renderTemp();
-		renderDHCP();
+		renderConnDetail();
 		renderMCS();
 
 		/* 自定义 DNS 是 UCI 侧的静态配置，跟 AT 无关，单独加载；
 		   拿到后重绘一次，让「主/备 DNS」显示成自定义值并带上「自定义」徽章。
 		   ACL 不含 network 时静默降级为只读，不影响上面任何渲染。 */
-		loadDnsConfig().then(renderDHCP);
+		loadDnsConfig().then(renderConnDetail);
 
 		AtWs.client.connect().catch(function (err) {
 			if (err && err.message === 'REQUIRE_AUTH_KEY') {

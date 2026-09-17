@@ -979,6 +979,25 @@
   background: rgba(59, 130, 246, 0.04);
 }
 
+/* 分组标题行：多组「项目 → 值」合并进一张表时用它分隔（如「连接诊断 / 地址 / IP 与 DNS」）。
+   只加一条淡色底与间距，不做描边，免得看起来像另一张表的表头。
+   斑马纹按 nth-child 算，分组行插进去会让后续行的奇偶错位 —— 这里显式把分组行
+   排除在斑马纹之外，让每组内部各自从「白」开始，视觉上更整齐。 */
+.mt5700-table-group-row td.mt5700-table-group {
+  padding: 10px 16px 6px;
+  font-size: var(--mt5700-font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--mt5700-text-muted, var(--mt5700-text-secondary));
+  background: transparent;
+  border-bottom: 1px solid var(--mt5700-divider);
+}
+
+.mt5700-table-group-row:hover td.mt5700-table-group,
+.mt5700-table-striped tbody tr.mt5700-table-group-row:nth-child(even) {
+  background: transparent;
+}
+
 /* ---------- 状态标签 ---------- */
 .mt5700-badge {
   display: inline-flex;

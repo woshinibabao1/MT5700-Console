@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '5.5.9';
+var MT5700_CSS_VERSION = '5.5.10';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -878,6 +878,16 @@ var Mt5700 = (function () {
 			tbody.appendChild(tr0);
 		} else {
 			rows.forEach(function (row) {
+				/* 分组标题行：传 { group: '地址' }。
+				   几组「项目 → 值」合并进一张表时用它分隔，比拆成多张表少两套表头。 */
+				if (row && row.group != null && !row.nodeType) {
+					var gtr = E('tr', { 'class': 'mt5700-table-group-row' });
+					gtr.appendChild(E('td', {
+						colspan: headers.length, 'class': 'mt5700-table-group'
+					}, row.group));
+					tbody.appendChild(gtr);
+					return;
+				}
 				var tr = E('tr');
 				row.forEach(function (cell) {
 					if (typeof cell === 'object' && cell.nodeType) {
@@ -885,7 +895,10 @@ var Mt5700 = (function () {
 						td.appendChild(cell);
 						tr.appendChild(td);
 					} else {
-						tr.appendChild(E('td', {}, cell || '—'));
+						/* ★ 用 == null 判空，不要用 ||：
+						   0 与 '' 都是有效读数（温度 0℃、计数 0、空字符串），
+						   被 || 吃掉会显示成「—」，等于把真实数据说成没数据。 */
+						tr.appendChild(E('td', {}, cell == null ? '—' : cell));
 					}
 				});
 				tbody.appendChild(tr);
