@@ -11,12 +11,13 @@
  *
  * 等价迁移原 WebUI network/Info.tsx，并按「一个主题一张卡片」重新组织，避免信息重叠：
  *   ① 信号质量     主小区 RSRP/RSRQ/SINR + 调制方式(MCS)，头部放刷新控制
- *   ② 连接状态     注册/运营商/签约速率 + 连接诊断(ENDC/5GC/发射功率/PDP) + IP 与 DNS
+ *   ② 连接状态     注册/运营商/签约速率 + 连接诊断(ENDC/5GC/发射功率) + 地址 + IP 与 DNS
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量
  *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
+ *   ⑥ 空口健康     空口丢包(^PDCPDATAINFO) + 快速休眠(^FASTDORM) + 短信承载域(+CGSMS)
  * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
- * [连接状态 | 右列（SIM 与设备 → 速率与流量）]。
+ * [连接状态 | 右列（SIM 与设备 → 空口健康）]。
  * 速率与流量位于右列、紧跟 SIM 与设备正下方，不再兜在页面最底部。载波表列与上游快照一致（制式/频段/频点/带宽/PCI/RSRP/RSRQ/SINR/强度）。
  */
 
@@ -52,6 +53,11 @@ return L.view.extend({
 		connCard._body.appendChild(connBody);
 		var diagBox = E('div', { 'class': 'mt5700-mt-md' });
 		connCard._body.appendChild(diagBox);
+		/* 地址表：PDP 上下文地址（AT+CGPADDR）与 WAN 侧在用地址（AT^DHCP?/^DHCPV6?）
+		   **汇聚到一张表并按地址去重** —— 本机这两个来源的 IPv4 是同一个值，
+		   分两处显示就是同一串数字占两行（2026-09-18 实测：CID 1 与 ^DHCP 都是 10.117.101.195）。 */
+		var addrBox = E('div', { 'class': 'mt5700-mt-md' });
+		connCard._body.appendChild(addrBox);
 		var dhcpBox = E('div', { 'class': 'mt5700-mt-md' });
 		connCard._body.appendChild(dhcpBox);
 
@@ -78,25 +84,28 @@ return L.view.extend({
 		var devBody = E('div');
 		devCard._body.appendChild(devBody);
 
-		/* ⑥ 一键诊断：把本页已有的读数翻译成结论与归因。
-		   头部徽章给总评，正文先一句「最可能的原因」，再逐项「结论 + 依据与建议」。
-		   全部数据来自 state（信号/速率/注册/载波/温度/SIM），**不新增任何串口查询**。 */
-		var diagCard = Mt5700.card('一键诊断', '基于本页实测数据，不额外查询模组');
-		var diagBody = E('div');
-		diagCard._body.appendChild(diagBody);
+		/* ⑥ 空口健康：模组侧的「丢包 / 休眠 / 短信域」三项，翻成能看懂的结论。
+		   数据来自 ^PDCPDATAINFO? / ^FASTDORM? / +CGSMS? 三条只读查询（慢档 30s 一轮）。
+		   选这三条是因为它们**别处没有、且各能解释一个现象**：
+		     - 空口丢包 → 「信号满格却掉速 / 丢包」；
+		     - 快速休眠 → 「点开网页、APP 第一下总要卡一下」；
+		     - 短信承载域 → 「5G SA 下短信发不出去」。 */
+		var airCard = Mt5700.card('空口健康', '空口丢包、快速休眠与短信承载域');
+		var airBody = E('div');
+		airCard._body.appendChild(airBody);
 
 		/* 版式（「左右要对称」+「SIM 与设备下面的空白要有价值」）：
 		     载波与聚合（满宽，表格含逐载波 RSRP/RSRQ/SINR/强度）
 		     信号质量（满宽）
-		     连接状态 | 右列（SIM 与设备 → 一键诊断）  ← 双列卡区 .mt5700-cards
+		     连接状态 | 右列（SIM 与设备 → 空口健康）  ← 双列卡区 .mt5700-cards
 		     速率与流量（满宽）
 		   右列两张卡用 .mt5700-stack 纵向堆叠，把左列的空白补上（实测左右差 ≈ 70px）。
 		   之前的「SIM + 速率」右列比左列高一大截，是因为速率卡带着 170px 曲线；
-		   换成诊断卡（纯表格，无图形）后高度正好。窄屏单列时按 DOM 顺序降级：
-		   连接状态 → SIM 与设备 → 一键诊断 → 速率与流量。 */
+		   换成纯表格的卡后高度正好。窄屏单列时按 DOM 顺序降级：
+		   连接状态 → SIM 与设备 → 空口健康 → 速率与流量。 */
 		var duoRight = E('div', { 'class': 'mt5700-stack' });
 		duoRight.appendChild(devCard);
-		duoRight.appendChild(diagCard);
+		duoRight.appendChild(airCard);
 		var duo = E('div', { 'class': 'mt5700-cards' });
 		duo.appendChild(connCard);
 		duo.appendChild(duoRight);
@@ -115,6 +124,8 @@ return L.view.extend({
 			nrssbid: null,
 			monnc: [],
 			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
+			/* 空口健康：pdcp 是 DRB 数组（可能多条），delta 是相邻两轮的丢包增量 */
+			air: { pdcp: [], pdcpPrev: null, fastdorm: null, cgsms: null, delta: null, deltaReset: false },
 			/* 12 路传感器温度，键名与 Parse.parseCHIPTEMP 的返回严格一一对应
 			   （手册 17.1：sub3G/sub6G/MIMO/TCXO/peri1/peri2/ap1/ap2/modem1/modem2/bbp1/bbp2）。
 			   有守卫 tests/ui-contract.test.js 校验两侧键数一致，补字段时别只改一边。 */
@@ -295,144 +306,116 @@ return L.view.extend({
 			renderDevCard();
 		}
 
-		/* ================= 一键诊断 =================
-		 * 目的不是再罗列一遍参数，而是替用户把读数翻译成「结论 + 最可能的原因」。
-		 * 全部数据取自 state（信号 / 速率 / 注册 / 载波 / 温度 / SIM），
-		 * 不新增任何串口查询——这也是它比「加个探测面板」省的地方。
+		/* ================= 空口健康 =================
+		 * 目的不是再罗列一遍参数，而是把模组侧三项「别处没有」的读数翻成结论：
+		 *   - AT^PDCPDATAINFO? 空口丢包（按 DRB 统计的累计丢弃包数）
+		 *   - AT^FASTDORM?     快速休眠（无流量多久进休眠 → 解释首包延迟）
+		 *   - AT+CGSMS?       短信承载域（5G SA 下「优先 CS」会让短信发不出去）
+		 * 三条都是只读查询，跟慢档 30 秒走一轮，不订阅、不额外占 AT 通道
+		 * （订阅式上报才会独占通道，主动查询不会 —— 这是它和 PDCP 速率方案的区别）。
 		 */
 
-		/* 阈值集中放这里，调判定只动这一处。单位都是字段的原生单位：
-		   RSRP / SINR / PUSCH 为 dBm / dB，温度 ℃，签约速率 kbps，实测速率字节/秒。 */
-		var DIAG_RULES = {
-			rsrpGood: -85, rsrpFair: -95,   /* ≥ -85 良好，≥ -95 一般，否则偏差 */
-			sinrGood: 15, sinrFair: 8,      /* ≥ 15 良好，≥ 8 一般，否则偏差 */
-			puschGood: 15, puschFair: 20,   /* ≤ 15 为佳，≤ 20 偏高，否则过高 */
-			tempWarn: 60, tempBad: 75,      /* 60 起告警，75 起降频 */
-			rateGood: 60, rateFair: 30      /* 实测峰值占签约的百分比 */
-		};
+		/*
+		 * 判定阈值：**只看增量，不看累计**。
+		 * 累计丢包数本身没有意义（跑上几天总有几千个），只有「这一轮又丢了多少」
+		 * 才能说明现在还在不在丢。真机实测稳态：上行增量个位数/分钟。
+		 */
+		var AIR_DISCARD_WARN = 30;    /* 个/分钟，超过即「偏高」 */
+		var AIR_DISCARD_BAD = 300;    /* 个/分钟，超过即「异常」 */
+		var AIR_QUEUE_WARN = 200;     /* 发送队列瞬时堆积包数，超过即「偏高」 */
 
-		function diagNum(v) {
-			var n = Number(v);
-			return isFinite(n) ? n : null;
-		}
-
-		function diagSpeed(value, unitMode) {
-			var s = splitSpeedUI(value, unitMode);
-			return s.value + ' ' + s.unit;
+		function airSum(list, key) {
+			var n = 0;
+			(list || []).forEach(function (d) { if (d && d[key] != null) n += d[key]; });
+			return n;
 		}
 
 		/*
-		 * 组装诊断项，返回 [{ item, level, verdict, detail }]，level 为 bad / warn / ok。
-		 * 取不到读数的项**整项跳过**——宁可少一行，也不用「—」凑版面，
-		 * 更不能用 0 冒充实测值（0 会被判成「速率 0%」，等于凭空报故障）。
+		 * 组装检查项，返回 [{ item, level, verdict, detail }]，level 为 bad / warn / ok。
+		 * 取不到读数的项**整项跳过** —— 宁可少一行，也不用「—」凑版面。
 		 */
-		function buildDiagnostics() {
+		function buildAirItems() {
 			var items = [];
-			var cell = state.cell || {};
-			var d = state.diag || {};
+			var a = state.air || {};
+			var pdcp = a.pdcp || [];
+			var d = a.delta;
+			var perMin = (d && d.sec > 0)
+				? { ul: Math.round(d.ul / d.sec * 60), dl: Math.round(d.dl / d.sec * 60) }
+				: null;
 
-			/* ① 速率达成：本轮实测峰值 vs 签约 AMBR。
-			   峰值只在「实时监测」开着时累计，关着时 peakDown 为 0，该项跳过。 */
-			var ambr = diagNum(state.ambrDown);
-			var peak = diagNum(state.peakDown);
-			if (ambr !== null && ambr > 0 && peak !== null && peak > 0) {
-				var pct = Math.round(peak * 8 / (ambr * 1000) * 100);
-				var lv = pct >= DIAG_RULES.rateGood ? 'ok' : (pct >= DIAG_RULES.rateFair ? 'warn' : 'bad');
+			function lvOf(per) {
+				/* 增量算不出来（首轮、或计数器刚重置）时不参与判定，
+				   否则一个纯粹的「没数据」会被显示成故障。 */
+				if (per == null) return 'ok';
+				return per >= AIR_DISCARD_BAD ? 'bad' : (per >= AIR_DISCARD_WARN ? 'warn' : 'ok');
+			}
+			function verdictOf(lv) {
+				return lv === 'ok' ? '正常' : (lv === 'warn' ? '偏高' : '异常');
+			}
+
+			/* ① 空口丢包：累计 + 增量一起给。
+			   只给累计会吓到人（本机 17333 个），只给增量又看不出规模，两项都要。 */
+			if (pdcp.length) {
+				var ul = airSum(pdcp, 'ulDiscardCnt');
+				var dl = airSum(pdcp, 'dlDiscardCnt');
+				var ulPer = (perMin && !a.deltaReset) ? perMin.ul : null;
+				var dlPer = (perMin && !a.deltaReset) ? perMin.dl : null;
+				var ulLv = lvOf(ulPer), dlLv = lvOf(dlPer);
+				function tail(cnt, per) {
+					if (a.deltaReset) return ' · 计数器本轮已重置（重拨或 DRB 变化），增量不做判定';
+					if (per == null) return ' · 下一轮起给出增量';
+					return ' · 本轮 +' + cnt + '（约 ' + per + ' 个/分）';
+				}
 				items.push({
-					item: '速率达成', level: lv,
-					verdict: lv === 'ok' ? '正常' : (lv === 'warn' ? '一般' : '偏低'),
-					detail: '峰值 ' + diagSpeed(peak, 'bytes') + ' / 签约 ' + diagSpeed(ambr, 'kbps')
-						+ '（' + pct + '%）' + (lv === 'bad' ? ' · 建议换时段复测' : '')
+					item: '上行丢包（空口）', level: ulLv, verdict: verdictOf(ulLv),
+					detail: '累计 ' + ul + ' 个' + tail(perMin ? d.ul : null, ulPer)
+						+ (ulLv === 'ok' ? '' : ' · 上行拥塞或发射功率已到顶，先看信号与 PUSCH，再换时段复测')
+				});
+				items.push({
+					item: '下行丢包（空口）', level: dlLv, verdict: verdictOf(dlLv),
+					detail: '累计 ' + dl + ' 个' + tail(perMin ? d.dl : null, dlPer)
+						+ (dlLv === 'ok' ? '' : ' · 多为基站侧拥塞或空口质量差，可对照 SINR 一起看')
+				});
+
+				/* ② 发送队列堆积：全 0（没有堆积）就不列，列出来只是噪声 */
+				var hiQ = airSum(pdcp, 'highPriQueBuffPktNums');
+				var loQ = airSum(pdcp, 'lowPriQueBuffPktNums');
+				if (hiQ || loQ) {
+					var qLv = (hiQ + loQ) >= AIR_QUEUE_WARN ? 'warn' : 'ok';
+					items.push({
+						item: '发送队列堆积', level: qLv, verdict: qLv === 'ok' ? '正常' : '偏高',
+						detail: '高优先级 ' + hiQ + ' 个 · 低优先级 ' + loQ + ' 个（瞬时值）'
+							+ (qLv === 'ok' ? '' : ' · 包发不出去，通常是上行拥塞或信号弱')
+					});
+				}
+			}
+
+			/* ③ 快速休眠：它是「首包慢」的正解，本身不是故障，所以永不计入异常 */
+			if (a.fastdorm) {
+				var fd = a.fastdorm;
+				items.push({
+					item: '快速休眠', level: 'ok',
+					verdict: fd.enabled ? '已启用' : '已关闭',
+					detail: (fd.enabled
+						? (fd.timer != null ? fd.timer + ' 秒无流量进入休眠' : '已启用（未回时长）')
+						: '已停止休眠')
+						+ ' · ' + (fd.enabled
+							? '休眠后首个数据包要重建 RRC 连接，这就是「点开网页/APP 第一下卡一下」的原因'
+							: '不进休眠，响应最快，代价是功耗更高')
+						+ '（' + fd.typeText + '）'
 				});
 			}
 
-			/* ② 信号质量 SINR：同样强度下，SINR 直接决定能跑多高的调制阶数 */
-			var sinr = diagNum(cell.sinr);
-			if (sinr !== null) {
-				var sl = sinr >= DIAG_RULES.sinrGood ? 'ok' : (sinr >= DIAG_RULES.sinrFair ? 'warn' : 'bad');
+			/* ④ 短信承载域：5G SA 下「优先 CS」是短信发不出去的常见根因 */
+			if (a.cgsms) {
+				var cs = a.cgsms;
 				items.push({
-					item: '信号质量', level: sl,
-					verdict: sl === 'ok' ? '良好' : (sl === 'warn' ? '一般' : '偏差'),
-					detail: 'SINR ' + sinr + ' dB（良好需 ≥ ' + DIAG_RULES.sinrGood + '）'
-						+ (sl === 'ok' ? '' : ' · 建议调整摆放位置或朝向')
-				});
-			}
-
-			/* ③ 上行发射功率 PUSCH：越高说明离基站越远或遮挡越重，是「看着有信号但上不去」的常见线索 */
-			var pusch = (d.nrTx && d.nrTx.length) ? diagNum(d.nrTx[0].pusch) : null;
-			if (pusch !== null) {
-				var pl = pusch <= DIAG_RULES.puschGood ? 'ok' : (pusch <= DIAG_RULES.puschFair ? 'warn' : 'bad');
-				items.push({
-					item: '发射功率', level: pl,
-					verdict: pl === 'ok' ? '正常' : (pl === 'warn' ? '偏高' : '过高'),
-					detail: 'PUSCH ' + pusch + ' dBm（≤ ' + DIAG_RULES.puschGood + ' 为佳）'
-						+ (pl === 'ok' ? '' : ' · 距基站较远或有遮挡')
-				});
-			}
-
-			/* ④ 信号强度 RSRP */
-			var rsrp = diagNum(cell.rsrp);
-			if (rsrp !== null) {
-				var rl = rsrp >= DIAG_RULES.rsrpGood ? 'ok' : (rsrp >= DIAG_RULES.rsrpFair ? 'warn' : 'bad');
-				items.push({
-					item: '信号强度', level: rl,
-					verdict: rl === 'ok' ? '良好' : (rl === 'warn' ? '一般' : '偏差'),
-					detail: 'RSRP ' + rsrp + ' dBm（≥ ' + DIAG_RULES.rsrpGood + ' 为良好）'
-						+ (rl === 'ok' ? '' : ' · 建议挪到靠窗或高处')
-				});
-			}
-
-			/* ⑤ 网络注册：5GC / EPS / IMS 三处汇总成一行的结论 */
-			var regTexts = [];
-			/* AT+C5GREG? 的 statText 自带「5GC」字样（如「已注册 5GC」），
-			   再拼一次前缀就会显示成「5GC 已注册 5GC」；只在它没写时才补。 */
-			if (d.reg && d.reg.statText) {
-				regTexts.push(/5G/.test(d.reg.statText) ? d.reg.statText : '5GC ' + d.reg.statText);
-			}
-			if (d.creg && d.creg.statText) regTexts.push('EPS ' + d.creg.statText);
-			if (d.cireg) regTexts.push('IMS ' + (d.cireg.info ? '可用' : '不可用'));
-			if (regTexts.length) {
-				var regOk = !!(d.reg && /已注册/.test(d.reg.statText));
-				items.push({
-					item: '网络注册', level: regOk ? 'ok' : 'bad',
-					verdict: regOk ? '正常' : '异常',
-					detail: regTexts.join(' · ')
-				});
-			}
-
-			/* ⑥ 载波聚合：只有单个载波时速率上限受限，值得单独提示 */
-			var cc = (state.carriers || []).length;
-			if (cc > 0) {
-				items.push({
-					item: '载波聚合', level: cc >= 2 ? 'ok' : 'warn',
-					verdict: cc >= 2 ? '已启用' : '未启用',
-					detail: cc + ' 个载波' + (cc >= 2 ? '' : ' · 单载波，速率上限受限')
-				});
-			}
-
-			/* ⑦ 模块温度：12 路取最高，与「SIM 与设备」那一行同源同口径 */
-			var t = state.temps || {};
-			var tv = Object.keys(t)
-				.map(function (k) { return Number(t[k]) || 0; })
-				.filter(function (v) { return v > 0; });
-			if (tv.length) {
-				var mt = Math.max.apply(null, tv);
-				var tl = mt < DIAG_RULES.tempWarn ? 'ok' : (mt < DIAG_RULES.tempBad ? 'warn' : 'bad');
-				items.push({
-					item: '模块温度', level: tl,
-					verdict: tl === 'ok' ? '正常' : (tl === 'warn' ? '偏高' : '过高'),
-					detail: mt + ' ℃（告警 ' + DIAG_RULES.tempWarn + ' · 降频 ' + DIAG_RULES.tempBad + '）'
-						+ (tl === 'ok' ? '' : ' · 注意通风散热')
-				});
-			}
-
-			/* ⑧ SIM 状态：状态码表只有一份，在 parse.js（simShort / simIsWarn） */
-			if (devState) {
-				var simWarn = Parse.simIsWarn(devState.sim);
-				items.push({
-					item: 'SIM 状态', level: simWarn ? 'bad' : 'ok',
-					verdict: simWarn ? '异常' : '正常',
-					detail: Parse.simShort(devState.sim) + (devState.pin ? ' · PIN ' + devState.pin : '')
+					item: '短信承载域', level: cs.preferCs ? 'warn' : 'ok',
+					verdict: cs.preferCs ? '需留意' : '正常',
+					detail: cs.text + '（' + cs.service + '）'
+						+ (cs.preferCs
+							? ' · 5G SA 没有 CS 域，建议改为「优先 PS 域」'
+							: ' · 走 PS 域，5G SA 下可用')
 				});
 			}
 
@@ -440,91 +423,66 @@ return L.view.extend({
 		}
 
 		/* 总评：按最严重的一项定级 */
-		function diagOverall(items) {
+		function airOverall(items) {
 			var bad = 0, warn = 0;
 			items.forEach(function (it) {
 				if (it.level === 'bad') bad++;
 				else if (it.level === 'warn') warn++;
 			});
-			return {
-				level: bad ? 'bad' : (warn ? 'warn' : 'ok'),
-				bad: bad, warn: warn, total: items.length
-			};
+			return { level: bad ? 'bad' : (warn ? 'warn' : 'ok'), bad: bad, warn: warn, total: items.length };
 		}
 
 		/*
-		 * 总体结论：不复述各项，只给「最可能的原因」。
-		 * 归因按优先级排：SIM → 温度 → 信号 → 速率。
-		 * 其中「信号都正常但速率远低于签约」是最有价值的一条——
-		 * 它直接把责任指向基站侧/套餐，而不是让用户怀疑设备坏了。
+		 * 总体结论：不复述各项，只说「现在该关注什么」。
+		 * 归因按可处置性排序：正在丢包 → 短信发不出 → 队列堆积 → 一切正常。
 		 */
-		function diagSummary(items) {
+		function airSummary(items) {
 			var map = {};
 			items.forEach(function (it) { map[it.item] = it; });
-			var rate = map['速率达成'], sig = map['信号强度'],
-				quality = map['信号质量'], temp = map['模块温度'], sim = map['SIM 状态'];
+			var ul = map['上行丢包（空口）'], dl = map['下行丢包（空口）'],
+				q = map['发送队列堆积'], sms = map['短信承载域'];
 
-			if (sim && sim.level === 'bad') {
-				return 'SIM 未就绪，这是当前最该解决的一项：请检查卡是否插好、是否被 PIN/PUK 锁定。';
+			if ((ul && ul.level === 'bad') || (dl && dl.level === 'bad')) {
+				return '空口丢包正在快速增长：先看信号与发射功率，再排查基站侧拥塞——上行丢通常伴随 PUSCH 顶格。';
 			}
-			if (temp && temp.level === 'bad') {
-				return '模块温度已进入降频区间，速率下滑很可能是过热保护所致，先解决散热再看速率。';
+			if ((ul && ul.level === 'warn') || (dl && dl.level === 'warn')) {
+				return '空口有丢包但还不算严重；如果这会儿正觉得掉速，按下面各项顺序排查。';
 			}
-			if (sig && sig.level === 'bad') {
-				return '信号强度是主要短板：先改善接收（挪到靠窗或高处、避开金属遮挡），再谈速率。';
+			if (sms && sms.level === 'warn') {
+				return '短信承载域为「优先 CS」：5G SA 没有 CS 域，建议改为「优先 PS 域」。';
 			}
-			if (rate && rate.level === 'bad') {
-				if ((!sig || sig.level === 'ok') && (!quality || quality.level === 'ok')) {
-					return '信号与温度都正常，速率却远低于签约 —— 基站侧拥塞或套餐限速的可能性大于设备故障，建议换时段复测。';
-				}
-				return '信号与速率都不理想：先按下面各项的建议改善接收，再复测速率。';
+			if (q && q.level === 'warn') {
+				return '发送队列有堆积：上行发不出去的典型表现，多为上行拥塞或信号弱。';
 			}
-			if (rate && rate.level === 'warn') {
-				return '整体可用，速率还没跑满签约。若长期如此，按下面各项逐条排查。';
-			}
-			/*
-			 * 没有单一主因、但有需要关注项时（例如只有「载波聚合未启用」），
-			 * 不能回一句「各项指标正常」——总评已经显示「一般」，正文却说正常，
-			 * 两处自相矛盾。这里点出排序最靠前的那一项 warn。
-			 */
-			for (var i = 0; i < items.length; i++) {
-				if (items[i].level === 'warn') {
-					return '整体可用，但「' + items[i].item + '」还没到理想状态：' + items[i].detail + '。';
-				}
-			}
-			return '各项指标正常，未发现需要处理的异常。';
+			return '空口侧未发现异常：丢包没有持续增长，短信承载域与休眠配置也都正常。';
 		}
 
-		/*
-		 * 注意：本页另有一个 renderDiag()（下方「连接诊断」，渲染进「连接状态」卡）。
-		 * 两个都是 function 声明 → 后者提升覆盖前者，曾导致本卡永远空白（真机「一键诊断没有数据」）。
-		 * 故本函数必须叫 renderDiagCard，不得改回 renderDiag。
-		 */
-		function renderDiagCard() {
-			if (!diagBody) return;
-			diagBody.innerHTML = '';
-			var items = buildDiagnostics();
+		function renderAirCard() {
+			if (!airBody) return;
+			airBody.innerHTML = '';
+			var items = buildAirItems();
 			if (!items.length) {
-				diagBody.appendChild(Mt5700.empty('等待数据…（诊断需要信号、速率、温度等至少一项读数）'));
+				airBody.appendChild(Mt5700.empty(
+					'等待数据…（需要 ^PDCPDATAINFO? / ^FASTDORM? / +CGSMS? 至少一条返回）'));
 				return;
 			}
 
-			/* 按严重程度排序：bad → warn → ok，同级保持原始顺序（有问题的排在最前面） */
+			/* 按严重程度排序：bad → warn → ok，同级保持原始顺序 */
 			var order = { bad: 0, warn: 1, ok: 2 };
 			items.sort(function (a, b) { return order[a.level] - order[b.level]; });
 
-			var ov = diagOverall(items);
+			var ov = airOverall(items);
 			var lvText = { bad: '较差', warn: '一般', ok: '良好' };
 			var tail = [];
 			if (ov.bad) tail.push(ov.bad + ' 项异常');
-			if (ov.warn) tail.push(ov.warn + ' 项需关注');
+			if (ov.warn) tail.push(ov.warn + ' 项需留意');
 			var headText = '总体：' + lvText[ov.level] + '　'
-				+ (tail.length ? tail.join(' · ') + ' / 共 ' + ov.total + ' 项' : '共 ' + ov.total + ' 项全部正常');
+				+ (tail.length ? tail.join(' · ') + ' / 共 ' + ov.total + ' 项' : '共 ' + ov.total + ' 项正常');
 
 			var box = E('div', { 'class': 'mt5700-diag-summary is-' + ov.level });
 			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' }, headText));
-			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' }, diagSummary(items)));
-			diagBody.appendChild(box);
+			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' }, airSummary(items)));
+			airBody.appendChild(box);
 
 			var rows = items.map(function (it) {
 				return [
@@ -533,7 +491,39 @@ return L.view.extend({
 					it.detail
 				];
 			});
-			diagBody.appendChild(Mt5700.table(['检查项', '结论', '依据与建议'], rows, { striped: true }));
+			airBody.appendChild(Mt5700.table(['检查项', '结论', '依据与建议'], rows, { striped: true }));
+
+			/* 短信域确需改动时给一个就地入口（改它是掉电保存，所以走一次确认） */
+			if (state.air.cgsms && state.air.cgsms.preferCs) {
+				var act = E('div', { 'class': 'mt5700-mt-sm' });
+				act.appendChild(Mt5700.ghostButton('改为「优先 PS 域」', setCgsmsPs));
+				airBody.appendChild(act);
+			}
+
+			airBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+				'丢包是 PDCP 层的累计值（自本次拨号起），判定看增量；'
+				+ '休眠与短信域是模组配置，来自 ^FASTDORM? / +CGSMS?。'));
+		}
+
+		/*
+		 * 把短信承载域改成「优先 PS 域」（AT+CGSMS=2）。
+		 * 手册 7.7：0、2 优先 PS；1、3 优先 CS，默认 3。5G SA 网络没有 CS 域，
+		 * 保持默认会出现「信号正常但短信发不出」，这条改动就是它的解药。
+		 * ★ 该设置**掉电保存**（写入模组 NV），所以走一次确认，不静默下发。
+		 */
+		function setCgsmsPs() {
+			Mt5700.confirm('把短信承载域改为「优先 PS 域」（AT+CGSMS=2）？该设置会写入模组并掉电保存，需要改回时设为 3。', function () {
+				return AtWs.client.sendCommand('AT+CGSMS=2').then(function (res) {
+					if (!res || !res.success) {
+						Mt5700.error('修改失败：' + ((res && res.error) || '模组未响应'));
+						return;
+					}
+					/* 直接按下发值重建对象：不发第二次查询，也避免旧值残留一帧 */
+					state.air.cgsms = Parse.parseCgsms('+CGSMS: 2');
+					Mt5700.success('已改为「优先 PS 域」');
+					renderAirCard();
+				});
+			}, '确认修改');
 		}
 
 		/* ---------- 渲染 ---------- */
@@ -909,16 +899,76 @@ return L.view.extend({
 				rows.push(['NR CC' + (i + 1) + ' PUSCH', dash(c.pusch, ' dBm') + (c.freq ? ' · ' + (c.freq / 1000).toFixed(1) + ' MHz' : '')]);
 			});
 			diagBox.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
-			if (d.addrs && d.addrs.length) {
-				diagBox.appendChild(E('div', { 'class': 'mt5700-hint' }, 'PDP 地址：'));
-				var ul = E('ul', { 'class': 'mt5700-agree-list' });
-				d.addrs.forEach(function (a) {
-					ul.appendChild(E('li', {}, 'CID ' + a.cid + ' · ' + a.family + '：' + a.address));
-				});
-				diagBox.appendChild(ul);
-			} else {
-				diagBox.appendChild(E('div', { 'class': 'mt5700-hint' }, '没有已激活的 PDP 上下文地址。'));
+			/* PDP 地址不再以列表挂在诊断下面：它和 WAN 侧在用的地址常常是同一个值
+			   （本机 CID 1 的 IPv4 与 ^DHCP 下发的完全一样），
+			   已合并到下方那张「地址」表，并按地址去重（见 renderAddr）。 */
+			renderAddr();
+		}
+
+		/* ---------- 地址总览（PDP + WAN 汇聚去重） ----------
+		 *
+		 * 三个来源会给出**同一个地址**：
+		 *   ① AT+CGPADDR     —— PDP 上下文地址（CID 1 → IPv4，CID 5 → IPv6）
+		 *   ② AT^DHCP?       —— 运营商 DHCP 下发的 IPv4（本机与 CID 1 完全相同）
+		 *   ③ AT^DHCPV6?     —— IPv6 地址/前缀（本机该命令直接 ERROR，取不到）
+		 * 以前 ① 挂在诊断下面、② 在下面的 IP 表里，同一串数字出现两次。
+		 * 这里按（类型 + 地址）做键合并，一行只留一个地址，来源写在同一格里。
+		 */
+		function addrKey(family, addr) {
+			var v = String(addr == null ? '' : addr).trim().toLowerCase();
+			return v ? (family + '|' + v) : '';
+		}
+
+		function buildAddrRows() {
+			var map = {};
+			var order = [];
+			function add(addr, family, cid, src) {
+				var key = addrKey(family, addr);
+				if (!key) return;
+				var e = map[key];
+				if (!e) {
+					e = map[key] = { address: String(addr).trim(), family: family, cids: [], fromWan: false, fromPdp: false };
+					order.push(e);
+				}
+				if (src === 'PDP') e.fromPdp = true;
+				if (src === 'WAN') e.fromWan = true;
+				if (cid != null && e.cids.indexOf(cid) < 0) e.cids.push(cid);
 			}
+			(state.diag.addrs || []).forEach(function (a) { add(a.address, a.family, a.cid, 'PDP'); });
+			if (state.dhcpv4 && state.dhcpv4.ipv4Address) add(state.dhcpv4.ipv4Address, 'IPv4', null, 'WAN');
+			if (state.dhcpv6 && state.dhcpv6.ipv6Address) add(state.dhcpv6.ipv6Address, 'IPv6', null, 'WAN');
+
+			order.sort(function (a, b) {
+				if (a.family !== b.family) return a.family === 'IPv4' ? -1 : 1;
+				var ac = a.cids.length ? a.cids[0] : 99;
+				var bc = b.cids.length ? b.cids[0] : 99;
+				return ac - bc;
+			});
+			return order;
+		}
+
+		function renderAddr() {
+			if (!addrBox) return;
+			addrBox.innerHTML = '';
+			var list = buildAddrRows();
+			if (!list.length) {
+				addrBox.appendChild(E('div', { 'class': 'mt5700-hint' }, '暂无已激活的 PDP 上下文地址。'));
+				return;
+			}
+			var rows = list.map(function (e) {
+				var srcs = [];
+				if (e.fromPdp) srcs.push('PDP');
+				if (e.fromWan) srcs.push('WAN（上网在用）');
+				return [
+					e.cids.length ? e.cids.join(' / ') : '—',
+					e.family,
+					e.address,
+					srcs.join(' · ')
+				];
+			});
+			addrBox.appendChild(Mt5700.table(['CID', '类型', '地址', '来源'], rows, { striped: true }));
+			addrBox.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+				'PDP 上下文地址与 WAN 侧在用地址相同时只列一行（来源列会同时标出 PDP 与 WAN）。'));
 		}
 
 		/*
@@ -1134,7 +1184,7 @@ return L.view.extend({
 			var rows = [];
 			var v4 = state.dhcpv4, v6 = state.dhcpv6;
 			if (v4) {
-				rows.push(['IPv4 地址', v4.ipv4Address]);
+				/* IPv4 地址不在这里重复：已并入上方「地址」表（两处本来就是同一个值） */
 				rows.push(['子网掩码', v4.subnetMask]);
 				rows.push(['网关', v4.gateway]);
 				rows.push(['DHCP 服务器', v4.dhcpServer]);
@@ -1142,7 +1192,7 @@ return L.view.extend({
 				rows.push(['备 DNS', dnsCell(1, v4.secondaryDNS)]);
 			}
 			if (v6) {
-				rows.push(['IPv6 地址', v6.ipv6Address]);
+				/* 同理：IPv6 地址也并进上方「地址」表 */
 				rows.push(['IPv6 前缀', v6.netmask]);
 				rows.push(['IPv6 网关', v6.gateway]);
 				rows.push(['IPv6 DNS', v6.primaryDNS + ' / ' + v6.secondaryDNS]);
@@ -1328,7 +1378,11 @@ return L.view.extend({
 						if (!isNaN(value)) state.ipv6Cap = { capValue: value, description: Parse.ipv6CapDescription(value) };
 					}
 				}
-			}).then(renderDHCP);
+				/* 地址表吃 dhcpv4/dhcpv6，DHCP 拿到新值后要跟着重绘（它与 PDP 地址去重合并） */
+			}).then(function () {
+				renderDHCP();
+				renderAddr();
+			});
 		}
 
 		function getFlow() {
@@ -1472,6 +1526,56 @@ return L.view.extend({
 			});
 		}
 
+		/*
+		 * 空口健康的三条查询（^PDCPDATAINFO? / ^FASTDORM? / +CGSMS?）。
+		 *
+		 * ★ 都是**主动查询**，不是订阅：订阅式上报会独占 AT 通道（PDCP 速率方案当初
+		 *   就是因为这个被否掉的），主动查询只在慢档这一轮多 3 次往返。
+		 * ★ ^PDCPDATAINFO 手册 5.36 的名字像「设置周期上报」，但它的**读命令**会直接
+		 *   回当前统计（真机实测返回 2 条 DRB），不需要先发 =1 开启。
+		 * ★ +CGSMS? 需要 PIN 就绪（手册属性表：PIN = Y），卡被锁时返回 ERROR ——
+		 *   这是正常情况，静默留空即可，卡片会自动少一行。
+		 */
+		function loadAirHealth() {
+			return AtWs.client.sendCommand('AT^PDCPDATAINFO?').then(function (pdcp) {
+				updatePdcpDelta(pdcp.success && pdcp.data ? Parse.parsePdcpDataInfo(String(pdcp.data)) : []);
+				return AtWs.client.sendCommand('AT^FASTDORM?');
+			}).then(function (fd) {
+				state.air.fastdorm = fd.success && fd.data ? Parse.parseFastdorm(String(fd.data)) : null;
+				return AtWs.client.sendCommand('AT+CGSMS?');
+			}).then(function (cs) {
+				state.air.cgsms = cs.success && cs.data ? Parse.parseCgsms(String(cs.data)) : null;
+				renderAirCard();
+			});
+		}
+
+		/*
+		 * 丢包增量必须在覆盖 state.air.pdcp **之前**算。
+		 * 计数器的三种「对不上」都要识别出来，否则会凭空报故障：
+		 *   ① 首轮没有上一次读数      → 只记基准，不给增量（delta = null）；
+		 *   ② 重拨 / 计数器归零      → 差值变负，不能显示成「本轮丢了负数个」；
+		 *   ③ DRB 条数变化（重建承载）→ 合计跳变，同样按「已重置」处理。
+		 * ②③ 都置 deltaReset，界面写明「增量本轮不做判定」，而不是把累计值报成故障。
+		 */
+		function updatePdcpDelta(list) {
+			var a = state.air;
+			var prev = a.pdcpPrev;
+			var ul = airSum(list, 'ulDiscardCnt');
+			var dl = airSum(list, 'dlDiscardCnt');
+			if (list.length) a.pdcpPrev = { t: Date.now(), ul: ul, dl: dl, n: list.length };
+			if (!prev || !list.length || prev.n !== list.length) {
+				a.delta = null;
+				a.deltaReset = !!prev;      /* 首轮不算「重置」，只是还没基准 */
+			} else if (ul < prev.ul || dl < prev.dl) {
+				a.delta = null;
+				a.deltaReset = true;
+			} else {
+				a.delta = { ul: ul - prev.ul, dl: dl - prev.dl, sec: (Date.now() - prev.t) / 1000 };
+				a.deltaReset = false;
+			}
+			a.pdcp = list;
+		}
+
 		/* ---------- 实时速率（OpenWrt 接口统计采样） ---------- */
 
 		/*
@@ -1503,9 +1607,6 @@ return L.view.extend({
 			sampleRate();
 		}
 			renderSpeed();
-			/* 峰值随之归零 / 重新起算，「速率达成」这一项要跟着变，
-			   否则会一直挂着上一轮的尖峰，或关掉监测后仍显示旧百分比 */
-			renderDiagCard();
 		}
 
 		var rateChk = E('input', { 'type': 'checkbox' });
@@ -1521,8 +1622,6 @@ return L.view.extend({
 		 * 下一拍（1 秒后）自然会用最新基准继续，不会丢数据。
 		 */
 		var rateInFlight = false;
-		/* 采样节拍计数：诊断卡依赖峰值速率，但没必要 1Hz 重建表格，用它稀释到 5 秒一次 */
-		var diagSampleTick = 0;
 		function sampleRate() {
 			if (rateInFlight) return Promise.resolve();
 			rateInFlight = true;
@@ -1557,8 +1656,6 @@ return L.view.extend({
 					if (state.rtUp > state.peakUp) state.peakUp = state.rtUp;
 						rateSample = { t: now, rx: r.rx_bytes, tx: r.tx_bytes, device: r.device };
 						renderSpeed();
-					/* 峰值变了，「速率达成」这一项的百分比也要跟着走 */
-					if (++diagSampleTick % 5 === 0) renderDiagCard();
 						return;
 					}
 					return;
@@ -1634,7 +1731,7 @@ return L.view.extend({
 		 * 它只依赖快档已取到的 state.carriers，没有前置依赖，放前面是安全的。
 		 */
 		var SLOW_TASKS = [loadSecondary, getPSReg, getFlow, getOperator, getAMBR,
-			getQCI, getDHCP, getTemp, getMCS, loadDiagnostics];
+			getQCI, getDHCP, getTemp, getMCS, loadDiagnostics, loadAirHealth];
 
 		/* 慢档各任务的失败记录：逐步兜错后失败不再阻断后续，但要留痕，
 		   否则「某一项一直失败」又会退化成看不见的静默问题。 */
@@ -1662,9 +1759,9 @@ return L.view.extend({
 			slowRunning = chain.then(function () {
 				slowRefreshing = false;
 				slowRunning = null;
-				/* 诊断吃的是慢档取到的信号 / 注册 / 载波 / 温度 / SIM，
+				/* 空口健康吃的是慢档取到的丢包 / 休眠 / 短信域，
 				   慢档整轮跑完再统一刷一次，避免逐个任务渲染导致的抖动 */
-				renderDiagCard();
+				renderAirCard();
 			});
 			return slowRunning;
 		}
@@ -1715,8 +1812,8 @@ return L.view.extend({
 		renderConn();
 		renderSignal();
 		renderCarriers();
-		renderDiag();          /* 连接诊断（渲染进「连接状态」卡内） */
-		renderDiagCard();      /* 一键诊断（右列独立卡片） */
+		renderDiag();          /* 连接诊断（渲染进「连接状态」卡内，末尾会带出地址表） */
+		renderAirCard();       /* 空口健康（右列独立卡片） */
 		renderSpeed();
 		renderFlow();
 		renderTemp();

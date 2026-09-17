@@ -119,6 +119,114 @@ var Parse = (function () {
 			});
 	};
 
+	/* ================= 空口健康 ================= */
+
+	/*
+	 * AT^PDCPDATAINFO? —— 按 DRB 粒度上报的 PDCP 统计（手册 5.36）。
+	 *
+	 * 手册列的 14 个字段：
+	 *   <id>,<pduSessionId>,<discardTimerLen>,<avgDelay>,<minDelay>,<maxDelay>,
+	 *   <highPriQueMaxBuffTime>,<lowPriQueMaxBuffTime>,<highPriQueBuffPktNums>,
+	 *   <lowPriQueBuffPktNums>,<ulPdcpRate>,<dlPdcpRate>,<ulDiscardCnt>,<dlDiscardCnt>
+	 *
+	 * ★ 真机比手册多回 2 个字段（2026-09-18 实测）：
+	 *     ^PDCPDATAINFO: 2,6,500,0,0,0,0,0,0,0,0,0,17333,0,574750503,558267589
+	 *     ^PDCPDATAINFO: 11,5,65535,0,0,0,0,0,0,0,0,0,0,0,45072,45072
+	 *   末尾两个大数手册无记载（疑似累计收发字节），**没有依据就不解读**：
+	 *   只取前 14 个，多余的忽略——绝不能把未知字段当丢包数显示给用户。
+	 *
+	 * ★ 主动查询时 avgDelay / minDelay / maxDelay / ulPdcpRate / dlPdcpRate 恒为 0
+	 *   （手册原文：「主动查询时为 0」），只有「丢包总数 / 队列缓存 / 丢弃定时器」是真值。
+	 *   所以这几个 0 字段干脆不解析，免得被当成「时延 0 / 速率 0」的假故障。
+	 *
+	 * ★ discardTimerLen 报 65535 = 该 DRB 未配置（实测第二个 DRB 就是），
+	 *   按「无测量」返回 null，界面显示「—」而不是「65535 ms」。
+	 *   但丢包总数是累计值，65535 在这里可能是真值，不过滤。
+	 */
+	var PDCP_UNSET = 65535;
+	api.parsePdcpDataInfo = function (text) {
+		var out = [];
+		String(text == null ? '' : text).split(/\r?\n/).forEach(function (line) {
+			var m = line.match(/\^PDCPDATAINFO:\s*([\d,\s]+)/);
+			if (!m) return;
+			var f = m[1].split(',').map(function (s) { return s.trim(); });
+			if (f.length < 14) return;
+			/* 配置类字段：未配置（65535）→ null */
+			var conf = function (i) {
+				var n = Number(f[i]);
+				return (isFinite(n) && n !== PDCP_UNSET) ? n : null;
+			};
+			/* 计数类字段：0 是真值，不能用 65535 过滤 */
+			var cnt = function (i) {
+				var n = Number(f[i]);
+				return isFinite(n) ? n : null;
+			};
+			out.push({
+				id: cnt(0),
+				pduSessionId: cnt(1),
+				discardTimerLen: conf(2),
+				highPriQueMaxBuffTime: conf(6),
+				lowPriQueMaxBuffTime: conf(7),
+				highPriQueBuffPktNums: cnt(8),
+				lowPriQueBuffPktNums: cnt(9),
+				ulDiscardCnt: cnt(12),
+				dlDiscardCnt: cnt(13)
+			});
+		});
+		return out;
+	};
+
+	/*
+	 * AT^FASTDORM? —— 快速休眠（手册 13.15）。
+	 *   <type>  0 停止休眠 / 1 只允许 Fast Dormancy（默认）/ 2 只允许 ASCR / 3 允许两者
+	 *   <timer_length> 无流量后多久进入休眠，1~30 秒，默认 5（可选项，可能不回）
+	 * 这条解释了「打开网页第一下要卡半秒」：休眠后首个数据包要重新建 RRC 连接。
+	 */
+	var FASTDORM_TYPES = {
+		0: '停止休眠',
+		1: '只允许 Fast Dormancy',
+		2: '只允许 ASCR',
+		3: '允许 ASCR 和 Fast Dormancy'
+	};
+	api.parseFastdorm = function (text) {
+		var m = String(text == null ? '' : text).match(/\^FASTDORM:\s*(\d+)\s*(?:,\s*(\d+))?/);
+		if (!m) return null;
+		var type = Number(m[1]);
+		var timer = m[2] === undefined ? null : Number(m[2]);
+		return {
+			type: type,
+			typeText: FASTDORM_TYPES[type] || ('类型 ' + type),
+			timer: isFinite(timer) ? timer : null,
+			/* 只有 0 是「不休眠」，其余都会进休眠 */
+			enabled: type !== 0
+		};
+	};
+
+	/*
+	 * AT+CGSMS? —— 短信承载域（手册 7.7）。
+	 *   0 只选 PS 域 / 1 只选 CS 域 / 2 优先 PS 域 / 3 优先 CS 域（默认 3）
+	 * ★ 手册原文：「为提高短信发送成功率，实际配置如下：0、2 优先选择 PS 域；1、3 优先选择 CS 域」。
+	 *   5G SA 下根本没有 CS 域，保持默认的「优先 CS」会让短信发不出去，
+	 *   所以这里要能给出 preferCs 判定，界面才好提示改成 PS 优先。
+	 */
+	var CGSMS_SERVICES = {
+		0: '只选 PS 域',
+		1: '只选 CS 域',
+		2: '优先 PS 域',
+		3: '优先 CS 域'
+	};
+	api.parseCgsms = function (text) {
+		var m = String(text == null ? '' : text).match(/\+CGSMS:\s*(\d+)/);
+		if (!m) return null;
+		var s = Number(m[1]);
+		return {
+			service: s,
+			text: CGSMS_SERVICES[s] || ('取值 ' + s),
+			preferCs: s === 1 || s === 3,
+			preferPs: s === 0 || s === 2
+		};
+	};
+
 	/* ================= 温度 ================= */
 
 	// AT^CHIPTEMP?
@@ -128,18 +236,18 @@ var Parse = (function () {
 		var f = match[1].split(',').map(function (s) { return s.trim(); });
 		var g = function (i) { return f[i] !== undefined ? AtWs.parseTemperature(f[i]) : 0; };
 		/*
-	 * ^CHIPTEMP 返回 12 路传感器温度，顺序见鼎桥手册 17.1：
-	 *   sub3G PA, sub6G PA, MIMO PA, TCXO, peri1, peri2, ap1, ap2,
-	 *   modem1, modem2, bbp1, bbp2
-	 * ★ 旧实现只取前 7 路，且把 f[4]/f[5]/f[6] 错标成 ap1/ap2/modem1
-	 *   （实为 peri1/peri2/ap1）——既漏了最热的 modem/bbp，名字也全错位。
-	 *   现按手册补全 12 路并改正命名。65535（无效值）由 parseTemperature 归 0。
-	 */
-	return {
+		 * ^CHIPTEMP 返回 12 路传感器温度，顺序见鼎桥手册 17.1：
+		 *   sub3G PA, sub6G PA, MIMO PA, TCXO, peri1, peri2, ap1, ap2,
+		 *   modem1, modem2, bbp1, bbp2
+		 * ★ 旧实现只取前 7 路，且把 f[4]/f[5]/f[6] 错标成 ap1/ap2/modem1
+		 *   （实为 peri1/peri2/ap1）——既漏了最热的 modem/bbp，名字也全错位。
+		 *   现按手册补全 12 路并改正命名。65535（无效值）由 parseTemperature 归 0。
+		 */
+		return {
 		sub3GPA: g(0), sub6GPA: g(1), mimoPa: g(2), tcxo: g(3),
 		peri1: g(4), peri2: g(5), ap1: g(6), ap2: g(7),
 		modem1: g(8), modem2: g(9), bbp1: g(10), bbp2: g(11)
-	};
+		};
 	};
 
 	/* ================= MCS ================= */
