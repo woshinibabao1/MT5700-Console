@@ -597,8 +597,42 @@ function safeHost(h) {
 	return h;
 }
 
-function es9pTmp(tag) {
-	return '/tmp/mt5700-es9p-' + tag + '-' + time() + '.tmp';
+/*
+ * 临时文件必须用 mktemp 建，不能自己拼名字。
+ *
+ * /tmp 是 1777（任何本地用户都可写）。早先这里拼的是
+ *   /tmp/mt5700-es9p-<tag>-<time()>.tmp
+ * 时间戳是**秒级**的，本地用户可以提前算出下一次的文件名，在那里放一个符号链接
+ * 指向 /etc/passwd 之类 —— 于是 fs.open(..., 'w') 与 curl -o 都会顺着链接写过去，
+ * 等于以 root 身份覆盖任意文件（本地提权）。
+ *
+ * mktemp 用 O_EXCL 创建、权限 0600、文件名含随机数不可预测，且失败会明确报错。
+ * 创建不成功就整个调用失败，绝不能退回可预测路径。
+ */
+function es9pMktemp() {
+	let p;
+	try {
+		p = fs.popen('mktemp /tmp/mt5700-es9p-XXXXXX', 'r');
+	} catch (e) {
+		return null;
+	}
+	if (!p) {
+		return null;
+	}
+	let s = p.read('line');
+	p.close();
+	s = (s != null) ? trim(s) : '';
+	if (length(s) == 0 || substr(s, 0, 1) != '/') {
+		return null;
+	}
+	return s;
+}
+
+function es9pUnlink(path) {
+	if (path == null) {
+		return;
+	}
+	try { fs.unlink(path); } catch (e) { }
 }
 
 function es9pToolAvailable() {
@@ -617,10 +651,18 @@ function es9pToolAvailable() {
 }
 
 function es9pPost(host, path, body) {
-	const bodyFile = es9pTmp('req');
-	const outFile = es9pTmp('res');
+	const bodyFile = es9pMktemp();
+	const outFile = es9pMktemp();
+	if (bodyFile == null || outFile == null) {
+		es9pUnlink(bodyFile);
+		es9pUnlink(outFile);
+		return { success: false, error: '无法创建临时文件（设备上没有 mktemp？）' };
+	}
+
 	let f = fs.open(bodyFile, 'w');
 	if (!f) {
+		es9pUnlink(bodyFile);
+		es9pUnlink(outFile);
 		return { success: false, error: '无法写临时文件' };
 	}
 	f.write(body);
@@ -639,16 +681,18 @@ function es9pPost(host, path, body) {
 	try {
 		p = fs.popen(cmd, 'r');
 	} catch (e) {
-		try { fs.unlink(bodyFile); } catch (e2) { }
+		es9pUnlink(bodyFile);
+		es9pUnlink(outFile);
 		return { success: false, error: '无法发起 HTTPS 请求' };
 	}
 	if (!p) {
-		try { fs.unlink(bodyFile); } catch (e2) { }
+		es9pUnlink(bodyFile);
+		es9pUnlink(outFile);
 		return { success: false, error: '无法发起 HTTPS 请求' };
 	}
 	let codeLine = p.read('line');
 	p.close();
-	try { fs.unlink(bodyFile); } catch (e) { }
+	es9pUnlink(bodyFile);
 
 	let respBody = '';
 	try {
@@ -656,7 +700,7 @@ function es9pPost(host, path, body) {
 	} catch (e) {
 		respBody = '';
 	}
-	try { fs.unlink(outFile); } catch (e) { }
+	es9pUnlink(outFile);
 
 	let status = int(trim(codeLine != null ? codeLine : ''));
 	if (status == null) {

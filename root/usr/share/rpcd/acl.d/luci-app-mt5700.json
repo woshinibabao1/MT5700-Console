@@ -20,7 +20,8 @@
 				"mt5700": [
 					"at",
 					"events",
-					"netrate"
+					"netrate",
+					"es9p"
 				],
 				"service": [
 					"list",
