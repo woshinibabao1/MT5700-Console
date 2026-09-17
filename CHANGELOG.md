@@ -5,6 +5,27 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.1.1] - 2026-09-17
+
+### 变更
+
+- **网络制式改成「代际-制式」写法**：`NR` / `LTE` 这类裸值改为 `5GA-NR` / `5G-NR` /
+  `4G-LTE` / `3G-WCDMA` / `2G-GSM`，后缀始终跟随真实 `sysMode`（不会把 LTE 标成 NR），
+  识别不了的制式仍原样返回裸值，不编造代际。
+  **★ 「5GA」是启发式判定，不是模组给的**：手册 13.1 的 `AT^SYSINFOEX <sysmode>` 合法值
+  只有 0/1/3/5/6/11（11 = NR-5GC），真机 `AT^MONSC` / `AT^HCSQ` 也只返回裸 `NR`，
+  模组没有任何 5G-Advanced 字段。按约定规则：**NR 且聚合载波数 ≥ 2 → `5GA-NR`**，
+  NR 单载波 → `5G-NR`。
+- **「连接状态」卡片标题带上运营商**：显示成「连接状态 ・ 中国移动」（PLMN 46000 经
+  `AtWs.operatorFromCode` 映射；真机 `AT^EONS=2` 实报 `46000`）。取不到运营商时
+  仍是「连接状态」，不会拼出「未知运营商」。
+
+### 测试
+
+- 新增 `tests/sysmode-label.test.js`（17 项）：抽出 `systemModeLabel` 真跑，
+  覆盖 2/3 载波→5GA、单载波→5G、LTE 不随载波数变 5G、未知制式原样返回、空值兜底，
+  并钉住标题拼接与「未知运营商不拼」两条。
+
 ## [2.1.0] - 2026-09-17
 
 状态页新增「一键诊断」：把已有读数翻译成结论与归因，而不是再罗列一遍参数。

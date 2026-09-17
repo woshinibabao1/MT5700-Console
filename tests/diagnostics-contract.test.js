@@ -88,9 +88,28 @@ ok('buildDiagnostics 代码里不出现 AT 命令字面量（注释里的命令�
 	'出现了 AT 命令字面量');
 
 const diagAll = stripComments(extractFn(js, 'buildDiagnostics') +
-	extractFn(js, 'renderDiag') + extractFn(js, 'diagSummary'));
-ok('renderDiag / diagSummary 同样不碰串口',
+	extractFn(js, 'renderDiagCard') + extractFn(js, 'diagSummary'));
+ok('renderDiagCard / diagSummary 同样不碰串口',
 	!/sendCommand/.test(diagAll) && !/AT[\^\+]/.test(diagAll));
+
+/* ---------- 2b. 函数名不得重名（2026-09-17 真机事故） ----------
+ * 本页曾同时存在两个 `function renderDiag`：「连接诊断」与「一键诊断」。
+ * 两者都是函数声明 → 提升后后者覆盖前者，诊断卡一次都没被填充过，
+ * 真机表现为「一键诊断里什么都没有」。静态断言当时全绿，没抓到。
+ * 这里既钉住具体名字，也钉住「顶层函数不得重名」这条通律。 */
+function countFnDefs(src, name) {
+	return (src.match(new RegExp('\\bfunction\\s+' + name + '\\s*\\(', 'g')) || []).length;
+}
+ok('renderDiagCard 有且仅有一个定义', countFnDefs(js, 'renderDiagCard') === 1,
+	'实际 ' + countFnDefs(js, 'renderDiagCard') + ' 个');
+ok('renderDiag 有且仅有一个定义（连接诊断专用，不得与诊断卡同名）',
+	countFnDefs(js, 'renderDiag') === 1, '实际 ' + countFnDefs(js, 'renderDiag') + ' 个');
+
+const topFns = (js.match(/^\t{2}function\s+(\w+)\s*\(/gm) || [])
+	.map(function (m) { return m.replace(/^\t{2}function\s+/, '').replace(/\s*\($/, ''); });
+const dupFns = topFns.filter(function (n, i) { return topFns.indexOf(n) !== i; });
+ok('页面顶层函数无重名（重名会被提升静默覆盖）', dupFns.length === 0,
+	'重名：' + dupFns.join(', '));
 
 /* ---------- 3. 缺失数据整项跳过，不用 0 冒充 ---------- */
 ok('速率项要求签约值 > 0 才参与判定（0 会被当真值算出 0%）',
@@ -124,11 +143,14 @@ ok('总体结论给归因而不复述各项', /function diagSummary\(/.test(js) 
 	/基站侧拥塞或套餐限速/.test(extractFn(js, 'diagSummary')));
 
 /* ---------- 7. 刷新时机齐全 ---------- */
-ok('慢档整轮跑完后刷新诊断', /slowRunning = chain\.then\(function \(\) \{[\s\S]{0,240}renderDiag\(\)/.test(js));
+ok('慢档整轮跑完后刷新诊断', /slowRunning = chain\.then\(function \(\) \{[\s\S]{0,260}renderDiagCard\(\)/.test(js));
 ok('实时监测开关切换后刷新诊断（峰值归零要跟着变）',
-	extractFn(js, 'setRateEnabled').indexOf('renderDiag()') !== -1);
-ok('峰值采样后刷新诊断', extractFn(js, 'sampleRate').indexOf('renderDiag()') !== -1);
+	extractFn(js, 'setRateEnabled').indexOf('renderDiagCard()') !== -1);
+ok('峰值采样后刷新诊断', extractFn(js, 'sampleRate').indexOf('renderDiagCard()') !== -1);
 ok('采样刷新做了节流（不 1Hz 重建表格）', /diagSampleTick\s*%\s*5/.test(js));
+ok('初始化时两个诊断各渲染一次（连接诊断 + 一键诊断）',
+	/renderDiag\(\);\s*\/\*[^\n]*\*\/\s*\n?\s*renderDiagCard\(\);/.test(js) ||
+	(extractFn(js, 'renderDiagCard') && /renderDiag\(\);[\s\S]{0,80}renderDiagCard\(\);/.test(js)));
 
 /* ---------- 8. 样式在位 ---------- */
 ok('CSS 有 .mt5700-stack 纵向堆叠', /\.mt5700-stack\s*\{/.test(css));

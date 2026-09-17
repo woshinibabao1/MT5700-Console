@@ -45,6 +45,8 @@ return L.view.extend({
 
 		/* ② 连接状态：注册 / 运营商 / 签约速率 + 连接诊断 + IP 与 DNS（原三张卡合并） */
 		var connCard = Mt5700.card('连接状态', '注册、诊断与地址');
+		/* 标题节点留个引用：renderConn 里要把它改成「连接状态 ・ 中国移动」 */
+		var connTitleEl = connCard.querySelector('.mt5700-card-title');
 		var connBody = E('div');
 		connCard._body.appendChild(connBody);
 		var diagBox = E('div', { 'class': 'mt5700-mt-md' });
@@ -492,7 +494,12 @@ return L.view.extend({
 			return '各项指标正常，未发现需要处理的异常。';
 		}
 
-		function renderDiag() {
+		/*
+		 * 注意：本页另有一个 renderDiag()（下方「连接诊断」，渲染进「连接状态」卡）。
+		 * 两个都是 function 声明 → 后者提升覆盖前者，曾导致本卡永远空白（真机「一键诊断没有数据」）。
+		 * 故本函数必须叫 renderDiagCard，不得改回 renderDiag。
+		 */
+		function renderDiagCard() {
 			if (!diagBody) return;
 			diagBody.innerHTML = '';
 			var items = buildDiagnostics();
@@ -544,17 +551,48 @@ return L.view.extend({
 			return String(parseInt(s, 16));
 		}
 
+		/*
+		 * 网络制式显示文案：裸值 NR / LTE 改成「代际-制式」写法（5G-NR / 4G-LTE）。
+		 *
+		 * ★ 这里的「5GA」是启发式判定，不是模组给的：
+		 *   手册 13.1 的 AT^SYSINFOEX <sysmode> 合法值只有 0/1/3/5/6/11（11 = NR-5GC），
+		 *   真机 AT^MONSC / AT^HCSQ 也只返回裸 "NR" —— 模组**没有任何 5G-Advanced 字段**，
+		 *   手册全文检索不到 5G-A / 5GA / Advanced。所以只能按用户约定的规则推断：
+		 *   NR 且聚合载波数 ≥ 2 → 5GA-NR，NR 单载波 → 5G-NR。
+		 *
+		 * 后缀始终跟随真实 sysMode，不会把 LTE 标成 NR；无法识别的制式原样返回裸值
+		 * （宁可显示 "NR-5GC" 也不要编一个代际出来）。
+		 */
+		function systemModeLabel(sysMode, carrierCount) {
+			var m = String(sysMode || '').trim().toUpperCase();
+			if (m === 'NR' || m === 'NR-5GC' || m === '5G') {
+				return (carrierCount >= 2 ? '5GA' : '5G') + '-NR';
+			}
+			if (m === 'LTE') return '4G-LTE';
+			if (m === 'WCDMA') return '3G-WCDMA';
+			if (m === 'GSM') return '2G-GSM';
+			return m || '—';
+		}
+
 		function renderConn() {
 			connBody.innerHTML = '';
+			/* 卡片标题带上运营商（「连接状态 ・ 中国移动」）。
+			   operatorFromCode 拿不到 PLMN 时返回「未知运营商」，这种情况就不拼，
+			   免得标题白白变长还看不出意义。 */
+			if (connTitleEl) {
+				var op = (state.operator && state.operator !== '未知运营商')
+					? state.operator : '';
+				connTitleEl.textContent = op ? ('连接状态 ・ ' + op) : '连接状态';
+			}
 			var c = state.cell;
 			var ambrD = splitSpeedUI(state.ambrDown, 'kbps');
 			var ambrU = splitSpeedUI(state.ambrUp, 'kbps');
 			var grid = E('div', { 'class': 'mt5700-metrics' });
 			[
 				{ label: '网络状态', value: state.networkStatus, color: 'info' },
-				/* 网络制式只在载波表里逐载波列出过，缺一个整体的值（NR / LTE）；
-				   与载波表保持一致用裸值，不另造一份中文码表。 */
-				{ label: '网络制式', value: state.cell.sysMode || '—' },
+				/* 制式改成「5GA-NR / 5G-NR / 4G-LTE」写法，判定规则见 systemModeLabel。
+				   载波数是 ^HFREQINFO 聚合出来的载波条数（state.carriers）。 */
+				{ label: '网络制式', value: systemModeLabel(state.cell.sysMode, state.carriers.length) },
 				/* 信号强度不在此重复：上方环形仪表与顶部状态条已各有一处 */
 				{ label: 'APN', value: state.apn },
 				{ label: 'QCI', value: state.qci },
@@ -1337,7 +1375,7 @@ return L.view.extend({
 			renderSpeed();
 			/* 峰值随之归零 / 重新起算，「速率达成」这一项要跟着变，
 			   否则会一直挂着上一轮的尖峰，或关掉监测后仍显示旧百分比 */
-			renderDiag();
+			renderDiagCard();
 		}
 
 		var rateChk = E('input', { 'type': 'checkbox' });
@@ -1389,8 +1427,8 @@ return L.view.extend({
 					if (state.rtUp > state.peakUp) state.peakUp = state.rtUp;
 						rateSample = { t: now, rx: r.rx_bytes, tx: r.tx_bytes, device: r.device };
 						renderSpeed();
-						/* 峰值变了，「速率达成」这一项的百分比也要跟着走 */
-						if (++diagSampleTick % 5 === 0) renderDiag();
+					/* 峰值变了，「速率达成」这一项的百分比也要跟着走 */
+					if (++diagSampleTick % 5 === 0) renderDiagCard();
 						return;
 					}
 					return;
@@ -1496,7 +1534,7 @@ return L.view.extend({
 				slowRunning = null;
 				/* 诊断吃的是慢档取到的信号 / 注册 / 载波 / 温度 / SIM，
 				   慢档整轮跑完再统一刷一次，避免逐个任务渲染导致的抖动 */
-				renderDiag();
+				renderDiagCard();
 			});
 			return slowRunning;
 		}
@@ -1547,7 +1585,8 @@ return L.view.extend({
 		renderConn();
 		renderSignal();
 		renderCarriers();
-		renderDiag();
+		renderDiag();          /* 连接诊断（渲染进「连接状态」卡内） */
+		renderDiagCard();      /* 一键诊断（右列独立卡片） */
 		renderSpeed();
 		renderFlow();
 		renderTemp();
