@@ -525,6 +525,146 @@ function atCallCached(cmdRaw) {
 	return rpcCall('at', { cmd: cmd });
 }
 
+
+/*
+ * ================= ES9+ 转发（eSIM profile 下载） =================
+ *
+ * 为什么需要它：
+ *   下载 eSIM profile 的 HTTPS 那一半（ES9+，GSMA SGP.22）必须能直连运营商的
+ *   SM-DP+ 服务器。浏览器做不到 —— SM-DP+ 不发 CORS 头，跨域请求直接被拦。
+ *   所以由路由器代发一次 POST，APDU 那一半仍在浏览器侧经 AT+CSIM 完成。
+ *
+ * ★ 安全边界（这本质上是一个「受限的外网 HTTP 客户端」，必须收紧）：
+ *   ① 只认 https，URL 由本文件拼装，scheme 不可被参数影响；
+ *   ② 主机必须是**合法 FQDN** —— 拒绝 IP 字面量 / localhost / 含端口或斜杠，
+ *      否则这条通道就成了登录用户打内网的跳板（SSRF）；
+ *   ③ 路径必须在 ES9+ 的 5 个端点白名单里，不接受任意路径；
+ *   ④ 请求体必须是合法 JSON 且 ≤256KB；
+ *   ⑤ 证书验证**保持开启**（不加 -k）。服务器链不全时会明确报失败，
+ *      由界面原样呈现，而不是偷偷降低安全级别。
+ */
+const ES9P_PATHS = {
+	initiateAuthentication: '/gsma/rsp2/es9plus/initiateAuthentication',
+	authenticateClient: '/gsma/rsp2/es9plus/authenticateClient',
+	getBoundProfilePackage: '/gsma/rsp2/es9plus/getBoundProfilePackage',
+	handleNotification: '/gsma/rsp2/es9plus/handleNotification',
+	cancelSession: '/gsma/rsp2/es9plus/cancelSession'
+};
+
+function es9pPathAllowed(path) {
+	for (let k in ES9P_PATHS) {
+		if (ES9P_PATHS[k] === path) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* 主机名白名单校验：只放行 [A-Za-z0-9.-] 的合法 FQDN */
+function safeHost(h) {
+	if (h == null || h == '') {
+		return null;
+	}
+	let n = length(h);
+	if (n < 4 || n > 253) {
+		return null;
+	}
+	let dots = 0;
+	let letters = 0;
+	for (let i = 0; i < n; i++) {
+		let c = substr(h, i, 1);
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			letters++;
+		} else if ((c >= '0' && c <= '9') || c == '-') {
+			/* 允许 */
+		} else if (c == '.') {
+			dots++;
+		} else {
+			return null;
+		}
+	}
+	if (dots < 1 || letters < 1) {
+		return null;   /* 无点 = 不是域名（也挡住 localhost/纯 IP） */
+	}
+	let first = substr(h, 0, 1);
+	let last = substr(h, n - 1, 1);
+	if (first == '.' || first == '-' || last == '.' || last == '-') {
+		return null;
+	}
+	if (index(h, '..') >= 0) {
+		return null;
+	}
+	return h;
+}
+
+function es9pTmp(tag) {
+	return '/tmp/mt5700-es9p-' + tag + '-' + time() + '.tmp';
+}
+
+function es9pToolAvailable() {
+	let p;
+	try {
+		p = fs.popen('command -v curl', 'r');
+	} catch (e) {
+		return false;
+	}
+	if (!p) {
+		return false;
+	}
+	let s = p.read('line');
+	p.close();
+	return (s != null && length(trim(s)) > 0);
+}
+
+function es9pPost(host, path, body) {
+	const bodyFile = es9pTmp('req');
+	const outFile = es9pTmp('res');
+	let f = fs.open(bodyFile, 'w');
+	if (!f) {
+		return { success: false, error: '无法写临时文件' };
+	}
+	f.write(body);
+	f.close();
+
+	const cmd = 'timeout 45 curl -sS --max-time 35 -X POST' +
+		" -H 'Content-Type: application/json'" +
+		" -H 'X-Admin-Protocol: gsma/rsp/v2.2.2'" +
+		" -H 'User-Agent: gsma-rsp-lpad'" +
+		' --data-binary @' + bodyFile +
+		' -o ' + outFile +
+		" -w '%{http_code}'" +
+		" 'https://" + host + path + "'";
+
+	let p;
+	try {
+		p = fs.popen(cmd, 'r');
+	} catch (e) {
+		try { fs.unlink(bodyFile); } catch (e2) { }
+		return { success: false, error: '无法发起 HTTPS 请求' };
+	}
+	if (!p) {
+		try { fs.unlink(bodyFile); } catch (e2) { }
+		return { success: false, error: '无法发起 HTTPS 请求' };
+	}
+	let codeLine = p.read('line');
+	p.close();
+	try { fs.unlink(bodyFile); } catch (e) { }
+
+	let respBody = '';
+	try {
+		respBody = fs.readfile(outFile);
+	} catch (e) {
+		respBody = '';
+	}
+	try { fs.unlink(outFile); } catch (e) { }
+
+	let status = int(trim(codeLine != null ? codeLine : ''));
+	if (status == null) {
+		return { success: false, status: 0, body: respBody, error: '服务器无响应或连接失败' };
+	}
+	return { success: true, status: status, body: respBody };
+}
+
 return {
 	mt5700: {
 		at: {
@@ -566,6 +706,51 @@ return {
 			args: { device: '' },
 			call: function (req) {
 				return netrateCall(req);
+			}
+		},
+		es9p: {
+			args: { host: '', path: '', body: '', probe: 0 },
+			call: function (req) {
+				let a = req.args;
+
+				/* probe=1：只探测通道可用性，不发任何网络请求 */
+				if (a.probe) {
+					let ok = es9pToolAvailable();
+					return {
+						success: true,
+						available: ok,
+						error: ok ? '' : '设备上没有 curl，无法访问 SM-DP+ 服务器'
+					};
+				}
+
+				let host = safeHost(getStr(a, 'host'));
+				if (host == null) {
+					return { success: false, error: '主机地址不合法（必须是域名，不接受 IP）' };
+				}
+				let path = getStr(a, 'path');
+				if (path == null || !es9pPathAllowed(path)) {
+					return { success: false, error: '路径不在 ES9+ 白名单内' };
+				}
+				let body = getStr(a, 'body');
+				if (body == null || body == '') {
+					return { success: false, error: '缺少请求体' };
+				}
+				/* BPP 最大也就几十 KB，256KB 足够，顺手挡住异常输入 */
+				if (length(body) > 262144) {
+					return { success: false, error: '请求体过大（上限 256KB）' };
+				}
+				/* 注意：jsonParse 解析失败是**抛异常**，不是返回 null */
+				try {
+					if (jsonParse(body) == null) {
+						return { success: false, error: '请求体不是合法 JSON' };
+					}
+				} catch (e) {
+					return { success: false, error: '请求体不是合法 JSON' };
+				}
+				if (!es9pToolAvailable()) {
+					return { success: false, error: '设备上没有 curl，无法访问 SM-DP+ 服务器' };
+				}
+				return es9pPost(host, path, body);
 			}
 		}
 	}

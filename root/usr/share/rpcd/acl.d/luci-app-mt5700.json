@@ -92,7 +92,8 @@
 				],
 				"mt5700": [
 					"at",
-					"events"
+					"events",
+					"es9p"
 				],
 				"service": [
 					"set",

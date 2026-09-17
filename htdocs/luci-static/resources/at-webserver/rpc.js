@@ -48,6 +48,23 @@ var rpcNetRate = L.rpc.declare({
 	expect: {}
 });
 
+/*
+ * ES9+ 转发（eSIM profile 下载用）。
+ *
+ * 浏览器没法直连运营商的 SM-DP+ 服务器：SM-DP+ 不发 CORS 头，跨域会被拦
+ * （这正是 lpac / luci-app-epm 都把下载甩给本机二进制的原因）。
+ * 这里只让路由器代发一次 JSON POST，APDU 那一半仍在前端经 AT+CSIM 完成。
+ *
+ * 后端的收紧项见 mt5700.uc 的 es9p：只认 https、主机必须是合法 FQDN
+ * （拒绝 IP / localhost，防 SSRF）、路径在 5 个 ES9+ 端点白名单内、证书照验。
+ */
+var rpcEs9p = L.rpc.declare({
+	object: 'mt5700',
+	method: 'es9p',
+	params: ['host', 'path', 'body', 'probe'],
+	expect: {}
+});
+
 function withTimeout(p, ms, msg) {
 	return Promise.race([
 		p,
@@ -1133,9 +1150,48 @@ function fetchNetRate(device) {
 		});
 }
 
+/*
+ * ES9+ 转发：向指定 SM-DP+ 主机发一次 JSON POST。
+ * 返回 Promise<{success, status, body}>；失败时 success=false 且带 error。
+ * 超时给 60s —— 后端 curl 上限 35s，加上 rpcd 与 ucode 的开销留足余量。
+ */
+function es9pPost(host, path, json) {
+	return withTimeout(rpcEs9p(host, path, json, 0), 60000, 'ES9+ 请求超时')
+		.then(function (resp) {
+			if (!resp || resp.success === false) {
+				return { success: false, status: 0, body: '', error: (resp && resp.error) || 'ES9+ 请求失败' };
+			}
+			return { success: true, status: Number(resp.status) || 0, body: String(resp.body || '') };
+		})
+		.catch(function (err) {
+			return { success: false, status: 0, body: '', error: (err && err.message) || 'ES9+ 请求失败' };
+		});
+}
+
+/*
+ * ES9+ 通道可用性探测（不发任何网络请求，只问后端有没有 curl）。
+ * 老设备 / 裁剪过的固件上没有 mt5700.es9p 这个方法，L.rpc.declare 会直接
+ * 被 rpcd 拒掉 —— 那时 esim.js 必须给出「设备侧缺少通道」的明确说明，
+ * 而不是让「下载」按钮点了没反应。
+ */
+function es9pAvailable() {
+	return withTimeout(rpcEs9p('', '', '', 1), 10000, 'ES9+ 探测超时')
+		.then(function (resp) {
+			if (!resp || resp.success === false) {
+				return { available: false, error: (resp && resp.error) || 'rpcd 没有 mt5700.es9p 方法' };
+			}
+			return { available: !!resp.available, error: resp.error || '' };
+		})
+		.catch(function (err) {
+			return { available: false, error: (err && err.message) || 'rpcd 没有 mt5700.es9p 方法' };
+		});
+}
+
 var AtWs = {
 	client: atClient(),
 	netRate: fetchNetRate,
+	es9p: es9pPost,
+	es9pAvailable: es9pAvailable,
 	extractATData: extractATData,
 	extractATDataMultiline: extractATDataMultiline,
 	convertRsrp: convertRsrp,
