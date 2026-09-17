@@ -2691,17 +2691,19 @@
 }
 
 /* ==========================================================================
-   网络状态页版式调整（CSS v5.5.6）
+   网络状态页版式调整（CSS v5.5.7）
    --------------------------------------------------------------------------
-   ① .mt5700-stack                     右列纵向堆叠（SIM 与设备 → 速率与流量）
+   ① .mt5700-cards 双列：左「连接状态」、右「SIM 与设备」——两张同类信息卡，
+      高度接近、左右齐平；「速率与流量」整行满宽跟在双列下方（图表回到默认
+      170px）。早先把速率塞进右列做 .mt5700-stack 纵向堆叠，右列两张卡比左列
+      高出一大截，顶部对齐底部一长一短 —— 用户反馈「左右不对称」，已废弃。
    ② 窄屏（<1100px）补 .mt5700-cards 间距 —— 原规则只写在 min-width:1100px 内，
       窄屏既没有 grid 也没有 gap，纵向堆叠的卡片会贴死
    ③ .mt5700-card-body > .mt5700-toolbar 下边距 —— 作用域**必须**限定在
       card-body 内：.mt5700-toolbar 同时被「网络设置」页当作卡片头部工具条使用
       （.mt5700-card-extra），全局加边距会污染它（会审 R06）
-   ④ 速率与流量进入半宽列后的缩放：图表 170 → 120px，速率值 26 → 20px，
-      流量值降一档（2xl → xl）
-   ⑤ SIM 与设备是「项目 / 值」两列短表，行高收紧（会审 P14）
+   ④ .mt5700-metrics-flow：流量区 8 项（会话/累计/峰值），宽屏固定 4 列排成
+      2×4，避免 auto-fit 在满宽下凑出 6 列、第二行只剩 2 个的参差
    ========================================================================== */
 
 /* 「SIM 与设备 删掉多余空白」的正解：
@@ -2711,13 +2713,6 @@
    放在文件末尾以覆盖前面的 stretch（选择器优先级相同，后者生效）。 */
 .mt5700-cards { align-items: start; }
 
-.mt5700-stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--mt5700-space-lg);
-  min-width: 0;
-}
-
 /* ② 窄屏：单列流 + 与宽屏一致的间距 */
 @media (max-width: 1099px) {
   .mt5700-cards {
@@ -2725,20 +2720,12 @@
     grid-template-columns: minmax(0, 1fr);
     gap: var(--mt5700-space-lg);
   }
-  .mt5700-stack { gap: var(--mt5700-space-lg); }
 }
 
 /* ③ 只命中卡片正文内的工具条（网络状态页 SIM 卡那一条） */
 .mt5700-card-body > .mt5700-toolbar { margin-bottom: var(--mt5700-space-sm); }
 
-/* ④ 半宽列下的缩放 */
-.mt5700-stack .mt5700-chart { height: 120px; }
-.mt5700-stack .mt5700-speed-value { font-size: 20px; }
-.mt5700-stack .mt5700-metrics .mt5700-metric-value {
-  font-size: var(--mt5700-font-size-xl);
+/* ④ 流量区定列（窄屏仍走 .mt5700-metrics 的 auto-fit） */
+@media (min-width: 1100px) {
+  .mt5700-metrics-flow { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
-
-/* ⑤ 两列短表收紧：th/td padding 与 .mt5700-metrics 的 gap 同源思路，
-      此处是表格专属微调，故用裸值（既有 th/td 也是裸值 12px/16px） */
-.mt5700-stack .mt5700-table th,
-.mt5700-stack .mt5700-table td { padding: 9px 14px; }

@@ -67,7 +67,7 @@ return L.view.extend({
 		rateCard._body.appendChild(speedRow);
 		var chart = E('div', { 'class': 'mt5700-chart' });
 		rateCard._body.appendChild(chart);
-		var flowGrid = E('div', { 'class': 'mt5700-metrics mt5700-mt-md' });
+		var flowGrid = E('div', { 'class': 'mt5700-metrics mt5700-metrics-flow mt5700-mt-md' });
 		rateCard._body.appendChild(flowGrid);
 
 		/* ⑤ SIM 与设备：SIM 卡、模块标识与 5G 模块温度（同一张表铺开，不跳转、不重复） */
@@ -75,19 +75,20 @@ return L.view.extend({
 		var devBody = E('div');
 		devCard._body.appendChild(devBody);
 
-		/* 版式（用户要求「速率与流量放到 SIM 与设备下面」）：
+		/* 版式（用户要求「速率与流量放到 SIM 与设备下面」+「左右要对称」）：
 		     载波与聚合（满宽，表格含逐载波 RSRP/RSRQ/SINR/强度）
 		     信号质量（满宽）
-		     连接状态 | 右列（SIM 与设备 → 速率与流量）  ← 双列卡区 .mt5700-cards
-		   右列用 .mt5700-stack 纵向堆叠：速率与流量紧跟在 SIM 与设备正下方，
-		   不再像原先那样兜在整个页面最底部。body 子节点顺序与改前一致。 */
-		var duoRight = E('div', { 'class': 'mt5700-stack' });
-		duoRight.appendChild(devCard);
-		duoRight.appendChild(rateCard);
+		     连接状态 | SIM 与设备     ← 双列卡区 .mt5700-cards（两张同类信息卡，高度接近）
+		     速率与流量（满宽，紧跟在双列下方）
+		   为什么不再把速率塞进右列：右列两张卡（SIM + 速率）会明显高于左列一张卡，
+		   顶部对齐、底部一长一短，看着是歪的（用户反馈）。改成「两卡并排 + 图表满宽」
+		   后左右齐平，曲线也回到 170px 全宽。窄屏单列时顺序仍是
+		   连接状态 → SIM 与设备 → 速率与流量（页面流向的下方）。 */
 		var duo = E('div', { 'class': 'mt5700-cards' });
 		duo.appendChild(connCard);
-		duo.appendChild(duoRight);
+		duo.appendChild(devCard);
 		body.appendChild(duo);
+		body.appendChild(rateCard);
 		body.insertBefore(carrierCard, signalCard);
 
 		/* ---------- 状态 ---------- */
@@ -124,7 +125,10 @@ return L.view.extend({
 			 * 共用同一组变量会导致两面板互相覆盖、数值与语义双双错乱。
 			 */
 			ambrDown: 0, ambrUp: 0,
-			rtDown: 0, rtUp: 0
+			rtDown: 0, rtUp: 0,
+			/* 本轮「实时监测」的峰值速率（字节/秒，与 rtDown/rtUp 同单位）。
+			   只在采样时单向取 max，关掉监测再打开会归零重新累计。 */
+			peakDown: 0, peakUp: 0
 		};
 
 		var history = [];
@@ -302,6 +306,9 @@ return L.view.extend({
 			var grid = E('div', { 'class': 'mt5700-metrics' });
 			[
 				{ label: '网络状态', value: state.networkStatus, color: 'info' },
+				/* 网络制式只在载波表里逐载波列出过，缺一个整体的值（NR / LTE）；
+				   与载波表保持一致用裸值，不另造一份中文码表。 */
+				{ label: '网络制式', value: state.cell.sysMode || '—' },
 				/* 信号强度不在此重复：上方环形仪表与顶部状态条已各有一处 */
 				{ label: 'APN', value: state.apn },
 				{ label: 'QCI', value: state.qci },
@@ -686,13 +693,22 @@ return L.view.extend({
 		function renderFlow() {
 			flowGrid.innerHTML = '';
 			var f = state.flow;
+			/* 峰值是「本轮实时监测」内的最大值（关掉监测再开即归零），
+			   单位与 rtDown/rtUp、state.peakDown/peakUp 一致（字节/秒），显示同样走 splitSpeedUI。 */
+			function peakText(bps) {
+				if (!bps) return '—';
+				var s = splitSpeedUI(bps, 'bytes');
+				return s.value + ' ' + s.unit;
+			}
 			[
 				{ label: '当前会话时长', value: AtWs.formatDuration(f.lastDsTime, false) },
 				{ label: '当前下行流量', value: AtWs.formatFlow(f.lastRxFlow) },
 				{ label: '当前上行流量', value: AtWs.formatFlow(f.lastTxFlow) },
 				{ label: '累计时长', value: AtWs.formatDuration(f.totalDsTime, true) },
 				{ label: '累计下行', value: AtWs.formatFlow(f.totalRxFlow) },
-				{ label: '累计上行', value: AtWs.formatFlow(f.totalTxFlow) }
+				{ label: '累计上行', value: AtWs.formatFlow(f.totalTxFlow) },
+				{ label: '峰值下行', value: peakText(state.peakDown) },
+				{ label: '峰值上行', value: peakText(state.peakUp) }
 			].forEach(function (it) {
 				flowGrid.appendChild(Mt5700.metric(it.label, it.value));
 			});
@@ -740,6 +756,9 @@ return L.view.extend({
 			mcsGrid.innerHTML = '';
 			var dl = state.downlinkMCS, ul = state.uplinkMCS;
 			[
+				/* 信号强度百分比由 PS 状态解析得到（state.cell.signalPercent），
+				   之前只存不用 —— 环形仪表给的是 dBm 绝对值，这里补一个直观的百分比。 */
+				{ label: '信号强度', value: state.cell.signalPercent || '—' },
 				{ label: '下行调制', value: mcsDisplay(dl) },
 				{ label: '上行调制', value: mcsDisplay(ul) }
 			].forEach(function (it) {
@@ -1061,11 +1080,14 @@ return L.view.extend({
 			rateOn = !!on;
 			try { localStorage.setItem('mt5700.rateOn', rateOn ? '1' : '0'); } catch (e) {}
 			if (rateTimer) { clearInterval(rateTimer); rateTimer = null; }
-			if (rateOn) {
-				rateSample = null;
-				rateTimer = setInterval(sampleRate, 1000);
-				sampleRate();
-			}
+		if (rateOn) {
+			rateSample = null;
+			/* 重新开始一段监测：峰值随之归零，否则上一轮的尖峰会一直挂着 */
+			state.peakDown = 0;
+			state.peakUp = 0;
+			rateTimer = setInterval(sampleRate, 1000);
+			sampleRate();
+		}
 			renderSpeed();
 		}
 
@@ -1107,10 +1129,13 @@ return L.view.extend({
 						 * 计数器回绕或接口重置会产生负差，此时不能输出负值，
 						 * 直接以 0 处理并重置基准，下一拍即可恢复。
 						 */
-						state.rtDown = drx >= 0 ? drx / dt : 0;
-						state.rtUp = dtx >= 0 ? dtx / dt : 0;
-						history.push({ down: state.rtDown, up: state.rtUp });
-						if (history.length > HISTORY_POINTS) history = history.slice(history.length - HISTORY_POINTS);
+					state.rtDown = drx >= 0 ? drx / dt : 0;
+					state.rtUp = dtx >= 0 ? dtx / dt : 0;
+					history.push({ down: state.rtDown, up: state.rtUp });
+					if (history.length > HISTORY_POINTS) history = history.slice(history.length - HISTORY_POINTS);
+					/* 峰值只在本段监测内累计（单位与 rt* 一致：字节/秒） */
+					if (state.rtDown > state.peakDown) state.peakDown = state.rtDown;
+					if (state.rtUp > state.peakUp) state.peakUp = state.rtUp;
 						rateSample = { t: now, rx: r.rx_bytes, tx: r.tx_bytes, device: r.device };
 						renderSpeed();
 						return;
