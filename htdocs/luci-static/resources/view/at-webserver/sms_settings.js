@@ -109,20 +109,69 @@ return L.view.extend({
 		var storageEl = E('div', { 'class': 'mt5700-hint' }, '存储用量：—');
 		storeBody.appendChild(storageEl);
 
-		var locSel = Mt5700.select([
-			{ label: 'SIM 卡', value: 'SM' },
-			{ label: '模组内存', value: 'ME' },
-			{ label: '自动（SIM 优先）', value: 'MT' }
-		], 'SM');
+		/*
+		 * 存储位置的选项**必须由模组自己报**，不能写死。
+		 *
+		 * 实测（2026-09-18，本机 Hiveton H5000M / MT5700M）：
+		 *   AT+CPMS=?  → +CPMS: ("SM","ME"),("SM","ME"),("SM","ME")
+		 * 也就是说本机**只认 SM 与 ME**。此前界面里还有第三项「自动（SIM 优先）」= MT，
+		 * 而 AT+CPMS="MT","MT","MT" 实发返回 ERROR（success=false）—— 用户选它就
+		 * 永远是「保存失败」，且报错不告诉原因，看着就是「这功能坏了」。
+		 */
+		var STORAGE_LABELS = {
+			SM: 'SIM 卡', ME: '模组内存', MT: '全部（SIM + 模组）',
+			SR: '状态报告', BM: '广播', TA: '终端适配'
+		};
+		function storageLabel(v) { return STORAGE_LABELS[v] || v; }
+
+		/* AT+CPMS=? → 取第一段括号里的存储名（三段通常一致，以第一段为准） */
+		function parseCpmsSupported(text) {
+			var m = String(text || '').match(/\+CPMS:\s*\(([^)]*)\)/);
+			if (!m) return [];
+			var out = [];
+			var re = /"([^"]+)"/g;
+			var g;
+			while ((g = re.exec(m[1]))) out.push(g[1]);
+			return out;
+		}
+
+		function setSelectOptions(sel, values, current) {
+			sel.innerHTML = '';
+			values.forEach(function (v) {
+				var o = E('option', { value: v }, storageLabel(v) + '（' + v + '）');
+				if (v === current) o.selected = true;
+				sel.appendChild(o);
+			});
+			if (current && values.indexOf(current) < 0 && values.length) sel.value = values[0];
+		}
+
+		var locSel = Mt5700.select([], '');
+		var locHint = E('div', { 'class': 'mt5700-hint' }, '读取中…');
 		storeBody.appendChild(Mt5700.formGroup('存储位置', locSel));
+		storeBody.appendChild(locHint);
 
 		storeBody.appendChild(Mt5700.panelActions(
 			Mt5700.primaryButton('保存存储位置', function () {
 				var loc = locSel.value;
-				AtWs.client.sendCommand('AT+CPMS="' + loc + '","' + loc + '","' + loc + '"').then(function (res) {
-					if (res.success) { Mt5700.success('存储位置已保存'); loadStorage(); }
-					else { Mt5700.error('保存失败'); }
-				}).catch(function () { Mt5700.error('保存失败'); });
+				if (!loc) { Mt5700.error('请先选择存储位置'); return; }
+				AtWs.client.sendCommand('AT+CPMS="' + loc + '","' + loc + '","' + loc + '"')
+					.then(function (res) {
+						if (res.success) {
+							Mt5700.success('存储位置已保存：' + storageLabel(loc));
+						} else {
+							/*
+							 * 只弹「保存失败」等于什么都没说：本机实测 MT 不被支持，
+							 * 但界面看不出来是「这个选项不行」还是「功能坏了」。
+							 * 把模组原话带上，用户才知道该换一个。
+							 */
+							Mt5700.error('保存失败：' + loc + ' 可能不被支持（'
+								+ ((res && res.error) ? res.error : '模组未返回 OK') + '）');
+						}
+						return loadStorage();
+					})
+					.catch(function (e) {
+						Mt5700.error('保存失败：' + ((e && e.message) || e || '未知错误'));
+					});
 			}),
 			Mt5700.dangerButton('清空全部短信', function () {
 				Mt5700.confirm('确定清空全部短信？此操作不可恢复。', function () {
@@ -332,6 +381,22 @@ return L.view.extend({
 			}).catch(function () { fmtEl.textContent = '短信格式：读取失败'; });
 		}
 
+		/* 先问模组支持哪些存储，再据此生成下拉项（MT 之类本机没有的就不会出现） */
+		function loadStorageOptions() {
+			return AtWs.client.sendCommand('AT+CPMS=?').then(function (res) {
+				var list = parseCpmsSupported(res && res.data);
+				/* 查询失败时退回最通用的两个，别让下拉框空着 */
+				if (!list.length) list = ['SM', 'ME'];
+				state.supportedMemory = list;
+				setSelectOptions(locSel, list, state.storage ? state.storage.mem1 : list[0]);
+				locHint.textContent = '当前支持：' + list.map(storageLabel).join(' / ');
+			}).catch(function () {
+				state.supportedMemory = ['SM', 'ME'];
+				setSelectOptions(locSel, state.supportedMemory, 'SM');
+				locHint.textContent = '未能读取支持的存储（AT+CPMS=? 失败），已按 SIM 卡 / 模组内存显示';
+			});
+		}
+
 		function loadStorage() {
 			return AtWs.client.sendCommand('AT+CMGF=0').then(function () {
 				return AtWs.client.sendCommand('AT+CPMS?');
@@ -344,6 +409,14 @@ return L.view.extend({
 							mem2: m[4], used2: parseInt(m[5], 10), total2: parseInt(m[6], 10),
 							mem3: m[7], used3: parseInt(m[8], 10), total3: parseInt(m[9], 10)
 						};
+						/*
+						 * ★ 必须把下拉框同步成模组**当前真正用的**存储。
+						 *   早先这里只刷了用量文本、没管下拉框，于是它永远停在建页面时的
+						 *   默认值 'SM' —— 本机实际是 ME，界面却显示 SIM 卡。
+						 *   用户点「保存」后就算成功了，看着也像「没保存、又跳回去了」。
+						 */
+						setSelectOptions(locSel, state.supportedMemory.length
+							? state.supportedMemory : ['SM', 'ME'], state.storage.mem1);
 						renderStorage();
 					}
 				}
@@ -370,6 +443,7 @@ return L.view.extend({
 				.then(loadIMS)
 				// 必须在 loadStorage 之前：后者会下发 AT+CMGF=0，会把它之前读到的格式覆盖掉
 				.then(loadFormat)
+				.then(loadStorageOptions)
 				.then(loadStorage)
 				.then(refreshCacheCount)
 				.catch(function () { /* 单项数据失败时保留其余卡片，不打断整页 */ });
