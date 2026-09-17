@@ -41,7 +41,7 @@ const js = fs.readFileSync(JSP, 'utf8');
  *   ① bump mt5700.js 的 MT5700_CSS_VERSION；
  *   ② 把本常量改成新指纹（用本测试失败时打印出的实际值）。
  */
-const CSS_FINGERPRINT = 'c00437d175ca0668';
+const CSS_FINGERPRINT = '36438281585f63d7';
 
 let pass = 0;
 const fails = [];

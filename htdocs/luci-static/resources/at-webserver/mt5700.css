@@ -65,6 +65,27 @@
   --mt5700-space-lg: 24px;
   --mt5700-space-xl: 32px;
 
+  /* 响应式断点：★ 这里**不再**放 --mt5700-bp-* 变量（#2 修正，审查 R6）
+     · 原因一：那三个变量全仓零引用，是个陷阱 —— 改了界面纹丝不动。
+     · 原因二：更根本 —— `@container` / `@media` 的**条件表达式不接受 var()**
+       （实测：@container a (min-width: var(--bp)) 在容器 700px / --bp:600px 下不命中），
+     所以断点只能写死在条件里。**全部宽度断点的位置（共 6 处 @container + 2 处 @media）：**
+       @container mt5700（6 处 ★ 行号会随文件增删漂移 —— 认锚点选择器，别只认行号）
+         :1229 (max-width:720)   .at-status-card
+         :1273 (max-width:480)   .at-status-card      ← 唯一仍用 480 的容器断点
+         :2406 (max-width:960)   .mt5700-grid-3/4     ← 栅格 3/4 降 2 列
+         :2410 (max-width:600)   .mt5700-grid-2/3/4   ← 栅格单列（H05 裁决，勿改回 480）
+         :2423 (min-width:960)   .mt5700-cards        ← 双列卡区
+         :2431 (max-width:720)   .mt5700-sms-layout   ← 短信单栏 / 表格渐隐
+       @media (max-width)（2 处，载体都在 document.body 上、容器之外，无法用容器查询）
+         :2191 (max-width:720)                        .at-field 族（Ui.promptModal 产物）
+         :2509 (max-width:720), (pointer:coarse)      .mt5700-modal-mask 底部抽屉
+     ★ 另有一处 `:2525` `(max-height:480px) and (orientation:landscape)` 属横屏专用，不参与宽度断点集。
+     ★ 行号自校验（动过本文件就跑一次，别让注释把后人引到错处 —— 审查 H01 的教训）：
+         grep -n "@container\|@media (max-width" .../at-webserver/mt5700.css
+      · 真正被使用的常量只有下面这个内容区上限。 */
+  --mt5700-page-max: 1142px;
+
   /* 状态色 */
   --mt5700-accent: #3b82f6;
   --mt5700-accent-light: #60a5fa;
@@ -125,53 +146,33 @@
 }
 
 /* ==========================================================================
-   L1 - 应用壳与环境背景层
+   L1 - 应用壳 (.mt5700-app) 已移除：全仓零挂载（CHANGELOG.md:2013 明载，
+   主控扫描 55 文件 0 处挂载）。其基础排版已并入下方 .mt5700-page（P06 / V2）。
    ========================================================================== */
-.mt5700-app {
-  position: relative;
-  min-height: 100%;
-  padding: var(--mt5700-space-lg);
+
+/* ---------- 页面容器 ---------- */
+.mt5700-page {
+  max-width: var(--mt5700-page-max);
+  width: 100%;
+  min-width: 0;
+  margin: 0 auto;
+  /* 容器查询上下文：@container mt5700 量的是本元素自身渲染宽度，
+     真机内容区即 1142px（见黑板 §5）。所有 fixed 浮层挂在 document.body，
+     不在本包含块内，故 container-type 不会困住 modal/toast（R-A 已核）。 */
+  container-type: inline-size;
+  container-name: mt5700;
+  /* P06：原 .mt5700-app 基础排版迁移到此，去掉对宿主主题的字体依赖 */
   font-family: var(--mt5700-font-sans);
   color: var(--mt5700-text);
   font-size: var(--mt5700-font-size-base);
   line-height: 1.6;
 }
 
-.mt5700-app::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background:
-    radial-gradient(ellipse 60% 45% at 15% 8%, rgba(59, 130, 246, 0.09), transparent 62%),
-    radial-gradient(ellipse 50% 40% at 85% 12%, rgba(16, 185, 129, 0.07), transparent 60%),
-    radial-gradient(ellipse 55% 45% at 50% 100%, rgba(99, 102, 241, 0.07), transparent 65%),
-    var(--mt5700-bg);
-  backdrop-filter: blur(var(--mt5700-blur)) saturate(var(--mt5700-saturate));
-  -webkit-backdrop-filter: blur(var(--mt5700-blur)) saturate(var(--mt5700-saturate));
-}
-
-@media (prefers-color-scheme: dark) {
-  .mt5700-app::before {
-    background:
-      radial-gradient(ellipse 60% 45% at 15% 8%, rgba(59, 130, 246, 0.12), transparent 62%),
-      radial-gradient(ellipse 50% 40% at 85% 12%, rgba(16, 185, 129, 0.08), transparent 60%),
-      radial-gradient(ellipse 55% 45% at 50% 100%, rgba(99, 102, 241, 0.1), transparent 65%),
-      var(--mt5700-bg);
-  }
-}
-
-/* ---------- 页面容器 ---------- */
-.mt5700-page {
-  max-width: 1400px;
-  margin: 0 auto;
-}
-
 /* 页面主体：纵向弹性布局，统一卡片间距（修复卡片贴叠问题） */
 .mt5700-page-body {
   display: flex;
   flex-direction: column;
-  gap: var(--mt5700-space-lg);
+  gap: clamp(12px, 2.2cqi, var(--mt5700-space-lg));
   min-width: 0;
 }
 
@@ -180,8 +181,9 @@
 }
 
 .mt5700-page-title {
-  font-size: var(--mt5700-font-size-3xl);
-  font-weight: 700;
+  font-size: clamp(20px, 5cqi, var(--mt5700-font-size-3xl));
+  /* P18：Argon 对 h1~h6 强加 font-weight:normal !important，同特异性下 !important 胜出 */
+  font-weight: 700 !important;
   color: var(--mt5700-text);
   margin: 0 0 var(--mt5700-space-sm) 0;
   letter-spacing: -0.02em;
@@ -208,9 +210,12 @@
   transition: box-shadow var(--mt5700-transition-base), transform var(--mt5700-transition-base), background var(--mt5700-transition-base);
 }
 
-.mt5700-card:hover {
-  background: var(--mt5700-card-bg-hover);
-  box-shadow: var(--mt5700-sh-3), var(--mt5700-sh-inset);
+/* P22：点完态不消失（触屏 :hover 粘滞）→ 只给有真指针的设备 */
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-card:hover {
+    background: var(--mt5700-card-bg-hover);
+    box-shadow: var(--mt5700-sh-3), var(--mt5700-sh-inset);
+  }
 }
 
 .mt5700-card-header {
@@ -224,7 +229,7 @@
 
 .mt5700-card-title {
   font-size: var(--mt5700-font-size-lg);
-  font-weight: 600;
+  font-weight: 600 !important;
   color: var(--mt5700-text);
   margin: 0;
 }
@@ -240,7 +245,7 @@
 }
 
 .mt5700-card-body {
-  padding: var(--mt5700-space-lg);
+  padding: clamp(16px, 4cqi, var(--mt5700-space-lg));
 }
 
 .mt5700-card-footer {
@@ -254,7 +259,7 @@
    ========================================================================== */
 .mt5700-grid {
   display: grid;
-  gap: var(--mt5700-space-lg);
+  gap: clamp(12px, 2cqi, var(--mt5700-space-lg));
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 }
 
@@ -262,22 +267,8 @@
 .mt5700-grid-3 { grid-template-columns: repeat(3, 1fr); }
 .mt5700-grid-4 { grid-template-columns: repeat(4, 1fr); }
 
-@media (max-width: 1024px) {
-  .mt5700-grid-2,
-  .mt5700-grid-3,
-  .mt5700-grid-4 {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-@media (max-width: 640px) {
-  .mt5700-grid,
-  .mt5700-grid-2,
-  .mt5700-grid-3,
-  .mt5700-grid-4 {
-    grid-template-columns: 1fr;
-  }
-}
+/* 栅格列数响应：见文件末尾「响应式体系 v5.5.6」@container mt5700 三档（P02/P04/P09/P26）。
+   此处不再用视口断点——插件嵌在 Argon 容器链里，视口≠内容区宽度。 */
 
 /* ==========================================================================
    L3 - 浮动数据卡片 (悬浮微位移 + 微光)
@@ -295,9 +286,11 @@
   transition: transform var(--mt5700-transition-base), box-shadow var(--mt5700-transition-base);
 }
 
-.mt5700-metric:hover {
-  transform: translateY(-3px);
-  box-shadow: var(--mt5700-sh-2), var(--mt5700-sh-inset);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-metric:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--mt5700-sh-2), var(--mt5700-sh-inset);
+  }
 }
 
 .mt5700-metric-label {
@@ -309,7 +302,7 @@
 }
 
 .mt5700-metric-value {
-  font-size: var(--mt5700-font-size-2xl);
+  font-size: clamp(18px, 4.5cqi, var(--mt5700-font-size-2xl));
   font-weight: 700;
   color: var(--mt5700-text);
   word-break: break-all;
@@ -345,15 +338,17 @@
   transition: transform var(--mt5700-transition-base), box-shadow var(--mt5700-transition-base);
 }
 
-.mt5700-gauge:hover {
-  transform: translateY(-3px);
-  box-shadow: var(--mt5700-sh-3), var(--mt5700-sh-inset);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-gauge:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--mt5700-sh-3), var(--mt5700-sh-inset);
+  }
 }
 
 .mt5700-gauge-dial {
   position: relative;
-  width: 120px;
-  height: 120px;
+  width: clamp(84px, 26cqi, 120px);
+  height: clamp(84px, 26cqi, 120px);
   max-width: 100%;
 }
 
@@ -387,7 +382,7 @@
 }
 
 .mt5700-gauge-value {
-  font-size: 22px;
+  font-size: clamp(16px, 4.4cqi, 22px);
   font-weight: 700;
   color: var(--mt5700-text);
   line-height: 1.1;
@@ -434,7 +429,7 @@
 .mt5700-chart {
   position: relative;
   width: 100%;
-  height: 170px;
+  height: clamp(110px, 14cqi, 170px);
   background: var(--mt5700-glass-bg);
   border: 1px solid var(--mt5700-border);
   border-radius: var(--mt5700-radius-md);
@@ -461,7 +456,8 @@
   padding: 6px 10px;
   font-size: var(--mt5700-font-size-xs);
   color: var(--mt5700-text);
-  white-space: nowrap;
+  max-width: 70%;
+  white-space: normal;
   opacity: 0;
   transition: opacity var(--mt5700-transition-fast);
   transform: translate(-50%, calc(-100% - 10px));
@@ -537,11 +533,13 @@
   box-shadow: var(--mt5700-sh-1);
 }
 
-.mt5700-btn-primary:hover:not(:disabled) {
-  background: #2563eb;
-  border-color: #2563eb;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35), var(--mt5700-sh-1);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-btn-primary:hover:not(:disabled) {
+    background: #2563eb;
+    border-color: #2563eb;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35), var(--mt5700-sh-1);
+  }
 }
 
 .mt5700-btn-primary:active:not(:disabled) {
@@ -554,10 +552,12 @@
   border-color: var(--mt5700-border-subtle);
 }
 
-.mt5700-btn-secondary:hover:not(:disabled) {
-  background: var(--mt5700-card-bg-hover);
-  border-color: var(--mt5700-text-muted);
-  transform: translateY(-1px);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-btn-secondary:hover:not(:disabled) {
+    background: var(--mt5700-card-bg-hover);
+    border-color: var(--mt5700-text-muted);
+    transform: translateY(-1px);
+  }
 }
 
 .mt5700-btn-success {
@@ -567,11 +567,13 @@
   box-shadow: var(--mt5700-sh-1);
 }
 
-.mt5700-btn-success:hover:not(:disabled) {
-  background: #059669;
-  border-color: #059669;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35), var(--mt5700-sh-1);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-btn-success:hover:not(:disabled) {
+    background: #059669;
+    border-color: #059669;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35), var(--mt5700-sh-1);
+  }
 }
 
 .mt5700-btn-danger {
@@ -581,11 +583,13 @@
   box-shadow: var(--mt5700-sh-1);
 }
 
-.mt5700-btn-danger:hover:not(:disabled) {
-  background: #dc2626;
-  border-color: #dc2626;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35), var(--mt5700-sh-1);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-btn-danger:hover:not(:disabled) {
+    background: #dc2626;
+    border-color: #dc2626;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35), var(--mt5700-sh-1);
+  }
 }
 
 .mt5700-btn-ghost {
@@ -594,12 +598,14 @@
   border-color: transparent;
 }
 
-.mt5700-btn-ghost:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.05);
-  color: var(--mt5700-text);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-btn-ghost:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--mt5700-text);
+  }
 }
 
-@media (prefers-color-scheme: dark) {
+@media (hover: hover) and (pointer: fine) and (prefers-color-scheme: dark) {
   .mt5700-btn-ghost:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.08);
   }
@@ -905,12 +911,13 @@
 }
 
 /* 开关状态打磨：hover 反馈 / 键盘焦点环 / 禁用态 */
-.mt5700-switch input[type="checkbox"]:hover:not(:disabled):not(:checked) {
-  background: rgba(127, 127, 127, 0.35);
-}
-
-.mt5700-switch input[type="checkbox"]:hover:not(:disabled):checked {
-  background: #2563eb;
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-switch input[type="checkbox"]:hover:not(:disabled):not(:checked) {
+    background: rgba(127, 127, 127, 0.35);
+  }
+  .mt5700-switch input[type="checkbox"]:hover:not(:disabled):checked {
+    background: #2563eb;
+  }
 }
 
 .mt5700-switch input[type="checkbox"]:focus-visible {
@@ -936,6 +943,7 @@
 
 /* ---------- 表格 ---------- */
 .mt5700-table-wrapper {
+  position: relative;
   overflow-x: auto;
   border-radius: var(--mt5700-radius-md);
   border: 1px solid var(--mt5700-border-subtle);
@@ -967,16 +975,20 @@
 
 .mt5700-table tbody tr:last-child td { border-bottom: none; }
 
-.mt5700-table tbody tr:hover {
-  background: rgba(59, 130, 246, 0.04);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-table tbody tr:hover {
+    background: rgba(59, 130, 246, 0.04);
+  }
 }
 
 .mt5700-table-striped tbody tr:nth-child(even) {
   background: rgba(0, 0, 0, 0.01);
 }
 
-.mt5700-table-striped tbody tr:nth-child(even):hover {
-  background: rgba(59, 130, 246, 0.04);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-table-striped tbody tr:nth-child(even):hover {
+    background: rgba(59, 130, 246, 0.04);
+  }
 }
 
 /* ---------- 状态标签 ---------- */
@@ -1213,8 +1225,8 @@
 .at-status-card.is-offline { --at-color: #e45d5d; }
 .at-status-card.is-unknown { --at-color: #8a938e; }
 
-/* 手机端 */
-@media (max-width: 600px) {
+/* 手机端（P02：收敛进容器断点集 {480,720,960}；本组件 12 处调用点全部挂在 .mt5700-page 内） */
+@container mt5700 (max-width: 720px) {
 
   .at-status-card {
     gap: 13px;
@@ -1258,7 +1270,7 @@
 }
 
 /* 很窄的手机 */
-@media (max-width: 430px) {
+@container mt5700 (max-width: 480px) {
 
   .at-status-card {
     gap: 11px;
@@ -1334,7 +1346,7 @@
 
 .mt5700-modal-title {
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 600 !important;
   color: var(--mt5700-text);
   margin: 0 0 6px 0;
 }
@@ -1571,9 +1583,11 @@
   transition: transform var(--mt5700-transition-base), box-shadow var(--mt5700-transition-base);
 }
 
-.mt5700-speed-box:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--mt5700-sh-2), var(--mt5700-sh-inset);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-speed-box:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--mt5700-sh-2), var(--mt5700-sh-inset);
+  }
 }
 
 .mt5700-speed-label {
@@ -1611,7 +1625,9 @@
   white-space: nowrap;
 }
 
-.mt5700-tab:hover { color: var(--mt5700-text); }
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-tab:hover { color: var(--mt5700-text); }
+}
 
 .mt5700-tab.active {
   color: var(--mt5700-accent);
@@ -1626,11 +1642,7 @@
   min-height: 500px;
 }
 
-@media (max-width: 768px) {
-  .mt5700-sms-layout {
-    grid-template-columns: 1fr;
-  }
-}
+/* 短信双栏→单栏：见文件末尾「响应式体系 v5.5.6」@container (max-width:720px)（P16） */
 
 .mt5700-sms-list {
   background: var(--mt5700-glass-bg);
@@ -1647,7 +1659,7 @@
 
 .mt5700-sms-list-body {
   overflow-y: auto;
-  max-height: 500px;
+  max-height: min(500px, 55dvh);
 }
 
 .mt5700-sms-item {
@@ -1657,7 +1669,9 @@
   transition: background var(--mt5700-transition-fast);
 }
 
-.mt5700-sms-item:hover { background: rgba(59, 130, 246, 0.04); }
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-sms-item:hover { background: rgba(59, 130, 246, 0.04); }
+}
 
 .mt5700-sms-item.active { background: rgba(59, 130, 246, 0.08); }
 
@@ -1685,16 +1699,34 @@
 }
 
 .mt5700-sms-detail-header {
+  display: flex;
+  align-items: center;
+  gap: var(--mt5700-space-sm);
   padding: var(--mt5700-space-md);
   background: rgba(0, 0, 0, 0.02);
   border-bottom: 1px solid var(--mt5700-divider);
+}
+
+/* P16：窄容器返回按钮，宽容器下隐藏（见 @container max-width:720px 显隐） */
+.mt5700-sms-back {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: var(--mt5700-font-size-sm);
+  color: var(--mt5700-text-secondary);
+  background: transparent;
+  border: 1px solid var(--mt5700-border-subtle);
+  border-radius: var(--mt5700-radius-md);
+  cursor: pointer;
 }
 
 .mt5700-sms-detail-body {
   flex: 1;
   padding: var(--mt5700-space-md);
   overflow-y: auto;
-  max-height: 400px;
+  max-height: min(400px, 55dvh);
 }
 
 .mt5700-sms-bubble {
@@ -1760,7 +1792,8 @@
 
 .mt5700-terminal-body {
   padding: var(--mt5700-space-md);
-  max-height: 500px;
+  /* P20（#2 补漏）：原 500px 固定高，竖屏手机上会顶出视口；与另 4 处同口径改用 min(<原值>, 55dvh) */
+  max-height: min(500px, 55dvh);
   overflow-y: auto;
   font-family: var(--mt5700-font-mono);
   font-size: var(--mt5700-font-size-xs);
@@ -1869,7 +1902,8 @@
 }
 
 .mt5700-terminal-log {
-  max-height: 420px;
+  /* P20（#2 补漏）：同 .mt5700-terminal-body，420px → min(420px, 55dvh) */
+  max-height: min(420px, 55dvh);
   min-height: 160px;
   overflow-y: auto;
   background: rgba(0, 0, 0, 0.04);
@@ -1955,21 +1989,13 @@
   transition: width 0.4s ease;
 }
 
-/* ---------- 响应式 ---------- */
-@media (max-width: 768px) {
-  .mt5700-app { padding: var(--mt5700-space-md); }
-  .mt5700-page-title { font-size: var(--mt5700-font-size-2xl); }
-  .mt5700-card-body { padding: var(--mt5700-space-md); }
-  .mt5700-grid { gap: var(--mt5700-space-md); }
-  .mt5700-metric-value { font-size: var(--mt5700-font-size-xl); }
-  .mt5700-gauge-dial { width: 100px; height: 100px; }
-  .mt5700-gauge-value { font-size: 19px; }
-  .mt5700-chart { height: 140px; }
-  .mt5700-btn-group { width: 100%; }
-  .mt5700-btn-group .mt5700-btn { flex: 1; }
-  .at-status-card { flex-direction: row; flex-wrap: wrap; }
-  .mt5700-modal { max-width: 100%; }
-}
+/* ---------- 响应式（旧视口断点块，已拆分） ----------
+   本块原 13 条规则已分别处置：
+   - 连续量（标题/卡片内边距/栅格间距/指标值/仪表/图表高度）改为基础定义上的 clamp()，
+     见各自基础规则（P08/P11/P12）；
+   - .mt5700-app padding 随 .mt5700-app 整体移除（P06）；
+   - .mt5700-btn-group 满宽、.at-status-card 换行 → 见末尾 @container (max-width:720px)；
+   - .mt5700-modal max-width:100% → 见末尾弹窗底部抽屉块（P19，视口查询）。 */
 
 /* ---------- 工具类 ---------- */
 .mt5700-text-center { text-align: center; }
@@ -2007,36 +2033,40 @@
    覆盖：面板 / 字段 / 标签 / 弹窗 / 连接条 / 短信会话 / 终端等
    ========================================================================== */
 
-/* ---------- 页面骨架 ---------- */
-.at-page { }
-.at-page-head { margin-bottom: 14px; }
-.at-page-title { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
-.at-page-subtitle { color: #888; font-size: 13px; }
-.at-page-body { }
+/* ==========================================================================
+   公共样式 · 死族边界（#2 重写；原「活族回归（V6 纠错）」注释已废 —— 它有两处硬错）
+   --------------------------------------------------------------------------
+   【#2 更正】上一版注释谎报「按原版逐字恢复了 at-kv* / at-page* / at-tag / at-table」，
+   但这几族在本文件里本来就不存在（工作区实测 .at-kv / .at-page / .at-tag 各 0 条，
+   .at-table 只剩 1 条后代规则）；「视图动态创建表格时挂 at-table 类」也是假陈述 ——
+   视图用的是 .mt5700-table，.at-table 的生成点为 0。
+   它还把 at-toast* / at-conn* 标成「活族」，与调用链核查结论相反（见下）。
 
-/* ---------- 面板 ---------- */
-.at-panel {
-	background: #fff;
-	border: 1px solid #dfe2e5;
-	border-radius: 8px;
-	margin-bottom: 16px;
-	overflow: hidden;
-}
-.at-panel-head {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	padding: 10px 14px;
-	border-bottom: 1px solid #f0f2f5;
-	background: #fafbfc;
-}
-.at-panel-title { margin: 0; font-size: 15px; font-weight: 600; }
-.at-panel-hint { color: #999; font-size: 12px; }
-.at-panel-extra { font-size: 12px; color: #666; }
-.at-panel-body { padding: 12px 14px; }
-.at-panel-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+   ---- 判据：一个 .at-* 族只有在其「生产者调用链可达」时才保留（逐族核查过）----------
+   · 活（保留，勿删）：.at-modal* / .at-field* / .at-modal-actions / .at-btn*
+     生产者为 ui.js 的 api.confirm / api.promptModal / api.button，被 11 个视图调用共 14 处，
+     产物 append 到 document.body（故这三个族必须用视口查询，见本文件「响应式」小节）；
+     .at-autorefresh*（ui.js 生成，network_settings 调用）。
+   · 死（本次随注释一并删除，勿凭本注释复活）：
+     - .at-toast*  唯一生产者是 ui.js 的 api.toast，而它只被 api.success/error/warning/info
+       调用；全仓对 Ui.(toast|success|error|warning|info) 的真实调用 = 0。
+     - .at-conn*   唯一生产者是 ui.js 的 api.renderConnectionBar；视图里那 11 处
+       renderConnectionBar 走的都是 Mt5700.renderConnectionBar（mt5700.js 侧），与 ui.js
+       那一份无关。全仓 'at-conn' / 'at-toast' 除本文件与 ui.js 外零命中，tests/ 亦无断言
+       （契约钉的是 .mt5700-toast-*）。
+     - 其余死族（progress/empty/hint/sms/ussd/console/chips/metrics/speed/chart/lock/
+       note/inline/mono/period/steps/agree/reject）按 V6 保持删除。
+   · 存疑（本次未动，见审查 R12）：`.at-panel .cbi-input-checkbox` 与
+     `.at-panel .at-table .at-btn` 两条后代规则的上游 .at-panel 骨架已随 api.panel（零调用）
+     删除，规则本身因此不生效；但它们同时承担「防 Argon 把复选框压成 1rem」的兜底，
+     删前需先确认站内活着的复选框另有兜底，**故保留并在此标注，不擅自删**。
 
-/* ---------- 字段 ---------- */
+   ★ JS 侧残留：ui.js 里 api.toast / api.renderConnectionBar 两段**仍然存在**（下架它们
+     超出本次响应式改动范围）。若日后要复活这两族的渲染，**必须先恢复样式**，
+     否则会渲染出无样式的裸 DOM。
+   ========================================================================== */
+
+/* ---------- 字段（.at-field* 由 Ui.promptModal 生成，活的，保留） ---------- */
 .at-field { display: flex; align-items: flex-start; margin-bottom: 10px; }
 .at-field-label { flex: 0 0 160px; padding-top: 6px; font-weight: 500; color: #333; }
 .at-field-control { flex: 1 1 auto; }
@@ -2073,7 +2103,10 @@
 	box-shadow: 0 0 0 3px rgba(22, 104, 220, .12);
 	outline: none;
 }
-/* 复选/开关：保持原尺寸，仅统一主题强调色 */
+/* 复选/开关：保持原尺寸，仅统一主题强调色
+ * ★ 审查 R12：上游 .at-panel 骨架已随 api.panel（零调用）删除，本条**当前不生效**；
+ *   保留是因为它同时承担「防 Argon 把复选框压成 1rem」的兜底。删它之前必须先确认站内
+ *   活着的复选框另有兜底 —— 详见 :2050 附近「死族边界」注释里的 R12 说明，别单独删本条。 */
 .at-panel .cbi-input-checkbox {
 	width: auto;
 	height: auto;
@@ -2081,66 +2114,7 @@
 }
 .at-field-hint { color: #999; font-size: 12px; margin-top: 3px; }
 
-/* ---------- 键值表 ---------- */
-.at-kv { width: 100%; border-collapse: collapse; }
-.at-kv td { padding: 6px 10px; border-bottom: 1px solid #f4f5f7; font-size: 13px; }
-.at-kv-label { color: #666; white-space: nowrap; width: 1%; }
-.at-kv-value { color: #222; word-break: break-all; }
-
-/* ---------- 表格 ---------- */
-/* 视图动态创建的表格元素同时带有 cbi-section-table 与 at-table 两个类。
-   此处统一用 .at-panel 作用域提升优先级，保证外观由本文件决定、不受 LuCI 主题影响。 */
-.at-panel .at-table {
-	width: 100%;
-	border-collapse: collapse;
-	border: 1px solid #e5e8ec;
-	border-radius: 6px;
-	font-size: 13px;
-	background: #fff;
-	color: #333;
-}
-.at-panel .at-table th {
-	background: #fafbfc;
-	color: #555;
-	font-weight: 600;
-	text-align: left;
-	padding: 8px 10px;
-	border-bottom: 1px solid #e5e8ec;
-	white-space: nowrap;
-}
-.at-panel .at-table td {
-	padding: 8px 10px;
-	border-bottom: 1px solid #f0f2f5;
-	vertical-align: middle;
-	word-break: break-all;
-}
-.at-panel .at-table tbody tr:nth-child(even) { background: #fafbfc; }
-.at-panel .at-table tbody tr:hover { background: #f4f8fe; }
-.at-panel .at-table tbody tr:last-child td { border-bottom: 0; }
-.at-panel .at-table .at-btn,
-.at-panel .at-table .cbi-button {
-	padding: 3px 10px;
-	font-size: 12px;
-	line-height: 18px;
-}
-
-/* ---------- 标签 ---------- */
-.at-tags { display: flex; gap: 6px; flex-wrap: wrap; }
-.at-tag {
-	display: inline-block;
-	padding: 2px 10px;
-	border-radius: 12px;
-	font-size: 12px;
-	line-height: 20px;
-	border: 1px solid transparent;
-}
-.at-tag-green { color: #1a7f37; background: #e6f4ea; border-color: #b7dfc2; }
-.at-tag-red { color: #c62828; background: #fdeaea; border-color: #f3c0c0; }
-.at-tag-orange { color: #b26a00; background: #fff3e0; border-color: #ffd591; }
-.at-tag-blue { color: #1565c0; background: #e7f0fd; border-color: #bcd8f5; }
-.at-tag-gray { color: #555; background: #f0f0f0; border-color: #ddd; }
-
-/* ---------- 按钮 ---------- */
+/* ---------- 按钮（.at-btn 由 Ui.promptModal 的 api.button 生成，活的，保留） ---------- */
 .at-btn {
 	display: inline-block;
 	padding: 5px 14px;
@@ -2153,38 +2127,22 @@
 	line-height: 20px;
 	transition: background .15s, border-color .15s;
 }
-.at-btn:hover { background: #fff; border-color: #aaa; }
+@media (hover: hover) and (pointer: fine) {
+  .at-btn:hover { background: #fff; border-color: #aaa; }
+}
 .at-btn:disabled { opacity: .55; cursor: not-allowed; }
 .at-btn-primary { background: #1668dc; border-color: #1668dc; color: #fff; }
-.at-btn-primary:hover { background: #1f76ee; border-color: #1f76ee; color: #fff; }
+@media (hover: hover) and (pointer: fine) {
+  .at-btn-primary:hover { background: #1f76ee; border-color: #1f76ee; color: #fff; }
+}
 .at-btn-danger { background: #e5484d; border-color: #e5484d; color: #fff; }
-.at-btn-danger:hover { background: #f05a5f; border-color: #f05a5f; color: #fff; }
+@media (hover: hover) and (pointer: fine) {
+  .at-btn-danger:hover { background: #f05a5f; border-color: #f05a5f; color: #fff; }
+}
 .at-btn-action { background: #f2f4f7; border-color: #d0d5dd; }
 .at-btn-neutral { background: #f7f8fa; }
 
-/* ---------- Toast ---------- */
-.at-toast {
-	position: fixed;
-	top: 70px;
-	left: 50%;
-	transform: translateX(-50%);
-	z-index: 10000;
-	padding: 10px 22px;
-	border-radius: 8px;
-	color: #fff;
-	font-size: 14px;
-	box-shadow: 0 4px 16px rgba(0,0,0,.18);
-	opacity: 1;
-	transition: opacity .4s;
-	max-width: 80vw;
-}
-.at-toast-success { background: #1a7f37; }
-.at-toast-error { background: #c62828; }
-.at-toast-warning { background: #b26a00; }
-.at-toast-info { background: #1565c0; }
-.at-toast-hide { opacity: 0; }
-
-/* ---------- 弹窗 ---------- */
+/* ---------- 弹窗（.at-modal* 由 Ui.promptModal 生成，活的，保留） ---------- */
 .at-modal-mask {
 	position: fixed;
 	inset: 0;
@@ -2211,292 +2169,33 @@
 .at-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .at-modal .at-field { margin-bottom: 10px; }
 
-/* ---------- 连接状态条 ---------- */
-.at-conn-bar {
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	padding: 10px 14px;
-	border-radius: 10px;
-	margin-bottom: 14px;
-	font-size: 13px;
-	border: 1px solid transparent;
-	box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-	line-height: 1.35;
-}
-.at-conn-idle { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
-.at-conn-connecting { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
-.at-conn-connected { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
-.at-conn-disconnected { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
-.at-conn-error { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
-.at-conn-dot {
-	width: 8px; height: 8px; border-radius: 50%;
-	background: currentColor;
-	flex: 0 0 auto;
-	box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
-}
-.at-conn-connecting .at-conn-dot {
-	animation: at-conn-pulse 1.2s ease-in-out infinite;
-}
-@keyframes at-conn-pulse {
-	0%, 100% { opacity: 1; transform: scale(1); }
-	50% { opacity: 0.45; transform: scale(0.85); }
-}
-.at-conn-text { font-weight: 500; letter-spacing: 0.01em; }
-.at-conn-actions { margin-left: auto; display: flex; gap: 6px; }
-
-/* ---------- 进度条 ---------- */
-.at-progress-bar {
-	height: 8px;
-	background: #eef0f3;
-	border-radius: 4px;
-	overflow: hidden;
-	margin-top: 6px;
-}
-.at-progress-fill {
-	height: 100%;
-	background: #1668dc;
-	border-radius: 4px;
-	transition: width .4s;
-}
-.at-progress-danger { background: #e5484d; }
-
-/* ---------- 空状态 / 提示 ---------- */
-.at-empty { color: #999; font-size: 13px; padding: 18px 8px; text-align: center; }
-.at-hint { color: #888; font-size: 12px; margin-top: 4px; }
-
-/* ---------- 短信中心 ---------- */
-.at-sms-layout { display: flex; gap: 14px; min-height: 480px; }
-.at-sms-left { flex: 0 0 280px; border: 1px solid #e5e8ec; border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; }
-.at-sms-right { flex: 1 1 auto; border: 1px solid #e5e8ec; border-radius: 8px; display: flex; flex-direction: column; min-width: 0; }
-.at-sms-storage { padding: 8px 12px; background: #fafbfc; border-bottom: 1px solid #eef0f3; font-size: 12px; color: #666; }
-.at-sms-contacts { flex: 1 1 auto; overflow-y: auto; }
-.at-sms-contact { padding: 10px 12px; border-bottom: 1px solid #f4f5f7; cursor: pointer; }
-.at-sms-contact:hover { background: #f7f9fc; }
-.at-sms-contact-active { background: #e7f0fd; }
-.at-sms-contact-num { font-weight: 600; font-size: 14px; }
-.at-sms-contact-last { color: #888; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.at-sms-contact-time { color: #aaa; font-size: 11px; }
-.at-sms-left > .at-btn { margin: 8px; }
-.at-sms-conv-head {
-	padding: 10px 14px; background: #fafbfc; border-bottom: 1px solid #eef0f3;
-	font-weight: 600;
-}
-.at-sms-conv-body {
-	flex: 1 1 auto; overflow-y: auto; padding: 12px;
-	display: flex; flex-direction: column; gap: 8px;
-	background: #f8f9fb;
-}
-.at-sms-bubble {
-	max-width: 76%;
-	padding: 8px 12px;
-	border-radius: 10px;
-	font-size: 13px;
-	position: relative;
-	word-break: break-all;
-}
-.at-sms-sent { align-self: flex-end; background: #1668dc; color: #fff; border-bottom-right-radius: 2px; }
-.at-sms-recv { align-self: flex-start; background: #fff; border: 1px solid #e5e8ec; border-bottom-left-radius: 2px; }
-.at-sms-msg-meta { font-size: 11px; opacity: .7; margin-top: 3px; }
-.at-sms-msg-part { font-size: 11px; opacity: .75; }
-/* 短信气泡上的删除按钮。JS（sms_center.js）实际挂的类名是 .mt5700-sms-del，
-   而这里原写作 .at-sms-del —— 类名不一致，导致下面这套「小号 ✕」样式从未生效过。
-   现改用与 JS 一致的类名；同时去掉 display:none + hover 显隐：触屏没有 hover，
-   那样会让删除按钮在手机上永远点不到。位置相关声明一并去掉，保持当前实际版面不变。 */
+/* ---------- 短信中心（旧 .at-sms-* 体系已删：短信页改用 .mt5700-sms-*，P21/V6） ---------- */
+/* 短信气泡删除按钮：JS（sms_center.js）挂 .mt5700-sms-del，保留（ui-contract 钉住）。 */
 .mt5700-sms-del { padding: 0 6px; font-size: 11px; line-height: 18px; }
-.at-sms-input-row { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #eef0f3; align-items: flex-end; flex-wrap: wrap; }
-.at-sms-textarea {
-	flex: 1 1 auto; min-width: 200px; min-height: 44px; resize: vertical;
-	border: 1px solid #d0d5dd; border-radius: 6px; padding: 6px 8px; font-size: 13px;
-}
-.at-sms-hint { flex: 0 0 auto; color: #999; font-size: 11px; max-width: 220px; }
-.at-batch-list { max-height: 300px; overflow-y: auto; border: 1px solid #eef0f3; border-radius: 6px; padding: 6px; }
-.at-batch-item { display: flex; gap: 8px; align-items: flex-start; padding: 5px 6px; font-size: 13px; }
-.at-storage-info { font-size: 13px; color: #333; margin-bottom: 4px; }
 
-/* ---------- USSD ---------- */
-.at-ussd-reply {
-	margin-top: 8px; padding: 10px 12px; background: #f8f9fb;
-	border: 1px solid #e5e8ec; border-radius: 6px;
-	font-size: 14px; color: #222; min-height: 24px; word-break: break-all;
-}
-
-/* ---------- AT 终端 ---------- */
-.at-console {
-	background: #1e1e1e; color: #e6e6e6;
-	border: 1px solid #333; border-radius: 6px;
-	padding: 10px; max-height: 480px; overflow-y: auto;
-	font-family: ui-monospace, Menlo, Consolas, monospace;
-	font-size: 12px; line-height: 1.6;
-	white-space: pre-wrap; word-break: break-all;
-}
-.at-console-entry { margin-bottom: 10px; }
-.at-console-cmd { color: #9cdcfe; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.at-console-prompt { color: #6a9955; }
-.at-console-cmd time { color: #8b949e; font-size: 11px; }
-.at-console-res {
-	margin: 4px 0 0;
-	padding: 6px 8px;
-	/* 主题会给 pre 铺底色（aurora: background-color: var(--surface-sunken)，浅色下 #f4f7fa），
-	   只覆盖 color 会变成「浅底 + 浅黄字」，深色终端里结果完全看不清。
-	   这里显式重置 pre 的底色/边框，保证与终端深色背景一致。 */
-	background: rgba(255, 255, 255, .05);
-	border: 0;
-	border-radius: 4px;
-	color: #dcdcaa;
-	font-family: inherit;
-	font-size: inherit;
-	line-height: inherit;
-	white-space: pre-wrap;
-	word-break: break-all;
-	overflow-x: auto;
-}
-.at-console-res--err { color: #f48771; }
-.at-terminal-input { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-.at-terminal-input .cbi-input-text { flex: 1 1 260px; }
-.at-log-console {
-	background: #1e1e1e; color: #e6e6e6;
-	border: 1px solid #333; border-radius: 6px;
-	padding: 12px; max-height: 600px; overflow-y: auto;
-	font-family: ui-monospace, Menlo, Consolas, monospace;
-	font-size: 12px; line-height: 1.6;
-	white-space: pre-wrap; word-break: break-all;
-	margin: 0 0 10px;
-}
-
-/* ---------- 常用命令 / 已保存命令 ---------- */
-.at-chips { display: flex; gap: 8px; flex-wrap: wrap; }
-.at-chip { display: inline-flex; align-items: center; gap: 2px; }
-.at-chip-del { color: #c62828; cursor: pointer; padding: 0 4px; font-size: 14px; }
-
-/* ---------- 指标网格（网络状态页） ---------- */
-.at-metrics {
-	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-	gap: 10px;
-	margin-bottom: 10px;
-}
-.at-metric {
-	background: #f8f9fb;
-	border: 1px solid #eef0f3;
-	border-radius: 8px;
-	padding: 8px 10px;
-}
-.at-metric-label { color: #888; font-size: 11px; margin-bottom: 2px; }
-.at-metric-value { font-size: 15px; font-weight: 600; color: #222; word-break: break-all; }
-
-/* ---------- 速率显示（PDCP 实时速率） ---------- */
-.at-speed-row {
-	display: flex;
-	gap: 12px;
-	flex-wrap: wrap;
-	margin-bottom: 8px;
-}
-.at-speed-box {
-	display: flex;
-	align-items: baseline;
-	gap: 6px;
-	background: #f8f9fb;
-	border: 1px solid #eef0f3;
-	border-radius: 8px;
-	padding: 6px 12px;
-}
-.at-speed-num { font-size: 20px; font-weight: 700; color: #1668dc; }
-.at-speed-label { color: #888; font-size: 12px; }
-.at-speed-value { font-size: 13px; color: #444; }
-.at-speed-dir { color: #999; font-size: 12px; }
-
-/* ---------- 曲线图（SVG） ---------- */
-.at-chart {
-	width: 100%;
-	height: 120px;
-	background: #fafbfc;
-	border: 1px solid #eef0f3;
-	border-radius: 6px;
-	margin: 6px 0;
-}
-
-/* ---------- 锁频编辑器 ---------- */
-.at-lock-editor { border: 1px solid #eef0f3; border-radius: 6px; padding: 10px; margin: 8px 0; }
-.at-lock-items { display: flex; flex-direction: column; gap: 6px; }
-.at-lock-item {
-	display: flex;
-	gap: 8px;
-	align-items: center;
-	flex-wrap: wrap;
-	padding: 6px 8px;
-	background: #fafbfc;
-	border: 1px solid #f0f2f5;
-	border-radius: 6px;
-}
-.at-lock-item .cbi-input-text { width: 90px; }
-.at-lock-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-
-/* ---------- 通用提示 / 内联 / 等宽 ---------- */
-.at-note { color: #888; font-size: 12px; margin: 4px 0; }
-.at-inline { display: inline-block; margin-right: 10px; }
-.at-mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
-
-/* ---------- 定时时段 ---------- */
-.at-period {
-	display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
-	padding: 10px; border: 1px solid #eef0f3; border-radius: 8px; margin: 8px 0;
-}
-.at-period-kind { font-weight: 600; min-width: 48px; }
-.at-period .at-lock-editor { width: 100%; }
-
-/* ---------- 升级步骤进度 ---------- */
-.at-steps { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
-.at-step {
-	padding: 4px 10px; border-radius: 12px; font-size: 12px;
-	background: #f0f0f0; color: #666;
-}
-.at-step.at-step-done { background: #e6f4ea; color: #1a7f37; }
-.at-step.at-step-active { background: #e7f0fd; color: #1565c0; font-weight: 600; }
-.at-progress { margin: 8px 0; }
-
-/* ---------- 短信内容 ---------- */
-.at-sms-msg-content { word-break: break-all; white-space: pre-wrap; }
-
-/* ---------- 免责声明列表 ---------- */
-.at-agree-list { margin: 8px 0 12px; padding-left: 18px; }
-.at-agree-list li { margin-bottom: 4px; font-size: 13px; color: #444; }
-
-/* ---------- 网络拒绝（REJINFO） ---------- */
-.at-reject-title {
-	font-weight: 700;
-	font-size: 14px;
-	color: #b3261e;
-	margin-bottom: 4px;
-}
-.at-reject-line {
-	font-size: 13px;
-	color: #444;
-	margin-bottom: 2px;
-	word-break: break-all;
-}
-
-/* ---------- 自动刷新 ---------- */
+/* ---------- 自动刷新（.at-autorefresh 由 Ui.autoRefresh 生成，活的，保留） ---------- */
 .at-autorefresh { display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; font-size: 13px; color: #555; }
 .at-autorefresh-label { color: #666; }
 
-/* ---------- Spinner ---------- */
-.at-spinner { text-align: center; padding: 30px; color: #888; }
-
-/* ---------- 响应式 ---------- */
-@media (max-width: 768px) {
+/* ---------- 响应式 ----------
+ * ★ 载体说明（P02 例外；行号已按审查 R11 订正）：.at-field / .at-btn / .at-modal-actions
+ *   三族全部由 ui.js 生成，且产品的挂载点是 **document.body**：
+ *     · api.promptModal → ui.js:194 `document.body.appendChild(mask)`
+ *     · api.confirm     → ui.js:136 `document.body.appendChild(mask)`
+ *   （旧注释写的 `ui.js:118` 是 `var box = E('div',{class:'at-modal'})`，**不是 append 行**，
+ *     留着会把后人引到错处。）
+ *   它们在 .mt5700-page 这个容器之外 → 容器查询对它们无效，**必须**用视口查询。
+ *   断点值已收敛进新集合 {480,720,960}（原 768）。
+ *   22:00 复核：视图对 Ui.* 的全部调用只有 promptModal(14) 一个会产出这三族类
+ *   （Ui.field/ui.button 零外部调用）→ 作用域仅模态框，视口载体的误差面可控。 */
+@media (max-width: 720px) {
 	.at-field { flex-direction: column; }
 	.at-field-label { flex: none; padding-top: 0; margin-bottom: 4px; }
-	.at-sms-layout { flex-direction: column; }
-	.at-sms-left { flex: none; width: 100%; }
-	.at-sms-right { min-height: 400px; }
-	.at-sms-bubble { max-width: 92%; }
-	.at-panel-head { flex-direction: column; align-items: flex-start; gap: 4px; }
+	/* 旧 .at-sms-* 体系已删（短信页改用 .mt5700-sms-*，P21/V6），此处不再保留其窄屏规则 */
+	/* .at-panel-head / .at-panel .at-table 对应 Ui.panel / 视图 at-table 零调用（V6），其窄屏规则一并删除 */
 	.at-btn { width: 100%; text-align: center; }
 	.at-modal-actions { flex-direction: column; }
 	.at-modal-actions .at-btn { width: 100%; }
-	/* 表格在窄屏下改为横向滚动，避免挤压列宽 */
-	.at-panel .at-table { display: block; overflow-x: auto; white-space: nowrap; }
 }
 
 /* ==========================================================================
@@ -2510,15 +2209,8 @@
      - .at-autorefresh      自动刷新控件的 label 布局
    ========================================================================== */
 
-/* 双列卡区：宽屏两列、窄屏自动回单列（与上游快照 pv-grid2 等价） */
-@media (min-width: 1100px) {
-  .mt5700-cards {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: stretch;
-    gap: var(--mt5700-space-lg);
-  }
-}
+/* 双列卡区：基础定义 + 容器查询见末尾「响应式体系 v5.5.6」（P07/V3/P26）。
+   旧 min-width:1100px 视口断点已并入容器断点 960px。 */
 
 /* 载波卡头部：主小区身份（PLMN / TAC / 小区 / PCI）+ 聚合状态徽章 */
 .mt5700-carrier-head {
@@ -2570,15 +2262,10 @@
 /* ==========================================================================
    页面宽度统一（CSS v5.1.0）
    --------------------------------------------------------------------------
-   LuCI 的容器链（main → main-right → .container）全是 flex，而 .mt5700-page
-   原先只有 max-width:1400px，作为 flex item 会**按内容收缩**——于是各页宽度
-   变成内容宽度（实测 601 / 684 / 894 / 972px 各不相同），卡片风格一致但栏宽
-   不一致。这里强制撑满可用宽度，全站统一为容器宽度（1440 视口下约 1182px）。
+   LuCI 的容器链（main → main-right → .container）全是 flex，.mt5700-page 作为
+   flex item 会按内容收缩。width:100%/min-width:0 已并入上方「页面容器」单一定义
+   （含 max-width:var(--mt5700-page-max) 与 container-type），此处不再重复。
    ========================================================================== */
-.mt5700-page {
-  width: 100%;
-  min-width: 0;
-}
 
 /* ==========================================================================
    SSB 波束列表（CSS v5.2.0）
@@ -2627,9 +2314,11 @@
   cursor: pointer;
   transition: background var(--mt5700-transition-fast), color var(--mt5700-transition-fast);
 }
-.mt5700-segmented-btn:hover:not(.is-active) {
-  background: var(--mt5700-card-bg-hover);
-  color: var(--mt5700-text);
+@media (hover: hover) and (pointer: fine) {
+  .mt5700-segmented-btn:hover:not(.is-active) {
+    background: var(--mt5700-card-bg-hover);
+    color: var(--mt5700-text);
+  }
 }
 .mt5700-segmented-btn.is-active {
   background: var(--mt5700-accent);
@@ -2688,4 +2377,176 @@
 .mt5700-beam-cell.is-best {
   outline: 2px solid var(--mt5700-accent);
   outline-offset: 1px;
+}
+
+/* ==========================================================================
+   响应式体系 v5.5.6（统一容器查询 @container mt5700）
+   --------------------------------------------------------------------------
+   P02 / P04 / P07 / P09 / P16 / P26：用挂在 .mt5700-page 上的容器查询替代散落的
+   视口断点。容器量的是 .mt5700-page 自身渲染宽度，真机上即内容区 1142px（黑板 §5），
+   与 Argon 侧栏折叠/换主题无关，根除「同一视口断点两种结果」与 1025–1099 适配盲区。
+   三档：xs <480 / sm <720 / md <960；xs 写在最后，窄屏优先命中。
+   ★ 唯一例外：栅格单列用 600 而不是 xs 的 480，理由见下面栅格块的说明。
+    ========================================================================== */
+
+/* 栅格列数（P09/P26）：md <960 → 3/4 列降 2 列；容器 <600 → 全部单列。
+   ★ 单列阈值取 600 而不是 xs 的 480（审查 R7 → H05，主控裁决，勿改回 480）：
+     · 判据：与 .mt5700-grid 自带的 minmax(280px, 1fr) 下限对齐。gap 是
+       clamp(12px, 2cqi, 24px)，容器 600 时 gap=12px → 两列各 (600−12)/2 = 294px
+       ≥ 280px；若用 480，容器 481 时两列仅 (481−9.6)/2 ≈ 235px，会打破设计系统
+       自己规定的最小列宽。
+     · 带①（手机档，容器 ≈ 视口−40）被消除：1 列 ⟺ 容器 <600 ⟺ 视口 <640，
+       与 HEAD 的 @media (max-width:640px) 完全等价 → 视口 521–639 不再从 1 列变 2 列。
+     · 带②（桌面档，容器 = 视口−258）随之扩大：1 列 ⟺ 视口 <858，即视口 640–857
+       （容器 382–599）由 2 列变 1 列。该带内 2 列时每列仅 185–293px，全部低于
+       294px 下限，判为改善（与审查 #2 已接受的带② 同性质、同判据）。
+     · 影响面：grid-3 / grid-4 全仓零使用（.mt5700-grid 4 处 + .mt5700-grid-2 4 处），
+       本块实际只作用于 .mt5700-grid-2。
+   .mt5700-grid 走 auto-fill(minmax 280px) 自带收缩，不覆盖。 */
+@container mt5700 (max-width: 960px) {
+  .mt5700-grid-3,
+  .mt5700-grid-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@container mt5700 (max-width: 600px) {
+  .mt5700-grid-2,
+  .mt5700-grid-3,
+  .mt5700-grid-4 { grid-template-columns: 1fr; }
+}
+
+/* 双列卡区（P07/V3/P26）：修正「容器 <1100px 全部贴叠」缺陷。
+   基础单列 + 24px 间隙；≥960px 双列（真机 1142 走此档）。 */
+.mt5700-cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--mt5700-space-lg);
+}
+@container mt5700 (min-width: 960px) {
+  .mt5700-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+  }
+}
+
+/* sm <720：短信双栏→单栏（P16）、按钮组满宽、状态卡换行不挤压 */
+@container mt5700 (max-width: 720px) {
+  .mt5700-sms-layout {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+  /* P16：窄容器下默认只显示列表；点联系人后 .is-detail 切换为只显示详情 */
+  .mt5700-sms-layout > .mt5700-sms-detail { display: none; }
+  .mt5700-sms-layout.is-detail > .mt5700-sms-list { display: none; }
+  .mt5700-sms-layout.is-detail > .mt5700-sms-detail { display: flex; }
+  .mt5700-sms-list-body { max-height: none; }
+  .mt5700-sms-back { display: inline-flex; }
+  .mt5700-btn-group { width: 100%; }
+  .mt5700-btn-group .mt5700-btn { flex: 1; }
+  .at-status-card { flex-wrap: wrap; }
+  /* P17（#2 修正）：表格横向滚动时的右侧渐隐提示 —— 改用**滚动容器自身的 mask**。
+     · 原实现（`::after` + `position:absolute`）是滚动容器的绝对定位后代 → 随内容一起左移：
+       Reviewer R2 + 主控复测（`.workbuddy/tmp/_fix_probe.js`，像素级扫纯红带）实测
+       `scrollLeft 0 → 137(max)` 时提示带 `[498,525] → [361,388]`，**整整漂 137px** 并压住表格文字，
+       而右缘反而没有提示 —— 与 P17 的意图相反。
+     · mask 作用于元素自身盒子、不随内容滚动：同口径实测最右红像素 `509 → 510`（±1px），钉住。
+     · 代价：右缘 28px 内连同容器 **1px 边框**一起淡出（实测边框色 `rgb(226,232,239)` → `rgb(254,254,254)`）；
+       **12px 圆角**整块落在淡出带内、一并被淡化（审查 #2 指出原注释漏写圆角，此处补齐）。
+       底色与卡片同源，两者观感可接受。
+     · 仍满足 P17 约束：**无新增元素、无 JS**（`-webkit-` 前缀供旧 WebKit 兜底）。
+     · 已知局限：CSS 无法判断「是否真的溢出」，非溢出表格的右 28px 也会淡化（与原实现同等局限）。 */
+  .mt5700-table-wrapper {
+    -webkit-mask-image: linear-gradient(to left, transparent 0, #000 28px);
+    mask-image: linear-gradient(to left, transparent 0, #000 28px);
+  }
+}
+
+/* ==========================================================================
+   触摸目标 ≥44px（P13 · 铁律一：10 类一次改齐）
+   --------------------------------------------------------------------------
+   仅触屏指针 (pointer:coarse) 生效，鼠标环境不变。
+   ★ 不碰 .mt5700-switch：51×31 是 iOS 原生几何，红线明令几何不得变（P14）。
+   ========================================================================== */
+@media (pointer: coarse) {
+  .mt5700-btn,
+  .mt5700-btn-sm,
+  .mt5700-btn-icon,
+  .mt5700-btn-sm.mt5700-btn-icon,
+  .mt5700-table .mt5700-btn,
+  .mt5700-tab,
+  .mt5700-segmented-btn,
+  .at-btn,
+  /* ★ 审查 R12：上游 .at-panel 骨架已随 api.panel（零调用）删除，本条**当前不生效**；
+       保留待裁（它同时是 .at-panel 内按钮 44px 的兜底）。删它之前先读 :2050 附近的说明。 */
+  .at-panel .at-table .at-btn {
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+  .mt5700-btn-icon,
+  .mt5700-btn-sm.mt5700-btn-icon {
+    width: 44px;
+    height: 44px;
+  }
+  .at-field-control input,
+  .at-field-control select {
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+}
+
+/* ==========================================================================
+   弹窗底部抽屉（P19）+ 横屏收紧（P25）+ 触屏 blur 降级（P10）
+   ========================================================================== */
+
+/* P19：手机 / 触屏下弹窗改为底部抽屉。两套模态都改：
+   .mt5700-modal* 来自 Mt5700.confirm（mt5700.js:521），
+   .at-modal* 来自 Ui.promptModal（ui.js:194 append；api.confirm 在 ui.js:136）——
+   ★ 行号订正见审查 R11（旧写的 ui.js:118/142 不是 append 行）；
+   二者均 append 到 document.body（R-A 已核，不受 .mt5700-page 的 container-type 影响）。 */
+/* 载体说明（P02 例外）：模态遮罩同样 append 到 document.body，在容器之外，故用视口查询；
+ *   (pointer: coarse) 才是触屏的主载体，600→720 仅为与 sm 断点对齐。
+ *   ★ #2 修正（审查 R5）：触屏那一支原先没有宽度上限，平板横屏（1024，pointer:coarse）
+ *   会把弹窗拉成满宽底抽屉（实测 1002px，同宽鼠标是 482px 居中）。
+ *   现给抽屉加 min(100%,640px)：手机（视口 ≤720）仍是满宽，平板/桌面触屏收成 640 上限。 */
+@media (max-width: 720px), (pointer: coarse) {
+  .mt5700-modal-mask,
+  .at-modal-mask {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .mt5700-modal,
+  .at-modal {
+    max-width: min(100%, 640px);
+    max-height: 70dvh;
+    border-radius: 20px 20px 0 0;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+}
+
+/* P25：手机横屏（视口高 ≤480）收紧高度与留白；平板横屏落在 lg 区间，保持原布局 */
+@media (max-height: 480px) and (orientation: landscape) {
+  .mt5700-page-header { margin-bottom: 12px; }
+  .mt5700-sms-list-body,
+  .mt5700-sms-detail-body,
+  .mt5700-terminal-body,
+  .mt5700-terminal-log { max-height: 45dvh; }
+  .mt5700-chart { height: clamp(96px, 14cqi, 170px); }
+}
+
+/* P10：触屏设备关闭 L3 浮动层（指标/仪表/速率盒）的 backdrop-filter 缓解滚动卡顿
+   （1GB 内存路由器，黑板 §5）。L2 主卡片 .mt5700-card 保留 blur，视觉基线不动。 */
+@media (pointer: coarse) {
+  .mt5700-metric,
+  .mt5700-gauge,
+  .mt5700-speed-box {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(255, 255, 255, 0.86);
+  }
+}
+
+/* 暗色 + 触屏：用条件合并（而不是把 @media 嵌进 @media）——
+   条件规则嵌套依赖 CSS Nesting 支持，旧 WebView 会整块丢弃。 */
+@media (pointer: coarse) and (prefers-color-scheme: dark) {
+  .mt5700-metric,
+  .mt5700-gauge,
+  .mt5700-speed-box { background: rgba(32, 38, 54, 0.92); }
 }

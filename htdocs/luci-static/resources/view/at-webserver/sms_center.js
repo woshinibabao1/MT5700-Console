@@ -38,6 +38,15 @@ return L.view.extend({
 		var layout = E('div', { 'class': 'mt5700-sms-layout' });
 		body.appendChild(layout);
 
+		/* P16：窄容器单栏的「列表 ⇄ 详情」状态，**唯一写入点**。
+		 *   CSS 侧（mt5700.css 容器查询 ≤720）：默认只显示列表，.is-detail 时只显示详情。
+		 *   ★ 任何「要让用户看到会话」的入口都必须走这里，别再直接 classList.add —— 漏一处
+		 *     就会在手机上留下一个点了没反应、又无法返回的入口（#2 修正的正是「+ 新短信」）。
+		 *   宽容器下该类名不产生任何样式，调用无副作用。 */
+		function setDetail(on) {
+			layout.classList.toggle('is-detail', !!on);
+		}
+
 		// 左：联系人
 		var left = E('div', { 'class': 'mt5700-sms-list' });
 		var leftHead = E('div', { 'class': 'mt5700-sms-list-header' });
@@ -54,6 +63,10 @@ return L.view.extend({
 				var num = (values.number || '').trim();
 				if (!num) { Mt5700.warning('请输入联系人号码'); return; }
 				if (!Parse.isValidPhoneNumber(num)) { Mt5700.warning('请输入正确的 5-19 位手机号码'); return; }
+				// P16（#2 修正）：新建会话也必须切到详情，否则窄容器（容器 ≤720）下
+				// 详情面板仍是 display:none，而该号码在收到第一条短信前不在联系人列表里
+				// → 用户点完「确定」停在列表页、又没有可点的条目回不去。与 selectContact 共用 setDetail。
+				setDetail(true);
 				state.selectedContact = num;
 				state.messages = [];
 				renderContacts();
@@ -256,6 +269,12 @@ return L.view.extend({
 
 		function renderConversation() {
 			convHead.innerHTML = '';
+			// P16：窄容器返回按钮（宽容器下 .mt5700-sms-back 为 display:none）
+			var backBtn = E('button', { 'class': 'mt5700-sms-back', 'type': 'button' }, '← 返回');
+			backBtn.addEventListener('click', function () {
+				setDetail(false);   // P16：唯一写入点的反向操作，等价于去掉 .is-detail
+			});
+			convHead.appendChild(backBtn);
 			convHead.appendChild(E('div', { 'class': 'mt5700-sms-item-number' },
 				state.selectedContact ? '与 ' + state.selectedContact + ' 的会话' : '请选择联系人'));
 			convBody.innerHTML = '';
@@ -433,6 +452,7 @@ return L.view.extend({
 		function selectContact(num) {
 			state.selectedContact = num;
 			clearUnread(num);        // 打开会话即视为已读
+			setDetail(true);     // P16：窄容器下切到详情视图（宽容器无影响）
 			state.messages = [];
 			for (var i = 0; i < state.contacts.length; i++) {
 				if (normalizeNumber(state.contacts[i].number) === normalizeNumber(num)) {
