@@ -5,6 +5,36 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.0.9] - 2026-09-17
+
+状态页信息密度与视觉打磨，全部改动经四角色会审（29/29 编号汇总 PASS）。
+
+### 修复
+
+- **「取最高温」是假的：`AT^CHIPTEMP` 只解了 12 路中的 7 路**（`parse.js`）
+  手册 17.1 定义 12 路温度，代码里 `g(0..6)` 只取前 7 个，且第 5/6/7 路被错标成
+  `ap1/ap2/modem1` —— 真实最高温所在的 `modem2`（手册示例 42.0℃）**根本没进数组**，
+  界面因此低报 2.0℃。已按手册补齐 12 路（`sub3GPA/sub6GPA/mimoPa/tcxo/peri1/peri2/
+  ap1/ap2/modem1/modem2/bbp1/bbp2`），并加双侧键数守卫防止再退化。
+
+### 变更
+
+- **7 行逐路温度 → 单行「5G模块温度」**（`network_status.js`）
+  取 12 路最高值，明细只在 `title` 悬浮里给数值、不再铺满整张卡片。
+- **菜单「5G 模组管理」→「MT5700M模块管理」**（`luci-app-mt5700.json`）
+- **「SIM 与设备」卡片去掉多余空白**：`.mt5700-cards` 的 `align-items` 由 `stretch`
+  改回 `start`（stretch 会把矮卡片拉高，底部留一大片空）。
+- **「速率与流量」缩放并移到「SIM 与设备」下方**：新增 `.mt5700-stack` 纵向堆叠容器；
+  图表 170px → 120px、速率数字 26px → 20px。
+- **统计图折线改圆润弧度**（`mt5700.js`）：`polyline` 改 `path` + 二次贝塞尔中点法
+  （天然不过冲，面积图与曲线共用同一条 path，不会出现描边和填充错位）。
+- CSS 缓存击穿版本号 `5.5.5` → `5.5.6`（设备 squashfs mtime=1970，靠 `?v=` 强制刷新）。
+
+### 测试
+
+- `tests/ui-contract.test.js`：温度断言改为「单行 5G模块温度 + 无 tempGrid 容器」。
+- `tests/css-cachebust-contract.test.js`：指纹随本次 CSS 改动同步更新。
+
 ## [2.0.8] - 2026-09-17
 
 本轮是**全仓系统性审查**（71 文件 / 30,109 行，前端 + Rust 后端 + Shell 集成 + 测试工程），

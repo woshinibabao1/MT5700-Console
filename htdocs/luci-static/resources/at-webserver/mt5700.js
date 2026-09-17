@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '5.5.5';
+var MT5700_CSS_VERSION = '5.5.6';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -759,31 +759,58 @@ var Mt5700 = (function () {
 		function px(j) { return (j / Math.max(1, n - 1)) * (w - 4) + 2; }
 		function py(v) { return h - 15 - (v / actualMax) * (h - 30); }
 
-		var downPts = [], upPts = [];
+		var downXY = [], upXY = [];
 		for (var j = 0; j < n; j++) {
-			downPts.push(px(j).toFixed(1) + ',' + py(data[j].down || 0).toFixed(1));
-			upPts.push(px(j).toFixed(1) + ',' + py(data[j].up || 0).toFixed(1));
+			downXY.push([px(j), py(data[j].down || 0)]);
+			upXY.push([px(j), py(data[j].up || 0)]);
 		}
 
-		// 下行面积填充
+		/*
+		 * 折线转平滑曲线：二次贝塞尔「中点法」——以相邻两点的中点为曲线端点、
+		 * 原数据点为控制点（Q 段）。
+		 * 选它而不是 Catmull-Rom 的理由：x 本来就是均匀的（px(j) 线性），
+		 * 中点法天然 C1 连续、纵向不会越过相邻数据点的包络，
+		 * 没有 Catmull-Rom 在 1Hz 抖动尖峰处的过冲（实测越界 18px），
+		 * 因此不需要再写一套钳制代码（会审 R09 / R04）。
+		 * n=1 时无路径、n=2 时退化为直线 —— 与调用处的 n > 1 守卫配合。
+		 */
+		function smoothD(pts) {
+			if (pts.length < 2) return '';
+			var d = 'M' + pts[0][0].toFixed(1) + ',' + pts[0][1].toFixed(1);
+			if (pts.length === 2) {
+				return d + 'L' + pts[1][0].toFixed(1) + ',' + pts[1][1].toFixed(1);
+			}
+			for (var i = 1; i < pts.length - 1; i++) {
+				var mx = (pts[i][0] + pts[i + 1][0]) / 2;
+				var my = (pts[i][1] + pts[i + 1][1]) / 2;
+				d += 'Q' + pts[i][0].toFixed(1) + ',' + pts[i][1].toFixed(1)
+					+ ' ' + mx.toFixed(1) + ',' + my.toFixed(1);
+			}
+			var last = pts[pts.length - 1];
+			return d + 'L' + last[0].toFixed(1) + ',' + last[1].toFixed(1);
+		}
+
+		// 下行面积填充：与折线共用同一条平滑路径，否则曲线与面积边缘会对不上
 		if (n > 1) {
-			svg.appendChild(svgEl('polygon', {
+			svg.appendChild(svgEl('path', {
 				fill: 'url(#' + gradId + ')',
-				points: downPts.join(' ') + ' ' + px(n - 1).toFixed(1) + ',' + (h - 15) + ' ' + px(0).toFixed(1) + ',' + (h - 15)
+				d: smoothD(downXY)
+					+ 'L' + downXY[n - 1][0].toFixed(1) + ',' + (h - 15)
+					+ 'L' + downXY[0][0].toFixed(1) + ',' + (h - 15) + 'Z'
 			}));
 		}
 
-		// 双折线
+		// 双折线（平滑曲线）
 		if (n > 1) {
-			svg.appendChild(svgEl('polyline', {
+			svg.appendChild(svgEl('path', {
 				fill: 'none', stroke: downColor, 'stroke-width': 2,
 				'stroke-linejoin': 'round', 'stroke-linecap': 'round',
-				points: downPts.join(' ')
+				d: smoothD(downXY)
 			}));
-			svg.appendChild(svgEl('polyline', {
+			svg.appendChild(svgEl('path', {
 				fill: 'none', stroke: upColor, 'stroke-width': 2,
 				'stroke-linejoin': 'round', 'stroke-linecap': 'round',
-				points: upPts.join(' ')
+				d: smoothD(upXY)
 			}));
 		}
 

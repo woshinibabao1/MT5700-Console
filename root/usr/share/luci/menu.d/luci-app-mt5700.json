@@ -13,7 +13,7 @@
 		}
 	},
 	"admin/modem/5g": {
-		"title": "5G 模组管理",
+		"title": "MT5700M模块管理",
 		"order": 10,
 		"action": {
 			"type": "firstchild",

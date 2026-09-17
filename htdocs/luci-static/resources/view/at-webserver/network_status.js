@@ -13,9 +13,10 @@
  *   ② 连接状态     注册/运营商/签约速率 + 连接诊断(ENDC/5GC/发射功率/PDP) + IP 与 DNS
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量
- *   ⑤ SIM 与设备   SIM 卡、模块标识、各路传感器温度
- * 版式与上游原版一致：载波与聚合满宽 → 信号质量满宽 → [连接状态 | SIM 与设备] 双列
- * → 速率与流量满宽。载波表列与上游快照一致（制式/频段/频点/带宽/PCI/RSRP/RSRQ/SINR/强度）。
+ *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
+ * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
+ * [连接状态 | 右列（SIM 与设备 → 速率与流量）]。
+ * 速率与流量位于右列、紧跟 SIM 与设备正下方，不再兜在页面最底部。载波表列与上游快照一致（制式/频段/频点/带宽/PCI/RSRP/RSRQ/SINR/强度）。
  */
 
 return L.view.extend({
@@ -68,22 +69,25 @@ return L.view.extend({
 		rateCard._body.appendChild(chart);
 		var flowGrid = E('div', { 'class': 'mt5700-metrics mt5700-mt-md' });
 		rateCard._body.appendChild(flowGrid);
-		body.appendChild(rateCard);
 
-		/* ⑤ SIM 与设备：SIM 卡、模块标识与各路传感器温度（同一张表铺开，不跳转、不重复） */
-		var devCard = Mt5700.card('SIM 与设备', 'SIM、模块标识与各路传感器温度');
+		/* ⑤ SIM 与设备：SIM 卡、模块标识与 5G 模块温度（同一张表铺开，不跳转、不重复） */
+		var devCard = Mt5700.card('SIM 与设备', 'SIM、模块标识与模块温度');
 		var devBody = E('div');
 		devCard._body.appendChild(devBody);
 
-		/* 版式与上游原版一致：
+		/* 版式（用户要求「速率与流量放到 SIM 与设备下面」）：
 		     载波与聚合（满宽，表格含逐载波 RSRP/RSRQ/SINR/强度）
 		     信号质量（满宽）
-		     连接状态 | SIM 与设备（双列卡区 .mt5700-cards）
-		     速率与流量（满宽） */
+		     连接状态 | 右列（SIM 与设备 → 速率与流量）  ← 双列卡区 .mt5700-cards
+		   右列用 .mt5700-stack 纵向堆叠：速率与流量紧跟在 SIM 与设备正下方，
+		   不再像原先那样兜在整个页面最底部。body 子节点顺序与改前一致。 */
+		var duoRight = E('div', { 'class': 'mt5700-stack' });
+		duoRight.appendChild(devCard);
+		duoRight.appendChild(rateCard);
 		var duo = E('div', { 'class': 'mt5700-cards' });
 		duo.appendChild(connCard);
-		duo.appendChild(devCard);
-		body.insertBefore(duo, rateCard);
+		duo.appendChild(duoRight);
+		body.appendChild(duo);
 		body.insertBefore(carrierCard, signalCard);
 
 		/* ---------- 状态 ---------- */
@@ -97,7 +101,14 @@ return L.view.extend({
 			nrssbid: null,
 			monnc: [],
 			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
-			temps: { sub3GPA: 0, sub6GPA: 0, mimoPa: 0, tcxo: 0, ap1: 0, ap2: 0, modem1: 0 },
+			/* 12 路传感器温度，键名与 Parse.parseCHIPTEMP 的返回严格一一对应
+			   （手册 17.1：sub3G/sub6G/MIMO/TCXO/peri1/peri2/ap1/ap2/modem1/modem2/bbp1/bbp2）。
+			   有守卫 tests/ui-contract.test.js 校验两侧键数一致，补字段时别只改一边。 */
+			temps: {
+				sub3GPA: 0, sub6GPA: 0, mimoPa: 0, tcxo: 0,
+				peri1: 0, peri2: 0, ap1: 0, ap2: 0,
+				modem1: 0, modem2: 0, bbp1: 0, bbp2: 0
+			},
 			flow: { lastDsTime: 0, lastTxFlow: 0, lastRxFlow: 0, totalDsTime: 0, totalTxFlow: 0, totalRxFlow: 0 },
 			dhcpv4: null, dhcpv6: null, ipv6Cap: null,
 			uplinkMCS: null, downlinkMCS: null,
@@ -241,17 +252,22 @@ return L.view.extend({
 				['模块 / 固件', (st.model || '—') + ' / ' + (st.fw || '—')]
 			];
 
-			/* 各路传感器温度（AT^CHIPTEMP?，单位 0.1℃）：按温度从高到低排，便于一眼看到最热那路 */
+			/* 5G 模块温度：12 路传感器取最高（AT^CHIPTEMP?，单位 0.1℃）。
+			   明细挂 title，但**只给数值、不给传感器名** —— 名字源在 parse.js
+			   按手册修正前长期错标（peri1/peri2/ap1 被标成 ap1/ap2/modem1），
+			   现在把名字写进 UI 等于把历史错误固化；等名字稳定后再加不迟（会审 R01）。
+			   0 视为「未上报」，既不参与取 max 也不进明细。 */
 			var t = state.temps || {};
-			var temps = [
-				['Sub3G PA', t.sub3GPA], ['Sub6G PA', t.sub6GPA], ['MIMO PA', t.mimoPa],
-				['TCXO', t.tcxo], ['AP1', t.ap1], ['AP2', t.ap2], ['Modem1', t.modem1]
-			].filter(function (it) { return it[1]; })
-				.sort(function (a, b) { return Number(b[1]) - Number(a[1]); });
-			if (temps.length) {
-				temps.forEach(function (it) { rows.push(['温度 · ' + it[0], it[1] + ' ℃']); });
+			var tempVals = Object.keys(t)
+				.map(function (k) { return Number(t[k]) || 0; })
+				.filter(function (v) { return v > 0; });
+			if (tempVals.length) {
+				var maxTemp = Math.max.apply(null, tempVals);
+				rows.push(['5G模块温度', E('span',
+					{ title: '各传感器明细（℃）：' + tempVals.join(' / ') },
+					maxTemp + ' ℃')]);
 			} else {
-				rows.push(['温度', '—']);
+				rows.push(['5G模块温度', '—']);
 			}
 
 			devBody.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));

@@ -2689,3 +2689,56 @@
   outline: 2px solid var(--mt5700-accent);
   outline-offset: 1px;
 }
+
+/* ==========================================================================
+   网络状态页版式调整（CSS v5.5.6）
+   --------------------------------------------------------------------------
+   ① .mt5700-stack                     右列纵向堆叠（SIM 与设备 → 速率与流量）
+   ② 窄屏（<1100px）补 .mt5700-cards 间距 —— 原规则只写在 min-width:1100px 内，
+      窄屏既没有 grid 也没有 gap，纵向堆叠的卡片会贴死
+   ③ .mt5700-card-body > .mt5700-toolbar 下边距 —— 作用域**必须**限定在
+      card-body 内：.mt5700-toolbar 同时被「网络设置」页当作卡片头部工具条使用
+      （.mt5700-card-extra），全局加边距会污染它（会审 R06）
+   ④ 速率与流量进入半宽列后的缩放：图表 170 → 120px，速率值 26 → 20px，
+      流量值降一档（2xl → xl）
+   ⑤ SIM 与设备是「项目 / 值」两列短表，行高收紧（会审 P14）
+   ========================================================================== */
+
+/* 「SIM 与设备 删掉多余空白」的正解：
+   .mt5700-cards 原本 align-items:stretch（mt5700.css:2518），两列被拉到等高，
+   矮的那张卡多出来的高度就渲染成卡底部一片空白 —— 这才是「多余空白」的来源。
+   改成 start 后每张卡按自身内容定高，空白彻底消失（会审 R08 的兜底方案，此处直接采用）。
+   放在文件末尾以覆盖前面的 stretch（选择器优先级相同，后者生效）。 */
+.mt5700-cards { align-items: start; }
+
+.mt5700-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mt5700-space-lg);
+  min-width: 0;
+}
+
+/* ② 窄屏：单列流 + 与宽屏一致的间距 */
+@media (max-width: 1099px) {
+  .mt5700-cards {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--mt5700-space-lg);
+  }
+  .mt5700-stack { gap: var(--mt5700-space-lg); }
+}
+
+/* ③ 只命中卡片正文内的工具条（网络状态页 SIM 卡那一条） */
+.mt5700-card-body > .mt5700-toolbar { margin-bottom: var(--mt5700-space-sm); }
+
+/* ④ 半宽列下的缩放 */
+.mt5700-stack .mt5700-chart { height: 120px; }
+.mt5700-stack .mt5700-speed-value { font-size: 20px; }
+.mt5700-stack .mt5700-metrics .mt5700-metric-value {
+  font-size: var(--mt5700-font-size-xl);
+}
+
+/* ⑤ 两列短表收紧：th/td padding 与 .mt5700-metrics 的 gap 同源思路，
+      此处是表格专属微调，故用裸值（既有 th/td 也是裸值 12px/16px） */
+.mt5700-stack .mt5700-table th,
+.mt5700-stack .mt5700-table td { padding: 9px 14px; }

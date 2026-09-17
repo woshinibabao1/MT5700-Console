@@ -127,7 +127,19 @@ var Parse = (function () {
 		if (!match) return null;
 		var f = match[1].split(',').map(function (s) { return s.trim(); });
 		var g = function (i) { return f[i] !== undefined ? AtWs.parseTemperature(f[i]) : 0; };
-		return { sub3GPA: g(0), sub6GPA: g(1), mimoPa: g(2), tcxo: g(3), ap1: g(4), ap2: g(5), modem1: g(6) };
+		/*
+	 * ^CHIPTEMP 返回 12 路传感器温度，顺序见鼎桥手册 17.1：
+	 *   sub3G PA, sub6G PA, MIMO PA, TCXO, peri1, peri2, ap1, ap2,
+	 *   modem1, modem2, bbp1, bbp2
+	 * ★ 旧实现只取前 7 路，且把 f[4]/f[5]/f[6] 错标成 ap1/ap2/modem1
+	 *   （实为 peri1/peri2/ap1）——既漏了最热的 modem/bbp，名字也全错位。
+	 *   现按手册补全 12 路并改正命名。65535（无效值）由 parseTemperature 归 0。
+	 */
+	return {
+		sub3GPA: g(0), sub6GPA: g(1), mimoPa: g(2), tcxo: g(3),
+		peri1: g(4), peri2: g(5), ap1: g(6), ap2: g(7),
+		modem1: g(8), modem2: g(9), bbp1: g(10), bbp2: g(11)
+	};
 	};
 
 	/* ================= MCS ================= */

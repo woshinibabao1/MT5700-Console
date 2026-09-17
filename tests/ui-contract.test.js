@@ -119,9 +119,25 @@ const TERMINAL = path.join(ROOT, 'htdocs', 'luci-static', 'resources', 'view', '
 ok('终端快捷命令里也没有网络时间',
 	fs.readFileSync(TERMINAL, 'utf8').indexOf('AT^NWTIME?') < 0);
 
-/* 各路传感器温度必须落在「SIM 与设备」卡的那张表里（用户明确要求归位到这里） */
-ok('温度行由 SIM 与设备卡渲染（温度 · 前缀）', statusJs.indexOf("'温度 · '") >= 0);
+/* 温度：12 路传感器合并为「SIM 与设备」卡里的单行「5G模块温度」（取最高）。
+ * 用**源码字面量精确匹配**，不写正则容错 —— 本项目出过「断言写成 A || B，
+ * 而注释里恰好同时含 A、B，守卫等价于删除」的事故（本文件 :105-117）。 */
+ok('温度合并为单行「5G模块温度」', statusJs.indexOf("'5G模块温度'") >= 0);
+ok('不再逐路渲染「温度 · 」前缀的温度行', statusJs.indexOf("'温度 · '") < 0);
 ok('不再有独立的温度磁贴容器 tempGrid', statusJs.indexOf('tempGrid') < 0);
+/* parse.js 的 12 路解析与 network_status.js 的 state.temps 必须键数一致：
+   否则「补了解析字段却忘了同步 state」会让取最高悄悄少算几路（会审 R02/R11）。 */
+const PARSE_JS = path.join(ROOT, 'htdocs', 'luci-static', 'resources', 'at-webserver', 'parse.js');
+const parseSrc = fs.readFileSync(PARSE_JS, 'utf8');
+const tempKeysOf = (src) => {
+	const m = src.match(/(?:return\s*\{|temps:\s*\{)([^}]*)\}/s);
+	return m ? (m[1].match(/[A-Za-z][A-Za-z0-9]*\s*:/g) || []).length : -1;
+};
+const parseKeys = tempKeysOf(parseSrc.match(/parseCHIPTEMP[\s\S]*?return\s*\{[\s\S]*?\};/)[0]);
+const stateKeys = tempKeysOf(statusJs.match(/temps:\s*\{[\s\S]*?\}/)[0]);
+ok('温度字段数两侧一致（parseCHIPTEMP vs state.temps）',
+	parseKeys > 0 && parseKeys === stateKeys,
+	'parse=' + parseKeys + ' state=' + stateKeys);
 
 /* ---------- 6. AT 通道必须经 rpcd → ucode → Rust，前端不得直连串口 ----------
  * 既定链路（rpc.js 头部注释 & L.rpc.declare）：
