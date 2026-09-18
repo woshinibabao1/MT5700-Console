@@ -98,15 +98,37 @@ ok('范围 0-3 也能正确解析', RANGES_03.roam && RANGES_03.roam.max === 3);
 
 const opts2 = Parse.roamOptions(2);
 ok('范围 0-2 → 3 个选项', opts2.length === 3, '实际 ' + opts2.length);
-ok('范围 0-2 用基础语义（0 = 不支持漫游）',
-	opts2[0].value === '0' && /不支持漫游/.test(opts2[0].label) && !/国内/.test(opts2[0].label),
+ok('范围 0-2 用基础语义（0 = 不允许漫游）',
+	opts2[0].value === '0' && /不允许漫游/.test(opts2[0].label) && !/国内/.test(opts2[0].label),
 	opts2[0] && opts2[0].label);
 
 const opts3 = Parse.roamOptions(3);
 ok('范围 0-3 → 4 个选项', opts3.length === 4, '实际 ' + opts3.length);
-ok('范围 0-3 用国内/国际语义（0 = 开启国内国际漫游）',
-	opts3[0].value === '0' && /开启国内国际漫游/.test(opts3[0].label),
+ok('范围 0-3 用国内/国际语义（0 = 国内 + 国际都允许）',
+	opts3[0].value === '0' && /国内 \+ 国际都允许/.test(opts3[0].label),
 	opts3[0] && opts3[0].label);
+
+/*
+ * 国内 / 国际四档必须齐全：2×2 的四种组合（国内×国际）一个都不能少，
+ * 否则用户想「只开国际漫游」这类组合时根本选不到。这条钉的是「选项不全」，
+ * 与下面「本机只有 3 档」不矛盾 —— 档位数由模组实报范围决定，四档的**定义**必须完整。
+ */
+ok('国内/国际四档齐全（都允许 / 仅国内 / 仅国际 / 都不允许）',
+	opts3.length === 4 &&
+	/仅允许国内漫游/.test(Parse.ROAM_TEXT[1]) &&
+	/仅允许国际漫游/.test(Parse.ROAM_TEXT[2]) &&
+	/国内国际都不允许/.test(Parse.ROAM_TEXT[3]),
+	JSON.stringify(Parse.ROAM_TEXT));
+
+/*
+ * 数值前缀「0 · 」在漫游上是**故意保留**的（两套语义要能对手册核对），
+ * 但括号里不得再并列另一套语义 —— 旧版写成「0 · 开启国内国际漫游（旧语义：不支持漫游）」，
+ * 一行两套含义，读的人分不清当前生效哪套。
+ */
+ok('漫游文案不得在同一项里并列两套语义（无「旧语义」尾巴）',
+	Object.keys(Parse.ROAM_TEXT).every((k) => !/旧语义/.test(Parse.ROAM_TEXT[k])) &&
+	Object.keys(Parse.ROAM_TEXT_BASIC).every((k) => !/旧语义/.test(Parse.ROAM_TEXT_BASIC[k])),
+	'ROAM_TEXT=' + JSON.stringify(Parse.ROAM_TEXT));
 
 /*
  * 核心断言：同一个数值 0，在两套语义下含义相反。
@@ -114,9 +136,36 @@ ok('范围 0-3 用国内/国际语义（0 = 开启国内国际漫游）',
  * 一旦有人把它写死成其中一套，另一类设备上的显示就是反的。
  */
 ok('数值 0 在两套语义下含义相反（这正是不许写死一套的原因）',
-	/^0 · 不支持漫游/.test(Parse.ROAM_TEXT_BASIC[0]) &&
-	/^0 · 开启国内国际漫游/.test(Parse.ROAM_TEXT[0]),
+	/^0 · 不允许漫游/.test(Parse.ROAM_TEXT_BASIC[0]) &&
+	/^0 · 国内 \+ 国际都允许/.test(Parse.ROAM_TEXT[0]),
 	'两套语义的主句若不再相反，说明手册理解变了，需重新核对 13.2.3');
+
+/* ---------- B2. 服务域选项（集中到 parse.js，避免页面内联一份重复定义） ---------- */
+
+const srvOpts = Parse.srvDomainOptions();
+ok('服务域 5 个选项且 value 为 0-4',
+	srvOpts.length === 5 && srvOpts.map((o) => o.value).join(',') === '0,1,2,3,4',
+	JSON.stringify(srvOpts.map((o) => o.value)));
+ok('服务域 label 是中文人话（不带数字前缀 / 英文缩写）',
+	srvOpts.every((o) => !/^\d ·/.test(o.label) && !/[A-Z_]{3,}/.test(o.label)),
+	JSON.stringify(srvOpts.map((o) => o.label)));
+ok('手册原名保留在 SRV_DOMAIN_CODE 里（不丢排障信息）',
+	Parse.SRV_DOMAIN_CODE[0] === 'CS_ONLY' && Parse.SRV_DOMAIN_CODE[2] === 'CS_PS',
+	JSON.stringify(Parse.SRV_DOMAIN_CODE));
+
+/* ---------- B3. 频段选项：label 简化，但十六进制码不得被抹掉 ---------- */
+
+/*
+ * 简化 label 要治的是「选项太啰嗦」，不是「抹掉排障信息」。频段是位图，
+ * 十六进制码正是拿去对 AT 手册 13.2.3 的唯一依据 —— 它移到 hint 里可以，
+ * 但整个文件里必须还留着这些码（作为选项 value），否则排障时无从下手。
+ */
+['00680380', '2000000680380', '3FFFFFFF', '1E200000095', '7FFFFFFFFFFFFFFF'].forEach((code) => {
+	ok('频段预设码 ' + code + ' 仍在源码里（未因简化被抹掉）', modemJs.indexOf(code) >= 0);
+});
+ok('频段 label 不再把十六进制码塞进文案（码移出 label）',
+	!/label: '[0-9A-F]{8,} · /.test(modemJs),
+	'仍有形如「00680380 · 自动」的选项文案');
 
 /* ---------- C. 读回与下发 ---------- */
 
@@ -140,6 +189,38 @@ ok('暴露 2G / 3G 频段', /formGroup\('2G \/ 3G 频段'/.test(modemJs));
 ok('暴露漫游', /formGroup\('漫游'/.test(modemJs));
 ok('暴露服务域', /formGroup\('服务域'/.test(modemJs));
 ok('暴露 4G / LTE 频段', /formGroup\('4G \/ LTE 频段'/.test(modemJs));
+
+/*
+ * 卡片内顺序。两类各成一组，别把同类拆开：
+ *   制式（接入顺序）→ 频段（2G/3G、4G/LTE 相邻）→ 注册（服务域、漫游）
+ * 漫游放最后：它能给几档由模组实报范围决定，与前面四项「选项固定」性质不同。
+ */
+const ORDER = ['网络接入顺序', '2G / 3G 频段', '4G / LTE 频段', '服务域', '漫游'];
+const ORDER_POS = ORDER.map((n) => modemJs.indexOf("formGroup('" + n + "'"));
+ok('顺序为 接入顺序 → 2G/3G 频段 → 4G/LTE 频段 → 服务域 → 漫游',
+	ORDER_POS.every((p, i) => p > 0 && (i === 0 || p > ORDER_POS[i - 1])),
+	JSON.stringify(ORDER_POS));
+
+/* 迁移位置最容易犯的错：新块加上了、旧块没删 → 页面上出现两个同名设置 */
+ok('2G / 3G 频段只挂载一次', modemJs.split("formGroup('2G / 3G 频段'").length === 2);
+ok('4G / LTE 频段只挂载一次', modemJs.split("formGroup('4G / LTE 频段'").length === 2);
+ok('频段选项表各只定义一次', modemJs.split('var BAND_OPTIONS').length === 2
+	&& modemJs.split('var LTE_OPTIONS').length === 2);
+
+/* 0x2000000680380 = 自动组合 + WCDMA VIII(900)；旧版误标成「WCDMA 900 + 1700」 */
+ok('2G/3G 预设不再把 WCDMA 900 误标成 1700', !/WCDMA 900 \+ 1700/.test(modemJs));
+
+/* 服务域下拉必须来自 parse.js 的单一来源，页面不得再内联一份 */
+ok('服务域选项取自 Parse.srvDomainOptions()', /Mt5700\.select\(Parse\.srvDomainOptions\(\)/
+	.test(modemJs));
+
+/* 频段解读走位图解码，不手编频段名（手编必然对错位） */
+ok('2G/3G 提示用 decodeBandMask 解码', /Parse\.decodeBandMask\(bandSel\.value\)/.test(modemJs));
+ok('4G/LTE 提示用 decodeLteBandMask 解码', /Parse\.decodeLteBandMask\(lteSel\.value\)/.test(modemJs));
+
+/* 服务域范围外的值不能被静默吞掉 */
+ok('服务域范围外的当前值也会补为选项（不静默改写）',
+	/ensureOption\(srvSel, String\(sysCfg\.srvdomain\)/.test(modemJs));
 
 /* 手册 13.2.3 注 2 的约束 */
 const srvConstraint = extractFunction(modemJs, 'applySrvConstraint()');

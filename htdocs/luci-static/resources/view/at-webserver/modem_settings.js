@@ -629,34 +629,51 @@ return L.view.extend({
 			'模组按什么先后顺序搜索网络制式'));
 		sysBody.appendChild(acqHint);
 
-		/* ---------- 2. 2G / 3G 频段 ---------- */
+		/* ---------- 2. 2G / 3G 频段 ----------
+		 * 与「网络接入顺序」同一套路：label 只给中文，十六进制位图码移出选项、
+		 * 在选中后的 hint 里带出（码是拿去对 AT 手册 13.2.3 的唯一依据，不能丢）。
+		 * 频段名不再手编 —— 交给 Parse.decodeBandMask 按位拆，避免把「+ WCDMA 900」
+		 * 误写成「+ WCDMA 1700」这类靠肉眼对位图必然会犯的错。 */
 		var BAND_OPTIONS = [
-			{ value: '', label: '不修改（保持模组当前设置）' },
-			{ value: '00680380', label: '00680380 · 自动（由模组按运营商选择）' },
-			{ value: '3FFFFFFF', label: '3FFFFFFF · 全部频段（GSM / WCDMA 全频段）' },
-			{ value: '2000000680380', label: '2000000680380 · WCDMA 900 + 1700 + 自动' }
+			{ value: '', label: '不修改' },
+			{ value: '00680380', label: '自动（推荐）' },
+			{ value: '2000000680380', label: '自动 + WCDMA 900' },
+			{ value: '3FFFFFFF', label: '全部频段' }
 		];
 		var bandSel = Mt5700.select(BAND_OPTIONS, '');
-		bandSel.addEventListener('change', function () { sysCfg.band = bandSel.value; });
-		sysBody.appendChild(Mt5700.formGroup('2G / 3G 频段', bandSel,
-			'十六进制位图，一般保持「自动」即可'));
-		sysBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-			'这是位图不是数字，手改极易出错；需要精确控制时用下面的只读原始值对照 AT 手册。'));
-
-		/* ---------- 3. 漫游（选项按 =? 实测范围动态生成） ---------- */
-		var roamSel = Mt5700.select(Parse.roamOptions(2), '1');
-		var roamHint = E('div', { 'class': 'mt5700-hint' });
-		var roamNote = E('div', { 'class': 'mt5700-hint' });
-		function paintRoam() {
-			sysCfg.roam = parseInt(roamSel.value, 10);
-			var table = (sysRanges.roam && sysRanges.roam.max >= 3) ? Parse.ROAM_TEXT : Parse.ROAM_TEXT_BASIC;
-			roamHint.textContent = '解读：' + (table[sysCfg.roam] || sysCfg.roam);
+		var bandHint = E('div', { 'class': 'mt5700-hint' });
+		function paintBand() {
+			sysCfg.band = bandSel.value;
+			bandHint.textContent = bandSel.value
+				? '码 ' + bandSel.value + ' · ' + Parse.decodeBandMask(bandSel.value)
+					+ '（位图，改动前先记下卡片底部的只读原始值）'
+				: '保持模组当前设置，本项不下发';
 		}
-		roamSel.addEventListener('change', paintRoam);
-		sysBody.appendChild(Mt5700.formGroup('漫游', roamSel,
-			'是否允许接入非归属运营商的网络'));
-		sysBody.appendChild(roamHint);
-		sysBody.appendChild(roamNote);
+		bandSel.addEventListener('change', paintBand);
+		sysBody.appendChild(Mt5700.formGroup('2G / 3G 频段', bandSel,
+			'GSM / WCDMA 频带位图，一般保持「自动」'));
+		sysBody.appendChild(bandHint);
+
+		/* ---------- 3. 4G / LTE 频段 ----------
+		 * 紧跟着 2G/3G 放：两者都是「频段位图」，拆开会让同类设置散在卡片两头。 */
+		var LTE_OPTIONS = [
+			{ value: '', label: '不修改' },
+			{ value: '1E200000095', label: '常用（国内三家全覆盖）' },
+			{ value: '7FFFFFFFFFFFFFFF', label: '全部频段' }
+		];
+		var lteSel = Mt5700.select(LTE_OPTIONS, '');
+		var lteHint = E('div', { 'class': 'mt5700-hint' });
+		function paintLte() {
+			sysCfg.lteband = lteSel.value;
+			lteHint.textContent = lteSel.value
+				? '码 ' + lteSel.value + ' · ' + Parse.decodeLteBandMask(lteSel.value)
+					+ (lteSel.value === '7FFFFFFFFFFFFFFF' ? '（会明显增加搜网时间）' : '')
+				: '保持模组当前设置，本项不下发';
+		}
+		lteSel.addEventListener('change', paintLte);
+		sysBody.appendChild(Mt5700.formGroup('4G / LTE 频段', lteSel,
+			'LTE 频带位图，一般保持「常用」'));
+		sysBody.appendChild(lteHint);
 
 		/* ---------- 4. 服务域 ---------- */
 		var SRV_DESC = {
@@ -666,24 +683,44 @@ return L.view.extend({
 			3: '由网络侧决定注册方式。当前接入制式含 4G / 5G 时模组不允许此值。',
 			4: '不改动服务域，只保存本页其它项。'
 		};
-		var srvSel = Mt5700.select([
-			{ label: '0 · 仅语音（CS_ONLY）', value: '0' },
-			{ label: '1 · 仅数据（PS_ONLY）', value: '1' },
-			{ label: '2 · 语音 + 数据（CS_PS）', value: '2' },
-			{ label: '3 · 不限（ANY）', value: '3' },
-			{ label: '4 · 不修改', value: '4' }
-		], '2');
+		var srvSel = Mt5700.select(Parse.srvDomainOptions(), '2');
 		var srvHint = E('div', { 'class': 'mt5700-hint' });
 		var srvNote = E('div', { 'class': 'mt5700-hint' });
 		function paintSrv() {
 			sysCfg.srvdomain = parseInt(srvSel.value, 10);
-			srvHint.textContent = SRV_DESC[sysCfg.srvdomain] || '';
+			/* 手册原名（CS_ONLY 等）只出现在这里：它是排障对手册用的，
+			   塞进下拉 label 会让「仅语音」变成「0 · 仅语音（CS_ONLY）」这种代号串。 */
+			var code = Parse.SRV_DOMAIN_CODE[sysCfg.srvdomain];
+			srvHint.textContent = (code ? '服务域 ' + sysCfg.srvdomain + '（' + code + '，手册 13.2.3）· ' : '')
+				+ (SRV_DESC[sysCfg.srvdomain] || '');
 		}
 		srvSel.addEventListener('change', paintSrv);
 		sysBody.appendChild(Mt5700.formGroup('服务域', srvSel,
 			'注册到语音域、数据域还是两者'));
 		sysBody.appendChild(srvHint);
 		sysBody.appendChild(srvNote);
+
+		/*
+		 * ---------- 5. 漫游（选项按 =? 实测范围动态生成） ----------
+		 * 放最后一项：它能提供几档、是「国内 / 国际」还是「整体开关」，
+		 * 完全由模组上报的范围决定（手册 13.2.3 两套语义），与前面四项
+		 * 「选项固定」的性质不同，插在中间会让整卡顺序看起来没有章法。
+		 */
+		var roamSel = Mt5700.select(Parse.roamOptions(2), '1');
+		var roamHint = E('div', { 'class': 'mt5700-hint' });
+		var roamNote = E('div', { 'class': 'mt5700-hint' }, '漫游可选哪些值由模组实报范围决定，读取中…');
+		function paintRoam() {
+			sysCfg.roam = parseInt(roamSel.value, 10);
+			var full = !!(sysRanges.roam && sysRanges.roam.max >= 3);
+			var text = (full ? Parse.ROAM_TEXT : Parse.ROAM_TEXT_BASIC)[sysCfg.roam];
+			roamHint.textContent = '已选：' + (text || sysCfg.roam)
+				+ (full ? '（国内与国际可分别设置）' : '（本机只能整体开关漫游）');
+		}
+		roamSel.addEventListener('change', paintRoam);
+		sysBody.appendChild(Mt5700.formGroup('漫游', roamSel,
+			'是否允许接入非归属运营商的网络'));
+		sysBody.appendChild(roamHint);
+		sysBody.appendChild(roamNote);
 
 		/*
 		 * 手册 13.2.3 注 2 的硬约束：设置的模式里含有 L(03) 或 NR(08) 时，
@@ -708,19 +745,6 @@ return L.view.extend({
 				? '当前接入顺序包含 4G / 5G，模组不允许「仅语音(0)」与「不限(3)」，已自动禁用。'
 				: '';
 		}
-
-		/* ---------- 5. 4G / LTE 频段 ---------- */
-		var LTE_OPTIONS = [
-			{ value: '', label: '不修改（保持模组当前设置）' },
-			{ value: '1E200000095', label: '1E200000095 · 常用（BC1/3/5/8/34/38/39/40/41）' },
-			{ value: '7FFFFFFFFFFFFFFF', label: '7FFFFFFFFFFFFFFF · 全部 LTE 频段' }
-		];
-		var lteSel = Mt5700.select(LTE_OPTIONS, '');
-		lteSel.addEventListener('change', function () { sysCfg.lteband = lteSel.value; });
-		sysBody.appendChild(Mt5700.formGroup('4G / LTE 频段', lteSel,
-			'十六进制位图；改为「全部」会明显增加搜网时间'));
-		sysBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-			'本机读回值 1E200000095 即 BC1+BC3+BC5+BC8+BC34+BC38+BC39+BC40+BC41 的叠加。'));
 
 		/* ---------- 模组当前原始值（只读，便于排障对标） ---------- */
 		var sysRaw = E('div', { 'class': 'mt5700-hint' }, '模组当前值：读取中…');
@@ -767,10 +791,15 @@ return L.view.extend({
 				ensureOption(bandSel, sysCfg.band, '');
 				ensureOption(lteSel, sysCfg.lteband, '');
 				ensureOption(roamSel, String(sysCfg.roam), '');
-				srvSel.value = String(sysCfg.srvdomain);
+				/* 服务域同样要补项：模组被手工写过 5 之类范围外的值时，
+				   直接 sel.value = '5' 在只有 0-4 的下拉里会**静默失败**，
+				   界面显示 2 而实际下发 5，等于骗了用户一次。 */
+				ensureOption(srvSel, String(sysCfg.srvdomain), '');
 				paintAcq();
-				paintRoam();
+				paintBand();
+				paintLte();
 				paintSrv();
+				paintRoam();
 				sysRaw.textContent = '模组当前值：acqorder=' + sysCfg.acqorder
 					+ '，band=' + sysCfg.band + '，roam=' + sysCfg.roam
 					+ '，srvdomain=' + sysCfg.srvdomain + '，lteband=' + sysCfg.lteband;
@@ -796,11 +825,17 @@ return L.view.extend({
 					roamSel.appendChild(el);
 				});
 				if (sysCfgReady) ensureOption(roamSel, keep, '');
-				roamNote.textContent = '本机 ^SYSCFGEX=? 实报范围 roam ' + sysRanges.roam.min
-					+ '-' + sysRanges.roam.max + '，故按「'
-					+ (sysRanges.roam.max >= 3 ? '国内 / 国际' : '支持 / 不支持')
-					+ '」语义显示；服务域范围 '
-					+ (sysRanges.srvdomain ? sysRanges.srvdomain.min + '-' + sysRanges.srvdomain.max : '未知') + '。';
+				/*
+				 * 漫游档位到底齐不齐，由模组说了算，这里必须把「为什么只有 3 档」
+				 * 讲清楚 —— 否则用户会以为是本页没做全，实际是本机固件不给。
+				 */
+				roamNote.textContent = (sysRanges.roam.max >= 3
+					? '本机 ^SYSCFGEX=? 实报 roam ' + sysRanges.roam.min + '-' + sysRanges.roam.max
+						+ '：NV「漫游特性」已激活，国内漫游与国际漫游可分别设置（4 档齐全）。'
+					: '本机 ^SYSCFGEX=? 实报 roam ' + sysRanges.roam.min + '-' + sysRanges.roam.max
+						+ '：NV「漫游特性」未激活，模组只支持整体开关漫游，'
+						+ '不提供「国内」与「国际」分别设置；固件若上报 0-3，本页会自动换成四档。')
+					+ '（手册 13.2.3）';
 				paintRoam();
 			}).catch(function () {});
 		}
