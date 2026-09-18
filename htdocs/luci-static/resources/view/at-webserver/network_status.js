@@ -131,7 +131,7 @@ return L.view.extend({
 			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
 			tools: {
 				adc: { rows: [], at: 0, busy: false, err: null },
-				check: { busy: false, steps: null, at: 0, expanded: false }
+				check: { busy: false, steps: null, at: 0 }
 			},
 			/* 12 路传感器温度，键名与 Parse.parseCHIPTEMP 的返回严格一一对应
 			   （手册 17.1：sub3G/sub6G/MIMO/TCXO/peri1/peri2/ap1/ap2/modem1/modem2/bbp1/bbp2）。
@@ -537,8 +537,10 @@ return L.view.extend({
 					+ '卡在哪一步就直接告诉你。只读查询，不改任何设置。'));
 				return box;
 			}
-			/* 结论摘要插进标题行（与 ADC 同一写法），整块只占一行；
-			   6 步明细默认折叠，点「展开步骤」才渲染。 */
+			/* 结论摘要插进标题行（与 ADC 同一写法），6 步明细**始终**铺开在下面 ——
+			   原来做成「默认折叠 + 点按钮展开」，但结论只有一句「卡在第 N 步」，
+			   不给明细等于没说清卡在哪、为什么，还得再点一次才看得到，
+			   比一张固定表格多一道没有收益的交互。 */
 			var failed = null;
 			for (var i = 0; i < t.steps.length; i++) {
 				if (t.steps[i].level === 'bad') { failed = t.steps[i]; break; }
@@ -550,27 +552,22 @@ return L.view.extend({
 			   （padding 12px + margin-bottom 12px），塞进标题行会把整行撑高。 */
 			box.firstChild.insertBefore(
 				Mt5700.badge(summaryText, failed ? 'danger' : 'success'), btn);
-			if (t.expanded) {
-				box.appendChild(Mt5700.ghostButton('收起步骤', function () { t.expanded = false; renderTools(); }));
-				var rows = t.steps.map(function (s) {
+			box.appendChild(Mt5700.table(['步骤', '结果', '说明'],
+				t.steps.map(function (s) {
 					return [
 						s.name,
 						E('b', { 'class': 'mt5700-diag-verdict is-' + (s.level || 'ok') },
 							s.level === 'ok' ? '通过' : (s.level === 'warn' ? '存疑' : '未通过')),
 						s.text
 					];
-				});
-				box.appendChild(Mt5700.table(['步骤', '结果', '说明'], rows, { striped: true }));
-			} else {
-				box.appendChild(Mt5700.ghostButton('展开步骤', function () { t.expanded = true; renderTools(); }));
-			}
+				}), { striped: true }));
 			return box;
 		}
 
 		function runSelfCheck() {
 			var t = state.tools.check;
 			if (t.busy) return;
-			t.busy = true; t.steps = []; t.expanded = false;
+			t.busy = true; t.steps = [];
 			renderTools();
 			var steps = checkSteps();
 			var chain = Promise.resolve();

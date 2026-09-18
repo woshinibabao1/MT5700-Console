@@ -55,7 +55,7 @@ const preludeEnd = preludeMatch ? preludeMatch.index : src.indexOf('return L.vie
 const prelude = src.slice(0, preludeEnd);
 
 /* eslint-disable no-eval */
-const Fns = eval('(function(){' + prelude + '\nreturn { entriesFromBackend: entriesFromBackend, entriesFromSyslog: entriesFromSyslog, foldRepeats: foldRepeats, fmtClock: fmtClock, DIAL_RE: DIAL_RE };})()');
+const Fns = eval('(function(){' + prelude + '\nreturn { entriesFromBackend: entriesFromBackend, entriesFromSyslog: entriesFromSyslog, foldRepeats: foldRepeats, fmtStamp: fmtStamp, parseNotify: parseNotify, levelOfText: levelOfText, DIAL_RE: DIAL_RE };})()');
 
 /* ---------- 1. entriesFromBackend（后端内存日志 → 统一条目） ---------- */
 
@@ -150,6 +150,50 @@ function stripComments(s) {
 }
 const code = stripComments(src);
 
+/* ---------- 3b. ★ 统一格式：时间前缀必须带年月日 ---------- */
+
+const STAMP_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+ok('时间格式是「年月日 时分秒」', STAMP_RE.test(Fns.fmtStamp(1789736443532)));
+eq('个位数补零', Fns.fmtStamp(new Date(2026, 0, 2, 3, 4, 5).getTime()), '2026-01-02 03:04:05');
+ok('★ 旧的只给时分秒的 fmtClock 已下线', !/fmtClock/.test(code));
+ok('★ 日志行的时间列用 fmtStamp', /fmtStamp\(e\.ts\)/.test(code));
+ok('★ 导出头与每个导出行都带完整时间',
+	/fmtStamp\(Date\.now\(\)\)/.test(code) && /fmtStamp\(e\.ts\)/.test(code));
+
+/* ---------- 3c. 通知文件结构化（一条一行，续行并入上一条） ---------- */
+
+const NOTIFY_SAMPLE = [
+	'2026-09-16 20:39:31 [watchdog] 看门狗启动：接口=MT5700M',
+	'--------------------------------------------------',
+	'[2026-09-18 15:32:35] 发送者: 10658965010',
+	'内容: 【中国移动】戳 https://f.10086.cn/s/#70JefoL 参与',
+	'--------------------------------------------------',
+	'[2026-09-18 15:40:01] 发送者: 信号监控',
+	'内容: 网络切换提醒',
+	'制式: NR',
+	''
+].join('\n');
+const recs = Fns.parseNotify(NOTIFY_SAMPLE);
+
+eq('分隔线丢掉、三种写法切成 3 条', recs.length, 3);
+eq('无方括号的写法也能吃出时间', Fns.fmtStamp(recs[0].ts), '2026-09-16 20:39:31');
+ok('无方括号那条的 tag 原文保留', recs[0].text.indexOf('[watchdog]') === 0);
+eq('方括号写法吃出时间', Fns.fmtStamp(recs[1].ts), '2026-09-18 15:32:35');
+ok('★ 续行并入上一条，不丢原文',
+	recs[1].text.indexOf('发送者: 10658965010') === 0 && recs[1].text.indexOf('内容:') > 0);
+ok('短信里的链接与中文原样保留（不改写正文）',
+	recs[1].text.indexOf('https://f.10086.cn/s/#70JefoL') > 0);
+eq('两条续行都并入第三条', recs[2].text, '发送者: 信号监控 · 内容: 网络切换提醒 · 制式: NR');
+eq('★ 每条都拿到了时间戳（每行都有前缀可显示）',
+	recs.filter(function (r) { return r.ts > 0; }).length, 3);
+eq('开头就是续行时不丢（ts 记 0，时间列显示 —）', Fns.parseNotify('内容: 孤儿行')[0].ts, 0);
+eq('空文件 → 空列表', Fns.parseNotify(''), []);
+eq('级别推断：错误', Fns.levelOfText('接口拉起失败'), 'ERR');
+eq('级别推断：警告', Fns.levelOfText('warn: 信号弱'), 'WRN');
+eq('级别推断：默认信息', Fns.levelOfText('接口已 up'), 'INF');
+ok('★ 通知视图与前两个视图同一行式（时间 → 级别 → 正文）',
+	/function renderNotify[\s\S]{0,1600}mt5700-logmeta/.test(code));
+
 /* ---------- 4. 页面与菜单改名 ---------- */
 
 ok('页头是「运行日志」', /Mt5700\.page\('运行日志'/.test(src));
@@ -237,7 +281,7 @@ ok('★ 三个 Tab 的顺序仍与参考实现一致（模组拨号在前）',
 ok('★ 关键词搜索对三个视图一视同仁（别只在两个视图生效，切回来发现列表少一截）',
 	!/searchInput\.disabled/.test(code) && /级别筛选只对前两个视图生效/.test(src));
 ok('★ 导出与列表同一口径（notify 页导出过滤结果，不是文件全文）',
-	/lines = lines\.concat\(notifyLines\(\)\)/.test(code));
+	/notifyRecords\(\)\.forEach/.test(code));
 ok('★ 定时器登记进 _dispose（clearInterval）',
 	/_dispose[\s\S]{0,200}clearInterval/.test(src));
 ok('★ 页面隐藏时跳过刷新', /if \(document\.hidden\) return;/.test(src));

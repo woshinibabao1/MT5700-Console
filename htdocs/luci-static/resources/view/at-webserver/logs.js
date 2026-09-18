@@ -62,14 +62,55 @@ function pad(n, w) {
 	return s;
 }
 
-function fmtClock(ms) {
+/* ★ 统一时间格式：**年月日 时分秒**。三个视图的每一行、以及导出行，
+   时间前缀一律用它 —— 只给时分秒的话跨天的日志看不出是哪天的，
+   而设备是常年不重启的，syslog 与通知文件里必然混着多天的记录。 */
+function fmtStamp(ms) {
 	var d = new Date(ms || 0);
-	return pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2) + ':' + pad(d.getSeconds(), 2);
+	return d.getFullYear() + '-' + pad(d.getMonth() + 1, 2) + '-' + pad(d.getDate(), 2)
+		+ ' ' + pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2) + ':' + pad(d.getSeconds(), 2);
 }
 
-function fmtFull(ms) {
-	var d = new Date(ms || 0);
-	return d.getFullYear() + '-' + pad(d.getMonth() + 1, 2) + '-' + pad(d.getDate(), 2) + ' ' + fmtClock(ms);
+/* 级别推断：三个视图共用同一套判据，避免「同一句话在两个视图里颜色不同」 */
+function levelOfText(text) {
+	if (/错误|失败|error/i.test(text)) return 'ERR';
+	if (/警告|warn/i.test(text)) return 'WRN';
+	return 'INF';
+}
+
+/* 通知文件 → 一条一行。
+   ★ 文件里的行格式本身就不统一，实测三种：
+       2026-09-16 20:39:31 [watchdog] 看门狗启动：...
+       [2026-09-18 15:32:35] 发送者: 10658965010
+       内容: …        ← 上一条的续行，自己不带时间戳
+       还有 `------` 分隔线
+   直接逐行渲染就会出现「一半有日期一半没有」，所以这里先把时间戳吃出来，
+   续行并入上一条（用 · 连接，不丢原文），保证每一行都以时间戳开头。 */
+var TS_HEAD_RE = /^\[?\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})\s*\]?\s*/;
+var SEP_LINE_RE = /^[-=_*]{5,}$/;
+
+function parseNotify(content) {
+	var out = [];
+	var cur = null;
+	var lines = String(content || '').split('\n');
+	for (var i = 0; i < lines.length; i++) {
+		var line = lines[i].replace(/\s+$/, '');
+		if (!line || SEP_LINE_RE.test(line)) continue;
+		var m = line.match(TS_HEAD_RE);
+		if (m) {
+			if (cur) out.push(cur);
+			var ts = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], 0).getTime();
+			cur = { ts: isFinite(ts) ? ts : 0, text: line.slice(m[0].length).trim() };
+		} else if (cur) {
+			/* 续行并入上一条：不丢原文，只补一个分隔符 */
+			cur.text += ' · ' + line;
+		} else {
+			/* 文件开头就是续行（没有上一条可并）：保留原文，时间列显示 — */
+			out.push({ ts: 0, text: line });
+		}
+	}
+	if (cur) out.push(cur);
+	return out;
 }
 
 /* 后端内存日志：{ ts, level, msg } */
@@ -104,10 +145,7 @@ function entriesFromSyslog(rawList) {
 		if (!m) continue;
 		var text = m[2].trim();
 		if (!text) continue;
-		var lv = 'INF';
-		if (/错误|失败|error/i.test(text)) lv = 'ERR';
-		else if (/警告|warn/i.test(text)) lv = 'WRN';
-		out.push({ ts: Number(r.time) || Date.now(), level: lv, msg: text });
+		out.push({ ts: Number(r.time) || Date.now(), level: levelOfText(text), msg: text });
 	}
 	return out;
 }
@@ -274,7 +312,9 @@ return L.view.extend({
 		function renderRow(e) {
 			var lv = e.level || 'INF';
 			var row = E('div', { 'class': 'mt5700-logrow' });
-			row.appendChild(E('span', { 'class': 'mt5700-logmeta', 'title': fmtFull(e.ts) }, fmtClock(e.ts)));
+			/* ★ 时间前缀一律「年月日 时分秒」；取不到时间显示 — 而不是编一个 */
+			row.appendChild(E('span', { 'class': 'mt5700-logmeta' },
+				e.ts ? fmtStamp(e.ts) : '—'));
 			row.appendChild(Mt5700.badge(LEVEL_LABEL[lv] || lv, LEVEL_VARIANT[lv] || 'neutral'));
 			/* 级别配色复用终端日志既有类，不新造；警告级别靠左侧徽章区分 */
 			var msg = E('span', { 'class': 'mt5700-logmsg' + (lv === 'ERR' ? ' mt5700-log-err' : '') });
@@ -344,13 +384,12 @@ return L.view.extend({
 			footerEl.textContent = text;
 		}
 
-		/* 通知文件：按搜索词过滤后的行（导出与列表同一口径） */
-		function notifyLines() {
-			var lines = String(state.notify || '').replace(/\s+$/, '').split('\n')
-				.filter(function (l) { return l.trim() !== ''; });
-			if (!state.query) return lines;
+		/* 通知文件：切成「一条一行」并按搜索词过滤（导出与列表同一口径） */
+		function notifyRecords() {
+			var recs = parseNotify(state.notify);
 			var q = state.query.toLowerCase();
-			return lines.filter(function (l) { return l.toLowerCase().indexOf(q) >= 0; });
+			if (!q) return recs;
+			return recs.filter(function (r) { return r.text.toLowerCase().indexOf(q) >= 0; });
 		}
 
 		function renderNotify() {
@@ -362,32 +401,34 @@ return L.view.extend({
 				footerEl.textContent = '数据源不可用';
 				return;
 			}
-			var total = String(state.notify || '').replace(/\s+$/, '').split('\n')
-				.filter(function (l) { return l.trim() !== ''; }).length;
-			var lines = notifyLines();
-			if (!lines.length) {
+			var total = parseNotify(state.notify).length;
+			var recs = notifyRecords();
+			if (!recs.length) {
 				listEl.appendChild(Mt5700.empty(state.primed
-					? (total ? '没有匹配的通知行（试试清空关键词）'
+					? (total ? '没有匹配的通知（试试清空关键词）'
 						: '暂无通知记录（短信、来电、信号变化与存储告警会写入此文件）')
 					: '加载中…'));
 				footerEl.textContent = '文件：' + notifyPath;
 				return;
 			}
 			var frag = document.createDocumentFragment();
-			var shown = lines.length > 400 ? lines.slice(lines.length - 400) : lines;
+			var shown = recs.length > 400 ? recs.slice(recs.length - 400) : recs;
 			for (var i = 0; i < shown.length; i++) {
-				var lv = /错误|失败|error/i.test(shown[i]) ? 'ERR'
-					: (/警告|warn/i.test(shown[i]) ? 'WRN' : 'INF');
+				var r = shown[i];
+				var lv = levelOfText(r.text);
+				/* 与前两个视图同一行式：时间 → 级别 → 正文 */
 				var row = E('div', { 'class': 'mt5700-logrow' });
+				row.appendChild(E('span', { 'class': 'mt5700-logmeta' },
+					r.ts ? fmtStamp(r.ts) : '—'));
 				row.appendChild(Mt5700.badge(LEVEL_LABEL[lv] || lv, LEVEL_VARIANT[lv] || 'neutral'));
-				var msg = E('span', { 'class': 'mt5700-logmsg' });
-				msg.appendChild(highlight(shown[i]));
+				var msg = E('span', { 'class': 'mt5700-logmsg' + (lv === 'ERR' ? ' mt5700-log-err' : '') });
+				msg.appendChild(highlight(r.text));
 				row.appendChild(msg);
 				frag.appendChild(row);
 			}
 			listEl.appendChild(frag);
 			footerEl.textContent = '共 ' + total + ' 条'
-				+ (lines.length !== total ? '（过滤后 ' + lines.length + ' 条）' : '')
+				+ (recs.length !== total ? '（过滤后 ' + recs.length + ' 条）' : '')
 				+ ' · 文件：' + notifyPath;
 		}
 
@@ -488,13 +529,15 @@ return L.view.extend({
 
 		function exportLog() {
 			var lines = ['# MT5700 运行日志导出', '# 视图：' + state.tab
-				+ '  导出时间：' + fmtFull(Date.now()), ''];
+				+ '  导出时间：' + fmtStamp(Date.now()), ''];
 			if (state.tab === 'notify') {
-				/* 与前两个视图同一口径：导出**当前过滤结果**，而不是文件全文 */
-				lines = lines.concat(notifyLines());
+				/* 与前两个视图同一口径：导出**当前过滤结果**，且一样带时间前缀 */
+				notifyRecords().forEach(function (r) {
+					lines.push((r.ts ? fmtStamp(r.ts) : '—') + ' [' + levelOfText(r.text) + '] ' + r.text);
+				});
 			} else {
 				applyFilters(currentEntries()).forEach(function (e) {
-					lines.push(fmtFull(e.ts) + ' [' + e.level + '] ' + e.msg);
+					lines.push(fmtStamp(e.ts) + ' [' + e.level + '] ' + e.msg);
 				});
 			}
 			try {

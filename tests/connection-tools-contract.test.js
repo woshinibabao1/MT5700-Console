@@ -198,8 +198,11 @@ ok('★ 自检也进页面自动跑一次（不必先点按钮），与 ADC 串�
 ok('★ 自检结论用 badge 进标题行（不用块级 .mt5700-diag-summary，它会把行撑高）',
 	/Mt5700\.badge\(summaryText, failed \? 'danger' : 'success'\)/.test(nsSrc)
 	&& !/mt5700-diag-summary is-' \+ lv/.test(nsSrc));
-ok('★ 自检 6 步明细默认折叠（t.expanded 默认 false）',
-	/expanded: false/.test(nsSrc) && /t\.expanded \? Mt5700|if \(t\.expanded\)/.test(nsSrc));
+ok('★ 自检 6 步明细固定铺开（不再折叠，没有 t.expanded 开关）',
+	!/t\.expanded/.test(nsSrc) && !/expanded/.test(nsSrc)
+	&& /Mt5700\.table\(\['步骤', '结果', '说明'\]/.test(nsSrc));
+ok('★ 标题行仍保留结论徽章（卡在第 N 步 / 六步全部通过）',
+	/Mt5700\.badge\(summaryText, failed \? 'danger' : 'success'\)/.test(nsSrc));
 ok('★ 流量清零仍保留按钮与二次确认（不可逆，不能做成自动）',
 	/function clearFlowStats[\s\S]{0,300}Mt5700\.confirm/.test(nsSrc));
 
@@ -212,8 +215,8 @@ ok('★ ADC 进页面自动读一次（连上就调 readAdcPins，不用先点�
 	/refreshAll\(\);[\s\S]{0,400}readAdcPins\(\)\.then\(runSelfCheck\)/.test(nsSrc));
 ok('★ 自检也进页面自动跑一次，且与 ADC 串行不并发（11 条只读命令别一起挤通道）',
 	/readAdcPins\(\)\.then\(runSelfCheck\)/.test(nsSrc));
-ok('自检默认折叠，标题行只放结论摘要',
-	/t\.expanded/.test(nsSrc) && /展开步骤/.test(nsSrc));
+ok('自检明细是固定表格，不靠按钮切换（无展开/收起入口）',
+	!/展开步骤/.test(nsSrc) && !/收起步骤/.test(nsSrc));
 ok('ADC 有结果后按钮变「重新读取」',
 	/t\.rows\.length \? '重新读取' : '读取'/.test(nsSrc));
 ok('★ ADC 结果一行铺开（不再用「管脚/电平」表格，省掉表头 + N 行）',
