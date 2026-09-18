@@ -13,9 +13,9 @@
  *   ① 信号质量     主小区 RSRP/RSRQ/SINR + 调制方式(MCS)，头部放刷新控制
  *   ② 连接状态     注册/运营商/签约速率 + 一张合并表（连接诊断 + 地址与 DNS）
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
- *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量
+ *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量（卡头带「实时监测」开关与「清零」）
  *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
- *   ⑥ 连接工具     ADC 管脚电压 / 连通性自检 / 流量统计清零
+ *   ⑥ 连接工具     ADC 管脚电压 / 连通性自检（都是进页面自动跑一次的只读查询）
  * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
  * [连接状态 | 右列（SIM 与设备 → 连接质量）]。
  *
@@ -90,9 +90,11 @@ return L.view.extend({
 		var devBody = E('div');
 		devCard._body.appendChild(devBody);
 
-		/* ⑥ 连接工具：这一页别处全是读数，这里放**能做事的按钮** ——
-		 * ADC 管脚电压（自动读）/ 连通性自检 / 流量统计清零。
-		 * 形态为「按钮触发 + 结果区」。
+		/* ⑥ 连接工具：这一页别处全是读数，这里放**能做事的工具** ——
+		 * ADC 管脚电压 / 连通性自检。两者都是**只读**查询，进页面自动跑一次并串行排好队，
+		 * 按钮退化成「重新读取 / 重新自检」。
+		 * ★「流量统计清零」已迁到「速率与流量」卡头：它是个动作按钮，
+		 *   和同卡的流量数字放在一起才顺手，不该在「工具」里占一整块。
 		 * ★「网络拒绝原因」已迁到「网络设置 → 网络拒绝」，「服务状态监听」已下线
 		 *   —— 理由见下方连接工具区的注释。 */
 		var toolsCard = Mt5700.card('连接工具', '排查与诊断');
@@ -374,7 +376,6 @@ return L.view.extend({
 			toolsBody.innerHTML = '';
 			toolsBody.appendChild(buildAdcBlock());
 			toolsBody.appendChild(buildCheckBlock());
-			toolsBody.appendChild(buildFlowClearBlock());
 		}
 
 		/* ---------- ① ADC 管脚电压（手册 11.5） ----------
@@ -600,27 +601,37 @@ return L.view.extend({
 			});
 		}
 
-		/* ---------- ③ 流量统计清零（手册 16.11 ^DSFLOWCLR） ---------- */
-
-		function buildFlowClearBlock() {
-			var box = toolBlock('流量统计清零',
-				Mt5700.dangerButton('清零', clearFlowStats));
-			box.appendChild(E('p', { 'class': 'mt5700-hint' },
-				'把模组的本次与累计流量、连接时长全部归零（手册 16.11）。'
-				+ '只清统计计数器、**不会断网**；适合核对套餐周期或测某个应用耗了多少流量。'));
-			return box;
-		}
+		/*
+		 * ③ 流量统计清零（手册 16.11 ^DSFLOWCLR）
+		 * 入口挂在「速率与流量」卡头的「实时监测」开关后面（见下方 rateExtra 填充处），
+		 * 不占独立卡片：它是个动作按钮，和同一张卡的流量数字放在一起才顺手。
+		 * ★ 不可逆操作，必须走 Mt5700.confirm 二次确认。
+		 */
 
 		function clearFlowStats() {
 			Mt5700.confirm('清零流量统计？本次与累计的流量、连接时长都会归零，且无法恢复。'
-				+ '（不会影响网络连接本身）', function () {
+				+ '只清统计计数器、不会断网（手册 16.11 ^DSFLOWCLR）。'
+				+ '适合核对套餐周期，或测某个应用耗了多少流量。', function () {
 				return AtWs.client.sendCommand('AT^DSFLOWCLR').then(function (res) {
 					if (!res || !res.success) {
 						Mt5700.error('清零失败：' + ((res && res.error) || '模组未响应'));
 						return;
 					}
 					Mt5700.success('已清零');
-					return getFlow().then(renderFlow);
+					/* 峰值是「本轮实时监测」的极值，计数既然归零，峰值也该跟着归零，
+					   否则界面会同时出现「累计流量 0」和「峰值下行 300 Mbps」这种
+					   自相矛盾的画面。速率曲线（history）不跟着清 —— 它是速率维度
+					   的连续采样，清了只会让图空一大段，没有额外信息量。 */
+					state.peakDown = 0;
+					state.peakUp = 0;
+					/* ★ 成功与失败都要重绘：
+					   失败时把 state.flow 置空，让格子显示成「—」——
+					   计数其实已经归零了，只是没读回来；若照旧显示旧数字，
+					   用户会以为「没清成功」，那是比直接报错更糟的误读。 */
+					return getFlow().then(renderFlow, function () {
+						state.flow = {};
+						renderFlow();
+					});
 				});
 			}, '确认清零');
 		}
@@ -1130,14 +1141,47 @@ return L.view.extend({
 			return { value: String(Math.round(bits)), unit: 'bps' };
 		}
 
+		/*
+		 * ★ 图表宽度缓存（性能）：
+		 *   renderChart() 每秒被 renderSpeed() 调一次。原实现是
+		 *   `chart.innerHTML = ''` 之后立刻读 `chart.clientWidth` —— 按 MDN 对
+		 *   「强制同步布局（forced synchronous layout / layout thrashing）」的说明，
+		 *   读取 clientWidth 这类布局属性会迫使浏览器**立刻**完成挂起的样式重算与布局，
+		 *   而上一行刚把子树作废。于是每秒都在「作废布局 → 马上算回来」，是教科书式的
+		 *   反向优化；1Hz 下它还会和页面其它重绘抢主线程。
+		 *   失效源用 ResizeObserver 而不是 window.resize：容器宽度还会因为
+		 *   垂直滚动条出现/消失、断点切换、侧栏折叠而变化，这些**不一定**派发
+		 *   window resize（只认 resize 等于把「宽度只随窗口变化」当成了既定事实）。
+		 *   不支持 RO 的老浏览器退回 resize，功能不打折。
+		 */
+		var chartWidth = 0;
+		var chartRO = null;
+		var onResize = function () { chartWidth = 0; };
+		if (typeof ResizeObserver === 'function') {
+			chartRO = new ResizeObserver(onResize);
+			chartRO.observe(chart);
+		} else {
+			window.addEventListener('resize', onResize);
+		}
+
 		function renderChart() {
+			/* 不可见时不做重建：切后台那一刻在飞的 netRate 回来后仍会走到这里，
+			   在看不见的页面里做一次完整子树重建纯属浪费。 */
+			if (document.hidden) return;
 			chart.innerHTML = '';
 			if (!history.length) {
 				chart.appendChild(Mt5700.empty('等待数据…'));
 				return;
 			}
+			/* 只在缓存未命中时读一次布局属性。还没上屏时 clientWidth 为 0，
+			   此时**不缓存**（免得把兜底的 600 当成真实宽度记住），
+			   上屏后由 RO 的首次回调让它失效、下一拍重新量准。 */
+			if (!chartWidth) {
+				var measured = chart.clientWidth;
+				if (measured) chartWidth = measured;
+			}
 			chart.appendChild(Mt5700.lineChart(history, {
-				width: chart.clientWidth || 600,
+				width: chartWidth || 600,
 				height: 140,
 				tipFormat: function (p) {
 					var d = splitSpeedUI(p.down || 0, 'bytes');
@@ -1149,7 +1193,13 @@ return L.view.extend({
 
 		function renderFlow() {
 			flowGrid.innerHTML = '';
-			var f = state.flow;
+			var f = state.flow || {};
+			/* 取不到时统一显示「—」而不是「NaN」：
+			   清零成功后若重读失败，state.flow 会被置空，此时若照旧渲染旧数字，
+			   用户会以为「没清成功」—— 那才是误报。
+			   （AtWs.formatFlow(undefined) 会算出 "NaN TB"，所以必须在这一层挡掉。） */
+			function durText(v, showDays) { return v == null ? '—' : AtWs.formatDuration(v, showDays); }
+			function flowText(v) { return v == null ? '—' : AtWs.formatFlow(v); }
 			/* 峰值是「本轮实时监测」内的最大值（关掉监测再开即归零），
 			   单位与 rtDown/rtUp、state.peakDown/peakUp 一致（字节/秒），显示同样走 splitSpeedUI。 */
 			function peakText(bps) {
@@ -1158,12 +1208,12 @@ return L.view.extend({
 				return s.value + ' ' + s.unit;
 			}
 			[
-				{ label: '当前会话时长', value: AtWs.formatDuration(f.lastDsTime, false) },
-				{ label: '当前下行流量', value: AtWs.formatFlow(f.lastRxFlow) },
-				{ label: '当前上行流量', value: AtWs.formatFlow(f.lastTxFlow) },
-				{ label: '累计时长', value: AtWs.formatDuration(f.totalDsTime, true) },
-				{ label: '累计下行', value: AtWs.formatFlow(f.totalRxFlow) },
-				{ label: '累计上行', value: AtWs.formatFlow(f.totalTxFlow) },
+				{ label: '当前会话时长', value: durText(f.lastDsTime, false) },
+				{ label: '当前下行流量', value: flowText(f.lastRxFlow) },
+				{ label: '当前上行流量', value: flowText(f.lastTxFlow) },
+				{ label: '累计时长', value: durText(f.totalDsTime, true) },
+				{ label: '累计下行', value: flowText(f.totalRxFlow) },
+				{ label: '累计上行', value: flowText(f.totalTxFlow) },
 				{ label: '峰值下行', value: peakText(state.peakDown) },
 				{ label: '峰值上行', value: peakText(state.peakUp) }
 			].forEach(function (it) {
@@ -1435,7 +1485,14 @@ return L.view.extend({
 		}
 
 		function getDHCP() {
-			return AtWs.client.sendCommand('AT^DHCPV6?').then(function (v6) {
+			/* ★ attempts: 1 —— 实测（2026-09-18，走 8765 与前端同一通道）23 条只读命令里
+			   AT^DHCPV6? 是**唯一恒定失败**的一条（本机本来就没有 IPv6），
+			   其余 22 条全部 OK。它是「确定性失败」而不是「偶发 ERROR」，
+			   默认 3 次重试 + 200/400ms 退避纯属白跑：每轮慢档刷新要多吃约 1.5s 串口时间，
+			   而且这条命令排在链里，会把它后面所有读数一起推后。
+			   降到 1 次不改变任何界面语义 —— 失败仍由 slowFailures 静默兜住；
+			   将来真开通 IPv6 时，1 次尝试照样能成功（成功路径本来就不依赖重试）。 */
+			return AtWs.client.sendCommand('AT^DHCPV6?', { attempts: 1 }).then(function (v6) {
 				if (v6.success && v6.data) {
 					var str = AtWs.extractATData(v6.data, '^DHCPV6');
 					if (str) {
@@ -1636,26 +1693,48 @@ return L.view.extend({
 		var rateTimer = null;
 		var rateOn = true;
 
-		/* 「实时监测」开关：关闭即停表（不再每秒读接口计数器），重开时重新起基准 */
+		/* 「实时监测」开关：关闭即停表（不再每秒读接口计数器），重开时重新起基准。
+		   ★ 页面在**后台标签页**里打开时（`document.hidden === true`，例如 Ctrl+点击
+		   新标签页）不起表：看不见的时候每秒读一次网卡计数器是纯浪费，
+		   回到前台由 onVisibility 补起 —— 那里同样会丢弃旧基准。 */
 		function setRateEnabled(on) {
 			rateOn = !!on;
 			try { localStorage.setItem('mt5700.rateOn', rateOn ? '1' : '0'); } catch (e) {}
 			if (rateTimer) { clearInterval(rateTimer); rateTimer = null; }
-		if (rateOn) {
-			rateSample = null;
-			/* 重新开始一段监测：峰值随之归零，否则上一轮的尖峰会一直挂着 */
-			state.peakDown = 0;
-			state.peakUp = 0;
-			rateTimer = setInterval(sampleRate, 1000);
-			sampleRate();
-		}
+			if (rateOn && !document.hidden) {
+				rateSample = null;
+				/* 重新开始一段监测：峰值随之归零，否则上一轮的尖峰会一直挂着 */
+				state.peakDown = 0;
+				state.peakUp = 0;
+				rateTimer = setInterval(sampleRate, 1000);
+				sampleRate();
+			}
 			renderSpeed();
 		}
 
 		var rateChk = E('input', { 'type': 'checkbox' });
 		rateChk.addEventListener('change', function () { setRateEnabled(rateChk.checked); });
-		rateExtra.appendChild(E('div', { 'class': 'at-autorefresh' },
-			E('label', {}, rateChk, document.createTextNode(' 实时监测'))));
+		/* ★ E(tag, attrs, text) 只挂载第 3 个参数，第 4 个起会被**静默丢弃**
+		   （它是全站共用 helper，改成变参影响面太大，footgun 已记在
+		   FRONTEND_REVIEW_REPORT.md）。所以 label 必须分两步建 ——
+		   原来写成 E('label', {}, rateChk, document.createTextNode(' 实时监测'))，
+		   「实时监测」这四个字从来就没显示过，只剩一个光秃秃的勾选框。 */
+		var rateLabel = E('label', {}, rateChk);
+		rateLabel.appendChild(document.createTextNode(' 实时监测'));
+		/* 流量清零归位到这张卡：它清的就是本卡的流量统计，与速率/流量同一问题域，
+		   放在「连接工具」里要跨卡找。
+		   ★ 容器用 .mt5700-toolbar（mt5700.css:2590）而不是 .at-autorefresh：
+		   后者是 Ui.autoRefresh 的私有类（ui.js:347），自带 margin 6px/10px 与
+		   硬编码 #555（无深色变体），放进卡头会把这一排顶高、暗色下发灰；
+		   而且它没有 flex-wrap，窄屏两个子元素不换行而是直接溢出。
+		   .mt5700-toolbar 是 flex + gap + wrap，且「网络设置」页已在用它做卡头
+		   工具条（mt5700.css:2742 的注释承认该用法）—— 零新增样式。 */
+		var flowClearBtn = Mt5700.dangerButton('清零流量', clearFlowStats);
+		flowClearBtn.title = '把本次与累计流量、连接时长全部归零（AT^DSFLOWCLR，手册 16.11）';
+		var rateBar = E('div', { 'class': 'mt5700-toolbar' });
+		rateBar.appendChild(rateLabel);
+		rateBar.appendChild(flowClearBtn);
+		rateExtra.appendChild(rateBar);
 
 		/*
 		 * 1Hz 采样，但一次 netRate 往返可能长得多（它的超时是 5s）。
@@ -1666,6 +1745,8 @@ return L.view.extend({
 		 */
 		var rateInFlight = false;
 		function sampleRate() {
+			/* 不可见时不采样：定时器已停，这里挡的是「切后台瞬间在飞的那一次」。 */
+			if (document.hidden) return Promise.resolve();
 			if (rateInFlight) return Promise.resolve();
 			rateInFlight = true;
 			var settle = function () { rateInFlight = false; };
@@ -1835,9 +1916,29 @@ return L.view.extend({
 		 * 回到前台立即恢复并补一次刷新，避免看到陈旧读数。
 		 */
 		var onVisibility = function () {
-			if (document.hidden) { resetTimers(false); return; }
+			if (document.hidden) {
+				/* ★ 1Hz 的速率采样也要停：页面看不见时每秒读一次接口计数器是纯浪费，
+				   而它又是唯一不受 resetTimers 管辖的定时器。 */
+				if (rateTimer) { clearInterval(rateTimer); rateTimer = null; }
+				resetTimers(false);
+				return;
+			}
 			resetTimers(ar.isEnabled(), ar.getInterval());
 			refreshAll();
+			if (rateOn && !rateTimer) {
+				/* ★ 显式的语义决定：1Hz 速率采样只受「实时监测」开关管辖，
+				   不受「自动刷新」开关约束 —— 前者是这张卡自己的开关（用户勾了
+				   就是要看实时曲线），后者管的是读数类轮询。且它走的是 ubus
+				   netrate（读接口计数器），**不占 AT 串口**，与红线里的
+				   「AT 通道独占」不是一回事，所以不跟着 ar.isEnabled() 一起停。 */
+				/* ★ 回到前台必须丢弃旧基准：否则 dt 等于整段隐藏时长，
+				   字节差除以一个巨大的 dt 会落出一个被摊薄的假谷值，
+				   还会污染峰值判定（峰值只升不降，假谷值虽不抬峰值，
+				   但曲线上会留一段平躺的怪台阶）。 */
+				rateSample = null;
+				rateTimer = setInterval(sampleRate, 1000);
+				sampleRate();
+			}
 		};
 		document.addEventListener('visibilitychange', onVisibility);
 
@@ -1857,7 +1958,6 @@ return L.view.extend({
 		renderSpeed();
 		renderFlow();
 		renderTemp();
-		renderConnDetail();
 		renderMCS();
 
 		/* 自定义 DNS 是 UCI 侧的静态配置，跟 AT 无关，单独加载；
@@ -1895,6 +1995,9 @@ return L.view.extend({
 			if (rateTimer) clearInterval(rateTimer);
 			timer = slowTimer = rateTimer = null;
 			if (onVisibility) document.removeEventListener('visibilitychange', onVisibility);
+			if (chartRO) { chartRO.disconnect(); chartRO = null; }
+			else if (onResize) { window.removeEventListener('resize', onResize); }
+			onResize = null;
 			if (AtWs.client && AtWs.client.clearReadCache) AtWs.client.clearReadCache();
 		};
 		page._onDispose(self._dispose);

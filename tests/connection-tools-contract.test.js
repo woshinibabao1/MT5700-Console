@@ -207,7 +207,23 @@ ok('★ 流量清零仍保留按钮与二次确认（不可逆，不能做成自
 	/function clearFlowStats[\s\S]{0,300}Mt5700\.confirm/.test(nsSrc));
 
 ok('流量清零下发 AT^DSFLOWCLR', /sendCommand\('AT\^DSFLOWCLR'\)/.test(nsSrc));
-ok('清零后立刻重取流量并重绘', /getFlow\(\)\.then\(renderFlow\)/.test(nsSrc));
+/* ★ 两个 handler 都要有：只给 onFulfilled 时，取新流量失败就不重绘，
+   界面停在清零前的旧数字 —— 看起来像「没清成功」，而实际已经清了。
+   这是「失败路径被误读」的一种，所以钉死第二个 handler。 */
+ok('清零后重取流量并重绘（失败分支置空 state.flow 后重绘，不留旧数字）',
+	/getFlow\(\)\.then\(renderFlow, function \(\) \{\s*state\.flow = \{\};/.test(nsSrc));
+const rateBarBlock = (function () {
+	const a = nsSrc.indexOf("var rateChk = E('input'");
+	const b = nsSrc.indexOf('rateExtra.appendChild(rateBar)');
+	return (a >= 0 && b > a) ? nsSrc.slice(a, b) : '';
+})();
+ok('★ 清零入口挂在「速率与流量」卡头（与流量数字同一张卡）',
+	rateBarBlock.length > 0 && /dangerButton\('清零流量', clearFlowStats\)/.test(rateBarBlock));
+ok('★ 连接工具里不再有独立的清零块（已迁走）',
+	!/toolsBody\.appendChild\(buildFlowClearBlock\(\)\)/.test(nsSrc)
+	&& !/buildFlowClearBlock/.test(nsSrc));
+ok('★ 卡头「实时监测」的文字没有被 E() 静默丢掉（E 只挂第 3 参）',
+	/var rateLabel = E\('label', \{\}, rateChk\);[\s\S]{0,160}createTextNode\(' 实时监测'\)/.test(nsSrc));
 ok('ADC 用 AT^ADCREADEX=', /sendCommand\('AT\^ADCREADEX=' \+ id\)/.test(nsSrc));
 ok('ADC 管脚数量不写死（逐个试、失败即停）',
 	/var ADC_PIN_IDS = \[/.test(nsSrc) && /if \(v == null\) \{ stopped = true; return; \}/.test(nsSrc));

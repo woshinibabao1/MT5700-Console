@@ -241,10 +241,14 @@ return L.view.extend({
 				+ '下载过程要与运营商服务器通信，期间请保持网络畅通、不要断电。'));
 			var host = E('div', { 'class': 'mt5700-mt-sm' });
 			zone.appendChild(host);
-			zone.appendChild(E('div', { 'class': 'mt5700-mt-sm' },
-				Mt5700.button('添加 Profile', function () { openAddWizard(host); }, 'primary'),
-				document.createTextNode(' '),
-				Mt5700.ghostButton('处理待发回执', function () { processNotifications(); })));
+			/* ★ E(tag, attrs, child) 只挂载第 3 个参数、第 4 个起被**静默丢弃**。
+			   原来这里一次传了 5 个参数，结果「处理待发回执」按钮从来没被挂上去
+			   —— 只有「添加 Profile」可见。必须逐个 appendChild。 */
+			var actRow = E('div', { 'class': 'mt5700-mt-sm' });
+			actRow.appendChild(Mt5700.button('添加 Profile', function () { openAddWizard(host); }, 'primary'));
+			actRow.appendChild(document.createTextNode(' '));
+			actRow.appendChild(Mt5700.ghostButton('处理待发回执', function () { processNotifications(); }));
+			zone.appendChild(actRow);
 			zone.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
 				'「处理待发回执」用于补发卡上没发出去的安装结果：'
 				+ '装完 Profile 后卡会生成一条回执，服务器收不到就会一直挂着未确认。'));

@@ -819,8 +819,27 @@ var Mt5700 = (function () {
 			function f(v) { return v >= 1e6 ? (v / 1e6).toFixed(2) + ' Mbps' : v >= 1e3 ? (v / 1e3).toFixed(1) + ' Kbps' : Math.round(v) + ' bps'; }
 			return '↓ ' + f(p.down || 0) + ' · ↑ ' + f(p.up || 0);
 		}
+		/*
+		 * ★ rect 缓存（性能）：mousemove 是按事件触发的（鼠标移动时可到每秒上百次），
+		 *   每次都 getBoundingClientRect() 会强制同步布局（MDN Element.getBoundingClientRect：
+		 *   读取几何属性会触发 reflow），而曲线图在 1Hz 重绘、鼠标不动时也不会停止事件。
+		 *   改在 mouseenter 量一次、mouseleave 丢弃。
+		 *   兜底：若 hoverRect 为空（元素在光标下被重建、还没走 mouseenter）就现量一次。
+		 *   ★ 陈旧风险**不要**指望「图表每秒重建」来自愈 —— 重建恰恰是 tooltip 闪断的
+		 *     根源：子树重建后 wrap 与 tip 都是新对象、hoverRect 归 null、show 类丢失，
+		 *     而光标静止时浏览器不会补发 mousemove，**要等用户动一下鼠标才恢复**。
+		 *     本缓存既不修复也不加重它（改前每事件重取 rect，同样会闪断）。
+		 *     根治要把 tip 提到每秒重建的子树之外，见 FRONTEND_REVIEW_REPORT.md 第九节。
+		 *     缓存真正引入的偏差只有一条：悬停期间容器宽度变了，旧 rect 会残留到
+		 *     mouseleave（改前下一次 mousemove 就自愈）。
+		 */
+		var hoverRect = null;
+		wrap.addEventListener('mouseenter', function () {
+			hoverRect = wrap.getBoundingClientRect();
+		});
 		wrap.addEventListener('mousemove', function (e) {
-			var rect = wrap.getBoundingClientRect();
+			if (!hoverRect) hoverRect = wrap.getBoundingClientRect();
+			var rect = hoverRect;
 			var ratio = (e.clientX - rect.left) / Math.max(1, rect.width);
 			var idx = Math.max(0, Math.min(n - 1, Math.round(ratio * (n - 1))));
 			var p = data[idx];
@@ -832,6 +851,7 @@ var Mt5700 = (function () {
 			tip.classList.add('show');
 		});
 		wrap.addEventListener('mouseleave', function () {
+			hoverRect = null;
 			tip.classList.remove('show');
 		});
 
