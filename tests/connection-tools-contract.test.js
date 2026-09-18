@@ -242,6 +242,9 @@ ok('★ ADC 进页面自动读一次（连上就调 readAdcPins，不用先点�
 	/refreshAll\(\);[\s\S]{0,300}readAdcPins\(\);/.test(nsSrc));
 ok('ADC 有结果后按钮变「重新读取」',
 	/t\.rows\.length \? '重新读取' : '读取'/.test(nsSrc));
+ok('★ ADC 结果一行铺开（不再用「管脚/电平」表格，省掉表头 + N 行）',
+	/mt5700-inline mt5700-grow/.test(nsSrc)
+	&& !/Mt5700\.table\(\['管脚', '电平'\]/.test(nsSrc));
 
 /* ---------- 7. 沿用：PDCP / CGSMS 解析（解析器仍在 parse.js） ---------- */
 

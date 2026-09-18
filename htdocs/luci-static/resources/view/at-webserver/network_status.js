@@ -376,27 +376,33 @@ return L.view.extend({
 		}
 
 		/* ---------- ① ADC 管脚电压（手册 11.5） ----------
-		 * 进页面自动读一次（见底部初始化），结果直接铺在表里，不用先点按钮；
+		 * 进页面自动读一次（见底部初始化），结果一行铺开，不用先点按钮；
 		 * 按钮只是「再读一次」。5 条只读查询，失败即停，不会在模组里留下任何状态。 */
 
 		function buildAdcBlock() {
 			var t = state.tools.adc;
-			var box = toolBlock('ADC 管脚电压',
-				Mt5700.ghostButton(t.busy ? '读取中…' : (t.rows.length ? '重新读取' : '读取'), readAdcPins));
-			if (t.err && !t.rows.length) {
-				box.appendChild(Mt5700.empty(t.err));
-			} else if (!t.rows.length) {
-				box.appendChild(E('p', { 'class': 'mt5700-hint' },
-					t.busy ? '正在读取各 ADC 管脚（手册 11.5，单位 mV）…'
-						: '进页面自动读取；没出结果时点右侧按钮再读一次。'));
-			} else {
-				box.appendChild(Mt5700.table(['管脚', '电平'],
-					t.rows.map(function (r) { return ['ADC' + r.id, r.value + ' mV']; }),
-					{ striped: true }));
+			var btn = Mt5700.ghostButton(t.busy ? '读取中…' : (t.rows.length ? '重新读取' : '读取'), readAdcPins);
+			var box = toolBlock('ADC 管脚电压', btn);
+
+			if (t.rows.length) {
+				/* 值直接排进标题那一行：原先是「表头 + N 行 + 两行说明」，
+				   3 个管脚要吃掉 6 行高度；现在整块只有 2 行。
+				   管脚一律从 0 连续编号（逐个试、第一条失败即停），
+				   所以「ADC0 ADC1 ADC2」本身就是顺序，表头是重复信息。 */
+				var vals = E('span', { 'class': 'mt5700-inline mt5700-grow' });
+				t.rows.forEach(function (r, i) {
+					if (i) vals.appendChild(E('span', { 'class': 'mt5700-hint' }, '·'));
+					vals.appendChild(E('span', { 'class': 'mt5700-mono' }, 'ADC' + r.id + ' ' + r.value));
+				});
+				vals.appendChild(E('span', { 'class': 'mt5700-hint' }, 'mV'));
+				box.firstChild.insertBefore(vals, btn);
 				box.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-					'★ 手册只说「不同产品的 ADC 管脚数量不同」，没有说明每个管脚接的是什么'
-					+ ' —— 所以这里只给原始值，不解读成供电电压、也不设健康阈值。'
-					+ '（本机实测 3 个管脚分别为 1798 / 1799 / 1799 mV，属正常读数。）'));
+					'手册未说明各管脚接的是什么 —— 只给原始电平，不解读、不设阈值。'));
+			} else if (t.err) {
+				box.appendChild(Mt5700.empty(t.err));
+			} else {
+				box.appendChild(E('p', { 'class': 'mt5700-hint' },
+					t.busy ? '正在读取各 ADC 管脚…' : '进页面自动读取；没出结果时点右侧按钮再读一次。'));
 			}
 			return box;
 		}

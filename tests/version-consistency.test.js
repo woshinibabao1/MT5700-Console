@@ -34,18 +34,21 @@ const ROOT = path.join(__dirname, '..');
 const MAIN_PKG = 'at-webserver';
 /*
  * 确实与本项目同版本号的第三方包（人工确认过 crates.io 上存在）写这里。
+ * ★ 写成「包名 → 版本号」而不是名单：名单一旦加过就永久生效，将来这些包
+ *   真被全局替换误伤到**别的**版本号也会被放过；绑死版本号则只对得上当时那一版。
  *
  * icu_* 六件套：升到 2.3.0 时被本守卫拦下，经 `git show HEAD:src/rust/Cargo.lock`
  * 核对，这六个在**改动之前**就已经是 2.3.0（icu4x 2.3.0 系列），不是升版误伤。
- * icu_provider：升到 2.3.1 时被拦下，同样核对过——它在改动之前就是 2.3.1。
+ * icu_provider（2.3.1）、percent-encoding（2.3.2）同理，都是改动前就已是该版本。
  * 判据用「改动前后是否一致」而不是「查网页」—— lock 是 cargo 从 registry 解析
  * 出来的，里面写了就说明 crates.io 上确有此版本。
  */
-const KNOWN_SAME_VERSION = [
-	'icu_collections', 'icu_locale_core', 'icu_normalizer',
-	'icu_normalizer_data', 'icu_properties', 'icu_properties_data',
-	'icu_provider'
-];
+const KNOWN_SAME_VERSION = {
+	icu_collections: '2.3.0', icu_locale_core: '2.3.0', icu_normalizer: '2.3.0',
+	icu_normalizer_data: '2.3.0', icu_properties: '2.3.0', icu_properties_data: '2.3.0',
+	icu_provider: '2.3.1',
+	'percent-encoding': '2.3.2'
+};
 
 let pass = 0;
 const fails = [];
@@ -110,7 +113,7 @@ const others = blocks.filter(function (b) {
 	return b.name !== MAIN_PKG && b.version === (tomlV || lockV);
 });
 const unexpected = others.filter(function (b) {
-	return KNOWN_SAME_VERSION.indexOf(b.name) === -1;
+	return KNOWN_SAME_VERSION[b.name] !== b.version;
 });
 ok('Cargo.lock 中没有别的包被改成与本项目同版本号（升版全局替换的典型误伤）',
 	unexpected.length === 0,
