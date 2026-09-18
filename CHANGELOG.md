@@ -5,6 +5,42 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.4] - 2026-09-18
+
+### 变更（eSIM / eUICC 管理）
+
+- **回执（Notifications）闭环**：新增 `Euicc.listNotifications` / `Euicc.removeNotification`
+  接口，esim.js 增加「待发回执」常驻卡片与通知表格（单个移除 / 批量发送全部），
+  删除或启用 Profile 后在成功路径主动提醒发回执，并补「处理待发回执」解救按钮
+- **下载回执可视化**：runDownload 完成后若 ES10 回执标记 `notification.failed` 或
+  卡上未产生回执（`total=0`），顶部红色 danger 横幅提示，不再静默当作成功
+- **下载可中途取消**：runDownload 增加 `aborted` 标志与取消按钮（二次确认后
+  `aborted=true` 并在已拿到事务号时调用 `Euicc.cancelSession`）；事务号经
+  `onTransactionId` 回调外抛；取消路径按非致命错误处理
+- **ES10 结果 null 当成功加固**：toggleProfile（启用/禁用）中，ES10 结果 `=== null`
+  视为成功但记 warn，避免误报「删除/启用失败」；下载流程不涉及该分支（避免把未实现写成已实现）
+- **有限轮询替代固定 12s**：toggleProfile 改为退避轮询（6s→12s→24s，最多 3 轮，
+  `attempt < 3`），busy 时计入 attempt 并重排而非静默丢弃，每轮 timer 注册进
+  `cleanups`，新增「刷新列表」按钮
+
+### 修复
+
+- **6985 文案去「重试」**：卡片拒绝操作（疑似 M2M eUICC / 锁卡）的提示与说明去掉
+  诱导反复重试的话术，改为「请勿反复尝试，再试也不会改变结果」
+- **SM-DP+ 地址可见**：下载/通知相关路径暴露并展示 SM-DP+ 地址，便于排障
+
+### 未实现（接口位已留 / 明确不改）
+
+- **EUICCInfo2 诊断（等换卡）**：仅保留接口位，待换卡后补齐
+- **下载预览 / SM-DS 配置**：方案明确不改，本次未实现
+
+> 说明：本轮经由 agent-council `build` 四角色会审产出（提案 → 构建 → 审查 → 收口）。
+> 审查阶段拦下 4 条 blocker：① 页面主渲染并发开两条 ISD-R 逻辑通道（撞「AT 通道独占」红线，
+> 已改为串行链）；② 通知表格逐行「发送」实为全量发送并不可逆删除全部（已删掉该入口，
+> 只留「发送全部」+ 逐行「移除」）；③ 轮询 busy 时静默放弃且无退避（改为计数重排 + 6/12/24s
+> 退避）；④ 「取消下载」按钮流程结束后仍可点、会对已完成会话再发一次 cancelSession 且失败静默
+> （改为完成后禁用并移除）。以上均已修复并经主控实测复核。
+
 ## [2.3.3] - 2026-09-18
 
 ### 修复

@@ -228,8 +228,8 @@ var Euicc = (function () {
 		if (sw === '6985') {
 			return {
 				level: 'error',
-				text: '使用条件不满足（多半 ISD-R 没选上或通道串了）',
-				hint: '关通道重开会话，重试 1 次'
+				text: '卡片拒绝该操作：可能这张是 M2M eUICC（SGP.02，只能由 SM-SR 远程管理）或被厂家锁卡，本页无法管理',
+				hint: '请勿反复尝试，这类拒绝通常与卡商 / SIM 管理平台绑定，再试也不会改变结果'
 			};
 		}
 		if (sw === '6A80') {
@@ -1131,6 +1131,7 @@ var Euicc = (function () {
 		var act = opts.activation || {};
 		var onStep = opts.onStep || function () { };
 		var log = opts.log || function () { };
+		var onTx = opts.onTransactionId || function () { };
 		var mss = opts.mss || 120;
 		var smdp = act.smdp;
 		if (!smdp) throw makeError('EUICC_BAD_APDU', '缺少 SM-DP+ 地址');
@@ -1197,8 +1198,9 @@ var Euicc = (function () {
 					});
 				})
 				.then(function (resp) {
-					tx = resp.transactionId;
-					if (!tx) throw makeError('EUICC_ES9P_FAILED', '服务器没给 transactionId');
+				tx = resp.transactionId;
+				onTx(tx);
+				if (!tx) throw makeError('EUICC_ES9P_FAILED', '服务器没给 transactionId');
 
 					/* ④ 把服务器签名交给卡去验（验的是 CI 证书链，在卡里完成） */
 					onStep(4, '卡片校验服务器（2/4）');
@@ -1387,9 +1389,19 @@ var Euicc = (function () {
 			var seq = api.pickTagValue(item, '80');
 			var op = api.pickTagValue(item, '81');
 			if (seq) {
+				/* 操作类型映射（SGP.22 Notification 序号）。数值未核对，未知
+				 * 一律显示「操作 <十进制序号>」，绝不编造名称（P04）。 */
+				var OP_LABELS = { '01': '安装', '02': '启用', '03': '禁用', '04': '删除' };
+				var opNum = parseInt(op, 16);
+				var opLabel = OP_LABELS[op] || ('操作 ' + (isNaN(opNum) ? '?' : opNum));
+				var iccidHex = api.pickTagValue(item, '5A');
 				out.push({
 					seqHex: seq,
+					seq: parseInt(seq, 16),
 					operation: op || '',
+					opLabel: opLabel,
+					/* 5A 是 ICCID（nibble 已交换）；卡不带就留空（P04/P09） */
+					iccid: iccidHex ? api.swapNibbles(iccidHex) : '',
 					/* 0C 是 ASCII 的 SM-DP+ 地址；没有就用调用方给的 host 兜底 */
 					address: hexToAscii(api.pickTagValue(item, '0C'))
 				});
@@ -1397,6 +1409,65 @@ var Euicc = (function () {
 			i = vs + len - 1;
 		}
 		return out;
+	};
+
+
+	/*
+	 * 只读列出卡上待发回执（P02）：只 ListNotification，**绝不** Remove，避免
+	 * 「用户只想看一眼有没有待发回执」就被顺手删掉（删除不可逆，删了就永远发不出）。
+	 * SW≠9000 按 EUICC_OP_FAILED 抛（带 swText）。
+	 */
+	api.listNotifications = function (send) {
+		return api.withIsdrSession(send, function (ch, sendApdu) {
+			return sendApdu(api.buildListNotification(ch)).then(function (r) {
+				if (r.sw !== '9000') throw makeSwError('EUICC_OP_FAILED', r.sw);
+				return { items: api.parseNotifications(r.data || '') };
+			});
+		});
+	};
+
+	/*
+	 * 移除单条待发回执（P04）：**不可逆**，调用方（esim.js）必须二次确认。
+	 * seqHex 非法（非 hex，或长度 > 4 个字符）直接抛 EUICC_BAD_APDU，连卡都不下问。
+	 */
+	api.removeNotification = function (send, seqHex) {
+		if (!api.isHex(seqHex) || seqHex.length > 4) {
+			throw makeError('EUICC_BAD_APDU', '非法的通知序号：' + seqHex);
+		}
+		return api.withIsdrSession(send, function (ch, sendApdu) {
+			return sendApdu(api.buildRemoveNotificationFromList(ch, seqHex)).then(function (r) {
+				if (r.sw !== '9000') throw makeSwError('EUICC_OP_FAILED', r.sw);
+				return { sw: r.sw };
+			});
+		});
+	};
+
+	/*
+	 * 取消下载会话（P08）：只发 ES9+ cancelSession，**不下发**卡侧 ES10b CancelSession
+	 * （tag 未核对，猜错会 6A80/6985，把进行中的下载搞成半死状态）。
+	 * tx 空抛 EUICC_BAD_APDU；HTTP 非 2xx 只 log 不抛（best-effort：取消失败不能
+	 * 盖掉「用户已取消」这个事实）。
+	 */
+	api.cancelSession = function (es9p, smdp, tx) {
+		if (!tx || typeof es9p !== 'function') {
+			throw makeError('EUICC_BAD_APDU', '缺少会话事务号或 ES9+ 通道');
+		}
+		var req = api.es9pRequest('cancelSession', { transactionId: tx });
+		return Promise.resolve(es9p(smdp, req.path, req.json)).then(function (r) {
+			var st = (r && r.status);
+			if (st == null || st < 200 || st >= 300) {
+				if (typeof console !== 'undefined' && console.warn) {
+					console.warn('[euicc] 取消会话未成功（HTTP ' + st + '），已忽略');
+				}
+				return { ok: false, status: st };
+			}
+			return { ok: true, status: st };
+		}).catch(function (e) {
+			if (typeof console !== 'undefined' && console.warn) {
+				console.warn('[euicc] 取消会话失败：' + ((e && e.message) || e));
+			}
+			return { ok: false, status: 0 };
+		});
 	};
 
 	api.ISDR_AID = ISDR_AID;

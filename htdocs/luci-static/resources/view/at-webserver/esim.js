@@ -230,6 +230,9 @@ return L.view.extend({
 				var off = Mt5700.button('添加 Profile', function () { }, 'primary');
 				off.disabled = true;
 				zone.appendChild(off);
+				/* P02：列出 / 补发待发回执是纯 APDU，不需要 ES9+，故即便下载不可用也保留入口，
+				 *      避免用户在没有 curl 的设备上连「卡上有没有待发回执」的知情权都没有。 */
+				zone.appendChild(Mt5700.ghostButton('处理待发回执', function () { processNotifications(); }));
 				return zone;
 			}
 
@@ -494,35 +497,89 @@ return L.view.extend({
 				busy = true;
 				actions.innerHTML = '';
 				logBox.innerHTML = '';
+				var aborted = false;   /* P08：取消下载标志 */
+				var tx = null;          /* 下载会话事务号，取消时通知服务器 */
 				var stepEl = E('div', { 'class': 'mt5700-notice' }, '准备中…');
 				logBox.appendChild(stepEl);
 				var pre = E('div', { 'class': 'mt5700-mono' });
 				logBox.appendChild(pre);
 				var lines = [];
-				function log(s) {
-					lines.push(String(s));
-					pre.textContent = lines.slice(-40).join('\n');
-				}
-				Euicc.downloadProfile(send, es9pSend, {
-					activation: p,
-					confirmationCode: cc,
-					onStep: function (n, text) {
-						stepEl.textContent = '步骤 ' + n + '/10：' + text;
-					},
-					log: log
-				}).then(function (r) {
-					busy = false;
-					stepEl.textContent = '下载完成。';
-					Mt5700.success('Profile 已写入，正在刷新列表…');
-					var listCard = findListCard();
-					if (listCard) later(function () { loadProfiles(listCard); }, 3000);
-					else later(function () { render(); }, 3000);
-				}).catch(function (e) {
-					busy = false;
-					stepEl.textContent = '下载失败：' + ((e && e.message) || '未知错误');
-					handleErr(e);
-				});
+			function log(s) {
+				if (aborted) throw abortError();
+				lines.push(String(s));
+				pre.textContent = lines.slice(-40).join('\n');
 			}
+			/* P08：取消下载时由取消按钮置位；onStep / log 每块前检查，抛 EUICC_OP_FAILED 中止链路。 */
+			function onStep(n, text) {
+				if (aborted) throw abortError();
+				stepEl.textContent = '步骤 ' + n + '/10：' + text;
+			}
+			function abortError() {
+				var e = new Error('已取消');
+				e.code = 'EUICC_OP_FAILED';
+				return e;
+			}
+			/* P08：下载进行中出现「取消下载」按钮，二次确认后中止本地流程并 best-effort 通知服务器取消会话 */
+			var cancelBtn = Mt5700.ghostButton('取消下载', function () {
+				if (aborted) return;
+				Mt5700.confirm('确定取消下载？已下载部分不会写入，正在通知服务器取消会话。', function () {
+					aborted = true;
+					if (tx) {
+						/* 只发 ES9+ cancelSession，不下发卡侧 ES10b cancel（tag 未核对） */
+						Euicc.cancelSession(es9pSend, p.smdp, tx).catch(function (e) {
+							if (typeof console !== 'undefined' && console.warn) {
+								console.warn('[esim] 取消会话失败：' + ((e && e.message) || e));
+							}
+						});
+					}
+				}, '取消下载');
+			});
+			actions.appendChild(cancelBtn);
+
+			Euicc.downloadProfile(send, es9pSend, {
+				activation: p,
+				confirmationCode: cc,
+				onStep: onStep,
+				log: log,
+				onTransactionId: function (t) { tx = t; }
+			}).then(function (r) {
+				busy = false;
+				/* R04：流程已结束，禁用并移除「取消下载」入口，避免对已完成会话重复下发写命令 */
+				cancelBtn.disabled = true;
+				if (cancelBtn.parentNode) cancelBtn.parentNode.removeChild(cancelBtn);
+				stepEl.textContent = '下载完成。';
+				/* P01 + R05：装上了但回执没发出 / 卡上没产生回执（total=0）都按异常出红色横幅。
+				 * 按 SGP.22，安装成功后卡上理应产生一条待发回执，一条都没有本身即异常。 */
+				var nf = r.notification;
+				if (!nf || nf.failed || !(nf && nf.total > 0)) {
+					var msg;
+					if (nf && nf.failed) {
+						msg = 'Profile 已装上，但安装回执没发出去；服务器侧这份 Profile 可能一直挂未确认，删除前请先「处理待发回执」。';
+					} else {
+						msg = 'Profile 已装上，但卡上没有产生安装回执（total=0）；服务器侧可能一直挂未确认，删除前请先「处理待发回执」。';
+					}
+					var warn = E('div', { 'class': 'mt5700-notice-danger' }, msg);
+					body.insertBefore(warn, body.firstChild);
+					later(function () { if (warn.parentNode) warn.parentNode.removeChild(warn); }, 15000);
+				}
+				Mt5700.success('Profile 已写入，正在刷新列表…');
+				var listCard = findListCard();
+				if (listCard) later(function () { loadProfiles(listCard); }, 3000);
+				else later(function () { render(); }, 3000);
+			}).catch(function (e) {
+				busy = false;
+				/* R04：流程已结束，禁用并移除「取消下载」入口 */
+				cancelBtn.disabled = true;
+				if (cancelBtn.parentNode) cancelBtn.parentNode.removeChild(cancelBtn);
+				/* P08：用户主动取消不算错误，仅提示，不弹红色错误 */
+				if (aborted && e && e.code === 'EUICC_OP_FAILED') {
+					stepEl.textContent = '已取消下载。';
+					return;
+				}
+				stepEl.textContent = '下载失败：' + ((e && e.message) || '未知错误');
+				handleErr(e);
+			});
+		}
 
 			paintInput();
 			actions.appendChild(Mt5700.primaryButton('开始下载', function () { start(); }));
@@ -551,6 +608,99 @@ return L.view.extend({
 			});
 		}
 
+		/*
+		 * P02：删除 / 启用 / 禁用成功后，提醒用户「卡上可能还有没发出去的安装回执」。
+		 * 只读列出（纯 APDU），不触碰 ES9+；有则插一条黄色横幅 + 「处理待发回执」按钮。
+		 */
+		function showPendingReceipts() {
+			Euicc.listNotifications(send).then(function (r) {
+				var items = r.items || [];
+				if (!items.length) return;
+				var banner = E('div', { 'class': 'mt5700-notice-warning' },
+					'卡上有 ' + items.length + ' 条待发回执未发出；删除 / 切换前建议先处理，否则服务器侧可能一直挂未确认。');
+				var btn = Mt5700.ghostButton('处理待发回执', function () { processNotifications(); });
+				banner.appendChild(document.createTextNode(' '));
+				banner.appendChild(btn);
+				body.insertBefore(banner, body.firstChild);
+				later(function () {
+					if (banner.parentNode) banner.parentNode.removeChild(banner);
+				}, 15000);
+			}).catch(function () { /* 列出失败只静默，不掩盖主操作的成功提示 */ });
+		}
+
+		/* ---------- 待发回执管理（P04 + P09） ----------
+		 * 一张常驻卡片，列出卡上所有待发回执并支持「移除」（单条）与「发送全部」（批量）。
+		 * 移除是不可逆操作，必须经 Mt5700.confirm 二次确认。发往地址（来自卡上 0C）
+		 * 在表格中可见（P09）。R02：删掉逐行「发送」——它其实会整批发送并删除，与文案不符，
+		 * 且制造一条多余不可逆路径；只保留「发送全部」+ 逐行「移除」。 */
+		function loadNotifications(notifCard) {
+			Euicc.listNotifications(send).then(function (r) {
+				renderNotificationTable(notifCard, r.items || []);
+			}).catch(function (e) {
+				var code = (e && e.code) || '';
+				/* R07：整页已切到其它引导态（无卡 / 无 CSIM），提示无意义且会往已摘除的 DOM 写，静默 */
+				if (code === 'EUICC_NO_EUICC' || code === 'EUICC_NO_CSIM') return;
+				notifCard._body.innerHTML = '';
+				notifCard._body.appendChild(E('div', { 'class': 'mt5700-notice-warning' },
+					'读取待发回执失败：' + ((e && e.message) || code || '')));
+			});
+		}
+
+		function renderNotificationTable(notifCard, items) {
+			notifCard._body.innerHTML = '';
+			if (!items.length) {
+				notifCard._body.appendChild(E('div', { 'class': 'mt5700-hint' }, '卡上没有待发的回执。'));
+				return;
+			}
+			var headers = ['序号', 'ICCID', '操作类型', '发往', '操作'];
+			var rows = items.map(function (n) {
+				var actions = E('div');
+				/* P04：移除不可逆，必须二次确认（R02：删掉逐行「发送」，只留移除 + 批量发送全部） */
+				actions.appendChild(Mt5700.dangerButton('移除', function () {
+					removeNotification(notifCard, n);
+				}));
+				return [
+					n.seqHex,
+					n.iccid || '—',
+					n.opLabel || ('操作 ' + (isNaN(parseInt(n.operation, 16)) ? '?' : parseInt(n.operation, 16))),
+					n.address || '（通知未提供地址）',
+					actions
+				];
+			});
+			notifCard._body.appendChild(Mt5700.table(headers, rows, { striped: true }));
+			var batch = Mt5700.button('发送全部', function () { sendAllNotifications(notifCard); }, 'primary');
+			notifCard._body.appendChild(batch);
+		}
+
+		function sendAllNotifications(notifCard) {
+			if (busy) return;
+			busy = true;
+			Euicc.processNotifications(send, es9pSend, {}).then(function (r) {
+				busy = false;
+				Mt5700.success('已发出 ' + r.sent + '/' + r.total + ' 条回执');
+				loadNotifications(notifCard);
+			}).catch(function (e) {
+				busy = false;
+				handleErr(e);
+			});
+		}
+
+		/* 移除一条回执（P04）：不可逆，二次确认后才下发 removeNotification */
+		function removeNotification(notifCard, n) {
+			if (busy) return;
+			Mt5700.confirm('移除回执不可逆：删掉后这条安装结果就再也发不出去，确定移除？', function () {
+				busy = true;
+				Euicc.removeNotification(send, n.seqHex).then(function () {
+					busy = false;
+					Mt5700.success('已移除回执 ' + n.seqHex);
+					loadNotifications(notifCard);
+				}).catch(function (e) {
+					busy = false;
+					handleErr(e);
+				});
+			}, '移除');
+		}
+
 
 		/* ---------- 正常态：EID + Profile 表 + 操作 ---------- */
 		function renderOk(p) {
@@ -572,13 +722,27 @@ return L.view.extend({
 			listCard._body.appendChild(Mt5700.loading('正在读取 Profile 列表…'));
 			body.appendChild(listCard);
 
-			loadProfiles(listCard);
+			/*
+			 * R01：Profile 列表与待发回执都各自开 ISD-R 逻辑通道（withIsdrSession）。
+			 * 卡片只有 1~3 条逻辑通道，两个读操作并发会引发 open 失败（6A81/6A82）双双读不出。
+			 * 串行化：等 loadProfiles 完成（其通道已关闭）再创建并读取回执卡片，零成本满足通道独占。
+			 * 顺带解决 R07 的竞态：notifCard 的创建挪到 loadProfiles 成功之后，整页切走时不再有
+			 * 「往被清空的 DOM 写报错」的窗口。
+			 */
+			loadProfiles(listCard).then(function () {
+				/* P04 + P09：常驻「待发回执」卡片，列出卡上所有待发回执并支持移除（批量） */
+				if (!body.contains(listCard)) return; /* loadProfiles 失败已切到其它引导态，不再挂卡片 */
+				var notifCard = Mt5700.card('待发回执', '卡上攒着、还没发给运营商的安装结果；删除了就再也发不出去（不可逆）');
+				notifCard._body.appendChild(Mt5700.loading('正在读取待发回执…'));
+				body.appendChild(notifCard);
+				loadNotifications(notifCard);
+			});
 		}
 
 		function loadProfiles(listCard) {
-			if (busy) return;
+			if (busy) return Promise.resolve();
 			busy = true;
-			Euicc.listProfiles(send).then(function (res) {
+			return Euicc.listProfiles(send).then(function (res) {
 				busy = false;
 				renderTable(listCard, res.list || []);
 			}).catch(function (e) {
@@ -613,6 +777,12 @@ return L.view.extend({
 			});
 			listCard._body.appendChild(Mt5700.table(headers, rows));
 			listCard._body.appendChild(buildAddZone());
+			/* P07：手动刷新入口（切换 Profile 后卡片正在重注册，自动刷新可能失败，
+			 *      给用户一个兜底按钮，避免「列表卡在旧状态」又无处下手）。 */
+			listCard._body.appendChild(Mt5700.ghostButton('刷新列表', function () {
+				if (busy) return;
+				loadProfiles(listCard);
+			}));
 		}
 
 		/* ---------- P09 确认策略 ---------- */
@@ -623,37 +793,68 @@ return L.view.extend({
 			Mt5700.confirm('确定' + verb + '该 Profile？操作后网络将短暂中断并重注册（约 10~30 秒）。', function () {
 				busy = true;
 				var op = enable ? Euicc.enableProfile : Euicc.disableProfile;
-				op(send, { kind: 'iccid', hex: p.iccidRaw }, true).then(function () {
+				op(send, { kind: 'iccid', hex: p.iccidRaw }, true).then(function (r) {
 					busy = false;
+					/* P06：ES10 结果码识别不出（result === null）按误报成功处理——这里纠正：
+					 *      提示「已下发但未确认」，且不自动刷新覆盖旧列表，让用户手动确认。 */
+					if (r && r.result === null) {
+						var warn = E('div', { 'class': 'mt5700-notice-warning' },
+							verb + '已下发，但卡片未返回结果码，请点击「刷新列表」确认状态。');
+						body.insertBefore(warn, body.firstChild);
+						later(function () { if (warn.parentNode) warn.parentNode.removeChild(warn); }, 10000);
+						return;
+					}
 					var note = E('div', { 'class': 'mt5700-notice' },
 						verb + '成功，网络将中断并重注册，约 10~30 秒后恢复。');
 					body.insertBefore(note, body.firstChild);
 					later(function () { if (note.parentNode) note.parentNode.removeChild(note); }, 8000);
-					/* R07：成功后模组正在重注册，CSIM 大概率 +CME ERROR:14 / 无响应。
-					 * 延后约 12 秒再刷新；刷新失败保留旧列表，只用提示，不用 errorState 覆盖。 */
-					var listCard = findListCard();
-					if (listCard) {
-						later(function () {
-							if (busy) return; /* 期间用户已发起其它操作则不抢 */
-							busy = true;
-							Euicc.listProfiles(send).then(function (res) {
-								busy = false;
-								renderTable(listCard, res.list || []);
-							}).catch(function () {
-								busy = false;
-								/* 保留旧列表，仅提示，不覆盖为 errorState */
-								if (!listCard._body.querySelector('.mt5700-notice')) {
-									listCard._body.appendChild(E('div', { 'class': 'mt5700-notice' },
-										'卡片刷新中，请稍后点击重试'));
-								}
-							});
-						}, 12000);
-					}
+					/* P07 + R03：有限轮询替换一刀切的 12 秒；回执读取挪到轮询结束之后串行调用 */
+					pollListAfterToggle();
 				}).catch(function (e) {
 					busy = false;
 					handleErr(e);
 				});
 			});
+		}
+
+		/* P07 + R03：切换后有限轮询刷新 Profile 列表。
+		 * 退避 6s→12s→24s（覆盖「卡片正忙」窗口），attempt 统一封顶 3 次；
+		 * 期间用户已发起其它操作（busy）时计入 attempt 并重排，而非静默丢弃；
+		 * 回执读取（showPendingReceipts）挪到轮询结束之后串行调用，避免与轮询抢 ISD-R 通道。 */
+		function pollListAfterToggle() {
+			var listCard = findListCard();
+			if (!listCard) return;
+			var attempt = 0;
+			var backoff = [6000, 12000, 24000];
+			function tryOnce() {
+				if (busy) {
+					/* 用户已发起其它操作：计入 attempt 并重排，列表不会卡在旧状态而用户毫不知情 */
+					attempt++;
+					if (attempt < 3) later(tryOnce, backoff[Math.min(attempt, backoff.length - 1)]);
+					return;
+				}
+				busy = true;
+				Euicc.listProfiles(send).then(function (res) {
+					busy = false;
+					renderTable(listCard, res.list || []);
+					/* 轮询结束（成功）后串行读回执，避免并发开通道 */
+					showPendingReceipts();
+				}).catch(function () {
+					busy = false;
+					attempt++;
+					if (attempt < 3) {
+						later(tryOnce, backoff[Math.min(attempt, backoff.length - 1)]); /* 失败退避重试，最多 3 次 */
+					} else {
+						/* 保留旧列表，仅提示，不覆盖为 errorState */
+						if (!listCard._body.querySelector('.mt5700-notice')) {
+							listCard._body.appendChild(E('div', { 'class': 'mt5700-notice' },
+								'卡片刷新中，请稍后点击「刷新列表」'));
+						}
+						showPendingReceipts();
+					}
+				});
+			}
+			later(tryOnce, backoff[0]);
 		}
 
 		function renameProfile(p) {
@@ -695,15 +896,17 @@ return L.view.extend({
 						Mt5700.error('输入不匹配，已取消删除');
 						return;
 					}
-					busy = true;
-					Euicc.deleteProfile(send, { kind: 'iccid', hex: p.iccidRaw }).then(function () {
-						busy = false;
-						var listCard = findListCard();
-						if (listCard) loadProfiles(listCard);
-					}).catch(function (e) {
-						busy = false;
-						handleErr(e);
-					});
+				busy = true;
+				Euicc.deleteProfile(send, { kind: 'iccid', hex: p.iccidRaw }).then(function (r) {
+					busy = false;
+					var listCard = findListCard();
+					if (listCard) loadProfiles(listCard);
+					/* P02：删除成功后提示卡上可能还有没发出去的安装回执 */
+					showPendingReceipts();
+				}).catch(function (e) {
+					busy = false;
+					handleErr(e);
+				});
 				});
 			});
 		}
