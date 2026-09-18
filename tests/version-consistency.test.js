@@ -32,9 +32,18 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 const MAIN_PKG = 'at-webserver';
-/* 确实与本项目同版本号的第三方包（人工确认过 crates.io 上存在）写这里；
-   目前为空，出现即视为疑似误伤。 */
-const KNOWN_SAME_VERSION = [];
+/*
+ * 确实与本项目同版本号的第三方包（人工确认过 crates.io 上存在）写这里。
+ *
+ * icu_* 六件套：升到 2.3.0 时被本守卫拦下，经 `git show HEAD:src/rust/Cargo.lock`
+ * 核对，这六个在**改动之前**就已经是 2.3.0（icu4x 2.3.0 系列），不是升版误伤。
+ * 判据用「改动前后是否一致」而不是「查网页」—— lock 是 cargo 从 registry 解析
+ * 出来的，里面写了就说明 crates.io 上确有此版本。
+ */
+const KNOWN_SAME_VERSION = [
+	'icu_collections', 'icu_locale_core', 'icu_normalizer',
+	'icu_normalizer_data', 'icu_properties', 'icu_properties_data'
+];
 
 let pass = 0;
 const fails = [];

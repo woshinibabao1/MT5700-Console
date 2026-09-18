@@ -1277,6 +1277,51 @@ var Parse = (function () {
 		};
 	};
 
+	/* ================= ADC 管脚值 ^ADCREADEX（手册 11.5） ================= */
+
+	/*
+	 * 手册 11.5：AT^ADCREADEX=<id> 查询 ADC 管脚的原始值，单位 mV，
+	 * 且明写「不同产品的 ADC 管脚的数量不同」——**没有说明每个管脚接的是什么**。
+	 *
+	 * ★ 因此这里只做「取值」，绝不做「解读」：不把它叫成供电电压、不设健康阈值。
+	 *   真机实测本机 3 个管脚分别是 1798 / 1799 / 1799 mV（手册举例的输入电压是
+	 *   1099 mV，可见管脚接法各不相同）—— 若按「供电电压」显示会让人误以为 1.8V
+	 *   供电，属于凭空编造。界面上必须原样给数值 + 说明手册未定义管脚含义。
+	 */
+	api.parseAdcValue = function (data) {
+		var m = String(data == null ? '' : data).match(/\^ADCREADEX:\s*(-?\d+)/);
+		if (!m) return null;
+		var n = Number(m[1]);
+		return isFinite(n) ? n : null;
+	};
+
+	/* ================= 服务状态 ^SRVST（手册 13.6 / 13.7） ================= */
+
+	/* 手册 13.7：<srv_status> 五个取值，未收录的原样显示编号。 */
+	var SRV_STATUS = {
+		0: '无服务', 1: '限制服务', 2: '服务有效', 3: '区域服务限制', 4: '省电或休眠'
+	};
+
+	api.srvStatusText = function (v) {
+		/* ★ null / undefined 是「没取到」，不是 0：Number(null) === 0，
+		   直接 Number() 会把「没数据」显示成「无服务」——凭空报一个故障。 */
+		if (v == null || v === '') return '未知';
+		var n = Number(v);
+		if (!isFinite(n)) return '未知';
+		return SRV_STATUS[n] != null ? SRV_STATUS[n] : '未知状态（#' + n + '）';
+	};
+
+	/*
+	 * 解析主动上报 ^SRVST: <srv_status>。
+	 * 手册正文用半角冒号，这里两种冒号都收（与 ^REJINFO 同一处理方式）。
+	 */
+	api.parseSrvst = function (line) {
+		var m = String(line == null ? '' : line).match(/\^SRVST[：:]\s*(\d+)/);
+		if (!m) return null;
+		var n = Number(m[1]);
+		return { status: n, text: api.srvStatusText(n), raw: String(line).trim(), at: Date.now() };
+	};
+
 	/* ================= SIM 卡状态 ^SIMSQ（手册 6.6） ================= */
 
 	/*

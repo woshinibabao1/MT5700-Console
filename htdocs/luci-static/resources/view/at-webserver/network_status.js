@@ -15,7 +15,7 @@
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量
  *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
- *   ⑥ 连接质量     会话均速（整段平均）+ 空口丢包增量 + 信号波动 + 短信承载域
+ *   ⑥ 连接工具     ADC 管脚电压 / 诊断快照导出 / 网络拒绝原因 / 流量清零 / 服务状态监听 / 自检
  * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
  * [连接状态 | 右列（SIM 与设备 → 连接质量）]。
  *
@@ -25,10 +25,10 @@
  *   PDP 与 WAN 本来就是同一个地址，标了来源反而让人以为有两份地址。
  *   合并后按「连接诊断 / 地址 / IP 与 DNS」三个分组标题行分隔。
  *
- * ★ 为什么把「空口健康」换成「连接质量」（2026-09-18）：
- *   原卡的快速休眠只是复述一个不可处置的模组开关，丢包是其中唯一真有价值的项。
- *   新卡回答「这段时间到底跑得怎么样」：会话均速（整段平均，不是瞬时值）、
- *   丢包增量、信号波动区间，外加 5G SA 下短信发不出去的那个开关（短信承载域）。
+ * ★ 为什么把「连接质量」整卡换成「连接工具」（2026-09-18）：
+ *   旧卡四项里，会话均速重复「速率与流量」、信号波动重复「信号质量」、
+ *   空口丢包是自 PDU 会话建立起累加且模组从不清零的历史账，短信承载域又与主题无关；
+ *   它没有独立的问题域，只是「别处不要的边角料」集中营。新卡全部换成能做事的工具。
  * 速率与流量位于右列、紧跟 SIM 与设备正下方，不再兜在页面最底部。载波表列与上游快照一致（制式/频段/频点/带宽/PCI/RSRP/RSRQ/SINR/强度）。
  */
 
@@ -90,12 +90,12 @@ return L.view.extend({
 		var devBody = E('div');
 		devCard._body.appendChild(devBody);
 
-		/* ⑥ 连接质量：把「这段时间到底跑得怎么样」讲清楚 ——
-		 * 会话均速（整段平均，不是瞬时值）、空口丢包增量、信号波动区间，
-		 * 外加 5G SA 下短信发不出去的那个开关（短信承载域）。 */
-		var qualityCard = Mt5700.card('连接质量', '会话均速、丢包与信号波动');
-		var qualityBody = E('div');
-		qualityCard._body.appendChild(qualityBody);
+		/* ⑥ 连接工具：这一页别处全是读数，这里放**能做事的按钮** ——
+		 * ADC 管脚电压 / 诊断快照导出 / 网络拒绝原因 / 流量统计清零 /
+		 * 服务状态监听 / 连通性自检。形态为「按钮触发 + 结果区」。 */
+		var toolsCard = Mt5700.card('连接工具', '排查、诊断与快照导出');
+		var toolsBody = E('div');
+		toolsCard._body.appendChild(toolsBody);
 
 		/* 版式（「左右要对称」+「SIM 与设备下面的空白要有价值」）：
 		     载波与聚合（满宽，表格含逐载波 RSRP/RSRQ/SINR/强度）
@@ -108,7 +108,7 @@ return L.view.extend({
 		   连接状态 → SIM 与设备 → 连接质量 → 速率与流量。 */
 		var duoRight = E('div', { 'class': 'mt5700-stack' });
 		duoRight.appendChild(devCard);
-		duoRight.appendChild(qualityCard);
+		duoRight.appendChild(toolsCard);
 		var duo = E('div', { 'class': 'mt5700-cards' });
 		duo.appendChild(connCard);
 		duo.appendChild(duoRight);
@@ -127,11 +127,13 @@ return L.view.extend({
 			nrssbid: null,
 			monnc: [],
 			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
-			/* 连接质量：pdcp 是 DRB 数组（可能多条），delta 是相邻两轮的丢包增量 */
-			link: { pdcp: [], pdcpPrev: null, cgsms: null, delta: null, deltaReset: false },
-			/* 信号波动采样：每轮推一个 RSRP，只留最近 30 个（快档 5s → 约 2.5 分钟）。
-			   只看区间不看曲线：瞬时 RSRP 上方环形仪表已经有了，这里要的是「稳不稳」。 */
-			rsrpSamples: [],
+			tools: {
+				adc: { rows: [], at: 0, busy: false, err: null },
+				rej: { listening: false, last: null, count: 0, since: 0 },
+				srv: { listening: false, busy: false, last: null, log: [], offFailed: false, err: null, since: 0 },
+				check: { busy: false, steps: null, at: 0 },
+				snap: { text: '', at: 0, withIds: false }
+			},
 			/* 12 路传感器温度，键名与 Parse.parseCHIPTEMP 的返回严格一一对应
 			   （手册 17.1：sub3G/sub6G/MIMO/TCXO/peri1/peri2/ap1/ap2/modem1/modem2/bbp1/bbp2）。
 			   有守卫 tests/ui-contract.test.js 校验两侧键数一致，补字段时别只改一边。 */
@@ -312,270 +314,651 @@ return L.view.extend({
 			renderDevCard();
 		}
 
-		/* ================= 连接质量 =================
-		 * 回答「这段时间到底跑得怎么样」，只放别处没有、且各能解释一个现象的四项：
-		 *   - 会话均速     AT^DSFLOWQRY 的「本次连接流量 ÷ 本次连接时长」，是**整段平均**；
-		 *                  「速率与流量」卡给的是瞬时值，两者互补（一个看现在、一个看整段）。
-		 *   - 空口丢包     ^PDCPDATAINFO? 的**增量**（累计值本身说明不了任何问题）。
-		 *   - 信号波动     最近 N 次采样的 RSRP 区间（上方环形仪表只给瞬时值）。
-		 *   - 短信承载域   +CGSMS?，5G SA 下「优先 CS」会让短信发不出去，且**可就地改**。
-		 * 两条只读查询跟慢档 30 秒走一轮，不订阅、不额外占 AT 通道
-		 * （订阅式上报才会独占通道，主动查询不会 —— 这是它和 PDCP 速率方案的区别）。
+		/* ================= 连接工具 =================
+		 * 其余卡片全是「读数」，这一张专放**能做事的按钮**。
+		 *
+		 * ★ 为什么整卡换掉上一版「连接质量」（2026-09-18）：
+		 *   旧卡四项里，会话均速重复「速率与流量」、信号波动重复「信号质量」、
+		 *   空口丢包是自 PDU 会话建立起累加且模组从不清零的历史账
+		 *   （真机 60 秒 4 次采样 17337 纹丝不动，常年显示「正常」），
+		 *   短信承载域又与「连接」不是一个话题 —— 它没有独立的问题域，
+		 *   只是「别处不要的边角料」集中营。
+		 *
+		 * ★ 六项工具的手册依据（实测排除掉的候选记在 FRONTEND_REVIEW_REPORT.md）：
+		 *   · ADC 管脚电压   手册 11.5   AT^ADCREADEX=<id>，纯读
+		 *   · 诊断快照       纯前端拼装，零 AT 往返
+		 *   · 网络拒绝原因   手册 13.14  ^REJINFO，模组**自发**上报，只订阅、不下发写命令
+		 *   · 流量统计清零   手册 16.11  AT^DSFLOWCLR，只清计数器、不断网
+		 *   · 服务状态监听   手册 13.6/13.7 ^SRVST（见下方安全三件套）
+		 *   · 连通性自检     CPIN → C5GREG → CGACT → NDISSTATQRY → CGPADDR → DHCP 逐层走
+		 *
+		 * ★★ 安全三件套（2.2.1 事故的硬教训，写在这里防回退）：
+		 *   上一版为做「卡不卡」，让页面**进入时自动下发** AT^PDCPDATAINFO=1,5000
+		 *   开周期上报、离开时才关。页面被强杀后上报永久常驻模组，与 1Hz 的 AT
+		 *   轮询争抢同一条 AT 通道，真机事件队列积压 106 帧，只能重启服务才停。
+		 *   所以本卡任何「会留在模组里」的开关都必须满足三件事：
+		 *     ① 默认绝不开，必须由用户手动点；
+		 *     ② 到点由定时器强制关，不等用户、不依赖页面正常退出；
+		 *     ③ 关不掉就置 offFailed、判 warn 并给重试入口 ——
+		 *        悄悄留下一个常驻上报，比测不到严重得多。
+		 *   守卫：tests/connection-tools-contract.test.js
 		 */
 
-		/*
-		 * 丢包判定阈值：**只看增量，不看累计**。
-		 * 累计丢包数本身没有意义（跑上几天总有几千个），只有「这一轮又丢了多少」
-		 * 才能说明现在还在不在丢。真机实测稳态：上行增量个位数/分钟。
-		 */
-		var LINK_DISCARD_WARN = 30;    /* 个/分钟，超过即「偏高」 */
-		var LINK_DISCARD_BAD = 300;    /* 个/分钟，超过即「异常」 */
+		/* ADC 管脚 id：手册 11.5 明写「不同产品的 ADC 管脚的数量不同」，
+		   所以逐个试、第一条失败就停，不预设数量。 */
+		var ADC_PIN_IDS = [0, 1, 2, 3, 4];
+		/* 服务状态监听时长（毫秒）：到点强制关。2 分钟足够抓一次掉网。 */
+		var SRV_LISTEN_MS = 120000;
+		/* 服务状态变化最多留几条（新的在前） */
+		var SRV_LOG_MAX = 10;
 
-		/* 信号波动：区间跨度超过这个值就提示「不稳」（dB）。
-		   静止实测波动 ≤ 3 dB；走动、天线没拧紧或处在切换带时常见 10 dB 以上。 */
-		var RSRP_SWING_WARN = 10;
-		var RSRP_SAMPLES_MAX = 30;
+		var toolHandler = null;   /* 事件订阅回调（拒绝原因 / 服务状态共用一个） */
+		var srvTimer = null;      /* 服务状态监听的强制关闭定时器 */
+		var srvGen = 0;           /* 代次守卫：关闭后迟到的开启响应不许翻回「已开」 */
 
-		function airSum(list, key) {
-			var n = 0;
-			(list || []).forEach(function (d) { if (d && d[key] != null) n += d[key]; });
-			return n;
+		function fmtClock(ts) {
+			if (!ts) return '—';
+			var d = new Date(ts);
+			function p(n) { return n < 10 ? '0' + n : String(n); }
+			return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 		}
 
-		/*
-		 * RSRP 采样：只有有效读数才推进。
-		 * 0 是「未上报」（parse.js 里若干命令缺项会给 0），混进来会把区间拉到 -999。
-		 */
-		function pushRsrpSample(v) {
-			var n = Number(v);
-			if (!isFinite(n) || n === 0) return;
-			var s = state.rsrpSamples;
-			s.push(n);
-			if (s.length > RSRP_SAMPLES_MAX) s.shift();
+		/* 工具块外壳：标题 + 右侧按钮，结果区由调用方 append */
+		function toolBlock(title, btn) {
+			var box = E('div', { 'class': 'mt5700-mt-md' });
+			var bar = E('div', { 'class': 'mt5700-toolbar' });
+			bar.appendChild(E('span', { 'class': 'mt5700-badge mt5700-badge-neutral' }, title));
+			if (btn) bar.appendChild(btn);
+			box.appendChild(bar);
+			return box;
 		}
 
-		/*
-		 * 会话均速：^DSFLOWQRY 给的就是「本次连接」的字节数与秒数，直接相除。
-		 * 返回 null 表示算不出来（时长为 0 / 还没取到），界面整行跳过。
-		 * 单位是字节/秒，与 rtDown/rtUp 同单位，可直接喂 splitSpeedUI。
-		 */
-		function sessionAvgBytes(bytes, seconds) {
-			/* ★ null / undefined 是「没取到」，不是 0：
-			   Number(null) === 0，直接 Number() 会把「没数据」算成「均速 0 B/s」，
-			   界面上从「未知」变成「确定很慢」，是反向误导。 */
-			if (bytes == null || seconds == null) return null;
-			var b = Number(bytes), t = Number(seconds);
-			if (!isFinite(b) || !isFinite(t) || t <= 0 || b < 0) return null;
-			return b / t;
+		function renderTools() {
+			if (!toolsBody) return;
+			toolsBody.innerHTML = '';
+			toolsBody.appendChild(buildAdcBlock());
+			toolsBody.appendChild(buildRejBlock());
+			toolsBody.appendChild(buildSrvBlock());
+			toolsBody.appendChild(buildCheckBlock());
+			toolsBody.appendChild(buildSnapshotBlock());
+			toolsBody.appendChild(buildFlowClearBlock());
 		}
 
-		/*
-		 * 组装检查项，返回 [{ item, value, level, detail }]，level 为 bad / warn / ok。
-		 * 取不到读数的项**整项跳过** —— 宁可少一行，也不用「—」凑版面。
-		 */
-		function buildQualityItems() {
-			var items = [];
-			var a = state.link || {};
-			var f = state.flow || {};
-			var d = a.delta;
-			var perMin = (d && d.sec > 0)
-				? { ul: Math.round(d.ul / d.sec * 60), dl: Math.round(d.dl / d.sec * 60) }
-				: null;
+		/* ---------- ① ADC 管脚电压（手册 11.5） ---------- */
 
-			function lvOf(per) {
-				/* 增量算不出来（首轮、或计数器刚重置）时不参与判定，
-				   否则一个纯粹的「没数据」会被显示成故障。 */
-				if (per == null) return 'ok';
-				return per >= LINK_DISCARD_BAD ? 'bad' : (per >= LINK_DISCARD_WARN ? 'warn' : 'ok');
+		function buildAdcBlock() {
+			var t = state.tools.adc;
+			var box = toolBlock('ADC 管脚电压',
+				Mt5700.ghostButton(t.busy ? '读取中…' : '读取', readAdcPins));
+			if (t.err && !t.rows.length) {
+				box.appendChild(Mt5700.empty(t.err));
+			} else if (!t.rows.length) {
+				box.appendChild(E('p', { 'class': 'mt5700-hint' },
+					'读取模组各 ADC 管脚的原始电平（手册 11.5，单位 mV）。'));
+			} else {
+				box.appendChild(Mt5700.table(['管脚', '电平'],
+					t.rows.map(function (r) { return ['ADC' + r.id, r.value + ' mV']; }),
+					{ striped: true }));
+				box.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'★ 手册只说「不同产品的 ADC 管脚数量不同」，没有说明每个管脚接的是什么'
+					+ ' —— 所以这里只给原始值，不解读成供电电压、也不设健康阈值。'
+					+ '（本机实测 3 个管脚分别为 1798 / 1799 / 1799 mV，属正常读数。）'));
 			}
-			function verdictOf(lv) {
-				return lv === 'ok' ? '正常' : (lv === 'warn' ? '偏高' : '异常');
-			}
+			return box;
+		}
 
-			/* ① 会话均速：整段平均，跟瞬时速率不是一个东西 */
-			var avgD = sessionAvgBytes(f.lastRxFlow, f.lastDsTime);
-			var avgU = sessionAvgBytes(f.lastTxFlow, f.lastDsTime);
-			if (avgD != null || avgU != null) {
-				var base = '本次连接已传 ' + AtWs.formatFlow(
-						(Number(f.lastRxFlow) || 0) + (Number(f.lastTxFlow) || 0))
-					+ ' · 已连 ' + AtWs.formatDuration(f.lastDsTime, false);
-				if (avgD != null) {
-					var sd = splitSpeedUI(avgD, 'bytes');
-					items.push({
-						item: '本次连接均速（下行）', level: 'ok', value: sd.value + ' ' + sd.unit,
-						detail: base + ' · 整段平均，不是瞬时值'
+		function readAdcPins() {
+			var t = state.tools.adc;
+			if (t.busy) return;
+			t.busy = true; t.err = null; t.rows = [];
+			renderTools();
+			var stopped = false;
+			var chain = Promise.resolve();
+			ADC_PIN_IDS.forEach(function (id) {
+				chain = chain.then(function () {
+					if (stopped) return;
+					return AtWs.client.sendCommand('AT^ADCREADEX=' + id).then(function (res) {
+						var v = (res && res.success) ? Parse.parseAdcValue(String(res.data || '')) : null;
+						/* 第一条取不到就停：说明这个 id 不存在，后面也不用问了 */
+						if (v == null) { stopped = true; return; }
+						t.rows.push({ id: id, value: v });
 					});
-				}
-				if (avgU != null) {
-					var su = splitSpeedUI(avgU, 'bytes');
-					items.push({
-						item: '本次连接均速（上行）', level: 'ok', value: su.value + ' ' + su.unit,
-						detail: base + ' · 整段平均，不是瞬时值'
-					});
-				}
-			}
-
-			/* ② 空口丢包：累计 + 增量一起给。
-			   只给累计会吓到人（本机 17333 个），只给增量又看不出规模，两项都要。 */
-			var pdcp = a.pdcp || [];
-			if (pdcp.length) {
-				var ul = airSum(pdcp, 'ulDiscardCnt');
-				var dl = airSum(pdcp, 'dlDiscardCnt');
-				var ulPer = (perMin && !a.deltaReset) ? perMin.ul : null;
-				var dlPer = (perMin && !a.deltaReset) ? perMin.dl : null;
-				var ulLv = lvOf(ulPer), dlLv = lvOf(dlPer);
-				function tail(cnt, per) {
-					if (a.deltaReset) return ' · 计数器本轮已重置（重拨或 DRB 变化），增量不做判定';
-					if (per == null) return ' · 下一轮起给出增量';
-					return ' · 本轮 +' + cnt + '（约 ' + per + ' 个/分）';
-				}
-				items.push({
-					item: '上行丢包（空口）', level: ulLv, value: verdictOf(ulLv),
-					detail: '累计 ' + ul + ' 个' + tail(perMin ? d.ul : null, ulPer)
-						+ (ulLv === 'ok' ? '' : ' · 上行拥塞或发射功率已到顶，先看信号与 PUSCH，再换时段复测')
 				});
-				items.push({
-					item: '下行丢包（空口）', level: dlLv, value: verdictOf(dlLv),
-					detail: '累计 ' + dl + ' 个' + tail(perMin ? d.dl : null, dlPer)
-						+ (dlLv === 'ok' ? '' : ' · 多为基站侧拥塞或空口质量差，可对照 SINR 一起看')
-				});
-			}
-
-			/* ③ 信号波动：只给区间与跨度，不画曲线（仪表与曲线别处都有） */
-			var s = state.rsrpSamples || [];
-			if (s.length >= 2) {
-				var worst = Math.min.apply(null, s);
-				var best = Math.max.apply(null, s);
-				var swing = best - worst;
-				var lv = swing >= RSRP_SWING_WARN ? 'warn' : 'ok';
-				items.push({
-					item: '信号波动', level: lv, value: worst + ' ~ ' + best + ' dBm',
-					detail: '最近 ' + s.length + ' 次采样 · 波动 ' + swing + ' dB'
-						+ (lv === 'ok'
-							? '（稳定）'
-							: '（偏大：多为位置/天线松动或处在切换带，先固定位置再复测）')
-				});
-			}
-
-			/* ④ 短信承载域：5G SA 下「优先 CS」是短信发不出去的常见根因 */
-			if (a.cgsms) {
-				var cs = a.cgsms;
-				items.push({
-					item: '短信承载域', level: cs.preferCs ? 'warn' : 'ok',
-					value: cs.preferCs ? '需留意' : '正常',
-					detail: cs.text + '（' + cs.service + '）'
-						+ (cs.preferCs
-							? ' · 5G SA 没有 CS 域，建议改为「优先 PS 域」'
-							: ' · 走 PS 域，5G SA 下可用')
-				});
-			}
-
-			return items;
-		}
-
-		/* 总评：按最严重的一项定级 */
-		function qualityOverall(items) {
-			var bad = 0, warn = 0;
-			items.forEach(function (it) {
-				if (it.level === 'bad') bad++;
-				else if (it.level === 'warn') warn++;
 			});
-			return { level: bad ? 'bad' : (warn ? 'warn' : 'ok'), bad: bad, warn: warn, total: items.length };
+			return chain.catch(function (e) { t.err = (e && e.message) || '读取失败'; })
+				.then(function () {
+					t.busy = false; t.at = Date.now();
+					if (!t.rows.length && !t.err) t.err = '模组未返回任何 ADC 管脚值（该型号可能不支持 ^ADCREADEX）';
+					renderTools();
+				});
+		}
+
+		/* ---------- ② 网络拒绝原因（手册 13.14 ^REJINFO，模组自发上报） ---------- */
+
+		function buildRejBlock() {
+			var t = state.tools.rej;
+			var box = toolBlock('网络拒绝原因',
+				Mt5700.ghostButton(t.listening ? '停止监听' : '开始监听', toggleRejListen));
+			if (!t.last) {
+				box.appendChild(E('p', { 'class': 'mt5700-hint' }, t.listening
+					? '监听中，还没收到上报 —— 没被拒绝就不会推，这是正常的。'
+					: '监听模组自发的 ^REJINFO 上报（手册 13.14）：注册被拒、PDU 会话建立'
+						+ '被拒时它会自己推一帧。只订阅、不下发任何写命令，不占 AT 通道。'));
+				return box;
+			}
+			var r = t.last;
+			var rows = [
+				['时间', fmtClock(r.at)],
+				['PLMN', r.plmn || '—'],
+				['域', r.domainText],
+				['制式', r.ratText],
+				['拒绝类型', r.rejectTypeText],
+				['原因', E('b', { 'class': 'mt5700-diag-verdict is-bad' }, r.causeText)]
+			];
+			if (r.lac || r.cellId) {
+				rows.push(['LAC / 小区', (r.lac || '—') + ' / ' + (r.cellId || '—')]);
+			}
+			box.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
+			box.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+				'以上是模组上报的**最近一次**拒绝原因（原因值 ' + r.cause + '）。'
+				+ '常见问题：#7/#8 多为核心网未开通 5G 或未签约该 DNN；'
+				+ '#11/#12 多为欠费或区域限制；#15 为小区找不到合适用户。'));
+			return box;
+		}
+
+		function toggleRejListen() {
+			var t = state.tools.rej;
+			t.listening = !t.listening;
+			if (t.listening) { ensureToolHandler(); t.since = Date.now(); }
+			else dropToolHandler();
+			renderTools();
 		}
 
 		/*
-		 * 总体结论：不复述各项，只说「现在该关注什么」。
-		 * 归因按可处置性排序：正在丢包 → 短信发不出 → 信号不稳 → 一切正常。
+		 * 事件订阅：拒绝原因与服务状态共用一个回调、一次 subscribe。
+		 * 两个都关掉时才 unsubscribe —— 否则先关的那个会把另一个也掐了。
+		 *
+		 * 数据形态：rpc.js 把 URC 拆成 { type:'urc_data', data:{ type, raw, parsed } }。
 		 */
-		function qualitySummary(items) {
-			var by = {};
-			items.forEach(function (it) { by[it.item] = it; });
-			var ul = by['上行丢包（空口）'];
-			var dl = by['下行丢包（空口）'];
-			var sw = by['信号波动'];
-			var cg = by['短信承载域'];
-			if ((ul && ul.level === 'bad') || (dl && dl.level === 'bad')) {
-				return '空口丢包明显偏高：这一轮仍在持续增长，先对照信号与 SINR，再换时段复测。';
-			}
-			if (cg && cg.level !== 'ok') {
-				return '短信承载域是「优先 CS」：5G SA 没有 CS 域，建议改为「优先 PS 域」后重试。';
-			}
-			if ((ul && ul.level === 'warn') || (dl && dl.level === 'warn')) {
-				return '空口丢包偏高但还没失控：仍在增长，先观察一轮，持续走高再查信号与拥塞。';
-			}
-			if (sw && sw.level !== 'ok') {
-				return '信号波动偏大：多为位置或天线松动，固定位置后再看丢包是否跟着下降。';
-			}
-			return '空口侧未发现异常：丢包没有持续增长，短信承载域与信号波动也都正常。';
+		function ensureToolHandler() {
+			if (toolHandler) return;
+			toolHandler = function (ev) {
+				if (!ev) return;
+				var d = (ev.type === 'urc_data') ? ev.data : null;
+				if (!d || !d.type || !d.parsed) return;
+				if (d.type === 'REJINFO') {
+					state.tools.rej.last = d.parsed;
+					state.tools.rej.count++;
+					renderTools();
+				} else if (d.type === 'SRVST') {
+					var t = state.tools.srv;
+					t.last = d.parsed;
+					t.log.unshift(d.parsed);
+					if (t.log.length > SRV_LOG_MAX) t.log.pop();
+					renderTools();
+				}
+			};
+			AtWs.client.subscribe(toolHandler);
 		}
 
-		function renderQualityCard() {
-			if (!qualityBody) return;
-			qualityBody.innerHTML = '';
-			var items = buildQualityItems();
-			if (!items.length) {
-				qualityBody.appendChild(Mt5700.empty(
-					'等待数据…（需要 AT^DSFLOWQRY / ^PDCPDATAINFO? / +CGSMS? 至少一条返回）'));
-				return;
+		function dropToolHandler() {
+			if (!toolHandler) return;
+			if (state.tools.rej.listening || state.tools.srv.listening) return;
+			AtWs.client.unsubscribe(toolHandler);
+			toolHandler = null;
+		}
+
+		/* ---------- ③ 服务状态监听（手册 13.6/13.7 ^SRVST） ----------
+		 * ★ 这条**只能靠上报拿**：手册只有设置命令 AT^SRVST=<n> 与测试命令，
+		 *   没有任何读命令。所以「现在是不是无服务」= 先开上报、再等模组推。
+		 *   → 必须走安全三件套（见本卡开头）。
+		 */
+
+		function buildSrvBlock() {
+			var t = state.tools.srv;
+			var label = t.listening ? '停止监听' : (t.busy ? '开启中…' : '监听 2 分钟');
+			var box = toolBlock('服务状态监听',
+				Mt5700.ghostButton(label, function () {
+					if (t.listening) stopSrvListen(); else startSrvListen();
+				}));
+
+			/* ★ offFailed 必须显式报警：静默留下一个常驻上报比测不到严重得多 */
+			if (t.offFailed) {
+				var warn = E('div', { 'class': 'mt5700-diag-summary is-warn' });
+				warn.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' },
+					'周期上报没关掉（AT^SRVST=0 失败）'));
+				warn.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' },
+					'模组可能仍在持续上报。请点下面的按钮重试，直到这条提示消失。'));
+				var act = E('div', { 'class': 'mt5700-mt-sm' });
+				act.appendChild(Mt5700.dangerButton('重试关掉周期上报', sendSrvOff));
+				warn.appendChild(act);
+				box.appendChild(warn);
 			}
+			if (t.err) box.appendChild(E('p', { 'class': 'mt5700-hint' }, t.err));
 
-			/* 按严重程度排序：bad → warn → ok，同级保持原始顺序 */
-			var order = { bad: 0, warn: 1, ok: 2 };
-			items.sort(function (a, b) { return order[a.level] - order[b.level]; });
+			if (t.log.length) {
+				box.appendChild(Mt5700.table(['时间', '服务状态'],
+					t.log.map(function (x) {
+						return [fmtClock(x.at),
+							E('b', {
+								'class': 'mt5700-diag-verdict '
+									+ (x.status === 2 ? 'is-ok' : (x.status === 0 ? 'is-bad' : 'is-warn'))
+							}, x.text)];
+					}), { striped: true }));
+			} else if (t.listening) {
+				box.appendChild(E('p', { 'class': 'mt5700-hint' },
+					'监听中（' + Math.round(SRV_LISTEN_MS / 1000) + ' 秒后自动关闭），'
+					+ '等服务状态变化上报 —— 状态不变就不会推。'));
+			} else {
+				box.appendChild(E('p', { 'class': 'mt5700-hint' },
+					'监听「无服务 / 限制服务 / 服务有效」的**变化**（手册 13.7）。'
+					+ '该命令只有设置形式、没有读命令，所以只能开上报后等模组推；'
+					+ '状态不变就不会推 —— 因此**只在你点的时候开**，到点自动关，不会常驻。'));
+			}
+			return box;
+		}
 
-			var ov = qualityOverall(items);
-			var lvText = { bad: '较差', warn: '一般', ok: '良好' };
-			var tail = [];
-			if (ov.bad) tail.push(ov.bad + ' 项异常');
-			if (ov.warn) tail.push(ov.warn + ' 项需留意');
-			var headText = '总体：' + lvText[ov.level] + '　'
-				+ (tail.length ? tail.join(' · ') + ' / 共 ' + ov.total + ' 项' : '共 ' + ov.total + ' 项正常');
+		function startSrvListen() {
+			var t = state.tools.srv;
+			if (t.listening || t.busy) return;
+			var gen = ++srvGen;
+			t.busy = true; t.err = null;
+			ensureToolHandler();
+			renderTools();
+			AtWs.client.sendCommand('AT^SRVST=1').then(function (res) {
+				/* ★ 代次守卫：已经关掉了，迟到的开启响应不许把状态翻回「已开」 */
+				if (gen !== srvGen) return;
+				t.busy = false;
+				if (!(res && res.success)) {
+					t.listening = false;
+					t.err = '开启失败：' + ((res && res.error) || '模组未响应');
+					dropToolHandler();
+					renderTools();
+					return;
+				}
+				t.listening = true; t.since = Date.now(); t.err = null;
+				if (srvTimer) clearTimeout(srvTimer);
+				/* ★ 到点强制关：不等用户操作、不依赖页面正常退出 */
+				srvTimer = setTimeout(function () { srvTimer = null; stopSrvListen(); }, SRV_LISTEN_MS);
+				renderTools();
+			}).catch(function (e) {
+				if (gen !== srvGen) return;
+				t.busy = false; t.listening = false;
+				t.err = '开启失败：' + ((e && e.message) || '未知错误');
+				dropToolHandler();
+				renderTools();
+			});
+		}
 
-			var box = E('div', { 'class': 'mt5700-diag-summary is-' + ov.level });
-			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' }, headText));
-			box.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' }, qualitySummary(items)));
-			qualityBody.appendChild(box);
+		function stopSrvListen() {
+			var t = state.tools.srv;
+			t.listening = false; t.busy = false;
+			srvGen++;                 /* 作废所有还在飞的开启响应 */
+			if (srvTimer) { clearTimeout(srvTimer); srvTimer = null; }
+			dropToolHandler();
+			sendSrvOff();
+			renderTools();
+		}
 
-			var rows = items.map(function (it) {
+		/* 关闭上报：失败也要留痕（offFailed），绝不静默 */
+		function sendSrvOff() {
+			var t = state.tools.srv;
+			return AtWs.client.sendCommand('AT^SRVST=0').then(function (res) {
+				t.offFailed = !(res && res.success);
+			}).catch(function () {
+				t.offFailed = true;
+			}).then(renderTools);
+		}
+
+		/* ---------- ④ 连通性自检向导 ---------- */
+
+		/*
+		 * 逐层走一遍「拿到网」的每一步，卡住就停在那一步。
+		 * 判据全部来自手册中该命令的取值定义，不猜：
+		 *   CPIN        手册 6.x  <code> = READY 才就绪
+		 *   C5GREG      手册 7.x  <stat> 1=已注册 5=已注册(漫游) 3=注册被拒
+		 *   CGACT       手册 7.x  <state> 1=已激活
+		 *   NDISSTATQRY 手册 16.4 <stat> 1=已连接
+		 *   CGPADDR     手册 7.x  有地址才算拿到
+		 *   DHCP        手册 16.x 第 3 个字段是网关（十六进制 IP）
+		 */
+		function checkSteps() {
+			return [
+				{
+					name: 'SIM 就绪', cmd: 'AT+CPIN?',
+					judge: function (data) {
+						var m = String(data).match(/CPIN:\s*(\S+)/);
+						var v = m ? m[1] : '';
+						if (v === 'READY') return { level: 'ok', text: 'READY' };
+						if (!v) return { level: 'bad', text: '取不到 SIM 状态（卡没插好或没识别）' };
+						return { level: 'bad', text: 'SIM 未就绪：' + v };
+					}
+				},
+				{
+					name: '网络注册', cmd: 'AT+C5GREG?',
+					judge: function (data) {
+						var r = Parse.parseRegStat(String(data), '+C5GREG');
+						if (!r) return { level: 'bad', text: '取不到注册状态' };
+						if (r.stat === 1 || r.stat === 5) return { level: 'ok', text: r.statText };
+						if (r.stat === 3) return { level: 'bad', text: '注册被拒绝 —— 看上面「网络拒绝原因」' };
+						return { level: 'warn', text: r.statText + '（还没注册上，先看信号与 SIM）' };
+					}
+				},
+				{
+					name: 'PDP 上下文激活', cmd: 'AT+CGACT?',
+					judge: function (data) {
+						var active = [];
+						AtWs.extractATDataMultiline(String(data), '+CGACT').forEach(function (row) {
+							var p = row.split(',');
+							if (p[1] && p[1].trim() === '1' && Number(p[0]) > 0) active.push(Number(p[0]));
+						});
+						if (!active.length) return { level: 'bad', text: '没有任何已激活的 PDP 上下文（多为 APN 不对）' };
+						return { level: 'ok', text: '已激活 CID ' + active.join(' / ') };
+					}
+				},
+				{
+					name: '拨号连接', cmd: 'AT^NDISSTATQRY?',
+					judge: function (data) {
+						var rows = AtWs.extractATDataMultiline(String(data), '^NDISSTATQRY');
+						if (!rows.length) return { level: 'bad', text: '模组未返回连接状态' };
+						var connected = [];
+						rows.forEach(function (row) {
+							var p = row.split(',');
+							if (p.length >= 2 && p[1].trim() === '1') connected.push(p[0].trim());
+						});
+						if (!connected.length) return { level: 'bad', text: '未连接（stat=0）—— 拨号没起来或已断开' };
+						return { level: 'ok', text: '已连接 CID ' + connected.join(' / ') };
+					}
+				},
+				{
+					name: '拿到 IP 地址', cmd: 'AT+CGPADDR',
+					judge: function (data) {
+						var list = (Parse.parseCgpaddr(String(data)) || [])
+							.filter(function (a) { return a && a.address; });
+						if (!list.length) return { level: 'bad', text: 'PDP 已激活但没拿到地址 —— 多为 APN 或运营商侧问题' };
+						return {
+							level: 'ok',
+							text: list.map(function (a) { return a.address; }).join(' / ')
+						};
+					}
+				},
+				{
+					name: '网关与 DNS', cmd: 'AT^DHCP?',
+					judge: function (data) {
+						var str = AtWs.extractATData(String(data), '^DHCP');
+						if (!str) return { level: 'warn', text: '取不到 DHCP 下发的网关/DNS（不影响上网本身）' };
+						var d = str.split(',');
+						if (d.length < 6) return { level: 'warn', text: '返回字段不足，无法判断' };
+						var gw = AtWs.hexToIP(d[2].trim());
+						if (!gw || gw === '0.0.0.0') return { level: 'bad', text: '网关为空 —— 有地址但没有出口' };
+						return { level: 'ok', text: '网关 ' + gw + ' · DNS ' + AtWs.hexToIP(d[4].trim()) };
+					}
+				}
+			];
+		}
+
+		function buildCheckBlock() {
+			var t = state.tools.check;
+			var box = toolBlock('连通性自检',
+				Mt5700.ghostButton(t.busy ? '检查中…' : '开始自检', runSelfCheck));
+			if (!t.steps) {
+				box.appendChild(E('p', { 'class': 'mt5700-hint' },
+					'按 SIM → 注册 → PDP → 拨号 → 取址 → 网关 逐层查一遍，'
+					+ '卡在哪一步就直接告诉你。只读查询，不改任何设置。'));
+				return box;
+			}
+			var rows = t.steps.map(function (s) {
 				return [
-					it.item,
-					E('b', { 'class': 'mt5700-diag-verdict is-' + it.level }, it.value),
-					it.detail
+					s.name,
+					E('b', { 'class': 'mt5700-diag-verdict is-' + (s.level || 'ok') },
+						s.level === 'ok' ? '通过' : (s.level === 'warn' ? '存疑' : '未通过')),
+					s.text
 				];
 			});
-			qualityBody.appendChild(Mt5700.table(['检查项', '值', '依据与建议'], rows, { striped: true }));
+			box.appendChild(Mt5700.table(['步骤', '结果', '说明'], rows, { striped: true }));
 
-			/* 短信域确需改动时给一个就地入口（改它是掉电保存，所以走一次确认） */
-			if (state.link.cgsms && state.link.cgsms.preferCs) {
-				var act = E('div', { 'class': 'mt5700-mt-sm' });
-				act.appendChild(Mt5700.ghostButton('改为「优先 PS 域」', setCgsmsPs));
-				qualityBody.appendChild(act);
+			var failed = null;
+			for (var i = 0; i < t.steps.length; i++) {
+				if (t.steps[i].level === 'bad') { failed = t.steps[i]; break; }
+			}
+			var lv = failed ? 'bad' : 'ok';
+			var sum = E('div', { 'class': 'mt5700-diag-summary is-' + lv });
+			if (failed) {
+				sum.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' },
+					'卡在第 ' + (t.steps.indexOf(failed) + 1) + ' 步：' + failed.name));
+				sum.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' },
+					failed.text + '。前面的步骤都正常，问题就出在这一步。'));
+			} else {
+				sum.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' }, '六步全部通过'));
+				sum.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' },
+					'模组侧看不出问题。若仍上不了网，检查路由器 WAN 接口与防火墙。'));
+			}
+			box.appendChild(sum);
+			return box;
+		}
+
+		function runSelfCheck() {
+			var t = state.tools.check;
+			if (t.busy) return;
+			t.busy = true; t.steps = [];
+			renderTools();
+			var steps = checkSteps();
+			var chain = Promise.resolve();
+			steps.forEach(function (s) {
+				chain = chain.then(function () {
+					/* 已经卡在某一步就没必要继续往下查了 */
+					for (var i = 0; i < t.steps.length; i++) {
+						if (t.steps[i].level === 'bad') return;
+					}
+					return AtWs.client.sendCommand(s.cmd).then(function (res) {
+						var data = (res && res.success) ? String(res.data || '') : '';
+						var r = s.judge(data) || {};
+						t.steps.push({
+							name: s.name,
+							level: r.level || 'warn',
+							text: r.text || '（无法判断）'
+						});
+					}).catch(function (e) {
+						t.steps.push({
+							name: s.name, level: 'bad',
+							text: '查询失败：' + ((e && e.message) || '模组无响应')
+						});
+					}).then(renderTools);
+				});
+			});
+			return chain.then(function () {
+				t.busy = false; t.at = Date.now();
+				renderTools();
+			});
+		}
+
+		/* ---------- ⑤ 诊断快照导出（纯前端） ---------- */
+
+		function buildSnapshotBlock() {
+			var t = state.tools.snap;
+			var box = toolBlock('诊断快照导出',
+				Mt5700.ghostButton(t.text ? '重新生成' : '生成快照', function () {
+					t.text = buildSnapshotText(t.withIds);
+					t.at = Date.now();
+					renderTools();
+				}));
+
+			var chk = E('input', { 'type': 'checkbox' });
+			chk.checked = !!t.withIds;
+			chk.addEventListener('change', function () {
+				t.withIds = chk.checked;
+				/* 已生成过就按新选项重来一次，免得显示的是旧口径 */
+				if (t.text) t.text = buildSnapshotText(t.withIds);
+				renderTools();
+			});
+			box.appendChild(E('label', { 'class': 'mt5700-hint' }, chk,
+				document.createTextNode(' 含设备标识（IMEI / IMSI / ICCID）—— 公开发帖前建议取消勾选')));
+
+			if (!t.text) {
+				box.appendChild(E('p', { 'class': 'mt5700-hint' },
+					'把信号、注册、载波、地址、流量、温度打包成一段文本，'
+					+ '报障 / 找客服 / 发帖求助时直接贴。纯前端拼装，不额外下发 AT 命令。'));
+				return box;
 			}
 
-			qualityBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-				'均速是本次连接「总流量 ÷ 总时长」的整段平均，瞬时值见下方「速率与流量」；'
-				+ '丢包是 PDCP 层的累计值（自本次拨号起），判定看增量。'));
+			var ta = E('textarea', {
+				'class': 'mt5700-mono', 'readonly': 'readonly', 'rows': 14,
+				'style': 'width:100%;box-sizing:border-box;font-size:12px;line-height:1.6;'
+					+ 'padding:8px;margin-top:6px;resize:vertical'
+			});
+			ta.value = t.text;
+			box.appendChild(ta);
+
+			var act = E('div', { 'class': 'mt5700-mt-sm' });
+			act.appendChild(Mt5700.ghostButton('复制', function () { copySnapshot(t.text); }));
+			act.appendChild(Mt5700.ghostButton('下载 .txt', function () {
+				downloadSnapshot('mt5700-snapshot.txt', t.text);
+			}));
+			box.appendChild(act);
+			return box;
+		}
+
+		function copySnapshot(text) {
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				navigator.clipboard.writeText(text).then(function () {
+					Mt5700.success('已复制到剪贴板');
+				}).catch(function () {
+					Mt5700.error('复制失败，请手动选中文本框内容复制');
+				});
+				return;
+			}
+			Mt5700.error('当前环境不支持自动复制，请手动选中文本框内容复制');
+		}
+
+		function downloadSnapshot(name, text) {
+			try {
+				var blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+				var url = URL.createObjectURL(blob);
+				var a = E('a', { href: url, download: name });
+				document.body.appendChild(a);
+				a.click();
+				setTimeout(function () {
+					document.body.removeChild(a);
+					URL.revokeObjectURL(url);
+				}, 0);
+			} catch (e) {
+				Mt5700.error('下载失败：' + ((e && e.message) || '浏览器不支持'));
+			}
 		}
 
 		/*
-		 * 把短信承载域改成「优先 PS 域」（AT+CGSMS=2）。
-		 * 手册 7.7：0、2 优先 PS；1、3 优先 CS，默认 3。5G SA 网络没有 CS 域，
-		 * 保持默认会出现「信号正常但短信发不出」，这条改动就是它的解药。
-		 * ★ 该设置**掉电保存**（写入模组 NV），所以走一次确认，不静默下发。
+		 * 快照内容：只收「报障时对方一定会问」的那几类，不堆砌。
+		 * 设备标识默认不写 —— 这是要贴到公开场合的东西，默认少给、需要再勾。
 		 */
-		function setCgsmsPs() {
-			Mt5700.confirm('把短信承载域改为「优先 PS 域」（AT+CGSMS=2）？该设置会写入模组并掉电保存，需要改回时设为 3。', function () {
-				return AtWs.client.sendCommand('AT+CGSMS=2').then(function (res) {
+		function buildSnapshotText(withIds) {
+			var out = [];
+			var c = state.cell || {};
+			var f = state.flow || {};
+			var d = state.diag || {};
+			function push(k, v) { out.push(k + '：' + (v == null || v === '' ? '—' : v)); }
+
+			out.push('MT5700 诊断快照');
+			out.push('生成时间：' + new Date().toLocaleString());
+			out.push('');
+
+			out.push('[ 连接 ]');
+			push('运营商', state.operator);
+			push('注册状态', state.networkStatus);
+			push('制式', systemModeLabel(c.sysMode, (state.carriers || []).length));
+			push('APN', state.apn);
+			push('激活 CID', state.activeCid == null ? '—' : String(state.activeCid));
+			var ad = splitSpeedUI(state.ambrDown, 'kbps'), au = splitSpeedUI(state.ambrUp, 'kbps');
+			push('签约速率', '下行 ' + ad.value + ' ' + ad.unit + ' / 上行 ' + au.value + ' ' + au.unit);
+			push('RRC', d.rrc ? (d.rrc.rrcText || '—') : '—');
+			if (d.endc) {
+				push('EN-DC', d.endc.established ? '已建立'
+					: (!d.endc.available ? '小区不支持'
+						: (!d.endc.plmnAvailable ? '运营商未开通'
+							: (d.endc.restricted ? '网络侧受限' : '未建立'))));
+			}
+			out.push('');
+
+			out.push('[ 信号 ]');
+			push('RSRP', c.rsrp == null ? '—' : c.rsrp + ' dBm');
+			push('RSRQ', c.rsrq == null ? '—' : c.rsrq + ' dB');
+			push('SINR', c.sinr == null ? '—' : c.sinr + ' dB');
+			push('PCI', c.pci || '—');
+			push('频点', c.channel || '—');
+			out.push('');
+
+			var cars = state.carriers || [];
+			if (cars.length) {
+				out.push('[ 载波 ]');
+				cars.forEach(function (x) {
+					out.push('  #' + (x.index == null ? '?' : x.index) + ' ' + (x.sysMode || '?')
+						+ ' band=' + (x.band == null ? '—' : x.band)
+						+ ' 频点=' + (x.dlFcn == null ? '—' : x.dlFcn)
+						+ ' 带宽=' + (x.dlBwKHz == null ? '—' : x.dlBwKHz) + 'kHz'
+						+ ' PCI=' + (x.pci == null ? '—' : x.pci));
+				});
+				out.push('');
+			}
+
+			out.push('[ 地址 ]');
+			var addrs = d.addrs || [];
+			if (!addrs.length) out.push('  —');
+			addrs.forEach(function (a) {
+				out.push('  CID ' + a.cid + '  ' + a.address + '（' + (a.family || '—') + '）');
+			});
+			if (state.dhcpv4) {
+				out.push('  网关 ' + state.dhcpv4.gateway
+					+ ' · DNS ' + state.dhcpv4.primaryDNS + ' / ' + state.dhcpv4.secondaryDNS);
+			}
+			out.push('');
+
+			out.push('[ 流量 ]');
+			push('本次连接时长', AtWs.formatDuration(f.lastDsTime, false));
+			push('本次（下/上）', AtWs.formatFlow(f.lastRxFlow) + ' / ' + AtWs.formatFlow(f.lastTxFlow));
+			push('累计（下/上）', AtWs.formatFlow(f.totalRxFlow) + ' / ' + AtWs.formatFlow(f.totalTxFlow));
+			out.push('');
+
+			var tv = Object.keys(state.temps || {})
+				.map(function (k) { return Number(state.temps[k]) || 0; })
+				.filter(function (v) { return v > 0; });
+			out.push('[ 设备 ]');
+			push('5G 模块温度', tv.length ? Math.max.apply(null, tv) + ' ℃' : '—');
+			push('SIM 状态', devState ? Parse.simShort(devState.sim) : '—');
+			push('模块 / 固件', devState ? ((devState.model || '—') + ' / ' + (devState.fw || '—')) : '—');
+			if (withIds && devState) {
+				push('IMEI', devState.imei || '—');
+				push('IMSI', devState.imsi || '—');
+				push('ICCID', devState.iccid || '—');
+			}
+			out.push('');
+			out.push(withIds
+				? '（含设备标识，公开发帖前请自行删除 [ 设备 ] 段）'
+				: '（设备标识已按选项隐藏）');
+			return out.join('\n');
+		}
+
+		/* ---------- ⑥ 流量统计清零（手册 16.11 ^DSFLOWCLR） ---------- */
+
+		function buildFlowClearBlock() {
+			var box = toolBlock('流量统计清零',
+				Mt5700.dangerButton('清零', clearFlowStats));
+			box.appendChild(E('p', { 'class': 'mt5700-hint' },
+				'把模组的本次与累计流量、连接时长全部归零（手册 16.11）。'
+				+ '只清统计计数器、**不会断网**；适合核对套餐周期或测某个应用耗了多少流量。'));
+			return box;
+		}
+
+		function clearFlowStats() {
+			Mt5700.confirm('清零流量统计？本次与累计的流量、连接时长都会归零，且无法恢复。'
+				+ '（不会影响网络连接本身）', function () {
+				return AtWs.client.sendCommand('AT^DSFLOWCLR').then(function (res) {
 					if (!res || !res.success) {
-						Mt5700.error('修改失败：' + ((res && res.error) || '模组未响应'));
+						Mt5700.error('清零失败：' + ((res && res.error) || '模组未响应'));
 						return;
 					}
-					/* 直接按下发值重建对象：不发第二次查询，也避免旧值残留一帧 */
-					state.link.cgsms = Parse.parseCgsms('+CGSMS: 2');
-					Mt5700.success('已改为「优先 PS 域」');
-					renderQualityCard();
+					Mt5700.success('已清零');
+					return getFlow().then(renderFlow);
 				});
-			}, '确认修改');
+			}, '确认清零');
 		}
 
 		/* ---------- 渲染 ---------- */
@@ -1497,9 +1880,6 @@ return L.view.extend({
 						state.cell.sinr = serving.sinr != null ? serving.sinr : state.cell.sinr;
 					state.cell.sysMode = serving.sysMode || state.cell.sysMode;
 					state.cell.signalPercent = serving.signalPercent || '';
-					/* 信号波动采样：每轮推一个 RSRP，供「连接质量」卡算区间。
-					   放在赋值之后，确保拿到的是本轮最终值（不是上面被覆盖前的旧值）。 */
-					pushRsrpSample(state.cell.rsrp);
 					}
 					/*
 					 * ^HFREQINFO 解析结果原样带过来（parseHFREQINFO 已按手册
@@ -1574,55 +1954,6 @@ return L.view.extend({
 				state.diag.addrs = pdp.success && pdp.data ? Parse.parseCgpaddr(pdp.data) : [];
 				renderConnDetail();
 			});
-		}
-
-		/*
-		 * 连接质量的两条查询（^PDCPDATAINFO? / +CGSMS?）。
-		 * 原来还有一条 ^FASTDORM?（快速休眠）—— 它只是复述一个用户改不了、
-		 * 也不需要改的模组开关，每轮白搭一次串口往返，已去掉。
-		 *
-		 * ★ 都是**主动查询**，不是订阅：订阅式上报会独占 AT 通道（PDCP 速率方案当初
-		 *   就是因为这个被否掉的），主动查询只在慢档这一轮多 2 次往返。
-		 * ★ ^PDCPDATAINFO 手册 5.36 的名字像「设置周期上报」，但它的**读命令**会直接
-		 *   回当前统计（真机实测返回 2 条 DRB），不需要先发 =1 开启。
-		 * ★ +CGSMS? 需要 PIN 就绪（手册属性表：PIN = Y），卡被锁时返回 ERROR ——
-		 *   这是正常情况，静默留空即可，卡片会自动少一行。
-		 */
-		function loadLinkQuality() {
-			return AtWs.client.sendCommand('AT^PDCPDATAINFO?').then(function (pdcp) {
-				updatePdcpDelta(pdcp.success && pdcp.data ? Parse.parsePdcpDataInfo(String(pdcp.data)) : []);
-				return AtWs.client.sendCommand('AT+CGSMS?');
-			}).then(function (cs) {
-				state.link.cgsms = cs.success && cs.data ? Parse.parseCgsms(String(cs.data)) : null;
-				renderQualityCard();
-			});
-		}
-
-		/*
-		 * 丢包增量必须在覆盖 state.link.pdcp **之前**算。
-		 * 计数器的三种「对不上」都要识别出来，否则会凭空报故障：
-		 *   ① 首轮没有上一次读数      → 只记基准，不给增量（delta = null）；
-		 *   ② 重拨 / 计数器归零      → 差值变负，不能显示成「本轮丢了负数个」；
-		 *   ③ DRB 条数变化（重建承载）→ 合计跳变，同样按「已重置」处理。
-		 * ②③ 都置 deltaReset，界面写明「增量本轮不做判定」，而不是把累计值报成故障。
-		 */
-		function updatePdcpDelta(list) {
-			var a = state.link;
-			var prev = a.pdcpPrev;
-			var ul = airSum(list, 'ulDiscardCnt');
-			var dl = airSum(list, 'dlDiscardCnt');
-			if (list.length) a.pdcpPrev = { t: Date.now(), ul: ul, dl: dl, n: list.length };
-			if (!prev || !list.length || prev.n !== list.length) {
-				a.delta = null;
-				a.deltaReset = !!prev;      /* 首轮不算「重置」，只是还没基准 */
-			} else if (ul < prev.ul || dl < prev.dl) {
-				a.delta = null;
-				a.deltaReset = true;
-			} else {
-				a.delta = { ul: ul - prev.ul, dl: dl - prev.dl, sec: (Date.now() - prev.t) / 1000 };
-				a.deltaReset = false;
-			}
-			a.pdcp = list;
 		}
 
 		/* ---------- 实时速率（OpenWrt 接口统计采样） ---------- */
@@ -1780,7 +2111,7 @@ return L.view.extend({
 		 * 它只依赖快档已取到的 state.carriers，没有前置依赖，放前面是安全的。
 		 */
 		var SLOW_TASKS = [loadSecondary, getPSReg, getFlow, getOperator, getAMBR,
-			getQCI, getDHCP, getTemp, getMCS, loadDiagnostics, loadLinkQuality];
+			getQCI, getDHCP, getTemp, getMCS, loadDiagnostics];
 
 		/* 慢档各任务的失败记录：逐步兜错后失败不再阻断后续，但要留痕，
 		   否则「某一项一直失败」又会退化成看不见的静默问题。 */
@@ -1808,9 +2139,6 @@ return L.view.extend({
 			slowRunning = chain.then(function () {
 				slowRefreshing = false;
 				slowRunning = null;
-				/* 连接质量吃的是慢档取到的丢包与短信域、快档取到的信号采样，
-				   慢档整轮跑完再统一刷一次，避免逐个任务渲染导致的抖动 */
-				renderQualityCard();
 			});
 			return slowRunning;
 		}
@@ -1862,7 +2190,7 @@ return L.view.extend({
 		renderSignal();
 		renderCarriers();
 		renderConnDetail();    /* 连接明细：诊断 + 地址 + IP 与 DNS（一张表） */
-		renderQualityCard();   /* 连接质量（右列独立卡片） */
+		renderTools();   /* 连接工具（右列独立卡片） */
 		renderSpeed();
 		renderFlow();
 		renderTemp();
@@ -1894,6 +2222,12 @@ return L.view.extend({
 			if (timer) clearInterval(timer);
 			if (slowTimer) clearInterval(slowTimer);
 			if (rateTimer) clearInterval(rateTimer);
+			if (srvTimer) { clearTimeout(srvTimer); srvTimer = null; }
+			/* 监听还开着就尽力关掉：这是页面被强杀时唯一的收尾机会 */
+			if (state.tools.srv.listening) { try { AtWs.client.sendCommand('AT^SRVST=0'); } catch (e) {} }
+			if (toolHandler) { AtWs.client.unsubscribe(toolHandler); toolHandler = null; }
+			state.tools.srv.listening = false;
+			state.tools.rej.listening = false;
 			timer = slowTimer = rateTimer = null;
 			if (onVisibility) document.removeEventListener('visibilitychange', onVisibility);
 			if (AtWs.client && AtWs.client.clearReadCache) AtWs.client.clearReadCache();

@@ -148,8 +148,18 @@ def main():
     # Cargo.lock（★ 只动主包块）
     lock_text, lock_crlf = _load(LOCK)
     lock2 = bump_lock(lock_text, old, new)
-    if lock2.count('version = "%s"' % new) != 1:
-        raise SystemExit('改完 lock 后新版本号出现了多次，中止（疑似误伤依赖）')
+    """
+    ★ 校验的正确姿势是「改动前后计数差 1」，而不是「新版本号只出现 1 次」。
+      后者会把「某个依赖的版本号恰好和目标版本相同」当成误伤 —— 2026-09-18 升
+      2.3.0 时就被这个自检拦下：lock 里有 6 个依赖本身就叫 2.3.0，脚本直接中止。
+      真正的语义是：只有主包那一行从 old 变成 new，其余一行都不许动。
+    """
+    before = lock_text.count('version = "%s"' % new)
+    after = lock2.count('version = "%s"' % new)
+    if after != before + 1:
+        raise SystemExit(
+            'lock 里新版本号从 %d 处变成 %d 处（期望 +1），中止（疑似误伤依赖）'
+            % (before, after))
     _save(LOCK, lock2, lock_crlf)
 
     # CHANGELOG：只在要求时补标题，正文必须人工写

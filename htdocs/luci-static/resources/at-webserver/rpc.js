@@ -867,7 +867,8 @@ function isUnsolicitedText(text) {
 	if (text === 'RING' || text === 'IRING' || text === '^IRING' || text === 'NO CARRIER') return true;
 	return text.indexOf('+CMTI:') === 0 || text.indexOf('^CEND:') === 0 ||
 		text.indexOf('^SMMEMFULL') === 0 || text.indexOf('MEMORY FULL') >= 0 ||
-		text.indexOf('^REJINFO') === 0 || (text.indexOf('+CUSD:') === 0 && text.indexOf(',') >= 0);
+		text.indexOf('^REJINFO') === 0 || text.indexOf('^SRVST') === 0 ||
+		(text.indexOf('+CUSD:') === 0 && text.indexOf(',') >= 0);
 }
 
 /* ---- raw_data 拆分（^PDCPDATAINFO / URC） ---- */
@@ -893,6 +894,14 @@ function parseRawData(text) {
 		} else if (line.indexOf('^REJINFO') === 0) {
 			// 网络拒绝原因主动上报，解析后进 REJINFO 类型
 			out.push({ type: 'REJINFO', raw: line, parsed: Parse.parseRejInfo(line) });
+		} else if (line.indexOf('^SRVST') === 0) {
+			/*
+			 * 服务状态变化主动上报（手册 13.7）。
+			 * ★ 这条**只能用 URC 拿**：手册 13.6 只有设置命令 AT^SRVST=<n> 与测试命令，
+			 *   没有任何读命令 —— 想看「当前是不是无服务」，只能先 AT^SRVST=1 开上报再等模组推。
+			 *   因此监听开关必须由用户手动点，并且到点要强制关回去（见 network_status.js）。
+			 */
+			out.push({ type: 'SRVST', raw: line, parsed: Parse.parseSrvst(line) });
 		}
 	}
 	return out;
