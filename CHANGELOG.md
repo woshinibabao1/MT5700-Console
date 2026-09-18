@@ -5,6 +5,19 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.3] - 2026-09-18
+
+### 修复
+
+- **ADC 管脚读数胶囊化**：真机反馈一排读数被挤成竖向堆叠。根因是容器复用了
+  `.mt5700-grow`（flex:1 1 240px），在窄栏里被压缩到内容宽度以下，再撞上
+  `.mt5700-mono` 的 word-break:break-all，「ADC0 1799」就地断行。改用专门的
+  `.mt5700-readout*` 胶囊（flex:0 0 auto + nowrap，容器 min-width:0 放不下时
+  整块换行），管脚名次要色小字 + 电平等宽加粗 + 单位只在末尾出现一次，
+  底色 rgba(127,127,127,0.07) 亮暗主题都可见
+- mt5700.css 变更，同步 bump `MT5700_CSS_VERSION` 5.5.10 → 5.5.11（squashfs
+  mtime 恒 1970-01-01，只 bump 版本号才能击穿浏览器缓存）
+
 ## [2.3.2] - 2026-09-18
 
 ### 变更

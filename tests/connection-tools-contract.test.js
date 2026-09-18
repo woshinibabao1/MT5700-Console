@@ -27,10 +27,13 @@ const PARSE_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources'
 const NS_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'network_status.js');
 /* 「网络拒绝原因」迁移后的归宿页 */
 const SET_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'network_settings.js');
+/* ADC 读数胶囊的样式（竖向堆叠那次事故就出在这里，故一并守卫） */
+const CSS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at-webserver', 'mt5700.css');
 
 const parseSrc = fs.readFileSync(PARSE_JS, 'utf8');
 const nsSrc = fs.readFileSync(NS_JS, 'utf8');
 const setSrc = fs.readFileSync(SET_JS, 'utf8');
+const cssSrc = fs.readFileSync(CSS, 'utf8');
 
 const pm = parseSrc.match(/var Parse = \((function[\s\S]*?)\)\(\);/);
 if (!pm) { console.error('无法从 parse.js 提取模块'); process.exit(1); }
@@ -243,8 +246,17 @@ ok('★ ADC 进页面自动读一次（连上就调 readAdcPins，不用先点�
 ok('ADC 有结果后按钮变「重新读取」',
 	/t\.rows\.length \? '重新读取' : '读取'/.test(nsSrc));
 ok('★ ADC 结果一行铺开（不再用「管脚/电平」表格，省掉表头 + N 行）',
-	/mt5700-inline mt5700-grow/.test(nsSrc)
+	/mt5700-readouts/.test(nsSrc)
 	&& !/Mt5700\.table\(\['管脚', '电平'\]/.test(nsSrc));
+/* 2026-09-18 真机反馈：一排读数被挤成竖向堆叠。根因是容器 .mt5700-grow
+   （flex:1 1 240px）在窄栏里被压到内容宽度以下，再撞上 .mt5700-mono 的
+   word-break:break-all，「ADC0 1799」就地断行。这三行是防回退的钉子。 */
+ok('★ ADC 胶囊不许被压扁（flex:0 0 auto + nowrap）',
+	/\.mt5700-readout \{[\s\S]*?flex: 0 0 auto;[\s\S]*?white-space: nowrap;/.test(cssSrc));
+ok('★ ADC 读数容器允许整块换行而不是压扁子项（min-width:0）',
+	/\.mt5700-readouts \{[\s\S]*?flex-wrap: wrap;[\s\S]*?min-width: 0;/.test(cssSrc));
+ok('★ ADC 不再复用 .mt5700-grow（正是它把一排压成了竖排）',
+	!/mt5700-inline mt5700-grow/.test(nsSrc));
 
 /* ---------- 7. 沿用：PDCP / CGSMS 解析（解析器仍在 parse.js） ---------- */
 

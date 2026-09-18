@@ -389,12 +389,14 @@ return L.view.extend({
 				   3 个管脚要吃掉 6 行高度；现在整块只有 2 行。
 				   管脚一律从 0 连续编号（逐个试、第一条失败即停），
 				   所以「ADC0 ADC1 ADC2」本身就是顺序，表头是重复信息。 */
-				var vals = E('span', { 'class': 'mt5700-inline mt5700-grow' });
-				t.rows.forEach(function (r, i) {
-					if (i) vals.appendChild(E('span', { 'class': 'mt5700-hint' }, '·'));
-					vals.appendChild(E('span', { 'class': 'mt5700-mono' }, 'ADC' + r.id + ' ' + r.value));
+				var vals = E('span', { 'class': 'mt5700-readouts' });
+				t.rows.forEach(function (r) {
+					var chip = E('span', { 'class': 'mt5700-readout' });
+					chip.appendChild(E('span', { 'class': 'mt5700-readout-name' }, 'ADC' + r.id));
+					chip.appendChild(E('span', { 'class': 'mt5700-readout-value' }, String(r.value)));
+					vals.appendChild(chip);
 				});
-				vals.appendChild(E('span', { 'class': 'mt5700-hint' }, 'mV'));
+				vals.appendChild(E('span', { 'class': 'mt5700-readout-unit' }, 'mV'));
 				box.firstChild.insertBefore(vals, btn);
 				box.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
 					'手册未说明各管脚接的是什么 —— 只给原始电平，不解读、不设阈值。'));
