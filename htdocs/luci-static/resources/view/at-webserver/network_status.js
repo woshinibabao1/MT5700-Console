@@ -708,11 +708,14 @@ return L.view.extend({
 				},
 				{
 					/* ★ 三大高复发故障之一：git 不继承 exec 位，100644 的 init.d 开机根本不自启
-					   （用户实测踩过，项目红线第 9 条就是这个）。 */
+					   （用户实测踩过，项目红线第 9 条就是这个）。
+					   ★★ 判据用 initd_exec 而不是解析权限数字：这台设备上没有 stat 命令，
+					   采集脚本只能给 ls -l 的 rwx 串；直接比对 "755" 会把好机器判成故障。
+					   [ -x ] 才是"能不能执行"的可靠口径。 */
 					layer: 'L2', name: 'init.d 脚本权限', eval: function (f) {
 						var m = fv(f, 'initd_mode');
 						if (!m) return { level: 'bad', text: '找不到 /etc/init.d/at-webserver', fix: '重装 luci-app-mt5700' };
-						if (m === '755' || m === '0755') return { level: 'ok', text: m };
+						if (fnum(f, 'initd_exec', 0) === 1) return { level: 'ok', text: m };
 						return {
 							level: 'bad', text: '权限是 ' + m + '（缺执行位）—— 开机不会自启',
 							fix: 'chmod 755 /etc/init.d/at-webserver && /etc/init.d/at-webserver enable'
@@ -737,8 +740,10 @@ return L.view.extend({
 					   所以 480 只判"存疑"并说明会自动恢复，不判死。 */
 					layer: 'L2', name: 'USB 链路速率', eval: function (f) {
 						var s = fnum(f, 'usb_speed', -1), p = fv(f, 'usb_path'), v = fv(f, 'usb_version');
+						var prod = fv(f, 'usb_product');
 						if (s < 0) return { level: 'warn', text: '取不到 USB 速率' };
-						var txt = s + ' Mbps（' + (p || '未知路径') + (v ? ' · USB ' + v : '') + '）';
+						var txt = s + ' Mbps（' + (p || '未知路径') + (v ? ' · USB ' + v : '')
+							+ (prod ? ' · ' + prod : '') + '）';
 						if (s >= 5000) return { level: 'ok', text: txt };
 						if (s === 480) {
 							return {
@@ -903,11 +908,24 @@ return L.view.extend({
 
 				/* ---- L3 端到端连通 ---- */
 				{
+					/* ★★ 真机坑（2026-09-19 实测）：本机网关 10.0.0.1 **根本不回应 ICMP**，
+					   但公网 ping、HTTPS 全通 —— 网络完全正常。
+					   若无条件把"网关 ping 不通"判成 bad，这台机器每次排查都会报一个
+					   不存在的故障，而且会引导用户去做 ifdown/ifup（那才是真的会断网）。
+					   → 必须结合公网探测判断：公网通 = 网关只是不回应 ICMP，属正常。 */
 					layer: 'L3', name: 'ping 网关', eval: function (f) {
 						var v = fnum(f, 'ping_gw', -1);
 						if (v === 1) return { level: 'ok', text: '通' };
 						if (v < 0) return { level: 'warn', text: '没测（没有网关，或设备上没有 ping 命令）' };
-						return { level: 'bad', text: '网关 ping 不通 —— 二层就没到出口', fix: '回头看 L2 的「网关 ARP」那一项' };
+						var pub = (fnum(f, 'ping_public_a', -1) === 1 || fnum(f, 'ping_public_b', -1) === 1
+							|| fnum(f, 'tcp_443', -1) === 1);
+						if (pub) {
+							return {
+								level: 'ok',
+								text: '网关不回应 ICMP，但公网通 —— 运营商网关不答 ping 很常见，不影响上网'
+							};
+						}
+						return { level: 'bad', text: '网关 ping 不通，且公网也不通 —— 二层就没到出口', fix: '回头看 L2 的「网关 ARP」那一项' };
 					}
 				},
 				{
@@ -937,12 +955,24 @@ return L.view.extend({
 					}
 				},
 				{
-					/* 有些网络禁 ICMP：ping 不通不代表上不了网，这一项兜住那种情况 */
-					layer: 'L3', name: 'TCP 443', eval: function (f) {
+					/* 有些网络禁 ICMP：ping 不通不代表上不了网，这一项兜住那种情况。
+					   后端用 curl 打 https://www.qq.com，退出码 6 = 域名解析失败
+					   —— 那是 DNS 的问题，不能算到链路上，所以要单独点出来。 */
+					layer: 'L3', name: 'HTTPS 连通', eval: function (f) {
 						var v = fnum(f, 'tcp_443', -1);
-						if (v < 0) return { level: 'warn', text: '没测（设备上没有 nc）' };
-						if (v === 1) return { level: 'ok', text: '443 建连成功' };
-						return { level: 'warn', text: '443 建连失败 —— 若这项也不通，那是真的上不了网（不是 ICMP 被禁的假象）' };
+						if (v < 0) return { level: 'warn', text: '没测（设备上没有 curl）' };
+						if (v === 1) return { level: 'ok', text: 'https://www.qq.com 握手成功（DNS + TCP + TLS 都通）' };
+						if (v === 6) {
+							return {
+								level: 'bad',
+								text: '域名解析失败（curl 退出码 6）—— 链路可能是好的，问题在 DNS',
+								fix: '看上面「DNS 解析」那一项'
+							};
+						}
+						return {
+							level: 'warn',
+							text: 'HTTPS 建连失败（curl 退出码 ' + v + '）—— 若这项也不通，那是真的上不了网（不是 ICMP 被禁的假象）'
+						};
 					}
 				}
 			];

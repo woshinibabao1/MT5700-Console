@@ -85,6 +85,12 @@ const probeBody = ['emit', 'have_cmd', 'scan_zone', 'scan_sqm'].reduce(stripFn, 
 	/* ★ 还要剥掉单引号区段：awk 程序里的 $1/$2/$3 是**awk 的字段引用**，
 	   不是 shell 位置参数（不剥会把 5 处 awk 全误判成"脚本接受了参数"）。 */
 	.replace(/'[^']*'/g, "''");
+
+/* 去掉纯注释行：源码注释里会**刻意**提到被废弃的写法（stat -c、nc -z），
+   那是留给后来人的教训，不能被当成"你还在用这个命令"。 */
+const probeCode = probeSrc.split('\n')
+	.filter(function (l) { return !/^\s*#/.test(l); })
+	.join('\n');
 ok('★ 脚本主体不接受任何参数（无 $1/$@/$*，命令注入面为零）',
 	!/\$\d/.test(probeBody) && !/\$@/.test(probeBody) && !/\$\*/.test(probeBody),
 	(probeBody.match(/\$[\d@*]/g) || []).join(' '));
@@ -120,9 +126,31 @@ ok('★ 明确覆盖「刷机后缺接口」这个高复发故障（iface_exists
 ok('★ 明确覆盖「网关 ARP INCOMPLETE」这个静默断网形态',
 	/emit gw_neigh/.test(probeSrc));
 ok('★ 明确覆盖「init.d 是 100644 不自启」这个高复发故障',
-	/stat -c '%a' \/etc\/init\.d\/at-webserver/.test(probeSrc));
+	/emit initd_exec/.test(probeSrc));
+/* ★★ 真机坑：这台设备上 busybox 没有编 stat，`stat -c '%a'` 拿回空串，
+   会把一台正常的机器报成「缺执行位」。判据必须走 [ -x ]。 */
+ok('★ 不依赖 stat 命令（该设备上不存在，会静默返回空值）',
+	!/stat -c/.test(probeCode) && /\[ -x \/etc\/init\.d\/at-webserver \]/.test(probeCode));
+ok('★ 权限位取 ls -l 的 rwx 串（stat 不可用时的可移植写法）',
+	/ls -l \/etc\/init\.d\/at-webserver[^|]*\| cut -c1-10/.test(probeCode));
+
 ok('★ 明确覆盖 USB 链路速率（开机 480M → 后来 5000M 那个坑）',
 	/emit usb_speed/.test(probeSrc) && /emit usb_version/.test(probeSrc));
+/* ★★ 真机坑：直接取最大值会取到**根 Hub**（本机 usb2 报 20000，而真实模组
+   2-1 只有 5000），排查界面会显示一条高三倍的假速率，问题被完全掩盖。 */
+ok('★ USB 速率排除集线器（bDeviceClass=09，否则会取到根 Hub 的 20000）',
+	/bDeviceClass" 2>\/dev\/null\)" = "09"/.test(probeSrc));
+ok('★ USB 速率排除 usbN 根节点（双保险）',
+	/case "\$\{d\#\#\*\/\}" in usb\*\) continue ;; esac/.test(probeSrc));
+ok('★ 带上 USB 设备名（一眼确认取到的是不是模组）', /emit usb_product/.test(probeSrc));
+
+/* ★★ 两个真机坑：busybox 的 nc 不支持 -z；119.29.29.29:443 不开 HTTPS（curl rc=28） */
+ok('★ 不用 nc -z（busybox 的 nc 不支持，永远返回 1 → 天天误报）',
+	!/nc -z/.test(probeCode));
+ok('★ HTTPS 探测改走 curl（该设备上可用，退出码可区分"连上但证书不认"）',
+	/curl -s -o \/dev\/null --max-time 4 https:\/\/www\.qq\.com/.test(probeSrc));
+ok('★ curl 退出码 6（解析失败）单独区分，不算到链路上',
+	/6\) emit tcp_443 6/.test(probeSrc));
 
 /* ---------- 2. 事实键一致性 ---------- */
 
@@ -166,7 +194,8 @@ const sysChecks = new Function('fv', 'fnum',
 	})();
 
 const HEALTHY = {
-	svc_at_running: '1', svc_at_enabled: '1', initd_mode: '755', ttyusb_count: '4',
+	svc_at_running: '1', svc_at_enabled: '1', initd_mode: '-rwxr-xr-x', initd_exec: '1',
+	ttyusb_count: '4',
 	usb_speed: '5000', usb_path: '2-1', usb_version: '3.00',
 	iface_name: 'MT5700M', iface_device: 'eth2', iface_exists: '1', iface_auto: '1',
 	iface_up: '1', iface_pending: '0', iface_addr: '10.1.1.2', iface_mtu: '1500',
@@ -198,7 +227,7 @@ const notOk = Object.keys(good).filter(function (n) { return good[n].level !== '
 eq('★ 健康事实 → 全部判 ok（不许把正常状态误报成故障）', notOk, []);
 
 const BROKEN = Object.assign({}, HEALTHY, {
-	svc_at_running: '0', initd_mode: '644', ttyusb_count: '0', usb_speed: '480',
+	svc_at_running: '0', initd_exec: '0', ttyusb_count: '0', usb_speed: '480',
 	iface_exists: '0', iface_auto: '0', iface_up: '0', iface_addr: '10.1.1.9',
 	route_gw: '', gw_neigh: 'INCOMPLETE', fw_wan_cover: '0',
 	sqm_enabled: '1', sqm_iface: 'eth1', time_synced: '0',
@@ -208,7 +237,9 @@ const bad = run(BROKEN, Object.assign({}, HEALTHY_ST, { tools: { diag: { modAddr
 
 function bad2(name) { return bad[name] && bad[name].level === 'bad'; }
 ok('AT 服务没跑 → bad', bad2('AT 服务在运行'));
-ok('init.d 是 644 → bad（缺执行位）', bad2('init.d 脚本权限'));
+ok('init.d 没有执行位 → bad（initd_exec=0）', bad2('init.d 脚本权限'));
+ok('★ init.d 有执行位时，权限串是 rwx 形式也要判 ok（该设备没有 stat，拿不到 755）',
+	good['init.d 脚本权限'].level === 'ok', good['init.d 脚本权限'].text);
 ok('没有 /dev/ttyUSB* → bad', bad2('串口设备'));
 ok('USB 480M → warn 而不是 bad（开机早期会自己恢复）', bad['USB 链路速率'].level === 'warn');
 ok('缺接口 → bad', bad2('接口存在'));
@@ -220,11 +251,20 @@ ok('接口地址与模组不一致 → bad', bad2('接口地址与模组一致')
 ok('防火墙没覆盖 WAN → bad', bad2('防火墙覆盖 WAN'));
 ok('SQM 配在 eth1 而出口是 eth2 → bad', bad2('SQM 与分载'));
 ok('时间没同步 → bad', bad2('系统时间'));
-ok('网关 ping 不通 → bad', bad2('ping 网关'));
+ok('网关 ping 不通 + 公网也不通 → bad', bad2('ping 网关'));
+/* ★ 真机：网关 10.0.0.1 不回应 ICMP，但公网 ping 与 HTTPS 全通。
+   这种配置在国内运营商里很常见，判 bad 就是天天报假故障。 */
+ok('★ 网关不回应 ICMP 但公网通 → 判 ok（真机就是这种网关）',
+	run(Object.assign({}, HEALTHY, { ping_gw: '0' }), HEALTHY_ST)['ping 网关'].level === 'ok');
+ok('★ 网关不回应 ICMP 且公网也不通 → 才判 bad',
+	run(Object.assign({}, HEALTHY, { ping_gw: '0', ping_public_a: '0', ping_public_b: '0', tcp_443: '0' }),
+		HEALTHY_ST)['ping 网关'].level === 'bad');
 ok('公网 IP 都 ping 不通 → bad', bad2('ping 公网 IP'));
 ok('DNS 解析失败 → bad', bad2('DNS 解析'));
-ok('★ TCP 443 失败只判 warn（有些网络禁 TCP 探测，不能一刀切判死）',
-	bad['TCP 443'].level === 'warn');
+eq('★ curl 退出码 6（解析失败）→ bad 且指路 DNS 项',
+	run(Object.assign({}, HEALTHY, { tcp_443: '6' }), HEALTHY_ST)['HTTPS 连通'].level, 'bad');
+ok('★ curl 退出码 6 的文案要说明「链路可能是好的，问题在 DNS」',
+	/DNS/.test(run(Object.assign({}, HEALTHY, { tcp_443: '6' }), HEALTHY_ST)['HTTPS 连通'].text));
 
 /* 未知（-1）不许被判成故障：这是「判错代价 > 没测到」的硬要求 */
 const UNKNOWN = Object.assign({}, HEALTHY, {
@@ -232,8 +272,8 @@ const UNKNOWN = Object.assign({}, HEALTHY, {
 	dns_resolve_ok: '-1', tcp_443: '-1', usb_speed: '-1', ttyusb_count: '-1'
 });
 const unk = run(UNKNOWN, HEALTHY_ST);
-['ping 网关', 'ping 公网 IP', 'DNS 解析', 'TCP 443', 'USB 链路速率'].forEach(function (n) {
-	ok('★ ' + n + ' 探测不到（-1）→ 判 warn 不判 bad', unk[n].level === 'warn', unk[n].level);
+['ping 网关', 'ping 公网 IP', 'DNS 解析', 'HTTPS 连通', 'USB 链路速率'].forEach(function (n) {
+	ok('★ ' + n + ' 探测不到（-1）→ 判 warn 不判 bad', unk[n].level === 'warn', unk[n] && unk[n].level);
 });
 ok('★ 串口数为 0 才判 bad，-1 是"取不到"不该判死', unk['串口设备'].level !== 'bad');
 

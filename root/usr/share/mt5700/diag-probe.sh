@@ -134,13 +134,19 @@ emit flow_offload "$(uci -q get firewall.@defaults[0].flow_offloading 2>/dev/nul
 emit flow_offload_hw "$(uci -q get firewall.@defaults[0].flow_offloading_hw 2>/dev/null)"
 
 # ---------- 服务与串口 ----------
-# ★ init.d 脚本是 100644（没有执行位）→ 开机根本不自启，这是高复发故障
+# ★ init.d 脚本是 100644（没有执行位）→ 开机根本不自启，这是高复发故障。
+# ★★ 真机坑（2026-09-19 实测）：这台设备上**没有 stat 命令**（busybox 没编进来），
+#    用 `stat -c '%a'` 会拿回空值，于是"权限位"凭空变成一个空字符串 ——
+#    健康检查会把一台好好的机器报成「缺执行位」。改用 ls -l 的第 1~10 列，
+#    并把"能不能执行"单独判定（[ -x ] 是最可靠的口径，不依赖任何外部命令）。
 if [ -e /etc/init.d/at-webserver ]; then
-	emit initd_mode "$(stat -c '%a' /etc/init.d/at-webserver 2>/dev/null)"
+	emit initd_mode "$(ls -l /etc/init.d/at-webserver 2>/dev/null | cut -c1-10 | tr -d ' ')"
+	[ -x /etc/init.d/at-webserver ] && emit initd_exec 1 || emit initd_exec 0
 	/etc/init.d/at-webserver running >/dev/null 2>&1 && emit svc_at_running 1 || emit svc_at_running 0
 	/etc/init.d/at-webserver enabled >/dev/null 2>&1 && emit svc_at_enabled 1 || emit svc_at_enabled 0
 else
 	emit initd_mode ''
+	emit initd_exec 0
 	emit svc_at_running 0
 	emit svc_at_enabled 0
 fi
@@ -152,22 +158,32 @@ emit ttyusb_count "$tty_n"
 # ---------- USB 链路速率 ----------
 # ★ 本机真实发生过：开机枚举成 USB2（480），几百秒后重枚举成 USB3（5000），
 #   速率差三倍多。取所有 USB 设备里最大的 speed，并给出它所在的路径。
+# ★★ 真机坑（2026-09-19 实测）：直接取最大值会取到 **根 Hub** —— 这台机器上
+#   usb2 报 20000（USB 3.2 Gen2x2）、usb1 报 480，而真正的模组 2-1 只有 5000。
+#   结果排查界面显示「20000 Mbps」，比实际高三倍，问题被完全掩盖。
+#   → 必须按 bDeviceClass=09（Hub）把集线器排除掉，只比较真实设备。
 usb_best=0
 usb_path=''
 usb_ver=''
+usb_prod=''
 for d in /sys/bus/usb/devices/*; do
 	[ -f "$d/speed" ] || continue
+	# 排除根 Hub 与所有集线器：它们的 speed 是总线能力，不是实际链路速率
+	[ "$(cat "$d/bDeviceClass" 2>/dev/null)" = "09" ] && continue
+	case "${d##*/}" in usb*) continue ;; esac
 	s=$(cat "$d/speed" 2>/dev/null)
 	case "$s" in ''|*[!0-9]*) continue ;; esac
 	if [ "$s" -gt "$usb_best" ]; then
 		usb_best="$s"
 		usb_path="${d##*/}"
-		usb_ver=$(cat "$d/version" 2>/dev/null)
+		usb_ver=$(cat "$d/version" 2>/dev/null | tr -d ' ')
+		usb_prod=$(cat "$d/product" 2>/dev/null | tr -d '\r\n')
 	fi
 done
 emit usb_speed "$usb_best"
 emit usb_path "$usb_path"
 emit usb_version "$usb_ver"
+emit usb_product "$usb_prod"
 
 # ---------- DNS ----------
 dns_servers=''
@@ -236,10 +252,23 @@ else
 	emit dns_resolve_ok -1
 fi
 
-# TCP 443：有些网络禁 ICMP，ping 不通不代表上不了网，这一项用来兜住那种情况。
-# nc 缺失或 busybox 版本不支持 -z 时会得到 0，所以前端把它按"存疑"而非"不通"呈现。
-if have_cmd nc; then
-	timeout "$TCP_TIMEOUT" nc -z "$PING_A" 443 >/dev/null 2>&1 && emit tcp_443 1 || emit tcp_443 0
+# HTTPS：有些网络禁 ICMP，ping 不通不代表上不了网 —— 这一项用来兜住那种情况。
+# ★★ 两个真机坑（2026-09-19 实测，都是照着文档写会踩的）：
+#   ① busybox 的 nc 不支持 -z（用法就一行 `nc [IPADDR PORT]`），`nc -z` 必返回 1，
+#      于是「443 建连」永远失败 —— 一台能正常上网的机器会天天报存疑。
+#   ② 拿 119.29.29.29:443 当目标也会误判：该 IP 只答 ICMP、不开 HTTPS
+#      （curl 过去是 rc=28 超时，而 curl https://www.qq.com 是 rc=0）。
+#   → 改用 curl 打 https://www.qq.com，并按退出码区分「连上但证书不认」与「连不上」。
+#     退出码：0 正常；35/51/58/60 = TCP+TLS 已经握手成功（只是证书层面不认 IP/域名）；
+#     6 = 域名解析失败（那是 DNS 的问题，不是链路）；7/28 = 连不上 / 超时。
+if have_cmd curl; then
+	curl -s -o /dev/null --max-time 4 https://www.qq.com >/dev/null 2>&1
+	case "$?" in
+		0|35|51|58|60) emit tcp_443 1 ;;
+		6) emit tcp_443 6 ;;
+		7|28) emit tcp_443 0 ;;
+		*) emit tcp_443 -1 ;;
+	esac
 else
 	emit tcp_443 -1
 fi
