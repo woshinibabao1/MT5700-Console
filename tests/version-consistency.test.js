@@ -37,12 +37,14 @@ const MAIN_PKG = 'at-webserver';
  *
  * icu_* 六件套：升到 2.3.0 时被本守卫拦下，经 `git show HEAD:src/rust/Cargo.lock`
  * 核对，这六个在**改动之前**就已经是 2.3.0（icu4x 2.3.0 系列），不是升版误伤。
+ * icu_provider：升到 2.3.1 时被拦下，同样核对过——它在改动之前就是 2.3.1。
  * 判据用「改动前后是否一致」而不是「查网页」—— lock 是 cargo 从 registry 解析
  * 出来的，里面写了就说明 crates.io 上确有此版本。
  */
 const KNOWN_SAME_VERSION = [
 	'icu_collections', 'icu_locale_core', 'icu_normalizer',
-	'icu_normalizer_data', 'icu_properties', 'icu_properties_data'
+	'icu_normalizer_data', 'icu_properties', 'icu_properties_data',
+	'icu_provider'
 ];
 
 let pass = 0;

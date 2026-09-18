@@ -894,15 +894,14 @@ function parseRawData(text) {
 		} else if (line.indexOf('^REJINFO') === 0) {
 			// 网络拒绝原因主动上报，解析后进 REJINFO 类型
 			out.push({ type: 'REJINFO', raw: line, parsed: Parse.parseRejInfo(line) });
-		} else if (line.indexOf('^SRVST') === 0) {
-			/*
-			 * 服务状态变化主动上报（手册 13.7）。
-			 * ★ 这条**只能用 URC 拿**：手册 13.6 只有设置命令 AT^SRVST=<n> 与测试命令，
-			 *   没有任何读命令 —— 想看「当前是不是无服务」，只能先 AT^SRVST=1 开上报再等模组推。
-			 *   因此监听开关必须由用户手动点，并且到点要强制关回去（见 network_status.js）。
-			 */
-			out.push({ type: 'SRVST', raw: line, parsed: Parse.parseSrvst(line) });
 		}
+		/*
+		 * ^SRVST（服务状态）**不再解析分发**：对应功能「服务状态监听」已整块下线
+		 * （手册只有设置命令 AT^SRVST=<n>、没有读命令，要看状态就得先开周期上报
+		 *   再等模组推 —— 那会在模组里留下常驻上报，是 2.2.1 那类事故的源头）。
+		 * 它仍留在上面的 isUnsolicitedText 里：万一有人从 AT 终端手动开过上报，
+		 * 这条 URC 也能被正确归类成「非命令响应」，不会被当成某次查询的应答。
+		 */
 	}
 	return out;
 }

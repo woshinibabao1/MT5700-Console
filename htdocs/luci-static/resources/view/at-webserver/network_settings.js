@@ -75,29 +75,69 @@ return L.view.extend({
 		body.appendChild(neighCard);
 
 
-		/* ---------- 网络拒绝原因（^REJINFO 主动上报） ---------- */
-
-		var rejectCard = Mt5700.card('网络拒绝', '^REJINFO 主动上报的网络拒绝原因（注册失败时实时更新）');
+		/* ---------- 网络拒绝（手册 13.14 ^REJINFO，模组自发上报） ----------
+		 *
+		 * 2026-09-18：从「网络状态 → 连接工具」整块迁来，并做成表格。
+		 *   它回答的是「为什么注册不上 / PDU 会话建不起来」，与本页的锁频、邻区扫描
+		 *   是同一条排查链 —— 锁错频点、锁到没签约的 PLMN，第一条线索就在这里，
+		 *   而不是在全是读数的「网络状态」页。
+		 *
+		 * ★ 只订阅、不下发任何命令：^REJINFO 是模组**自发**上报（手册 13.14），
+		 *   既没有读命令也没有设置命令，不占 AT 通道、不会在模组里留下任何状态。
+		 *   所以这里不做「开始/停止监听」开关 —— 订阅是纯前端行为，一直挂着即可。
+		 */
+		var rejectCard = Mt5700.card('网络拒绝',
+			'^REJINFO 主动上报的拒绝原因（注册 / PDU 会话被拒时实时更新）');
 		var rejectBody = E('div');
 		rejectCard._body.appendChild(rejectBody);
 		body.appendChild(rejectCard);
 		var lastReject = null;
 
+		function fmtRejClock(ts) {
+			if (!ts) return '—';
+			var d = new Date(ts);
+			function p(n) { return n < 10 ? '0' + n : String(n); }
+			return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+		}
+
 		function renderReject() {
 			rejectBody.innerHTML = '';
 			if (!lastReject) {
 				rejectBody.appendChild(Mt5700.empty('尚无网络拒绝上报'));
+				rejectBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'没被拒绝就不会推 —— 这本身是正常的。注册被拒、PDU 会话建立被拒时，'
+					+ '模组会自己推一帧到这里（手册 13.14）。本页只订阅、不下发任何命令。'));
 				return;
 			}
 			var r = lastReject;
+			var rows = [
+				['时间', fmtRejClock(r.at)],
+				['PLMN', r.plmn || '—'],
+				['域', r.domainText],
+				['制式', r.ratText],
+				['拒绝类型', r.rejectTypeText],
+				['原因', E('b', { 'class': 'mt5700-diag-verdict is-bad' }, r.causeText)]
+			];
+			if (r.lac || r.cellId) {
+				rows.push(['LAC / 小区', (r.lac || '—') + ' / ' + (r.cellId || '—')]);
+			}
+			/* 原始原因值常与 cause 相同，只有不一样（模组做过二次映射）时才单列，
+			   否则同一行的两个数会让人以为有两个原因。 */
+			if (r.originalCause != null && Number(r.originalCause) !== Number(r.cause)) {
+				rows.push(['原始原因值', '#' + r.originalCause]);
+			}
+			if (r.esmCause !== undefined && r.esmCause !== null) {
+				rows.push(['ESM 原因', '#' + r.esmCause]);
+			}
+			rejectBody.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
 			rejectBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-				'网络拒绝：' + r.rejectTypeText + '（' + r.causeText + '）'));
+				'以上是模组上报的**最近一次**拒绝原因（原因值 ' + r.cause + '）。'
+				+ '常见问题：#7/#8 多为核心网未开通 5G 或未签约该 DNN；'
+				+ '#11/#12 多为欠费或区域限制；#15 为小区找不到合适用户。'));
 			rejectBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-				r.ratText + ' · PLMN ' + r.plmn + ' · ' + r.domainText + ' · 小区 ' + (r.cellId || '—')));
-			rejectBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-				'原始原因值 #' + r.originalCause + ' · LAC ' + (r.lac || '—') + ' · RAC ' + (r.rac || '—') +
-				(r.esmCause !== undefined ? ' · ESM 原因 #' + r.esmCause : '') +
-				' · ' + new Date(r.at).toLocaleTimeString()));
+				'原因指向 PLMN / 跟踪区时，多半是签约或区域限制，换小区也没用；'
+				+ '指向小区或频点时，可用上面「邻区扫描」挑个更强的小区、'
+				+ '再用「锁频设置」锁到已确认可用的频点 / PCI。'));
 		}
 		renderReject();
 

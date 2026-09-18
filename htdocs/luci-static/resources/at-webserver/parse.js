@@ -1295,32 +1295,13 @@ var Parse = (function () {
 		return isFinite(n) ? n : null;
 	};
 
-	/* ================= 服务状态 ^SRVST（手册 13.6 / 13.7） ================= */
-
-	/* 手册 13.7：<srv_status> 五个取值，未收录的原样显示编号。 */
-	var SRV_STATUS = {
-		0: '无服务', 1: '限制服务', 2: '服务有效', 3: '区域服务限制', 4: '省电或休眠'
-	};
-
-	api.srvStatusText = function (v) {
-		/* ★ null / undefined 是「没取到」，不是 0：Number(null) === 0，
-		   直接 Number() 会把「没数据」显示成「无服务」——凭空报一个故障。 */
-		if (v == null || v === '') return '未知';
-		var n = Number(v);
-		if (!isFinite(n)) return '未知';
-		return SRV_STATUS[n] != null ? SRV_STATUS[n] : '未知状态（#' + n + '）';
-	};
-
 	/*
-	 * 解析主动上报 ^SRVST: <srv_status>。
-	 * 手册正文用半角冒号，这里两种冒号都收（与 ^REJINFO 同一处理方式）。
+	 * ^SRVST（服务状态）解析器已于 2026-09-18 随功能一并删除：
+	 * 「服务状态监听」整块下线（手册只有设置命令 AT^SRVST=<n>、没有读命令，
+	 * 要看状态就得先开周期上报再等模组推，会在模组里留下常驻上报）。
+	 * 需要恢复时按手册 13.7 重建：0 无服务 / 1 限制服务 / 2 服务有效 /
+	 * 3 区域服务限制 / 4 省电或休眠；注意 null 是「没取到」，不能显示成「无服务」。
 	 */
-	api.parseSrvst = function (line) {
-		var m = String(line == null ? '' : line).match(/\^SRVST[：:]\s*(\d+)/);
-		if (!m) return null;
-		var n = Number(m[1]);
-		return { status: n, text: api.srvStatusText(n), raw: String(line).trim(), at: Date.now() };
-	};
 
 	/* ================= SIM 卡状态 ^SIMSQ（手册 6.6） ================= */
 

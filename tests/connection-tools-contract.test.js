@@ -2,16 +2,19 @@
 /*
  * 连接工具卡 契约测试（无需真机，纯 Node 跑）
  * ---------------------------------------------------------------------------
- * 2026-09-18：「连接质量」整卡换成「连接工具」，六项功能
- *   ADC 管脚电压 / 诊断快照导出 / 网络拒绝原因 / 流量统计清零 /
- *   服务状态监听 / 连通性自检。
+ * 2026-09-18：「连接质量」整卡换成「连接工具」。
+ *   初版六项，同日按用户要求调整为四项：
+ *     ADC 管脚电压（进页面自动读）/ 诊断快照导出 / 流量统计清零 / 连通性自检。
+ *   · 「网络拒绝原因」→ 迁到「网络设置 → 网络拒绝」卡（本测试第 9 节守卫）
+ *   · 「服务状态监听」→ 整块下线（^SRVST 解析器一并删除，本测试第 6 节守卫）
  *
  * 本测试覆盖：
- *   ① 解析层  parseAdcValue / parseSrvst / srvStatusText / parseRejInfo
+ *   ① 解析层  parseAdcValue / parseRejInfo
  *   ② 自检    checkSteps() 六步判据（用手册格式的应答真跑）
  *   ③ 快照    buildSnapshotText() 真跑，重点钉「默认不写设备标识」
- *   ④ 安全三件套（2.2.1 事故防回退的源码级契约）★ 最重要
+ *   ④ ★ 不占通道底线（2.2.1 事故防回退的源码级契约）最重要
  *   ⑤ 沿用    PDCP / CGSMS 解析、地址去重、三表合并（这些不随换卡而失效）
+ *   ⑥ 网络设置页「网络拒绝」卡契约（迁移后的归宿）
  *
  * 运行：node tests/connection-tools-contract.test.js
  */
@@ -22,9 +25,12 @@ const path = require('path');
 
 const PARSE_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at-webserver', 'parse.js');
 const NS_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'network_status.js');
+/* 「网络拒绝原因」迁移后的归宿页 */
+const SET_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'network_settings.js');
 
 const parseSrc = fs.readFileSync(PARSE_JS, 'utf8');
 const nsSrc = fs.readFileSync(NS_JS, 'utf8');
+const setSrc = fs.readFileSync(SET_JS, 'utf8');
 
 const pm = parseSrc.match(/var Parse = \((function[\s\S]*?)\)\(\);/);
 if (!pm) { console.error('无法从 parse.js 提取模块'); process.exit(1); }
@@ -66,20 +72,7 @@ eq('空串 → null', Parse.parseAdcValue(''), null);
 eq('null 输入不炸', Parse.parseAdcValue(null), null);
 eq('非数字 → null', Parse.parseAdcValue('^ADCREADEX: abc'), null);
 
-/* ---------- 2. ^SRVST（手册 13.7 五个取值） ---------- */
-
-eq('^SRVST: 0 → 无服务', Parse.parseSrvst('^SRVST: 0').status, 0);
-eq('^SRVST: 0 文案', Parse.parseSrvst('^SRVST: 0').text, '无服务');
-eq('^SRVST: 1 → 限制服务', Parse.parseSrvst('^SRVST: 1').text, '限制服务');
-eq('^SRVST: 2 → 服务有效', Parse.parseSrvst('^SRVST: 2').text, '服务有效');
-eq('^SRVST: 3 → 区域服务限制', Parse.parseSrvst('^SRVST: 3').text, '区域服务限制');
-eq('^SRVST: 4 → 省电或休眠', Parse.parseSrvst('^SRVST: 4').text, '省电或休眠');
-eq('全角冒号也收（手册正文用全角）', Parse.parseSrvst('^SRVST：2').status, 2);
-eq('未收录的取值有兜底文案', Parse.parseSrvst('^SRVST: 9').text, '未知状态（#9）');
-eq('不匹配的文本 → null', Parse.parseSrvst('OK'), null);
-eq('srvStatusText(null) 不炸', Parse.srvStatusText(null), '未知');
-
-/* ---------- 3. ^REJINFO（手册 13.14） ---------- */
+/* ---------- 2. ^REJINFO（手册 13.14，解析器留在 parse.js，UI 在 network_settings.js） ---------- */
 
 const REJ = Parse.parseRejInfo('^REJINFO: "46000",0,7,6,0,7,"1422","05","0C027F50"');
 ok('REJINFO 解析成功', REJ !== null, String(REJ));
@@ -143,8 +136,8 @@ eq('CPIN 取不到 → bad 且文案说明卡没插好',
 eq('C5GREG stat=1 → ok', judge('网络注册', '+C5GREG: 1,1,"46000","14225C"\r\nOK').level, 'ok');
 eq('C5GREG stat=5（漫游）→ ok', judge('网络注册', '+C5GREG: 1,5,"46000"\r\nOK').level, 'ok');
 eq('C5GREG stat=3（被拒）→ bad', judge('网络注册', '+C5GREG: 1,3\r\nOK').level, 'bad');
-ok('C5GREG 被拒时指路「网络拒绝原因」',
-	/网络拒绝原因/.test(judge('网络注册', '+C5GREG: 1,3\r\nOK').text));
+ok('C5GREG 被拒时指路「网络设置 → 网络拒绝」',
+	/网络设置 → 网络拒绝/.test(judge('网络注册', '+C5GREG: 1,3\r\nOK').text));
 eq('C5GREG stat=0（未注册）→ warn，不是 bad',
 	judge('网络注册', '+C5GREG: 1,0\r\nOK').level, 'warn');
 
@@ -218,41 +211,26 @@ ok('勾选后含 IMSI', snapWithIds.indexOf('460009711127691') >= 0);
 ok('勾选后提醒自行删除', /公开发帖前请自行删除/.test(snapWithIds));
 ok('设备还没取到时也不炸', makeSnapshotText(snapState, null)(false).indexOf('MT5700 诊断快照') === 0);
 
-/* ---------- 6. ★★ 安全三件套（2.2.1 事故防回退） ---------- */
+/* ---------- 6. ★★ 不占通道底线（2.2.1 事故防回退） ---------- */
 
 ok('卡片已改名为「连接工具」', /Mt5700\.card\('连接工具'/.test(nsSrc));
 ok('旧卡「连接质量」已下线', !/Mt5700\.card\('连接质量'/.test(nsSrc));
 
-ok('★ 初始化里不自动开启任何监听',
-	!/renderTools[\s\S]{0,80}startSrvListen/.test(nsSrc)
-	&& !/^\s*startSrvListen\(\);/m.test(nsSrc));
-ok('★ 服务状态监听只能手动触发（按钮绑定 startSrvListen）',
-	/startSrvListen\(\); else startSrvListen\(\);/.test(nsSrc)
-	|| /if \(t\.listening\) stopSrvListen\(\); else startSrvListen\(\);/.test(nsSrc));
-
-ok('★ 有到点强制关闭的定时器（SRV_LISTEN_MS）',
-	/var SRV_LISTEN_MS = \d+/.test(nsSrc)
-	&& /setTimeout\(function \(\) \{ srvTimer = null; stopSrvListen\(\); \}, SRV_LISTEN_MS\)/.test(nsSrc));
-ok('★ 关闭命令是 AT^SRVST=0', /sendCommand\('AT\^SRVST=0'\)/.test(nsSrc));
-ok('★ 关闭失败必须置 offFailed（不能静默）', /t\.offFailed = true;/.test(nsSrc));
-ok('★ offFailed 时判 warn 并给重试入口',
-	/mt5700-diag-summary is-warn/.test(nsSrc)
-	&& /dangerButton\('重试关掉周期上报', sendSrvOff\)/.test(nsSrc));
-ok('★ 有代次守卫 srvGen（迟到的开启响应不许翻回已开）',
-	/var srvGen = 0;/.test(nsSrc) && /if \(gen !== srvGen\) return;/.test(nsSrc)
-	&& /srvGen\+\+/.test(nsSrc));
-ok('★ 页面销毁时也尝试关掉上报',
-	/_dispose[\s\S]{0,1200}AT\^SRVST=0/.test(nsSrc));
 ok('★ 不再下发 PDCP 周期上报开关（2.2.1 元凶）',
 	!/sendCommand\('AT\^PDCPDATAINFO=/.test(nsSrc));
-
-ok('拒绝原因只订阅、不下发写命令',
-	!/sendCommand\('AT\^?REJINFO/.test(nsSrc)
-	&& /function toggleRejListen\(\)/.test(nsSrc));
-ok('两个监听共用一个订阅回调（不会重复 subscribe）',
-	/function ensureToolHandler\(\)[\s\S]{0,200}if \(toolHandler\) return;/.test(nsSrc));
-ok('两个都关掉才 unsubscribe',
-	/function dropToolHandler\(\)[\s\S]{0,300}rej\.listening \|\| state\.tools\.srv\.listening/.test(nsSrc));
+ok('★ 服务状态监听已整块下线（不再下发 AT^SRVST 命令）',
+	!/sendCommand\('AT\^SRVST/.test(nsSrc)
+	&& !/buildSrvBlock|startSrvListen|stopSrvListen|sendSrvOff/.test(nsSrc)
+	&& !/tools\.srv/.test(nsSrc));
+ok('★ ^SRVST 解析器已一并删除（不留死代码）',
+	!/api\.parseSrvst/.test(parseSrc) && !/api\.srvStatusText/.test(parseSrc));
+ok('★ 网络状态页不再有「网络拒绝原因」（已迁去网络设置）',
+	!/buildRejBlock|toggleRejListen|tools\.rej/.test(nsSrc));
+ok('★ 本卡没有任何周期上报开关（无 SRV_LISTEN_MS / 无订阅回调）',
+	!/SRV_LISTEN_MS/.test(nsSrc) && !/toolHandler/.test(nsSrc)
+	&& !/AtWs\.client\.subscribe/.test(nsSrc));
+ok('★ 自检那步指路到「网络设置 → 网络拒绝」',
+	/网络设置 → 网络拒绝/.test(nsSrc));
 
 ok('流量清零走确认弹窗', /function clearFlowStats[\s\S]{0,300}Mt5700\.confirm/.test(nsSrc));
 ok('流量清零下发 AT^DSFLOWCLR', /sendCommand\('AT\^DSFLOWCLR'\)/.test(nsSrc));
@@ -260,6 +238,10 @@ ok('清零后立刻重取流量并重绘', /getFlow\(\)\.then\(renderFlow\)/.tes
 ok('ADC 用 AT^ADCREADEX=', /sendCommand\('AT\^ADCREADEX=' \+ id\)/.test(nsSrc));
 ok('ADC 管脚数量不写死（逐个试、失败即停）',
 	/var ADC_PIN_IDS = \[/.test(nsSrc) && /if \(v == null\) \{ stopped = true; return; \}/.test(nsSrc));
+ok('★ ADC 进页面自动读一次（连上就调 readAdcPins，不用先点按钮）',
+	/refreshAll\(\);[\s\S]{0,300}readAdcPins\(\);/.test(nsSrc));
+ok('ADC 有结果后按钮变「重新读取」',
+	/t\.rows\.length \? '重新读取' : '读取'/.test(nsSrc));
 
 /* ---------- 7. 沿用：PDCP / CGSMS 解析（解析器仍在 parse.js） ---------- */
 
@@ -315,6 +297,27 @@ ok('三个分组标题行齐全',
 ok('地址表不再有 CID 列', !/Mt5700\.table\(\['CID'/.test(nsSrc));
 ok('地址表不再有来源列', !/'来源'/.test(nsSrc));
 
+/* ---------- 9. 网络设置页「网络拒绝」卡（^REJINFO 迁移后的归宿） ---------- */
+
+ok('网络设置页有「网络拒绝」卡', /Mt5700\.card\('网络拒绝'/.test(setSrc));
+ok('★ 只订阅 URC，不下发任何 ^REJINFO 命令（手册无读/设置命令）',
+	!/sendCommand\('AT\^?REJINFO/.test(setSrc)
+	&& /AtWs\.client\.subscribe\(rejectHandler\)/.test(setSrc)
+	&& /resp\.data\.type === 'REJINFO'/.test(setSrc));
+ok('★ 离线时也要 unsubscribe（否则反复进出叠加订阅）',
+	/_dispose[\s\S]{0,300}AtWs\.client\.unsubscribe\(rejectHandler\)/.test(setSrc));
+ok('没上报时给出「尚无网络拒绝上报」并说明「没被拒绝就不会推」',
+	/Mt5700\.empty\('尚无网络拒绝上报'\)/.test(setSrc)
+	&& /没被拒绝就不会推/.test(setSrc));
+ok('有上报时铺成表格（时间/PLMN/域/制式/拒绝类型/原因）',
+	/Mt5700\.table\(\['项目', '值'\], rows, \{ striped: true \}\)/.test(setSrc)
+	&& /\['拒绝类型', r\.rejectTypeText\]/.test(setSrc)
+	&& /\['原因', E\('b'/.test(setSrc));
+ok('给出常见原因值的解读（#7/#8/#11/#12/#15）',
+	/#7\/#8 多为核心网未开通 5G/.test(setSrc));
+ok('指回本页的排查手段（邻区扫描 / 锁频设置）',
+	/邻区扫描/.test(setSrc) && /锁频设置/.test(setSrc));
+
 /* ---------- 汇总 ---------- */
 
 if (fails.length) {
@@ -322,4 +325,4 @@ if (fails.length) {
 	fails.forEach(function (f) { console.log('  - ' + f); });
 	process.exit(1);
 }
-console.log('  ✓ ' + pass + ' 项断言通过（连接工具：解析 / 自检判据 / 快照脱敏 / 安全三件套 / 沿用契约）');
+console.log('  ✓ ' + pass + ' 项断言通过（连接工具：解析 / 自检判据 / 快照脱敏 / 不占通道底线 / 网络拒绝归位 / 沿用契约）');

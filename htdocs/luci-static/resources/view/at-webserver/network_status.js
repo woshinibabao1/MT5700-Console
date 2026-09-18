@@ -15,7 +15,7 @@
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量
  *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
- *   ⑥ 连接工具     ADC 管脚电压 / 诊断快照导出 / 网络拒绝原因 / 流量清零 / 服务状态监听 / 自检
+ *   ⑥ 连接工具     ADC 管脚电压 / 诊断快照导出 / 流量清零 / 连通性自检
  * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
  * [连接状态 | 右列（SIM 与设备 → 连接质量）]。
  *
@@ -91,8 +91,10 @@ return L.view.extend({
 		devCard._body.appendChild(devBody);
 
 		/* ⑥ 连接工具：这一页别处全是读数，这里放**能做事的按钮** ——
-		 * ADC 管脚电压 / 诊断快照导出 / 网络拒绝原因 / 流量统计清零 /
-		 * 服务状态监听 / 连通性自检。形态为「按钮触发 + 结果区」。 */
+		 * ADC 管脚电压（自动读）/ 连通性自检 / 诊断快照导出 / 流量统计清零。
+		 * 形态为「按钮触发 + 结果区」。
+		 * ★「网络拒绝原因」已迁到「网络设置 → 网络拒绝」，「服务状态监听」已下线
+		 *   —— 理由见下方连接工具区的注释。 */
 		var toolsCard = Mt5700.card('连接工具', '排查、诊断与快照导出');
 		var toolsBody = E('div');
 		toolsCard._body.appendChild(toolsBody);
@@ -324,44 +326,35 @@ return L.view.extend({
 		 *   短信承载域又与「连接」不是一个话题 —— 它没有独立的问题域，
 		 *   只是「别处不要的边角料」集中营。
 		 *
-		 * ★ 六项工具的手册依据（实测排除掉的候选记在 FRONTEND_REVIEW_REPORT.md）：
-		 *   · ADC 管脚电压   手册 11.5   AT^ADCREADEX=<id>，纯读
+		 * ★ 四个工具的手册依据（实测排除掉的候选记在 FRONTEND_REVIEW_REPORT.md）：
+		 *   · ADC 管脚电压   手册 11.5   AT^ADCREADEX=<id>，纯读，进页面自动读一次
 		 *   · 诊断快照       纯前端拼装，零 AT 往返
-		 *   · 网络拒绝原因   手册 13.14  ^REJINFO，模组**自发**上报，只订阅、不下发写命令
 		 *   · 流量统计清零   手册 16.11  AT^DSFLOWCLR，只清计数器、不断网
-		 *   · 服务状态监听   手册 13.6/13.7 ^SRVST（见下方安全三件套）
 		 *   · 连通性自检     CPIN → C5GREG → CGACT → NDISSTATQRY → CGPADDR → DHCP 逐层走
 		 *
-		 * ★★ 安全三件套（2.2.1 事故的硬教训，写在这里防回退）：
+		 * ★★ 两项已迁走 / 下线（2026-09-18，别再搬回来）：
+		 *   ①「网络拒绝原因」迁到「网络设置 → 网络拒绝」：它回答的是「为什么注册不上」，
+		 *      与锁频、邻区扫描是同一条排查链，放设置页才找得到；^REJINFO 是模组自发
+		 *      URC，放哪一页都不占 AT 通道。
+		 *   ②「服务状态监听」整块下线：手册只有设置命令 AT^SRVST=<n>、没有读命令，
+		 *      想看状态就得先开周期上报再等模组推 —— 正是 2.2.1 那类「页面进出自带写
+		 *      命令、页面被强杀后上报常驻模组」的风险源，而收益只是「掉网时多一行记录」，
+		 *      不值得为它占一条独占通道。
+		 *
+		 * ★★★ 安全底线（2.2.1 事故的硬教训，写在这里防回退）：
 		 *   上一版为做「卡不卡」，让页面**进入时自动下发** AT^PDCPDATAINFO=1,5000
 		 *   开周期上报、离开时才关。页面被强杀后上报永久常驻模组，与 1Hz 的 AT
 		 *   轮询争抢同一条 AT 通道，真机事件队列积压 106 帧，只能重启服务才停。
-		 *   所以本卡任何「会留在模组里」的开关都必须满足三件事：
-		 *     ① 默认绝不开，必须由用户手动点；
-		 *     ② 到点由定时器强制关，不等用户、不依赖页面正常退出；
-		 *     ③ 关不掉就置 offFailed、判 warn 并给重试入口 ——
-		 *        悄悄留下一个常驻上报，比测不到严重得多。
+		 *   因此：**本卡任何功能都不许在模组里留下常驻状态**。ADC / 自检 / 清零
+		 *   都是一次性读或写；将来若要再加「开上报 → 等推送」型功能，必须同时满足
+		 *   ① 默认关、只能手动开；② 到点定时器强制关；③ 关不掉就显式报警 + 重试入口
+		 *   —— 悄悄留下一个常驻上报，比测不到严重得多。
 		 *   守卫：tests/connection-tools-contract.test.js
 		 */
 
 		/* ADC 管脚 id：手册 11.5 明写「不同产品的 ADC 管脚的数量不同」，
 		   所以逐个试、第一条失败就停，不预设数量。 */
 		var ADC_PIN_IDS = [0, 1, 2, 3, 4];
-		/* 服务状态监听时长（毫秒）：到点强制关。2 分钟足够抓一次掉网。 */
-		var SRV_LISTEN_MS = 120000;
-		/* 服务状态变化最多留几条（新的在前） */
-		var SRV_LOG_MAX = 10;
-
-		var toolHandler = null;   /* 事件订阅回调（拒绝原因 / 服务状态共用一个） */
-		var srvTimer = null;      /* 服务状态监听的强制关闭定时器 */
-		var srvGen = 0;           /* 代次守卫：关闭后迟到的开启响应不许翻回「已开」 */
-
-		function fmtClock(ts) {
-			if (!ts) return '—';
-			var d = new Date(ts);
-			function p(n) { return n < 10 ? '0' + n : String(n); }
-			return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
-		}
 
 		/* 工具块外壳：标题 + 右侧按钮，结果区由调用方 append */
 		function toolBlock(title, btn) {
@@ -377,24 +370,25 @@ return L.view.extend({
 			if (!toolsBody) return;
 			toolsBody.innerHTML = '';
 			toolsBody.appendChild(buildAdcBlock());
-			toolsBody.appendChild(buildRejBlock());
-			toolsBody.appendChild(buildSrvBlock());
 			toolsBody.appendChild(buildCheckBlock());
 			toolsBody.appendChild(buildSnapshotBlock());
 			toolsBody.appendChild(buildFlowClearBlock());
 		}
 
-		/* ---------- ① ADC 管脚电压（手册 11.5） ---------- */
+		/* ---------- ① ADC 管脚电压（手册 11.5） ----------
+		 * 进页面自动读一次（见底部初始化），结果直接铺在表里，不用先点按钮；
+		 * 按钮只是「再读一次」。5 条只读查询，失败即停，不会在模组里留下任何状态。 */
 
 		function buildAdcBlock() {
 			var t = state.tools.adc;
 			var box = toolBlock('ADC 管脚电压',
-				Mt5700.ghostButton(t.busy ? '读取中…' : '读取', readAdcPins));
+				Mt5700.ghostButton(t.busy ? '读取中…' : (t.rows.length ? '重新读取' : '读取'), readAdcPins));
 			if (t.err && !t.rows.length) {
 				box.appendChild(Mt5700.empty(t.err));
 			} else if (!t.rows.length) {
 				box.appendChild(E('p', { 'class': 'mt5700-hint' },
-					'读取模组各 ADC 管脚的原始电平（手册 11.5，单位 mV）。'));
+					t.busy ? '正在读取各 ADC 管脚（手册 11.5，单位 mV）…'
+						: '进页面自动读取；没出结果时点右侧按钮再读一次。'));
 			} else {
 				box.appendChild(Mt5700.table(['管脚', '电平'],
 					t.rows.map(function (r) { return ['ADC' + r.id, r.value + ' mV']; }),
@@ -433,184 +427,7 @@ return L.view.extend({
 				});
 		}
 
-		/* ---------- ② 网络拒绝原因（手册 13.14 ^REJINFO，模组自发上报） ---------- */
-
-		function buildRejBlock() {
-			var t = state.tools.rej;
-			var box = toolBlock('网络拒绝原因',
-				Mt5700.ghostButton(t.listening ? '停止监听' : '开始监听', toggleRejListen));
-			if (!t.last) {
-				box.appendChild(E('p', { 'class': 'mt5700-hint' }, t.listening
-					? '监听中，还没收到上报 —— 没被拒绝就不会推，这是正常的。'
-					: '监听模组自发的 ^REJINFO 上报（手册 13.14）：注册被拒、PDU 会话建立'
-						+ '被拒时它会自己推一帧。只订阅、不下发任何写命令，不占 AT 通道。'));
-				return box;
-			}
-			var r = t.last;
-			var rows = [
-				['时间', fmtClock(r.at)],
-				['PLMN', r.plmn || '—'],
-				['域', r.domainText],
-				['制式', r.ratText],
-				['拒绝类型', r.rejectTypeText],
-				['原因', E('b', { 'class': 'mt5700-diag-verdict is-bad' }, r.causeText)]
-			];
-			if (r.lac || r.cellId) {
-				rows.push(['LAC / 小区', (r.lac || '—') + ' / ' + (r.cellId || '—')]);
-			}
-			box.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
-			box.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-				'以上是模组上报的**最近一次**拒绝原因（原因值 ' + r.cause + '）。'
-				+ '常见问题：#7/#8 多为核心网未开通 5G 或未签约该 DNN；'
-				+ '#11/#12 多为欠费或区域限制；#15 为小区找不到合适用户。'));
-			return box;
-		}
-
-		function toggleRejListen() {
-			var t = state.tools.rej;
-			t.listening = !t.listening;
-			if (t.listening) { ensureToolHandler(); t.since = Date.now(); }
-			else dropToolHandler();
-			renderTools();
-		}
-
-		/*
-		 * 事件订阅：拒绝原因与服务状态共用一个回调、一次 subscribe。
-		 * 两个都关掉时才 unsubscribe —— 否则先关的那个会把另一个也掐了。
-		 *
-		 * 数据形态：rpc.js 把 URC 拆成 { type:'urc_data', data:{ type, raw, parsed } }。
-		 */
-		function ensureToolHandler() {
-			if (toolHandler) return;
-			toolHandler = function (ev) {
-				if (!ev) return;
-				var d = (ev.type === 'urc_data') ? ev.data : null;
-				if (!d || !d.type || !d.parsed) return;
-				if (d.type === 'REJINFO') {
-					state.tools.rej.last = d.parsed;
-					state.tools.rej.count++;
-					renderTools();
-				} else if (d.type === 'SRVST') {
-					var t = state.tools.srv;
-					t.last = d.parsed;
-					t.log.unshift(d.parsed);
-					if (t.log.length > SRV_LOG_MAX) t.log.pop();
-					renderTools();
-				}
-			};
-			AtWs.client.subscribe(toolHandler);
-		}
-
-		function dropToolHandler() {
-			if (!toolHandler) return;
-			if (state.tools.rej.listening || state.tools.srv.listening) return;
-			AtWs.client.unsubscribe(toolHandler);
-			toolHandler = null;
-		}
-
-		/* ---------- ③ 服务状态监听（手册 13.6/13.7 ^SRVST） ----------
-		 * ★ 这条**只能靠上报拿**：手册只有设置命令 AT^SRVST=<n> 与测试命令，
-		 *   没有任何读命令。所以「现在是不是无服务」= 先开上报、再等模组推。
-		 *   → 必须走安全三件套（见本卡开头）。
-		 */
-
-		function buildSrvBlock() {
-			var t = state.tools.srv;
-			var label = t.listening ? '停止监听' : (t.busy ? '开启中…' : '监听 2 分钟');
-			var box = toolBlock('服务状态监听',
-				Mt5700.ghostButton(label, function () {
-					if (t.listening) stopSrvListen(); else startSrvListen();
-				}));
-
-			/* ★ offFailed 必须显式报警：静默留下一个常驻上报比测不到严重得多 */
-			if (t.offFailed) {
-				var warn = E('div', { 'class': 'mt5700-diag-summary is-warn' });
-				warn.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' },
-					'周期上报没关掉（AT^SRVST=0 失败）'));
-				warn.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' },
-					'模组可能仍在持续上报。请点下面的按钮重试，直到这条提示消失。'));
-				var act = E('div', { 'class': 'mt5700-mt-sm' });
-				act.appendChild(Mt5700.dangerButton('重试关掉周期上报', sendSrvOff));
-				warn.appendChild(act);
-				box.appendChild(warn);
-			}
-			if (t.err) box.appendChild(E('p', { 'class': 'mt5700-hint' }, t.err));
-
-			if (t.log.length) {
-				box.appendChild(Mt5700.table(['时间', '服务状态'],
-					t.log.map(function (x) {
-						return [fmtClock(x.at),
-							E('b', {
-								'class': 'mt5700-diag-verdict '
-									+ (x.status === 2 ? 'is-ok' : (x.status === 0 ? 'is-bad' : 'is-warn'))
-							}, x.text)];
-					}), { striped: true }));
-			} else if (t.listening) {
-				box.appendChild(E('p', { 'class': 'mt5700-hint' },
-					'监听中（' + Math.round(SRV_LISTEN_MS / 1000) + ' 秒后自动关闭），'
-					+ '等服务状态变化上报 —— 状态不变就不会推。'));
-			} else {
-				box.appendChild(E('p', { 'class': 'mt5700-hint' },
-					'监听「无服务 / 限制服务 / 服务有效」的**变化**（手册 13.7）。'
-					+ '该命令只有设置形式、没有读命令，所以只能开上报后等模组推；'
-					+ '状态不变就不会推 —— 因此**只在你点的时候开**，到点自动关，不会常驻。'));
-			}
-			return box;
-		}
-
-		function startSrvListen() {
-			var t = state.tools.srv;
-			if (t.listening || t.busy) return;
-			var gen = ++srvGen;
-			t.busy = true; t.err = null;
-			ensureToolHandler();
-			renderTools();
-			AtWs.client.sendCommand('AT^SRVST=1').then(function (res) {
-				/* ★ 代次守卫：已经关掉了，迟到的开启响应不许把状态翻回「已开」 */
-				if (gen !== srvGen) return;
-				t.busy = false;
-				if (!(res && res.success)) {
-					t.listening = false;
-					t.err = '开启失败：' + ((res && res.error) || '模组未响应');
-					dropToolHandler();
-					renderTools();
-					return;
-				}
-				t.listening = true; t.since = Date.now(); t.err = null;
-				if (srvTimer) clearTimeout(srvTimer);
-				/* ★ 到点强制关：不等用户操作、不依赖页面正常退出 */
-				srvTimer = setTimeout(function () { srvTimer = null; stopSrvListen(); }, SRV_LISTEN_MS);
-				renderTools();
-			}).catch(function (e) {
-				if (gen !== srvGen) return;
-				t.busy = false; t.listening = false;
-				t.err = '开启失败：' + ((e && e.message) || '未知错误');
-				dropToolHandler();
-				renderTools();
-			});
-		}
-
-		function stopSrvListen() {
-			var t = state.tools.srv;
-			t.listening = false; t.busy = false;
-			srvGen++;                 /* 作废所有还在飞的开启响应 */
-			if (srvTimer) { clearTimeout(srvTimer); srvTimer = null; }
-			dropToolHandler();
-			sendSrvOff();
-			renderTools();
-		}
-
-		/* 关闭上报：失败也要留痕（offFailed），绝不静默 */
-		function sendSrvOff() {
-			var t = state.tools.srv;
-			return AtWs.client.sendCommand('AT^SRVST=0').then(function (res) {
-				t.offFailed = !(res && res.success);
-			}).catch(function () {
-				t.offFailed = true;
-			}).then(renderTools);
-		}
-
-		/* ---------- ④ 连通性自检向导 ---------- */
+		/* ---------- ② 连通性自检向导 ---------- */
 
 		/*
 		 * 逐层走一遍「拿到网」的每一步，卡住就停在那一步。
@@ -640,7 +457,7 @@ return L.view.extend({
 						var r = Parse.parseRegStat(String(data), '+C5GREG');
 						if (!r) return { level: 'bad', text: '取不到注册状态' };
 						if (r.stat === 1 || r.stat === 5) return { level: 'ok', text: r.statText };
-						if (r.stat === 3) return { level: 'bad', text: '注册被拒绝 —— 看上面「网络拒绝原因」' };
+						if (r.stat === 3) return { level: 'bad', text: '注册被拒绝 —— 看「网络设置 → 网络拒绝」' };
 						return { level: 'warn', text: r.statText + '（还没注册上，先看信号与 SIM）' };
 					}
 				},
@@ -772,7 +589,7 @@ return L.view.extend({
 			});
 		}
 
-		/* ---------- ⑤ 诊断快照导出（纯前端） ---------- */
+		/* ---------- ③ 诊断快照导出（纯前端） ---------- */
 
 		function buildSnapshotBlock() {
 			var t = state.tools.snap;
@@ -936,7 +753,7 @@ return L.view.extend({
 			return out.join('\n');
 		}
 
-		/* ---------- ⑥ 流量统计清零（手册 16.11 ^DSFLOWCLR） ---------- */
+		/* ---------- ④ 流量统计清零（手册 16.11 ^DSFLOWCLR） ---------- */
 
 		function buildFlowClearBlock() {
 			var box = toolBlock('流量统计清零',
@@ -2214,20 +2031,18 @@ return L.view.extend({
 			}
 		}).then(function () {
 			refreshAll();
+			/* ADC 自动读一次：结果直接铺在「连接工具」里，不必先点按钮。
+			   5 条只读查询、失败即停，不会在模组里留下任何状态（安全底线的例外批准项）。 */
+			readAdcPins();
 		});
 
 		self._dispose = function () {
 			/* 离开页面必须清干净：三个定时器 + 可见性监听 + 只读缓存，
-			   否则反复进出会叠加倍轮询。 */
+			   否则反复进出会叠加倍轮询。
+			   （本页已无任何常驻上报开关，不需要再做「关不掉就报警」的收尾） */
 			if (timer) clearInterval(timer);
 			if (slowTimer) clearInterval(slowTimer);
 			if (rateTimer) clearInterval(rateTimer);
-			if (srvTimer) { clearTimeout(srvTimer); srvTimer = null; }
-			/* 监听还开着就尽力关掉：这是页面被强杀时唯一的收尾机会 */
-			if (state.tools.srv.listening) { try { AtWs.client.sendCommand('AT^SRVST=0'); } catch (e) {} }
-			if (toolHandler) { AtWs.client.unsubscribe(toolHandler); toolHandler = null; }
-			state.tools.srv.listening = false;
-			state.tools.rej.listening = false;
 			timer = slowTimer = rateTimer = null;
 			if (onVisibility) document.removeEventListener('visibilitychange', onVisibility);
 			if (AtWs.client && AtWs.client.clearReadCache) AtWs.client.clearReadCache();
