@@ -211,9 +211,13 @@ ok('★ 卡片已改名为「断网排查」（原「连接工具」）',
 /* ---------- 6. ★★ 不占通道底线（2.2.1 事故防回退） ---------- */
 
 ok('旧卡「连接质量」已下线', !/Mt5700\.card\('连接质量'/.test(nsSrc));
-ok('★ 底部有满宽的明细卡（33 项放右列会挤成一团）',
-	/Mt5700\.card\('断网排查明细'/.test(nsSrc)
-	&& /body\.appendChild\(diagDetailCard\)/.test(nsSrc));
+/* 2026-09-19 用户口径变更：删掉页面底部的满宽「断网排查明细」独立卡，
+   明细全部收进右列「断网排查」卡内部（P03）。旧断言钉的是「必须有独立明细卡」，
+   现在反向钉「不许再有独立明细卡 + 明细容器必须挂在 diagCard._body 上」。 */
+ok('★ 已删除底部满宽明细卡（不再有独立「断网排查明细」卡）',
+	!/diagDetailCard/.test(nsSrc)
+	&& !/Mt5700\.card\('断网排查明细'/.test(nsSrc)
+	&& /diagCard\._body\.appendChild\(diagDetailBody\)/.test(nsSrc));
 
 ok('★ 不再下发 PDCP 周期上报开关（2.2.1 元凶）',
 	!/sendCommand\('AT\^PDCPDATAINFO=/.test(nsSrc));
@@ -236,9 +240,27 @@ ok('★ 自检也进页面自动跑一次（不必先点按钮），与 ADC 串�
 ok('★ 排查结论用 badge 进标题行（不用块级 .mt5700-diag-summary，它会把行撑高）',
 	/box\.firstChild\.insertBefore\(Mt5700\.badge\(summaryText,/.test(nsSrc)
 	&& !/mt5700-diag-summary is-' \+ lv/.test(nsSrc));
-ok('★ 明细是固定表格，不靠按钮切换（无展开/收起入口）',
-	!/t\.expanded/.test(nsSrc)
-	&& /Mt5700\.table\(\['项目', '结论', '说明'\]/.test(nsSrc));
+/* 2026-09-19 用户口径变更：允许卡内折叠/分段/滚动，但禁止新增独立卡片。
+   旧口径（收起态/展开态都固定平铺、不靠按钮切换）已作废。新口径守卫：
+   · 表字面量保留（项目/结论/说明三列原样）
+   · 不把折叠状态塞进 state.tools.diag（无 t.expanded，会被 runDiagnosis 重置）
+   · 收起态有「展开明细」入口，展开后三层分段切换（Mt5700.segmented + DIAG_LAYERS）
+   · 严禁再新建「断网排查明细」独立卡片（P03 已删除，明细容器挂在 diagCard._body） */
+ok('★ 明细表字面量保留（项目/结论/说明三列原样）',
+	/Mt5700\.table\(\['项目', '结论', '说明'\]/.test(nsSrc));
+ok('★ 不把折叠状态塞进 state.tools.diag（无 t.expanded，避免被 runDiagnosis 整块重置）',
+	!/t\.expanded/.test(nsSrc));
+ok('★ 收起态有「展开明细」入口，展开后三层分段切换（复用现成 Mt5700.segmented + DIAG_LAYERS）',
+	/Mt5700\.ghostButton\('展开明细'/.test(nsSrc)
+	&& /Mt5700\.segmented\(DIAG_LAYERS/.test(nsSrc)
+	&& /diagDetailOpen/.test(nsSrc));
+/* ★ 2026-09-19 口径变更：钉死「默认折叠」这个核心口径——把 var diagDetailOpen 初值改成 true 必须让这条红。
+   光钉「存在 diagDetailOpen」不够（旧断言改成 true 仍全绿），所以单独钉初值 false。 */
+ok('★ 默认折叠（核心口径）：diagDetailOpen 初值为 false，未排查/无问题时收起',
+	/var diagDetailOpen = false;/.test(nsSrc));
+ok('★ 不新增任何独立明细卡片（明细容器挂在 diagCard._body 内）',
+	!/Mt5700\.card\('断网排查明细'/.test(nsSrc)
+	&& /diagCard\._body\.appendChild\(diagDetailBody\)/.test(nsSrc));
 ok('★ 四档结论都有对应文案（含新增的 idle 待检查）',
 	/var DIAG_VERDICT = \{ ok: '通过', warn: '存疑', bad: '未通过', idle: '待检查' \}/.test(nsSrc));
 ok('★ 待检查有 CSS 配色（不写会掉成继承色，暗色下和「通过」分不出来）',
@@ -273,7 +295,10 @@ ok('★ ADC 进页面自动读一次（连上就调 readAdcPins，不用先点�
 	/refreshAll\(\);[\s\S]{0,900}readAdcPins\(\)\.then\(runDiagnosis\)/.test(nsSrc));
 ok('★ 排查也进页面自动跑一次，且与 ADC 串行不并发（十几条只读命令别一起挤通道）',
 	/readAdcPins\(\)\.then\(runDiagnosis\)/.test(nsSrc));
-ok('自检明细是固定表格，不靠按钮切换（无展开/收起入口）',
+/* 2026-09-19 用户口径变更：允许卡内折叠/分段/滚动（见上方守卫）。
+   此处只钉死旧代码里误用的「展开步骤/收起步骤」向导式字眼不得重现
+   （旧版曾是「逐步展开/收起」的向导式交互，已被否决）。本卡用「展开明细/收起明细」入口。 */
+ok('自检明细不再用「展开步骤/收起步骤」向导式字眼（旧口径已作废）',
 	!/展开步骤/.test(nsSrc) && !/收起步骤/.test(nsSrc));
 ok('★ 排查只给建议命令，没有自动修复按钮（续约/重启服务本身就会断网）',
 	/'建议：' \+ i\.fix/.test(nsSrc)

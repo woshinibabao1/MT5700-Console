@@ -28,6 +28,8 @@
   --mt5700-border: rgba(255, 255, 255, 0.75);
   --mt5700-border-subtle: rgba(203, 213, 225, 0.55);
   --mt5700-divider: rgba(0, 0, 0, 0.06);
+  /* sticky 表头专用不透明底：亮色用纯白，避免 --mt5700-card-bg 的 0.82 alpha 在滚动时透出下方行内容 */
+  --mt5700-table-head-bg: #ffffff;
   /* iOS 风格开关专用：关态轨道要的是「一块浅灰填充」，不是描边色。
      复用 --mt5700-border-subtle 的话暗色下只有 0.08 alpha，轨道几乎看不见，
      所以单列两个变量随主题切换。开态沿用 --mt5700-accent，与页面按钮同色。 */
@@ -114,6 +116,8 @@
     --mt5700-border: rgba(255, 255, 255, 0.1);
     --mt5700-border-subtle: rgba(255, 255, 255, 0.08);
     --mt5700-divider: rgba(255, 255, 255, 0.06);
+    /* sticky 表头专用不透明底：暗色用纯 #202636（与卡片同色但全不透明），滚动时不透字 */
+    --mt5700-table-head-bg: #202636;
     --mt5700-switch-off: rgba(120, 120, 128, 0.32);
     --mt5700-switch-knob-sh: 0 3px 8px rgba(0, 0, 0, 0.45), 0 1px 1px rgba(0, 0, 0, 0.3);
     --mt5700-sh-1: 0 1px 2px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.3);
@@ -2897,4 +2901,32 @@
 .mt5700-readout-unit {
   font-size: var(--mt5700-font-size-xs);
   color: var(--mt5700-text-secondary);
+}
+
+/* 2026-09-19（P08）：断网排查明细收进右列卡内，限宽 509px 排版预算下
+   明细表整体降字号、钉列宽、sticky 表头、限高滚动。全部走 --mt5700-*，
+   亮暗主题都可读。作用域锁在 .mt5700-diag-detail 内，避免污染其它表格。 */
+.mt5700-diag-detail .mt5700-table {
+  font-size: var(--mt5700-font-size-xs); /* ① 12px */
+}
+.mt5700-diag-detail .mt5700-table th,
+.mt5700-diag-detail .mt5700-table td {
+  padding: 7px 10px; /* ② 降 padding 腾出三列文字宽度 */
+}
+.mt5700-diag-detail .mt5700-table th {
+  position: sticky; top: 0; /* ③ sticky 表头 */
+  background: var(--mt5700-table-head-bg); /* 不透明底，滚动时不透出下方行 */
+  box-shadow: 0 1px 0 var(--mt5700-divider); /* 用阴影画分隔线，避免 border 在滚动时丢失 */
+  z-index: 1;
+}
+.mt5700-diag-detail .mt5700-table td:first-child { width: 96px; } /* ④ 项目列 */
+.mt5700-diag-detail .mt5700-table td:nth-child(2) {
+  width: 52px; white-space: nowrap; /* ⑤ 结论列不折行 */
+}
+.mt5700-diag-detail .mt5700-diag-scroll {
+  max-height: 340px; overflow-y: auto; /* ⑥ 限高滚动（overflow-x 由 wrapper 自带 auto） */
+}
+/* 窄屏单列（<1100px）放宽到 520px，给说明列更多空间，且无右列对称问题 */
+@media (max-width: 1099px) {
+  .mt5700-diag-detail .mt5700-diag-scroll { max-height: 520px; }
 }

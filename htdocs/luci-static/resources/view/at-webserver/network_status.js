@@ -105,19 +105,18 @@ return L.view.extend({
 		var diagBody = E('div');
 		diagCard._body.appendChild(diagBody);
 
-		/* 明细卡：满宽，放在页面最底部（见下方版式说明）。
+		/* 明细容器：收进右列「断网排查」卡内部（2026-09-19 口径变更），默认折叠、展开才占地方；不再有独立满宽卡。
 		   每项给「事实 + 建议命令」，不提供自动修复按钮 —— 自动改网络配置本身
 		   就是断网源（重拉接口会短暂断网），用户明确选择「只诊断 + 给命令」。 */
-		var diagDetailCard = Mt5700.card('断网排查明细', '每一项的事实与建议（只给命令，不自动改配置）');
-		var diagDetailBody = E('div');
-		diagDetailCard._body.appendChild(diagDetailBody);
+		var diagDetailBody = E('div', { 'class': 'mt5700-diag-detail mt5700-mt-md' });
+		diagCard._body.appendChild(diagDetailBody);
 
 		/* 版式（「左右要对称」+「SIM 与设备下面的空白要有价值」）：
 		     载波与聚合（满宽，表格含逐载波 RSRP/RSRQ/SINR/强度）
 		     信号质量（满宽）
-		     连接状态 | 右列（SIM 与设备 → 连接质量）  ← 双列卡区 .mt5700-cards
+		     连接状态 | 右列（SIM 与设备 → 断网排查）  ← 双列卡区 .mt5700-cards
 		     速率与流量（满宽）
-		     断网排查明细（满宽，放最底部）
+		     断网排查明细（已收进右列卡内，不再满宽铺底）
 		   右列两张卡用 .mt5700-stack 纵向堆叠，把左列的空白补上（实测左右差 ≈ 70px）。
 		   之前的「SIM + 速率」右列比左列高一大截，是因为速率卡带着 170px 曲线；
 		   换成纯表格的卡后高度正好。窄屏单列时按 DOM 顺序降级：
@@ -130,7 +129,6 @@ return L.view.extend({
 		duo.appendChild(duoRight);
 		body.appendChild(duo);
 		body.appendChild(rateCard);
-		body.appendChild(diagDetailCard);   /* 满宽明细，33 项放右列会挤成一团 */
 		body.insertBefore(carrierCard, signalCard);
 
 		/* ---------- 状态 ---------- */
@@ -405,17 +403,23 @@ return L.view.extend({
 
 		/* 三层。明细表按这个顺序分组，总控卡按这个顺序出计数徽章。 */
 		var DIAG_LAYERS = [
-			{ id: 'L1', name: '模组与空口' },
-			{ id: 'L2', name: '系统与网络' },
-			{ id: 'L3', name: '端到端连通' }
+			{ id: 'L1', name: '模组与空口', short: '模组' },
+			{ id: 'L2', name: '系统与网络', short: '系统' },
+			{ id: 'L3', name: '端到端连通', short: '连通' }
 		];
+
+		/* ★ 2026-09-19（P05）：明细折叠/当前层用闭包变量，不塞进 state.tools.diag。
+		   理由：① runDiagnosis 开头会整块重置 t（重置 atSteps/items/facts），状态放进去会被清掉；
+		        ② 不能把展开状态写进 state.tools.diag —— tests/connection-tools-contract.test.js 用 !/t\.expanded/ 钉死。 */
+		var diagDetailOpen = false;
+		var diagLayer = 'L1';
 
 		function renderTools() {
 			if (!diagBody) return;
 			diagBody.innerHTML = '';
 			diagBody.appendChild(buildDiagBlock());
 			diagBody.appendChild(buildAdcBlock());
-			renderDiagDetail();   /* 底部满宽明细卡，跟着一起重绘 */
+			renderDiagDetail();   /* 卡内明细容器跟着一起重绘 */
 		}
 
 		/* ---------- ① ADC 管脚电压（手册 11.5） ----------
@@ -1020,28 +1024,74 @@ return L.view.extend({
 
 		function renderDiagDetail() {
 			if (!diagDetailBody) return;
+			/* R08：重建前记下滚动位置（若有），重建后恢复，避免每次 renderTools 重绘把滚动弹回顶部 */
+			var _scroller = diagDetailBody.querySelector('.mt5700-diag-scroll');
+			var _scrollTop = _scroller ? _scroller.scrollTop : 0;
 			diagDetailBody.innerHTML = '';
 			var t = state.tools.diag;
+			var items = diagItems();
+
+			/* ★ 2026-09-19（P04/P05/P07，R01 修订）：默认折叠成一行入口，不占右列额外高度。
+			   折叠态若有 factsErr 只用一行高对比提示（.mt5700-error），不放大块 empty ——
+			   否则会复现用户否决的「多出来一大块」。状态用闭包变量，不放 state.tools.diag。 */
+			if (!diagDetailOpen) {
+				if (t.factsErr) {
+					diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-error' },
+						'系统侧事实没取到（' + t.factsErr + '）：需升级 luci-app-mt5700，模组层 L1 不受影响。'));
+				}
+				var entryLabel = t.ran ? '明细' : '明细 · 未排查';
+				diagDetailBody.appendChild(toolBlock(entryLabel,
+					Mt5700.ghostButton('展开明细', function () {
+						diagDetailOpen = true;
+						renderTools();
+					})));
+				return;
+			}
+
+			/* 展开态：factsErr 才放大块 empty 提示（R01：大块只在展开态出现） */
 			if (t.factsErr) {
-				/* 后端没升级（老固件没有 mt5700.sysdiag）时必须说清楚，
-				   否则 L2/L3 那些「待检查」会被误读成「都正常」。 */
 				diagDetailBody.appendChild(Mt5700.empty('系统侧事实没取到：' + t.factsErr
 					+ ' —— 需要升级设备端的 luci-app-mt5700。模组层（L1）的检查不受影响。'));
 			}
-			var items = diagItems();
-			var rows = [];
-			DIAG_LAYERS.forEach(function (L) {
-				var list = items.filter(function (i) { return i.layer === L.id; });
-				if (!list.length) return;
-				/* 事实没取到时 L2/L3 全部是「待检查」，摆出来只会误导 */
-				if (t.factsErr && L.id !== 'L1') return;
-				rows.push({ group: L.id + ' ' + L.name });
-				list.forEach(function (i) { rows.push(diagRow(i)); });
-			});
-			diagDetailBody.appendChild(Mt5700.table(['项目', '结论', '说明'], rows, { striped: true }));
-			diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-				'判定标准与阈值写在本页源码的检查项注册表里；「建议」只是命令，不会自动执行 —— '
-				+ '续约、重启服务这类动作本身就会短暂断网，确认后再在终端里执行。'));
+
+			/* 展开态：三层分段切换（复用现成 Mt5700.segmented + DIAG_LAYERS，P06；label 用「ID + 短名」省宽度）。不再插 {group} 分组行。 */
+			var head = E('div', { 'class': 'mt5700-toolbar' });
+			head.appendChild(Mt5700.segmented(DIAG_LAYERS.map(function (L) {
+				return { label: L.id + ' ' + L.short, value: L.id };
+			}), diagLayer, function (v) {
+				diagLayer = v;
+				renderTools();
+			}).el);
+			head.appendChild(Mt5700.ghostButton('收起明细', function () {
+				diagDetailOpen = false;
+				renderTools();
+			}));
+			diagDetailBody.appendChild(head);
+
+			var list = items.filter(function (i) { return i.layer === diagLayer; });
+			/* 事实没取到时该层若是 L2/L3 全「待检查」，摆空表只会误导（R04）：给占位说明 */
+			if (!(t.factsErr && diagLayer !== 'L1')) {
+				var rows = list.map(function (i) { return diagRow(i); });
+				var tbl = Mt5700.table(['项目', '结论', '说明'], rows, { striped: true });
+				/* sticky 表头 + 限高滚动：max-height 加在 .mt5700-table-wrapper 上
+				   （它自带 overflow-x:auto，按 CSS 规范 overflow-y 会被算成 auto），表头滚动时固定。 */
+				tbl.classList.add('mt5700-diag-scroll');
+				diagDetailBody.appendChild(tbl);
+				if (_scrollTop) tbl.scrollTop = _scrollTop; /* R08 */
+			} else {
+				diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'系统侧事实没取到（需升级 luci-app-mt5700），本层（' + diagLayer + '）无法判定；先看模组层 L1。'));
+			}
+
+			/* R05/R06：底部说明 —— 未排查时引导先排查，已排查时给「本层 N / 共 N」避免「丢了 21 项」的错觉 */
+			if (!t.ran) {
+				diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'尚未排查 —— 点上方「开始排查」后，这里才会出各层的结论与建议命令。'));
+			} else {
+				diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'本层 ' + list.length + ' 项 / 共 ' + items.length + ' 项。判定标准与阈值写在本页源码的注册表里；'
+					+ '「建议」只是命令，不会自动执行 —— 续约、重启服务本身会短暂断网，确认后再在终端执行。'));
+			}
 		}
 
 		/* ---------- 总控块（右列卡片） ---------- */
@@ -1082,7 +1132,7 @@ return L.view.extend({
 
 			box.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
 				'共 ' + items.length + ' 项：L1 走 AT 只读命令，L2/L3 走后端只读采集。'
-				+ '只给事实与建议命令，不自动改任何配置。明细见页面底部。'));
+				+ '只给事实与建议命令，不自动改任何配置。明细在本卡内，默认折叠，点「展开明细」查看。'));
 			return box;
 		}
 
@@ -1151,7 +1201,26 @@ return L.view.extend({
 						level: r.level || 'warn', text: r.text || '（无数据）', fix: r.fix || ''
 					};
 				});
+			/* ★ 2026-09-19（P04，Reviewer 修正）：跑完无条件定位首个问题层；
+			   无问题项则保持原层与展开状态不变；折叠态且有问题项则自动展开。
+			   状态用闭包变量，不放 state.tools.diag（开头会被整块重置）。 */
+				var _prob = [];
+				(t.atSteps || []).forEach(function (s) {
+					if (s.level === 'bad' || s.level === 'warn') _prob.push({ name: s.name, layer: 'L1' });
+				});
+				(t.items || []).forEach(function (s) {
+					if (s.level === 'bad' || s.level === 'warn') _prob.push({ name: s.name, layer: s.layer });
+				});
+				if (_prob.length) {
+					diagLayer = _prob[0].layer || 'L1';
+					diagDetailOpen = true; /* 折叠态遇问题项 → 展开，让其可见 */
+				}
 				t.busy = false; t.at = Date.now(); t.ran = true;
+				if (!disposed) renderTools();
+			}).catch(function (e) {
+				/* R03：sysDiag/reject 时若不 catch，t.busy 永久卡 true、页面永久「排查中…」且自动展开永不触发。仍是只读无副作用。 */
+				t.busy = false; t.ran = true;
+				t.factsErr = String((e && e.message) || e);
 				if (!disposed) renderTools();
 			});
 		}
