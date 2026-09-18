@@ -46,12 +46,16 @@ function ok(label, cond, extra) {
 
 /* ---------- 0. 抽出纯函数真跑（到 return L.view.extend 为止） ---------- */
 
-const preludeEnd = src.indexOf('return L.view.extend');
-ok('能定位 return L.view.extend 以切出纯函数段', preludeEnd > 0);
+/* ★ 用「行首锚定」的正则而不是 indexOf('return L.view.extend')：
+   后者会命中**注释里**提到的同一串字（曾因此把 foldRepeats 切到注释外，
+   prelude 变成一段未闭合的块注释，eval 直接 SyntaxError）。 */
+const preludeMatch = src.match(/^return L\.view\.extend\(/m);
+ok('能定位视图定义起点以切出纯函数段', !!preludeMatch);
+const preludeEnd = preludeMatch ? preludeMatch.index : src.indexOf('return L.view.extend');
 const prelude = src.slice(0, preludeEnd);
 
 /* eslint-disable no-eval */
-const Fns = eval('(function(){' + prelude + '\nreturn { entriesFromBackend: entriesFromBackend, entriesFromSyslog: entriesFromSyslog, fmtClock: fmtClock, DIAL_RE: DIAL_RE };})()');
+const Fns = eval('(function(){' + prelude + '\nreturn { entriesFromBackend: entriesFromBackend, entriesFromSyslog: entriesFromSyslog, foldRepeats: foldRepeats, fmtClock: fmtClock, DIAL_RE: DIAL_RE };})()');
 
 /* ---------- 1. entriesFromBackend（后端内存日志 → 统一条目） ---------- */
 
@@ -88,6 +92,43 @@ eq('普通行判 INF', Fns.entriesFromSyslog([{ time: 5, msg: 'at-webserver: 启
 eq('冒号后没内容的不收（避免空行刷屏）',
 	Fns.entriesFromSyslog([{ time: 5, msg: 'at-webserver:' }]), []);
 eq('缺 time 时不产生 NaN 时间戳', Fns.entriesFromSyslog([{ msg: 'at-webserver: x' }])[0].ts > 0, true);
+
+/* ★ 真机实测：本插件在 syslog 里有**三种** tag，只认 at-webserver 一种会把
+   看门狗与 UCI 那两批行全丢掉 —— 页面上就表现为「没有任何数据」。
+   这是 2.3.6 修的主 bug 之一，钉死防回退。 */
+eq('★ 收 mt5700-watchdog 的行', Fns.entriesFromSyslog([
+	{ time: 1000, msg: 'mt5700-watchdog: 连接看门狗已启动' }
+]), [{ ts: 1000, level: 'INF', msg: '连接看门狗已启动' }]);
+eq('★ 收 mt5700-uci 的行', Fns.entriesFromSyslog([
+	{ time: 1000, msg: 'mt5700-uci: at-webserver 已设为开机自启（S99at-webserver）' }
+])[0].msg, 'at-webserver 已设为开机自启（S99at-webserver）');
+eq('带 PID 的 mt5700 系 tag 也认',
+	Fns.entriesFromSyslog([{ time: 1, msg: 'mt5700-watchdog[88]: ping' }])[0].msg, 'ping');
+eq('★ Rust 进程那类的行仍被排除（内存日志已提供，两边都收会重复）',
+	Fns.entriesFromSyslog([{ time: 5, msg: 'at-webserver-rust[9]: dial ok' }]), []);
+eq('★ 别家插件的行仍被排除（不能因为放开 tag 就收一堆噪音）',
+	Fns.entriesFromSyslog([
+		{ time: 1, msg: 'dnsmasq[1]: dhcp ack' },
+		{ time: 2, msg: 'odhcpd[3010]: No default route present' },
+		{ time: 3, msg: 'dropbear[1187]: Password auth succeeded' }
+	]), []);
+
+/* ---------- 2b. 相邻重复折叠 ---------- */
+
+eq('无重复原样返回', Fns.foldRepeats([
+	{ ts: 1, level: 'INF', msg: 'a' }, { ts: 2, level: 'INF', msg: 'b' }
+]), [{ ts: 1, level: 'INF', msg: 'a', repeat: 1 }, { ts: 2, level: 'INF', msg: 'b', repeat: 1 }]);
+eq('★ 相邻相同合并并计数（看门狗那句会连着出现几十次）',
+	Fns.foldRepeats([
+		{ ts: 1, level: 'INF', msg: 'x' }, { ts: 2, level: 'INF', msg: 'x' }, { ts: 3, level: 'INF', msg: 'x' }
+	]), [{ ts: 3, level: 'INF', msg: 'x', repeat: 3 }]);
+eq('★ 不相邻的相同文案不合并（中间出过别的事）', Fns.foldRepeats([
+	{ ts: 1, level: 'INF', msg: 'x' }, { ts: 2, level: 'ERR', msg: 'y' }, { ts: 3, level: 'INF', msg: 'x' }
+]).length, 3);
+eq('★ 级别不同即使文案相同也不合并', Fns.foldRepeats([
+	{ ts: 1, level: 'INF', msg: 'x' }, { ts: 2, level: 'ERR', msg: 'x' }
+]).length, 2);
+eq('空列表不炸', Fns.foldRepeats([]), []);
 
 /* ---------- 3. 拨号分类正则（哪些行算「模组拨号」） ---------- */
 
@@ -138,13 +179,32 @@ ok('★ R01 三路全失败不许弹「已刷新」：按成功数分级（0 →
 	&& /okCount === 3[\s\S]{0,120}Mt5700\.success/.test(code));
 ok('★ R02 通知文件读失败要单独存原因，不许写成空内容（否则显示成「暂无通知记录」）',
 	/state\.notifyErr =/.test(code) && /读不到通知文件/.test(src));
-ok('★ R02 首屏不许显示「暂无日志」：先置 loading 再渲染，未取过显示「加载中…」',
-	/state\.loading = true;\s*renderAll\(\);/.test(code) && /!state\.primed \? '加载中…'/.test(code));
+ok('★ R02 首屏不许显示「暂无日志」：未取过显示「加载中…」',
+	/!state\.primed \? '加载中…'/.test(code));
 ok('★ R09 后端已提供但缓冲为空，要与「能力缺失」区分开',
 	/后端已提供日志接口，但当前缓冲为空/.test(src));
 ok('★ 三路取数真串行（steps.reduce），不是并发 Promise.all',
 	/steps\.reduce\(function \(p, step\) \{\s*return p\.then\(step\);/.test(code)
 	&& !/Promise\.all\(/.test(code));
+
+/* ---------- 5b. ★ 首屏取数不得被 single-flight 挡掉 ----------
+ * refresh() 开头是 `if (state.loading) return`（防重入）。曾为「首屏先显示加载中」
+ * 在调用 refresh 前预置了 state.loading = true —— 结果第一次取数被它自己挡掉，
+ * 三个视图永远停在「加载中…」，真机表现就是「运行日志里没有数据」。
+ * 「还没取过」必须由 state.primed 表达，不能复用 loading。
+ * ★ 用 code（已剥注释）匹配：源码注释里就写着这串反例。 */
+
+ok('★ 首屏不得预置 state.loading = true',
+	!/state\.loading\s*=\s*true;\s*renderAll\(\);/.test(code)
+	&& !/state\.loading\s*=\s*true;\s*\n\s*renderAll\(\);/.test(code));
+ok('★ 首屏是「先渲染、后取数」，且中间没有 loading 赋值',
+	/renderAll\(\);\s*refresh\(false\);/.test(code));
+ok('★ refresh 仍保留 single-flight（防重入）',
+	/function refresh\(manual\)[\s\S]{0,120}if \(state\.loading\) return/.test(code));
+ok('★ 「还没取过」由 primed 表达', /primed:\s*false/.test(code)
+	&& /state\.primed\s*=\s*true/.test(code));
+ok('★ 未取数时列表显示「加载中…」而不是「暂无日志」',
+	/!state\.primed \? '加载中…'/.test(code) || /'加载中…'/.test(code));
 
 /* ---------- 6. 安全：注入面 ---------- */
 

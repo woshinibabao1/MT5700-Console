@@ -5,6 +5,42 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.6] - 2026-09-18
+
+### 修复（运行日志页三个视图都取不到数据）
+
+真机反馈「运行日志中没有数据」。上机实测：三个数据源本身**都有数据**
+（syslog 里本插件行 327 条、通知文件 359 行），问题全在前端。
+
+- **★ 首屏取数被 single-flight 自己挡掉**（本版主因）
+  为「首屏先显示加载中」在调用 `refresh()` 前预置了 `state.loading = true`，
+  而 `refresh()` 第一行就是 `if (state.loading) return` —— 第一次取数直接被跳过，
+  三个视图永远停在「加载中…」。现改为用 `state.primed` 表达「还没取过」，
+  不再复用 `loading`
+- **syslog 只认 `at-webserver` 一种 tag，漏掉另外两种**
+  真机实测本插件在 syslog 里有三种 tag：`at-webserver`（服务启停与初始化）、
+  `mt5700-watchdog`（连接看门狗）、`mt5700-uci`（开机自启与接口创建）。
+  只认第一种会把看门狗的「接口 MT5700M 未 up / 已恢复 up」那批行全丢掉
+- **相邻重复行合并**：看门狗每次服务重启都写同一句，几十条一字不差的话会把
+  有用信息挤没。相邻且同级别同文案的合并成一条、行尾标 `×N`；
+  不相邻的相同文案不合并（中间发生过别的事）
+- 「模组拨号」视图的提示补上指路：说明服务进程当前只往 syslog 写启停记录，
+  它们在「接口与网络」视图里
+
+### 已知限制（未变）
+
+「模组拨号」仍取不到数据 —— 后端 `mt5700.uc` 只有 at / events / netrate / es9p，
+没有 `logs` 方法（ubus 实测返回 `Access denied`）。补齐需改 Rust `logger.rs`
+加环形缓冲 + `rpcserver.rs` 加方法，本机无 cargo 无法编译验证。
+
+### 测试
+
+- `tests/logs-contract.test.js` 补到 77 项：新增 syslog 三种 tag 的解析断言、
+  `foldRepeats` 真行为断言（含「不相邻的相同文案不合并」）、
+  ★ 首屏不得预置 `loading` 的防回退断言
+- 测试切分纯函数段改用**行首锚定**正则：原 `indexOf('return L.view.extend')`
+  会命中注释里提到的同一串字，把函数切到注释里去（eval 直接 SyntaxError）
+
 ## [2.3.5] - 2026-09-18
 
 ### 变更（四处界面优化）

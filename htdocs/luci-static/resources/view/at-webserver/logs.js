@@ -30,6 +30,25 @@
  *   搜索匹配用 String.indexOf，不用 new RegExp(用户输入)。
  */
 
+/* 相邻重复行合并：看门狗每次服务重启都写一句「连接看门狗已启动」，
+   几十条一字不差的话会把真正有用的行挤到看不见的地方。
+   只合并**相邻**的 —— 不相邻的同文案说明中间发生过别的事，不能并。
+   （放在视图定义之前，测试可直接 eval 真跑它 —— 别在这段注释里复述视图定义的
+   那行代码字面量，测试就是靠它切分纯函数段的，写进来会把函数切到注释里去） */
+function foldRepeats(list) {
+	var out = [];
+	for (var i = 0; i < list.length; i++) {
+		var prev = out[out.length - 1];
+		if (prev && prev.msg === list[i].msg && prev.level === list[i].level) {
+			prev.repeat++;
+			prev.ts = list[i].ts;   /* 时间取最后一次出现的 */
+			continue;
+		}
+		out.push({ ts: list[i].ts, level: list[i].level, msg: list[i].msg, repeat: 1 });
+	}
+	return out;
+}
+
 /* 级别中文化：徽章显示中文，原始标识放 title 便于对照 */
 var LEVEL_LABEL = { DBG: '调试', INF: '信息', WRN: '警告', ERR: '错误' };
 var LEVEL_VARIANT = { DBG: 'neutral', INF: 'info', WRN: 'warning', ERR: 'danger' };
@@ -67,18 +86,23 @@ function entriesFromBackend(list) {
 	return out;
 }
 
-/* syslog 行：只取 init.d 那类（at-webserver: ...），后端 stdout 那类已由内存日志提供，
-   两边都收会重复。 */
+/* syslog 行：只取本插件写的行（init.d 的 logger 输出 / 看门狗 / UCI 辅助脚本）。
+   ★ tag 不止 `at-webserver` 一个 —— 真机实测有三种：
+     at-webserver      服务启停、procd 配置、防火墙与串口初始化、接口就绪
+     mt5700-watchdog   连接看门狗（接口掉线时的动作在这里）
+     mt5700-uci        UCI 变更（开机自启、接口创建）
+   只认 `at-webserver` 一种会把另外两类全丢掉，页面看起来就是「没有数据」。
+   后端进程自己的 stdout（at-webserver-rust[...]）不收：那条前缀后面是 `-rust`，
+   下面的正则要求 tag 紧跟 `:` 或 `[pid]:`，天然排除它，两边都收会重复。 */
+var OWN_TAG_RE = /^(at-webserver|mt5700-[a-z0-9-]+)(?:\[\d+\])?:\s*([\s\S]*)$/;
+
 function entriesFromSyslog(rawList) {
 	var out = [];
 	for (var i = 0; i < rawList.length; i++) {
 		var r = rawList[i] || {};
-		var msg = String(r.msg || '');
-		if (msg.indexOf('at-webserver') < 0) continue;
-		if (msg.indexOf('at-webserver-rust') >= 0) continue;
-		var m = msg.match(/^at-webserver(?:\[\d+\])?:\s*([\s\S]*)$/);
+		var m = String(r.msg || '').match(OWN_TAG_RE);
 		if (!m) continue;
-		var text = m[1].trim();
+		var text = m[2].trim();
 		if (!text) continue;
 		var lv = 'INF';
 		if (/错误|失败|error/i.test(text)) lv = 'ERR';
@@ -256,12 +280,17 @@ return L.view.extend({
 			var msg = E('span', { 'class': 'mt5700-logmsg' + (lv === 'ERR' ? ' mt5700-log-err' : '') });
 			msg.appendChild(highlight(e.msg));
 			row.appendChild(msg);
+			if (e.repeat > 1) {
+				row.appendChild(E('span', { 'class': 'mt5700-logmeta', 'title': '该行连续出现 ' + e.repeat + ' 次' },
+					'×' + e.repeat));
+			}
 			return row;
 		}
 
 		function renderList() {
 			listEl.innerHTML = '';
 			footerEl.textContent = '';
+			var folded = 0;
 
 			if (state.tab === 'notify') { renderNotify(); return; }
 
@@ -274,7 +303,8 @@ return L.view.extend({
 					'取不到模组拨号日志：' + (state.backendErr || '后端未提供 logs 方法')
 					+ '。该视图依赖新版后端的内存日志（ubus mt5700.logs）；'
 					+ '若提示权限不足，还需在 ACL 的 mt5700 段补 logs 读权限。'
-					+ '接口与网络、通知记录两个视图不受影响。',
+					+ '服务进程目前只往 syslog 写启停与初始化记录 —— 它们都在'
+					+ '「接口与网络」视图里；拨号过程细节要等后端补上该接口后才有。',
 					function () { refresh(true); }));
 				footerEl.textContent = '数据源不可用';
 				return;
@@ -294,7 +324,9 @@ return L.view.extend({
 			} else {
 				var frag = document.createDocumentFragment();
 				/* 只渲染最后 400 行，避免一次插入过多节点导致滚动卡顿 */
-				var shown = list.length > 400 ? list.slice(list.length - 400) : list;
+				var raw = list.length > 400 ? list.slice(list.length - 400) : list;
+				var shown = foldRepeats(raw);
+				folded = raw.length - shown.length;
 				for (var i = 0; i < shown.length; i++) frag.appendChild(renderRow(shown[i]));
 				listEl.appendChild(frag);
 			}
@@ -302,6 +334,7 @@ return L.view.extend({
 			var text = '共 ' + all.length + ' 条';
 			if (list.length !== all.length) text += '（过滤后 ' + list.length + ' 条）';
 			if (list.length > 400) text += '，仅显示最新 400 条';
+			if (folded > 0) text += '，相邻重复已合并 ' + folded + ' 条（行尾标注 ×N）';
 			/* ★ 两个数据源各自成句：iface 视图的条目一半来自后端内存日志、
 			   一半来自 syslog，只怪 syslog 会归错因。 */
 			if (state.tab === 'iface') {
@@ -508,9 +541,11 @@ return L.view.extend({
 			}, 10000);
 		}
 
-		/* ★ 首屏必须先置 loading 再渲染：renderAll() 早于第一次取数，
-		   否则用户第一眼看到的是「暂无日志」，而其实只是还没取。 */
-		state.loading = true;
+		/* ★ 首屏先渲染再取数，但**绝不能预先置 state.loading = true**：
+		   refresh() 第一行是 `if (state.loading) return Promise.resolve();`
+		   （single-flight 防重入），预置 true 会让第一次取数被它直接挡掉，
+		   三个视图永远停在「加载中…」—— 实测就是「页面没有数据」。
+		   「还没取过」这个语义由 state.primed 表达，不要复用 loading。 */
 		renderAll();
 		refresh(false);
 
