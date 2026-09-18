@@ -17,6 +17,9 @@
 					"getInitList",
 					"getRealtimeStats"
 				],
+				"log": [
+					"read"
+				],
 				"mt5700": [
 					"at",
 					"events",

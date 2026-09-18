@@ -979,7 +979,7 @@
   background: rgba(59, 130, 246, 0.04);
 }
 
-/* 分组标题行：多组「项目 → 值」合并进一张表时用它分隔（如「连接诊断 / 地址 / IP 与 DNS」）。
+/* 分组标题行：多组「项目 → 值」合并进一张表时用它分隔（如「连接诊断 / 地址与 DNS」）。
    只加一条淡色底与间距，不做描边，免得看起来像另一张表的表头。
    斑马纹按 nth-child 算，分组行插进去会让后续行的奇偶错位 —— 这里显式把分组行
    排除在斑马纹之外，让每组内部各自从「白」开始，视觉上更整齐。 */
@@ -1923,6 +1923,26 @@
   .mt5700-log-err { color: #f87171; }
   .mt5700-log-cmd { color: #60a5fa; }
 }
+
+/* ---------- 运行日志行（复用 .mt5700-terminal-log 做滚动容器） ----------
+   只补四个规则：行容器 / 行间分隔线 / 时间列 / 消息列。
+   级别配色用上面既有的 log-ok / log-err，警告级别交给左侧徽章区分，不再新造配色。 */
+.mt5700-logrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.mt5700-logrow + .mt5700-logrow { border-top: 1px solid rgba(127, 127, 127, 0.10); }
+
+.mt5700-logmeta {
+  flex: 0 0 auto;
+  color: var(--mt5700-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.mt5700-logmsg { flex: 1 1 auto; min-width: 0; }
 
 /* ---------- 锁频编辑器 ---------- */
 .mt5700-lock-editor {

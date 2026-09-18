@@ -165,54 +165,12 @@ ok('DHCP ok 时给出网关 10.10.10.1',
 eq('DHCP 取不到 → warn（不影响上网，不能判故障）',
 	judge('网关与 DNS', 'ERROR').level, 'warn');
 
-/* ---------- 5. 诊断快照：默认绝不能带设备标识 ---------- */
+/* ---------- 5. 诊断快照已下线（2026-09-18 用户要求删除） ---------- */
 
-function makeSnapshotText(st, dev) {
-	return new Function('state', 'devState', 'Parse', 'AtWs', 'systemModeLabel', 'splitSpeedUI',
-		extractFn(nsSrc, 'buildSnapshotText') + '\nreturn buildSnapshotText;')(
-		st, dev, Parse,
-		{
-			formatDuration: function (s) { return s + ' 秒'; },
-			formatFlow: function (b) { return b + ' B'; }
-		},
-		function (m) { return m || '5G-NR'; },
-		function (v, u) { return { value: String(v), unit: u === 'kbps' ? 'Mbps' : 'B/s' }; }
-	);
-}
-
-const snapState = {
-	cell: { rsrp: -78, rsrq: -10, sinr: 22, pci: 123, channel: '504990', sysMode: 'NR' },
-	carriers: [{ index: 0, sysMode: 'NR', band: 78, dlFcn: 504990, dlBwKHz: 100000, pci: 123 }],
-	diag: { endc: { established: false, available: true, plmnAvailable: true, restricted: false },
-		rrc: { rrcText: '连接态' }, addrs: [{ cid: 1, address: '10.117.101.195', family: 'IPv4' }] },
-	flow: { lastDsTime: 3600, lastRxFlow: 1000, lastTxFlow: 500, totalRxFlow: 2000, totalTxFlow: 800 },
-	temps: { sub6GPA: 412, ap1: 0, modem1: 390 },
-	dhcpv4: { gateway: '10.117.101.196', primaryDNS: '1.1.1.1', secondaryDNS: '8.8.8.8' },
-	operator: '中国移动', networkStatus: '已注册', apn: 'cmnet', activeCid: 1,
-	ambrDown: 3000000, ambrUp: 200000
-};
-const devState = {
-	sim: 11, pin: 'READY', phone: '', model: 'MT5700M-CN', fw: '1.0.0',
-	imei: '864640060359112', imsi: '460009711127691', iccid: '8986001234567890123'
-};
-
-const snapDefault = makeSnapshotText(snapState, devState)(false);
-const snapWithIds = makeSnapshotText(snapState, devState)(true);
-
-ok('快照含标题', /MT5700 诊断快照/.test(snapDefault));
-ok('快照含 [ 连接 ] 段', /\[ 连接 \]/.test(snapDefault));
-ok('快照含信号', /RSRP：-78 dBm/.test(snapDefault));
-ok('快照含载波', /\[ 载波 \]/.test(snapDefault));
-ok('快照含地址', /10\.117\.101\.195/.test(snapDefault));
-ok('快照含流量', /\[ 流量 \]/.test(snapDefault));
-ok('★ 默认不含 IMEI', snapDefault.indexOf('864640060359112') < 0);
-ok('★ 默认不含 IMSI', snapDefault.indexOf('460009711127691') < 0);
-ok('★ 默认不含 ICCID', snapDefault.indexOf('8986001234567890123') < 0);
-ok('默认给出「已隐藏」说明', /设备标识已按选项隐藏/.test(snapDefault));
-ok('勾选后含 IMEI', snapWithIds.indexOf('864640060359112') >= 0);
-ok('勾选后含 IMSI', snapWithIds.indexOf('460009711127691') >= 0);
-ok('勾选后提醒自行删除', /公开发帖前请自行删除/.test(snapWithIds));
-ok('设备还没取到时也不炸', makeSnapshotText(snapState, null)(false).indexOf('MT5700 诊断快照') === 0);
+ok('★ 快照功能已整块下线（不许再搬回来）',
+	!/buildSnapshotBlock|buildSnapshotText|copySnapshot|downloadSnapshot|诊断快照|state\.tools\.snap/.test(nsSrc));
+ok('★ 卡片副标题不再提「快照导出」',
+	/Mt5700\.card\('连接工具', '排查与诊断'\)/.test(nsSrc));
 
 /* ---------- 6. ★★ 不占通道底线（2.2.1 事故防回退） ---------- */
 
@@ -235,14 +193,27 @@ ok('★ 本卡没有任何周期上报开关（无 SRV_LISTEN_MS / 无订阅回�
 ok('★ 自检那步指路到「网络设置 → 网络拒绝」',
 	/网络设置 → 网络拒绝/.test(nsSrc));
 
-ok('流量清零走确认弹窗', /function clearFlowStats[\s\S]{0,300}Mt5700\.confirm/.test(nsSrc));
+ok('★ 自检也进页面自动跑一次（不必先点按钮），与 ADC 串行不并发',
+	/readAdcPins\(\)\.then\(runSelfCheck\)/.test(nsSrc));
+ok('★ 自检结论用 badge 进标题行（不用块级 .mt5700-diag-summary，它会把行撑高）',
+	/Mt5700\.badge\(summaryText, failed \? 'danger' : 'success'\)/.test(nsSrc)
+	&& !/mt5700-diag-summary is-' \+ lv/.test(nsSrc));
+ok('★ 自检 6 步明细默认折叠（t.expanded 默认 false）',
+	/expanded: false/.test(nsSrc) && /t\.expanded \? Mt5700|if \(t\.expanded\)/.test(nsSrc));
+ok('★ 流量清零仍保留按钮与二次确认（不可逆，不能做成自动）',
+	/function clearFlowStats[\s\S]{0,300}Mt5700\.confirm/.test(nsSrc));
+
 ok('流量清零下发 AT^DSFLOWCLR', /sendCommand\('AT\^DSFLOWCLR'\)/.test(nsSrc));
 ok('清零后立刻重取流量并重绘', /getFlow\(\)\.then\(renderFlow\)/.test(nsSrc));
 ok('ADC 用 AT^ADCREADEX=', /sendCommand\('AT\^ADCREADEX=' \+ id\)/.test(nsSrc));
 ok('ADC 管脚数量不写死（逐个试、失败即停）',
 	/var ADC_PIN_IDS = \[/.test(nsSrc) && /if \(v == null\) \{ stopped = true; return; \}/.test(nsSrc));
 ok('★ ADC 进页面自动读一次（连上就调 readAdcPins，不用先点按钮）',
-	/refreshAll\(\);[\s\S]{0,300}readAdcPins\(\);/.test(nsSrc));
+	/refreshAll\(\);[\s\S]{0,400}readAdcPins\(\)\.then\(runSelfCheck\)/.test(nsSrc));
+ok('★ 自检也进页面自动跑一次，且与 ADC 串行不并发（11 条只读命令别一起挤通道）',
+	/readAdcPins\(\)\.then\(runSelfCheck\)/.test(nsSrc));
+ok('自检默认折叠，标题行只放结论摘要',
+	/t\.expanded/.test(nsSrc) && /展开步骤/.test(nsSrc));
 ok('ADC 有结果后按钮变「重新读取」',
 	/t\.rows\.length \? '重新读取' : '读取'/.test(nsSrc));
 ok('★ ADC 结果一行铺开（不再用「管脚/电平」表格，省掉表头 + N 行）',
@@ -298,19 +269,41 @@ eq('同地址不同 CID → 1 行',
 	})().length, 1);
 eq('全空 → 0 行', makeAddrList({ diag: { addrs: [] }, dhcpv4: null, dhcpv6: null })().length, 0);
 
-/* ---------- 8. 沿用：三表合并（连接诊断 + 地址 + IP 与 DNS） ---------- */
+/* ---------- 8. 沿用：两表合并（连接诊断 + 地址与 DNS） ---------- */
 
-ok('三张表已合并成一个渲染入口 renderConnDetail', /function renderConnDetail\(\)/.test(nsSrc));
+ok('两张表已合并成一个渲染入口 renderConnDetail', /function renderConnDetail\(\)/.test(nsSrc));
 ok('旧的 renderDiag / renderAddr / renderDHCP 已下线',
 	!/function renderDiag\(/.test(nsSrc)
 	&& !/function renderAddr\(/.test(nsSrc)
 	&& !/function renderDHCP\(/.test(nsSrc));
-ok('三个分组标题行齐全',
-	/pushGroup\('连接诊断'/.test(nsSrc)
-	&& /pushGroup\('地址'/.test(nsSrc)
-	&& /pushGroup\('IP 与 DNS'/.test(nsSrc));
+/* 2026-09-18 用户反馈：「地址 不就是 IP 与 DNS 中的 ip 么为啥要分开」。
+   PDP 地址与 ^DHCP 下发的本来就是同一个地址，拆两组只是多一条分组标题。 */
+ok('★「地址」与「IP 与 DNS」已合并为一组「地址与 DNS」',
+	/pushGroup\('地址与 DNS', buildAddrRows\(\)\.concat\(buildDhcpRows\(\)\)\)/.test(nsSrc)
+	&& !/pushGroup\('IP 与 DNS'/.test(nsSrc));
+ok('只剩两个分组标题行', /pushGroup\('连接诊断'/.test(nsSrc));
 ok('地址表不再有 CID 列', !/Mt5700\.table\(\['CID'/.test(nsSrc));
 ok('地址表不再有来源列', !/'来源'/.test(nsSrc));
+
+ok('★ R05 readAdcPins busy 时必须返回 Promise（入口是 .then(runSelfCheck)，返回 undefined 会静默崩）',
+	/if \(t\.busy\) return Promise\.resolve\(\);/.test(nsSrc));
+ok('★ R04 自动链可被页面卸载中断（disposed 标记，反复进出不会多路排队）',
+	/var disposed = false;/.test(nsSrc)
+	&& /if \(stopped \|\| disposed\) return;/.test(nsSrc)
+	&& /if \(disposed\) return;/.test(nsSrc)
+	&& /_dispose[\s\S]{0,300}disposed = true;/.test(nsSrc));
+
+/* IPv6 能力值文案（手册 16.7.3） */
+eq('★ IPV6CAP 0 不在码表里 → 给裸值不编造（旧代码编了个「未获取能力值」）',
+	Parse.ipv6CapDescription(0), '未知能力值 0');
+eq('IPV6CAP 1 → 仅 IPv4（旧代码错译成「支持 IPv6」，已按手册纠正）',
+	Parse.ipv6CapDescription(1), '仅 IPv4');
+eq('IPV6CAP 2 → 仅 IPv6', Parse.ipv6CapDescription(2), '仅 IPv6');
+eq('IPV6CAP 7 → 支持 · 双栈（同一 APN）（真机就是这个值）',
+	Parse.ipv6CapDescription(7), '支持 · 双栈（同一 APN）');
+eq('IPV6CAP 11 → 支持 · 双栈（分用 APN）',
+	Parse.ipv6CapDescription(11), '支持 · 双栈（分用 APN）');
+ok('★ 未定义的值不许编造成支持/不支持', /未知能力值 999/.test(Parse.ipv6CapDescription(999)));
 
 /* ---------- 9. 网络设置页「网络拒绝」卡（^REJINFO 迁移后的归宿） ---------- */
 
@@ -340,4 +333,4 @@ if (fails.length) {
 	fails.forEach(function (f) { console.log('  - ' + f); });
 	process.exit(1);
 }
-console.log('  ✓ ' + pass + ' 项断言通过（连接工具：解析 / 自检判据 / 快照脱敏 / 不占通道底线 / 网络拒绝归位 / 沿用契约）');
+console.log('  ✓ ' + pass + ' 项断言通过（连接工具：解析 / 自检判据 / 快照已下线 / 不占通道底线 / 网络拒绝归位 / 沿用契约）');

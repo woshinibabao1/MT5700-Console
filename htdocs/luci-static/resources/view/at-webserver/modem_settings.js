@@ -578,15 +578,20 @@ return L.view.extend({
 		var sysCfgReady = false;
 		var sysRanges = { roam: null, srvdomain: null };
 
-		/* ---------- 1. 网络接入顺序 ---------- */
+		/* ---------- 1. 网络接入顺序 ----------
+		 * label 只给「人话」（5G 优先 / 仅 5G…）—— 十六进制码是给排障对 AT 手册用的，
+		 * 塞进 label 会让它长得没人愿意读。码值改由两处承载：
+		 *   ① 选中后下方 hint 里带出「制式代码 080302（NR → LTE → WDMA）」（见 paintAcq）
+		 *   ② 卡片底部只读原始值 sysRaw 会显示模组当前 acqorder
+		 * 两者都在，既不丢排障信息，也不把下拉撑成一列十六进制。 */
 		var ACQ_OPTIONS = [
-			{ value: '080302', label: '080302 · 5G 优先，逐级回落（NR→LTE→WCDMA）' },
-			{ value: '08', label: '08 · 仅 5G' },
-			{ value: '0302', label: '0302 · 4G 优先，可回落 3G' },
-			{ value: '03', label: '03 · 仅 4G' },
-			{ value: '0203', label: '0203 · 3G 优先，可回落 4G' },
-			{ value: '02', label: '02 · 仅 3G' },
-			{ value: '99', label: '99 · 不修改（只保存本页其它项）' }
+			{ value: '080302', label: '5G 优先' },
+			{ value: '08', label: '仅 5G' },
+			{ value: '0302', label: '4G 优先' },
+			{ value: '03', label: '仅 4G' },
+			{ value: '0203', label: '3G 优先' },
+			{ value: '02', label: '仅 3G' },
+			{ value: '99', label: '不修改' }
 		];
 		var ACQ_DESC = {
 			'080302': '有 5G 就用 5G，没有依次回落 4G、3G。绝大多数场景选它。',
@@ -597,12 +602,26 @@ return L.view.extend({
 			'02': '只搜 3G，速率低，仅供排障使用。',
 			'99': '不改动接入顺序，只保存本页其它项。'
 		};
+		/* 值 → 制式代码原文（手册 13.2.3：08=NR 03=LTE 02=WCDMA） */
+		var ACQ_CODE = {
+			'080302': 'NR → LTE → WCDMA',
+			'08': 'NR',
+			'0302': 'LTE → WCDMA',
+			'03': 'LTE',
+			'0203': 'WCDMA → LTE',
+			'02': 'WCDMA',
+			'99': '不改动'
+		};
 		var acqSel = Mt5700.select(ACQ_OPTIONS, '080302');
 		var acqHint = E('div', { 'class': 'mt5700-hint' });
 		function paintAcq() {
 			sysCfg.acqorder = acqSel.value;
-			acqHint.textContent = (ACQ_DESC[acqSel.value] || '')
-				+ '（制式代码：08=NR 03=LTE 02=WCDMA，手册 13.2.3）';
+			/* 未收录值查不到 ACQ_DESC 时给兜底，别渲染成「制式代码 0801 · （手册 13.2.3）」
+			   这种中间空一段、尾巴挂空括号的残句。 */
+			var desc = ACQ_DESC[acqSel.value] || '手册未收录该取值，保存即按原样写回';
+			acqHint.textContent = '制式代码 ' + acqSel.value
+				+ (ACQ_CODE[acqSel.value] ? '（' + ACQ_CODE[acqSel.value] + '）' : '')
+				+ ' · ' + desc + '（手册 13.2.3）';
 			applySrvConstraint();
 		}
 		acqSel.addEventListener('change', paintAcq);
@@ -729,7 +748,10 @@ return L.view.extend({
 			if (!sel.querySelector('option[value="' + value + '"]')) {
 				var o = document.createElement('option');
 				o.value = value;
-				o.textContent = (label || '') + value + ' · 当前值（预设未收录）';
+				/* 与新的极简 label 风格保持一致：「当前值 0801（预设未收录）」。
+				   ★ 未收录项**必须**带原始十六进制码 —— 它正是要拿去对 AT 手册
+				   查的那个值，简化 label 要治的病是「选项太啰嗦」，不是「抹掉排障信息」。 */
+				o.textContent = (label || '') + '当前值 ' + value + '（预设未收录）';
 				sel.appendChild(o);
 			}
 			sel.value = value;

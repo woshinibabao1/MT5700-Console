@@ -11,19 +11,19 @@
  *
  * 等价迁移原 WebUI network/Info.tsx，并按「一个主题一张卡片」重新组织，避免信息重叠：
  *   ① 信号质量     主小区 RSRP/RSRQ/SINR + 调制方式(MCS)，头部放刷新控制
- *   ② 连接状态     注册/运营商/签约速率 + 一张合并表（连接诊断 + 地址 + IP 与 DNS）
+ *   ② 连接状态     注册/运营商/签约速率 + 一张合并表（连接诊断 + 地址与 DNS）
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量
  *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
- *   ⑥ 连接工具     ADC 管脚电压 / 诊断快照导出 / 流量清零 / 连通性自检
+ *   ⑥ 连接工具     ADC 管脚电压 / 连通性自检 / 流量统计清零
  * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
  * [连接状态 | 右列（SIM 与设备 → 连接质量）]。
  *
- * ★ 为什么把「连接诊断 / 地址 / IP 与 DNS」三张表合成一张（2026-09-18）：
+ * ★ 为什么把「连接诊断 / 地址与 DNS」两张表合成一张（2026-09-18）：
  *   三者的行都是「项目 → 值」，拆三张只是多出两行表头、把同类信息切三刀；
  *   而「CID」「来源」两列又是纯内部概念 —— CID 1/5 用户无从干预，
  *   PDP 与 WAN 本来就是同一个地址，标了来源反而让人以为有两份地址。
- *   合并后按「连接诊断 / 地址 / IP 与 DNS」三个分组标题行分隔。
+ *   合并后按「连接诊断 / 地址与 DNS」两个分组标题行分隔。
  *
  * ★ 为什么把「连接质量」整卡换成「连接工具」（2026-09-18）：
  *   旧卡四项里，会话均速重复「速率与流量」、信号波动重复「信号质量」、
@@ -57,7 +57,7 @@ return L.view.extend({
 		body.appendChild(signalCard);
 
 		/* ② 连接状态：注册 / 运营商 / 签约速率 + 一张「连接明细」表。
-		 * 连接诊断、地址、IP 与 DNS 三张表已合并成一张（见 renderConnDetail）。 */
+		 * 连接诊断、地址与 DNS 两张表已合并成一张（见 renderConnDetail）。 */
 		var connCard = Mt5700.card('连接状态', '注册、诊断与地址');
 		/* 标题节点留个引用：renderConn 里要把它改成「连接状态 ・ 中国移动」 */
 		var connTitleEl = connCard.querySelector('.mt5700-card-title');
@@ -91,11 +91,11 @@ return L.view.extend({
 		devCard._body.appendChild(devBody);
 
 		/* ⑥ 连接工具：这一页别处全是读数，这里放**能做事的按钮** ——
-		 * ADC 管脚电压（自动读）/ 连通性自检 / 诊断快照导出 / 流量统计清零。
+		 * ADC 管脚电压（自动读）/ 连通性自检 / 流量统计清零。
 		 * 形态为「按钮触发 + 结果区」。
 		 * ★「网络拒绝原因」已迁到「网络设置 → 网络拒绝」，「服务状态监听」已下线
 		 *   —— 理由见下方连接工具区的注释。 */
-		var toolsCard = Mt5700.card('连接工具', '排查、诊断与快照导出');
+		var toolsCard = Mt5700.card('连接工具', '排查与诊断');
 		var toolsBody = E('div');
 		toolsCard._body.appendChild(toolsBody);
 
@@ -131,10 +131,7 @@ return L.view.extend({
 			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
 			tools: {
 				adc: { rows: [], at: 0, busy: false, err: null },
-				rej: { listening: false, last: null, count: 0, since: 0 },
-				srv: { listening: false, busy: false, last: null, log: [], offFailed: false, err: null, since: 0 },
-				check: { busy: false, steps: null, at: 0 },
-				snap: { text: '', at: 0, withIds: false }
+				check: { busy: false, steps: null, at: 0, expanded: false }
 			},
 			/* 12 路传感器温度，键名与 Parse.parseCHIPTEMP 的返回严格一一对应
 			   （手册 17.1：sub3G/sub6G/MIMO/TCXO/peri1/peri2/ap1/ap2/modem1/modem2/bbp1/bbp2）。
@@ -326,11 +323,11 @@ return L.view.extend({
 		 *   短信承载域又与「连接」不是一个话题 —— 它没有独立的问题域，
 		 *   只是「别处不要的边角料」集中营。
 		 *
-		 * ★ 四个工具的手册依据（实测排除掉的候选记在 FRONTEND_REVIEW_REPORT.md）：
+		 * ★ 三个工具的手册依据（实测排除掉的候选记在 FRONTEND_REVIEW_REPORT.md）：
 		 *   · ADC 管脚电压   手册 11.5   AT^ADCREADEX=<id>，纯读，进页面自动读一次
-		 *   · 诊断快照       纯前端拼装，零 AT 往返
+		 *   · 连通性自检     CPIN → C5GREG → CGACT → NDISSTATQRY → CGPADDR → DHCP 逐层走，
+		 *                   同样是纯读，进页面跟在 ADC 之后**串行**跑一次
 		 *   · 流量统计清零   手册 16.11  AT^DSFLOWCLR，只清计数器、不断网
-		 *   · 连通性自检     CPIN → C5GREG → CGACT → NDISSTATQRY → CGPADDR → DHCP 逐层走
 		 *
 		 * ★★ 两项已迁走 / 下线（2026-09-18，别再搬回来）：
 		 *   ①「网络拒绝原因」迁到「网络设置 → 网络拒绝」：它回答的是「为什么注册不上」，
@@ -356,6 +353,12 @@ return L.view.extend({
 		   所以逐个试、第一条失败就停，不预设数量。 */
 		var ADC_PIN_IDS = [0, 1, 2, 3, 4];
 
+		/* ★ 页面已卸载标记。进页面自动跑的「ADC → 自检」链一共 11 条只读查询，
+		   用户反复进出时，前一次的链还在独占的 AT 通道上排队（2.2.1 事故的形态：
+		   虽是只读、不留下常驻状态，但排队本身会让整页读数变慢）。
+		   _dispose 里置 true，链内每一步开头检查，让已发起的链尽快自然终止。 */
+		var disposed = false;
+
 		/* 工具块外壳：标题 + 右侧按钮，结果区由调用方 append */
 		function toolBlock(title, btn) {
 			var box = E('div', { 'class': 'mt5700-mt-md' });
@@ -371,7 +374,6 @@ return L.view.extend({
 			toolsBody.innerHTML = '';
 			toolsBody.appendChild(buildAdcBlock());
 			toolsBody.appendChild(buildCheckBlock());
-			toolsBody.appendChild(buildSnapshotBlock());
 			toolsBody.appendChild(buildFlowClearBlock());
 		}
 
@@ -411,14 +413,17 @@ return L.view.extend({
 
 		function readAdcPins() {
 			var t = state.tools.adc;
-			if (t.busy) return;
+			/* ★ 必须返回 Promise：入口是 readAdcPins().then(runSelfCheck)，
+			   busy 时 return undefined 会让调用方抛 TypeError，被吞进没人 catch 的
+			   rejected promise —— 表现为「自检静默不跑，页面上没有任何提示」。 */
+			if (t.busy) return Promise.resolve();
 			t.busy = true; t.err = null; t.rows = [];
 			renderTools();
 			var stopped = false;
 			var chain = Promise.resolve();
 			ADC_PIN_IDS.forEach(function (id) {
 				chain = chain.then(function () {
-					if (stopped) return;
+					if (stopped || disposed) return;
 					return AtWs.client.sendCommand('AT^ADCREADEX=' + id).then(function (res) {
 						var v = (res && res.success) ? Parse.parseAdcValue(String(res.data || '')) : null;
 						/* 第一条取不到就停：说明这个 id 不存在，后面也不用问了 */
@@ -431,7 +436,7 @@ return L.view.extend({
 				.then(function () {
 					t.busy = false; t.at = Date.now();
 					if (!t.rows.length && !t.err) t.err = '模组未返回任何 ADC 管脚值（该型号可能不支持 ^ADCREADEX）';
-					renderTools();
+					if (!disposed) renderTools();
 				});
 		}
 
@@ -524,53 +529,54 @@ return L.view.extend({
 
 		function buildCheckBlock() {
 			var t = state.tools.check;
-			var box = toolBlock('连通性自检',
-				Mt5700.ghostButton(t.busy ? '检查中…' : '开始自检', runSelfCheck));
+			var btn = Mt5700.ghostButton(t.busy ? '检查中…' : (t.steps ? '重新自检' : '开始自检'), runSelfCheck);
+			var box = toolBlock('连通性自检', btn);
 			if (!t.steps) {
 				box.appendChild(E('p', { 'class': 'mt5700-hint' },
 					'按 SIM → 注册 → PDP → 拨号 → 取址 → 网关 逐层查一遍，'
 					+ '卡在哪一步就直接告诉你。只读查询，不改任何设置。'));
 				return box;
 			}
-			var rows = t.steps.map(function (s) {
-				return [
-					s.name,
-					E('b', { 'class': 'mt5700-diag-verdict is-' + (s.level || 'ok') },
-						s.level === 'ok' ? '通过' : (s.level === 'warn' ? '存疑' : '未通过')),
-					s.text
-				];
-			});
-			box.appendChild(Mt5700.table(['步骤', '结果', '说明'], rows, { striped: true }));
-
+			/* 结论摘要插进标题行（与 ADC 同一写法），整块只占一行；
+			   6 步明细默认折叠，点「展开步骤」才渲染。 */
 			var failed = null;
 			for (var i = 0; i < t.steps.length; i++) {
 				if (t.steps[i].level === 'bad') { failed = t.steps[i]; break; }
 			}
-			var lv = failed ? 'bad' : 'ok';
-			var sum = E('div', { 'class': 'mt5700-diag-summary is-' + lv });
-			if (failed) {
-				sum.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' },
-					'卡在第 ' + (t.steps.indexOf(failed) + 1) + ' 步：' + failed.name));
-				sum.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' },
-					failed.text + '。前面的步骤都正常，问题就出在这一步。'));
+			var summaryText = failed
+				? ('卡在第 ' + (t.steps.indexOf(failed) + 1) + ' 步：' + failed.name)
+				: '六步全部通过';
+			/* 用现成 badge 而不是 .mt5700-diag-summary：后者是给块级结论用的
+			   （padding 12px + margin-bottom 12px），塞进标题行会把整行撑高。 */
+			box.firstChild.insertBefore(
+				Mt5700.badge(summaryText, failed ? 'danger' : 'success'), btn);
+			if (t.expanded) {
+				box.appendChild(Mt5700.ghostButton('收起步骤', function () { t.expanded = false; renderTools(); }));
+				var rows = t.steps.map(function (s) {
+					return [
+						s.name,
+						E('b', { 'class': 'mt5700-diag-verdict is-' + (s.level || 'ok') },
+							s.level === 'ok' ? '通过' : (s.level === 'warn' ? '存疑' : '未通过')),
+						s.text
+					];
+				});
+				box.appendChild(Mt5700.table(['步骤', '结果', '说明'], rows, { striped: true }));
 			} else {
-				sum.appendChild(E('div', { 'class': 'mt5700-diag-summary-head' }, '六步全部通过'));
-				sum.appendChild(E('div', { 'class': 'mt5700-diag-summary-text' },
-					'模组侧看不出问题。若仍上不了网，检查路由器 WAN 接口与防火墙。'));
+				box.appendChild(Mt5700.ghostButton('展开步骤', function () { t.expanded = true; renderTools(); }));
 			}
-			box.appendChild(sum);
 			return box;
 		}
 
 		function runSelfCheck() {
 			var t = state.tools.check;
 			if (t.busy) return;
-			t.busy = true; t.steps = [];
+			t.busy = true; t.steps = []; t.expanded = false;
 			renderTools();
 			var steps = checkSteps();
 			var chain = Promise.resolve();
 			steps.forEach(function (s) {
 				chain = chain.then(function () {
+					if (disposed) return;
 					/* 已经卡在某一步就没必要继续往下查了 */
 					for (var i = 0; i < t.steps.length; i++) {
 						if (t.steps[i].level === 'bad') return;
@@ -593,175 +599,11 @@ return L.view.extend({
 			});
 			return chain.then(function () {
 				t.busy = false; t.at = Date.now();
-				renderTools();
+				if (!disposed) renderTools();
 			});
 		}
 
-		/* ---------- ③ 诊断快照导出（纯前端） ---------- */
-
-		function buildSnapshotBlock() {
-			var t = state.tools.snap;
-			var box = toolBlock('诊断快照导出',
-				Mt5700.ghostButton(t.text ? '重新生成' : '生成快照', function () {
-					t.text = buildSnapshotText(t.withIds);
-					t.at = Date.now();
-					renderTools();
-				}));
-
-			var chk = E('input', { 'type': 'checkbox' });
-			chk.checked = !!t.withIds;
-			chk.addEventListener('change', function () {
-				t.withIds = chk.checked;
-				/* 已生成过就按新选项重来一次，免得显示的是旧口径 */
-				if (t.text) t.text = buildSnapshotText(t.withIds);
-				renderTools();
-			});
-			box.appendChild(E('label', { 'class': 'mt5700-hint' }, chk,
-				document.createTextNode(' 含设备标识（IMEI / IMSI / ICCID）—— 公开发帖前建议取消勾选')));
-
-			if (!t.text) {
-				box.appendChild(E('p', { 'class': 'mt5700-hint' },
-					'把信号、注册、载波、地址、流量、温度打包成一段文本，'
-					+ '报障 / 找客服 / 发帖求助时直接贴。纯前端拼装，不额外下发 AT 命令。'));
-				return box;
-			}
-
-			var ta = E('textarea', {
-				'class': 'mt5700-mono', 'readonly': 'readonly', 'rows': 14,
-				'style': 'width:100%;box-sizing:border-box;font-size:12px;line-height:1.6;'
-					+ 'padding:8px;margin-top:6px;resize:vertical'
-			});
-			ta.value = t.text;
-			box.appendChild(ta);
-
-			var act = E('div', { 'class': 'mt5700-mt-sm' });
-			act.appendChild(Mt5700.ghostButton('复制', function () { copySnapshot(t.text); }));
-			act.appendChild(Mt5700.ghostButton('下载 .txt', function () {
-				downloadSnapshot('mt5700-snapshot.txt', t.text);
-			}));
-			box.appendChild(act);
-			return box;
-		}
-
-		function copySnapshot(text) {
-			if (navigator.clipboard && navigator.clipboard.writeText) {
-				navigator.clipboard.writeText(text).then(function () {
-					Mt5700.success('已复制到剪贴板');
-				}).catch(function () {
-					Mt5700.error('复制失败，请手动选中文本框内容复制');
-				});
-				return;
-			}
-			Mt5700.error('当前环境不支持自动复制，请手动选中文本框内容复制');
-		}
-
-		function downloadSnapshot(name, text) {
-			try {
-				var blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-				var url = URL.createObjectURL(blob);
-				var a = E('a', { href: url, download: name });
-				document.body.appendChild(a);
-				a.click();
-				setTimeout(function () {
-					document.body.removeChild(a);
-					URL.revokeObjectURL(url);
-				}, 0);
-			} catch (e) {
-				Mt5700.error('下载失败：' + ((e && e.message) || '浏览器不支持'));
-			}
-		}
-
-		/*
-		 * 快照内容：只收「报障时对方一定会问」的那几类，不堆砌。
-		 * 设备标识默认不写 —— 这是要贴到公开场合的东西，默认少给、需要再勾。
-		 */
-		function buildSnapshotText(withIds) {
-			var out = [];
-			var c = state.cell || {};
-			var f = state.flow || {};
-			var d = state.diag || {};
-			function push(k, v) { out.push(k + '：' + (v == null || v === '' ? '—' : v)); }
-
-			out.push('MT5700 诊断快照');
-			out.push('生成时间：' + new Date().toLocaleString());
-			out.push('');
-
-			out.push('[ 连接 ]');
-			push('运营商', state.operator);
-			push('注册状态', state.networkStatus);
-			push('制式', systemModeLabel(c.sysMode, (state.carriers || []).length));
-			push('APN', state.apn);
-			push('激活 CID', state.activeCid == null ? '—' : String(state.activeCid));
-			var ad = splitSpeedUI(state.ambrDown, 'kbps'), au = splitSpeedUI(state.ambrUp, 'kbps');
-			push('签约速率', '下行 ' + ad.value + ' ' + ad.unit + ' / 上行 ' + au.value + ' ' + au.unit);
-			push('RRC', d.rrc ? (d.rrc.rrcText || '—') : '—');
-			if (d.endc) {
-				push('EN-DC', d.endc.established ? '已建立'
-					: (!d.endc.available ? '小区不支持'
-						: (!d.endc.plmnAvailable ? '运营商未开通'
-							: (d.endc.restricted ? '网络侧受限' : '未建立'))));
-			}
-			out.push('');
-
-			out.push('[ 信号 ]');
-			push('RSRP', c.rsrp == null ? '—' : c.rsrp + ' dBm');
-			push('RSRQ', c.rsrq == null ? '—' : c.rsrq + ' dB');
-			push('SINR', c.sinr == null ? '—' : c.sinr + ' dB');
-			push('PCI', c.pci || '—');
-			push('频点', c.channel || '—');
-			out.push('');
-
-			var cars = state.carriers || [];
-			if (cars.length) {
-				out.push('[ 载波 ]');
-				cars.forEach(function (x) {
-					out.push('  #' + (x.index == null ? '?' : x.index) + ' ' + (x.sysMode || '?')
-						+ ' band=' + (x.band == null ? '—' : x.band)
-						+ ' 频点=' + (x.dlFcn == null ? '—' : x.dlFcn)
-						+ ' 带宽=' + (x.dlBwKHz == null ? '—' : x.dlBwKHz) + 'kHz'
-						+ ' PCI=' + (x.pci == null ? '—' : x.pci));
-				});
-				out.push('');
-			}
-
-			out.push('[ 地址 ]');
-			var addrs = d.addrs || [];
-			if (!addrs.length) out.push('  —');
-			addrs.forEach(function (a) {
-				out.push('  CID ' + a.cid + '  ' + a.address + '（' + (a.family || '—') + '）');
-			});
-			if (state.dhcpv4) {
-				out.push('  网关 ' + state.dhcpv4.gateway
-					+ ' · DNS ' + state.dhcpv4.primaryDNS + ' / ' + state.dhcpv4.secondaryDNS);
-			}
-			out.push('');
-
-			out.push('[ 流量 ]');
-			push('本次连接时长', AtWs.formatDuration(f.lastDsTime, false));
-			push('本次（下/上）', AtWs.formatFlow(f.lastRxFlow) + ' / ' + AtWs.formatFlow(f.lastTxFlow));
-			push('累计（下/上）', AtWs.formatFlow(f.totalRxFlow) + ' / ' + AtWs.formatFlow(f.totalTxFlow));
-			out.push('');
-
-			var tv = Object.keys(state.temps || {})
-				.map(function (k) { return Number(state.temps[k]) || 0; })
-				.filter(function (v) { return v > 0; });
-			out.push('[ 设备 ]');
-			push('5G 模块温度', tv.length ? Math.max.apply(null, tv) + ' ℃' : '—');
-			push('SIM 状态', devState ? Parse.simShort(devState.sim) : '—');
-			push('模块 / 固件', devState ? ((devState.model || '—') + ' / ' + (devState.fw || '—')) : '—');
-			if (withIds && devState) {
-				push('IMEI', devState.imei || '—');
-				push('IMSI', devState.imsi || '—');
-				push('ICCID', devState.iccid || '—');
-			}
-			out.push('');
-			out.push(withIds
-				? '（含设备标识，公开发帖前请自行删除 [ 设备 ] 段）'
-				: '（设备标识已按选项隐藏）');
-			return out.join('\n');
-		}
-
-		/* ---------- ④ 流量统计清零（手册 16.11 ^DSFLOWCLR） ---------- */
+		/* ---------- ③ 流量统计清零（手册 16.11 ^DSFLOWCLR） ---------- */
 
 		function buildFlowClearBlock() {
 			var box = toolBlock('流量统计清零',
@@ -1124,7 +966,7 @@ return L.view.extend({
 
 		}
 
-		/* ---------- 连接明细（连接诊断 + 地址 + IP 与 DNS，三张表合并） ----------
+		/* ---------- 连接明细（连接诊断 + 地址与 DNS，两张表合并） ----------
 		 *
 		 * 三张表的行本来都是「项目 → 值」，拆开只是多出两行表头、把同类信息切三刀。
 		 * 合并后按分组标题行分隔，并砍掉两列：
@@ -1240,8 +1082,7 @@ return L.view.extend({
 				list.forEach(function (r) { rows.push(r); });
 			}
 			pushGroup('连接诊断', buildDiagRows());
-			pushGroup('地址', buildAddrRows());
-			pushGroup('IP 与 DNS', buildDhcpRows());
+			pushGroup('地址与 DNS', buildAddrRows().concat(buildDhcpRows()));
 			if (!rows.length) {
 				connDetailBox.appendChild(E('div', { 'class': 'mt5700-hint' }, '暂无连接明细数据。'));
 				return;
@@ -2014,7 +1855,7 @@ return L.view.extend({
 		renderConn();
 		renderSignal();
 		renderCarriers();
-		renderConnDetail();    /* 连接明细：诊断 + 地址 + IP 与 DNS（一张表） */
+		renderConnDetail();    /* 连接明细：诊断 + 地址与 DNS（一张表） */
 		renderTools();   /* 连接工具（右列独立卡片） */
 		renderSpeed();
 		renderFlow();
@@ -2040,14 +1881,18 @@ return L.view.extend({
 		}).then(function () {
 			refreshAll();
 			/* ADC 自动读一次：结果直接铺在「连接工具」里，不必先点按钮。
-			   5 条只读查询、失败即停，不会在模组里留下任何状态（安全底线的例外批准项）。 */
-			readAdcPins();
+			   5 条只读查询、失败即停，不会在模组里留下任何状态（安全底线的例外批准项）。
+			   ★ 自检排在 ADC 之后**串行**跑，不并发：两者都是只读查询，同时发起会让
+			   11 条命令一起挤在 AT 通道上排队。串行后总体耗时略长，但不会放大排队。 */
+			readAdcPins().then(runSelfCheck).catch(function () { /* 两条链内部都已各自兜错 */ });
 		});
 
 		self._dispose = function () {
 			/* 离开页面必须清干净：三个定时器 + 可见性监听 + 只读缓存，
 			   否则反复进出会叠加倍轮询。
+			   disposed 同时让已发起的「ADC → 自检」链尽快停下（见其声明处注释）。
 			   （本页已无任何常驻上报开关，不需要再做「关不掉就报警」的收尾） */
+			disposed = true;
 			if (timer) clearInterval(timer);
 			if (slowTimer) clearInterval(slowTimer);
 			if (rateTimer) clearInterval(rateTimer);

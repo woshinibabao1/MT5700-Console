@@ -291,10 +291,28 @@ var Parse = (function () {
 
 	/* ================= IPv6 CAP ================= */
 
+	/*
+	 * IPv6 能力值（手册 16.7.3）：
+	 *   0x01 = IPV4 ONLY
+	 *   0x02 = IPV6 ONLY
+	 *   0x07 = IPV4 ONLY + IPV6 ONLY + IPV4V6 使用相同 APN（双栈，同一 APN）
+	 *   0x0B = IPV4 ONLY + IPV6 ONLY + IPV4V6 使用不同 APN（双栈，分用 APN）
+	 *   其它值（含 0x00）手册标「保留」，一律按「未知能力值 N」原样展示，不编造支持/不支持。
+	 *
+	 * ★ 两处历史坑：
+	 *   ① 旧代码把 0 判成「不支持 IPv6」、1 判成「支持 IPv6」—— 按手册 1 是**仅 IPv4**，
+	 *      恰好译反。已纠正，守卫见 tests/connection-tools-contract.test.js 第 8 节。
+	 *   ② 界面此前直接显示「能力值 7」，用户看不懂。真机 ^IPV6CAP: 7 就是双栈同 APN。
+	 * 行名保持「IPv6 支持」；「能力」与「当前是否已取到 IPv6 地址」是两回事，这里只给能力。
+	 */
 	api.ipv6CapDescription = function (v) {
-		if (v === 0) return '不支持 IPv6';
-		if (v === 1) return '支持 IPv6';
-		return '能力值 ' + v;
+		/* 手册只定义了 1 / 2 / 7 / 11 四个取值，其余（含 0）一律原样给裸值 ——
+		   0 不在码表里，「未获取能力值」是我们编的解读，不干这事。 */
+		if (v === 1) return '仅 IPv4';
+		if (v === 2) return '仅 IPv6';
+		if (v === 7) return '支持 · 双栈（同一 APN）';
+		if (v === 11) return '支持 · 双栈（分用 APN）';
+		return '未知能力值 ' + v;
 	};
 
 	/* ================= 系统配置解读（SYSCFGEX，手册 13.2） =================
