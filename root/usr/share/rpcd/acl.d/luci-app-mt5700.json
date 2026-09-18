@@ -25,6 +25,7 @@
 					"events",
 					"logs",
 					"netrate",
+					"sysdiag",
 					"es9p"
 				],
 				"service": [

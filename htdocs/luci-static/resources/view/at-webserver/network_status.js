@@ -90,34 +90,47 @@ return L.view.extend({
 		var devBody = E('div');
 		devCard._body.appendChild(devBody);
 
-		/* ⑥ 连接工具：这一页别处全是读数，这里放**能做事的工具** ——
-		 * ADC 管脚电压 / 连通性自检。两者都是**只读**查询，进页面自动跑一次并串行排好队，
-		 * 按钮退化成「重新读取 / 重新自检」。
+		/* ⑥ 断网排查：这一页别处全是读数，这里放**能做事的工具**。
+		 *   · 右列这张是「总控」：开始排查按钮 + 一句话结论 + 三层通过计数 + ADC 管脚电压
+		 *   · 逐项明细铺在页面底部那张**满宽**卡里（33 项，窄栏挤不下）
+		 * 三层划分的理由：原来那 6 步连通性自检全在模组内部，只能回答「模组自己觉得通不通」，
+		 * 而真机踩过的断网事故有一半根本不在模组里（缺接口 / 没 restart firewall /
+		 * init.d 是 100644 / USB 枚举成 480M / 重枚举后不续约导致网关 ARP 一直 INCOMPLETE）。
+		 * L1 走 AT 只读命令，L2/L3 走后端 mt5700.sysdiag（一次性取回系统侧事实）。
 		 * ★「流量统计清零」已迁到「速率与流量」卡头：它是个动作按钮，
 		 *   和同卡的流量数字放在一起才顺手，不该在「工具」里占一整块。
 		 * ★「网络拒绝原因」已迁到「网络设置 → 网络拒绝」，「服务状态监听」已下线
 		 *   —— 理由见下方连接工具区的注释。 */
-		var toolsCard = Mt5700.card('连接工具', '排查与诊断');
-		var toolsBody = E('div');
-		toolsCard._body.appendChild(toolsBody);
+		var diagCard = Mt5700.card('断网排查', '三层体检 · 一键定位');
+		var diagBody = E('div');
+		diagCard._body.appendChild(diagBody);
+
+		/* 明细卡：满宽，放在页面最底部（见下方版式说明）。
+		   每项给「事实 + 建议命令」，不提供自动修复按钮 —— 自动改网络配置本身
+		   就是断网源（重拉接口会短暂断网），用户明确选择「只诊断 + 给命令」。 */
+		var diagDetailCard = Mt5700.card('断网排查明细', '每一项的事实与建议（只给命令，不自动改配置）');
+		var diagDetailBody = E('div');
+		diagDetailCard._body.appendChild(diagDetailBody);
 
 		/* 版式（「左右要对称」+「SIM 与设备下面的空白要有价值」）：
 		     载波与聚合（满宽，表格含逐载波 RSRP/RSRQ/SINR/强度）
 		     信号质量（满宽）
 		     连接状态 | 右列（SIM 与设备 → 连接质量）  ← 双列卡区 .mt5700-cards
 		     速率与流量（满宽）
+		     断网排查明细（满宽，放最底部）
 		   右列两张卡用 .mt5700-stack 纵向堆叠，把左列的空白补上（实测左右差 ≈ 70px）。
 		   之前的「SIM + 速率」右列比左列高一大截，是因为速率卡带着 170px 曲线；
 		   换成纯表格的卡后高度正好。窄屏单列时按 DOM 顺序降级：
-		   连接状态 → SIM 与设备 → 连接质量 → 速率与流量。 */
+		   连接状态 → SIM 与设备 → 断网排查 → 速率与流量 → 断网排查明细。 */
 		var duoRight = E('div', { 'class': 'mt5700-stack' });
 		duoRight.appendChild(devCard);
-		duoRight.appendChild(toolsCard);
+		duoRight.appendChild(diagCard);
 		var duo = E('div', { 'class': 'mt5700-cards' });
 		duo.appendChild(connCard);
 		duo.appendChild(duoRight);
 		body.appendChild(duo);
 		body.appendChild(rateCard);
+		body.appendChild(diagDetailCard);   /* 满宽明细，33 项放右列会挤成一团 */
 		body.insertBefore(carrierCard, signalCard);
 
 		/* ---------- 状态 ---------- */
@@ -133,7 +146,9 @@ return L.view.extend({
 			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
 			tools: {
 				adc: { rows: [], at: 0, busy: false, err: null },
-				check: { busy: false, steps: null, at: 0 }
+				/* 断网排查：atSteps = L1 的 AT 逐步结果，items = L2/L3 由系统事实判定的结果。
+				   facts 是后端 diag-probe.sh 回的 key=value，factsErr 非空说明后端没升级。 */
+				diag: { busy: false, ran: false, at: 0, atSteps: [], items: [], facts: {}, factsErr: '' }
 			},
 			/* 12 路传感器温度，键名与 Parse.parseCHIPTEMP 的返回严格一一对应
 			   （手册 17.1：sub3G/sub6G/MIMO/TCXO/peri1/peri2/ap1/ap2/modem1/modem2/bbp1/bbp2）。
@@ -315,21 +330,29 @@ return L.view.extend({
 			renderDevCard();
 		}
 
-		/* ================= 连接工具 =================
+		/* ================= 断网排查 =================
 		 * 其余卡片全是「读数」，这一张专放**能做事的按钮**。
 		 *
-		 * ★ 为什么整卡换掉上一版「连接质量」（2026-09-18）：
-		 *   旧卡四项里，会话均速重复「速率与流量」、信号波动重复「信号质量」、
-		 *   空口丢包是自 PDU 会话建立起累加且模组从不清零的历史账
-		 *   （真机 60 秒 4 次采样 17337 纹丝不动，常年显示「正常」），
-		 *   短信承载域又与「连接」不是一个话题 —— 它没有独立的问题域，
-		 *   只是「别处不要的边角料」集中营。
+		 * ★ 三层，共 33 项：
+		 *   L1 模组与空口（11）  AT 只读命令 + 复用页面已有读数
+		 *   L2 系统与网络（17）  后端 mt5700.sysdiag → diag-probe.sh 只读采集
+		 *   L3 端到端连通（5）   同上（ping 网关 / 公网 IP / DNS / TCP 443）
 		 *
-		 * ★ 三个工具的手册依据（实测排除掉的候选记在 FRONTEND_REVIEW_REPORT.md）：
-		 *   · ADC 管脚电压   手册 11.5   AT^ADCREADEX=<id>，纯读，进页面自动读一次
-		 *   · 连通性自检     CPIN → C5GREG → CGACT → NDISSTATQRY → CGPADDR → DHCP 逐层走，
-		 *                   同样是纯读，进页面跟在 ADC 之后**串行**跑一次
-		 *   · 流量统计清零   手册 16.11  AT^DSFLOWCLR，只清计数器、不断网
+		 * ★ 为什么换掉上一版「连接工具」的 6 步自检（2026-09-19）：
+		 *   那 6 步（CPIN → C5GREG → CGACT → NDISSTATQRY → CGPADDR → DHCP）
+		 *   全在模组内部，只能回答「模组自己觉得通不通」。而真机上真实发生过的
+		 *   断网 / 掉速事故里，有一半根本不在模组里：
+		 *     · 刷机后缺 MT5700M 接口（auto='1' 漏了）      → 完全没网，模组一切正常
+		 *     · 加了 WAN 没 /etc/init.d/firewall restart   → 有 IP 但出不去
+		 *     · init.d/at-webserver 是 100644             → AT 服务压根不自启
+		 *     · 开机 USB 枚举成 480M，几百秒后重枚举成 5000M → 速率差三倍多
+		 *     · 模组重枚举后 netifd 不续约 → 网关 ARP 永远 INCOMPLETE → 静默断网
+		 *   这些 6 步里一条都覆盖不到，所以补齐 L1 的 APN / 射频开关 / 服务域，
+		 *   再加 L2 / L3 两层，才谈得上「全面」。
+		 *
+		 * ★ 事实与判定分离：后端 diag-probe.sh 只输出 key=value 事实、不做任何判定；
+		 *   判定（通过 / 存疑 / 未通过、给什么建议）全在前端的注册表里。
+		 *   于是「加一项判据」只改前端、「加一项事实」才改后端，两边能独立扩展。
 		 *
 		 * ★★ 两项已迁走 / 下线（2026-09-18，别再搬回来）：
 		 *   ①「网络拒绝原因」迁到「网络设置 → 网络拒绝」：它回答的是「为什么注册不上」，
@@ -344,11 +367,16 @@ return L.view.extend({
 		 *   上一版为做「卡不卡」，让页面**进入时自动下发** AT^PDCPDATAINFO=1,5000
 		 *   开周期上报、离开时才关。页面被强杀后上报永久常驻模组，与 1Hz 的 AT
 		 *   轮询争抢同一条 AT 通道，真机事件队列积压 106 帧，只能重启服务才停。
-		 *   因此：**本卡任何功能都不许在模组里留下常驻状态**。ADC / 自检 / 清零
-		 *   都是一次性读或写；将来若要再加「开上报 → 等推送」型功能，必须同时满足
+		 *   因此：**本卡任何功能都不许在模组里留下常驻状态**。ADC / 排查 都是一次性读；
+		 *   将来若要再加「开上报 → 等推送」型功能，必须同时满足
 		 *   ① 默认关、只能手动开；② 到点定时器强制关；③ 关不掉就显式报警 + 重试入口
 		 *   —— 悄悄留下一个常驻上报，比测不到严重得多。
-		 *   守卫：tests/connection-tools-contract.test.js
+		 *
+		 * ★★★ 排查不自动修（用户 2026-09-19 明确选择）：
+		 *   只给「建议命令」，不提供修复按钮。续约 DHCP、重启 AT 服务这类动作
+		 *   本身就是断网源（ifdown/ifup 会短暂断网），由用户在终端里确认后执行更稳妥；
+		 *   而且 watchdog.sh 已经负责常驻自愈，这里再动手会和它抢职责。
+		 *   守卫：tests/connection-tools-contract.test.js / tests/diag-contract.test.js
 		 */
 
 		/* ADC 管脚 id：手册 11.5 明写「不同产品的 ADC 管脚的数量不同」，
@@ -371,11 +399,23 @@ return L.view.extend({
 			return box;
 		}
 
+		/* 排查结论的四种取值 —— 与 mt5700.css 的 .mt5700-diag-verdict.is-* 一一对应，
+		   加一种就得同时加 CSS，否则文字会掉成默认色（暗色主题下看不清）。 */
+		var DIAG_VERDICT = { ok: '通过', warn: '存疑', bad: '未通过', idle: '待检查' };
+
+		/* 三层。明细表按这个顺序分组，总控卡按这个顺序出计数徽章。 */
+		var DIAG_LAYERS = [
+			{ id: 'L1', name: '模组与空口' },
+			{ id: 'L2', name: '系统与网络' },
+			{ id: 'L3', name: '端到端连通' }
+		];
+
 		function renderTools() {
-			if (!toolsBody) return;
-			toolsBody.innerHTML = '';
-			toolsBody.appendChild(buildAdcBlock());
-			toolsBody.appendChild(buildCheckBlock());
+			if (!diagBody) return;
+			diagBody.innerHTML = '';
+			diagBody.appendChild(buildDiagBlock());
+			diagBody.appendChild(buildAdcBlock());
+			renderDiagDetail();   /* 底部满宽明细卡，跟着一起重绘 */
 		}
 
 		/* ---------- ① ADC 管脚电压（手册 11.5） ----------
@@ -441,20 +481,42 @@ return L.view.extend({
 				});
 		}
 
-		/* ---------- ② 连通性自检向导 ---------- */
-
-		/*
-		 * 逐层走一遍「拿到网」的每一步，卡住就停在那一步。
-		 * 判据全部来自手册中该命令的取值定义，不猜：
-		 *   CPIN        手册 6.x  <code> = READY 才就绪
-		 *   C5GREG      手册 7.x  <stat> 1=已注册 5=已注册(漫游) 3=注册被拒
-		 *   CGACT       手册 7.x  <state> 1=已激活
-		 *   NDISSTATQRY 手册 16.4 <stat> 1=已连接
-		 *   CGPADDR     手册 7.x  有地址才算拿到
-		 *   DHCP        手册 16.x 第 3 个字段是网关（十六进制 IP）
+		/* ---------- ② L1：模组与空口（AT 只读命令） ----------
+		 *
+		 * 逐层走一遍「拿到网」的每一步。判据全部来自手册中该命令的取值定义，不猜：
+		 *   CFUN         手册 x.x  <fun> 1=全功能；0/4 射频关 —— ★ 会直接把 eth2 挂死
+		 *   CPIN         手册 6.x  <code> = READY 才就绪
+		 *   CGDCONT      手册 7.x  <APN> 为空则 PDP 起不来（最大的一块空白：
+		 *                         原 6 步里根本没有 APN，而 APN 错是最常见的断网原因）
+		 *   SYSCFGEX     手册 13.2 第 4 个字段 <srvdomain>：0=CS_ONLY 只能打电话
+		 *   C5GREG       手册 7.x  <stat> 1=已注册 5=已注册(漫游) 3=注册被拒
+		 *   CGACT        手册 7.x  <state> 1=已激活
+		 *   NDISSTATQRY  手册 16.4 <stat> 1=已连接
+		 *   CGPADDR      手册 7.x  有地址才算拿到
+		 *   DHCP         手册 16.x 第 3 个字段是网关（十六进制 IP）
+		 *
+		 * ★ 不再"卡住就停"：这是**排查**不是向导，要的是完整画面
+		 *   （模组层没问题时，防火墙没覆盖 WAN 这类 L2 毛病也得看得见）。
+		 *   9 条只读命令串行走完，成本与原来 6 条在同一量级。
 		 */
 		function checkSteps() {
 			return [
+				{
+					name: '射频开关', cmd: 'AT+CFUN?',
+					judge: function (data) {
+						var m = String(data).match(/CFUN:\s*(\d+)/);
+						if (!m) return { level: 'warn', text: '取不到射频状态' };
+						var v = m[1];
+						if (v === '1') return { level: 'ok', text: '全功能（CFUN=1）' };
+						/* ★ 红线级：CFUN=0 会把 eth2 挂死，恢复要 ifdown/ifup。
+						   这里只提示，绝不自动下发 AT+CFUN=1。 */
+						return {
+							level: 'bad',
+							text: '射频已关（CFUN=' + v + '）—— 5G 网口 eth2 会被挂死，一切免谈',
+							fix: 'AT+CFUN=1 打开射频（会重启模组射频）；恢复网口需 ifdown MT5700M; sleep 2; ifup MT5700M'
+						};
+					}
+				},
 				{
 					name: 'SIM 就绪', cmd: 'AT+CPIN?',
 					judge: function (data) {
@@ -463,6 +525,45 @@ return L.view.extend({
 						if (v === 'READY') return { level: 'ok', text: 'READY' };
 						if (!v) return { level: 'bad', text: '取不到 SIM 状态（卡没插好或没识别）' };
 						return { level: 'bad', text: 'SIM 未就绪：' + v };
+					}
+				},
+				{
+					/* ★ APN 是原 6 步里最大的空白：APN 空或错 → PDP 起不来 → 必然断网，
+					   而模组侧其它读数（注册、信号）看起来全都是好的。 */
+					name: 'APN 配置', cmd: 'AT+CGDCONT?',
+					judge: function (data) {
+						var apns = [];
+						AtWs.extractATDataMultiline(String(data), '+CGDCONT').forEach(function (row) {
+							/* +CGDCONT: <cid>,<PDP_type>,<APN>,<PDP_addr>,... —— APN 可能带引号 */
+							var p = row.split(',');
+							if (p.length < 3) return;
+							var a = p[2].replace(/"/g, '').trim();
+							if (a && apns.indexOf(a) < 0) apns.push(a);
+						});
+						if (!apns.length) {
+							return {
+								level: 'bad',
+								text: '没有任何配了 APN 的 PDP 上下文 —— 拨号必然失败（这是断网最常见的原因）',
+								fix: 'AT+CGDCONT=1,"IP","<运营商APN>"（移动 cmnet / 联通 3gnet / 电信 ctnet），改完重新拨号'
+							};
+						}
+						return { level: 'ok', text: apns.join(' / ') };
+					}
+				},
+				{
+					/* 服务域 CS_ONLY（0）只能打电话不能上网；ANY（3）在含 4G/5G 时模组不允许 */
+					name: '服务域与制式', cmd: 'AT^SYSCFGEX?',
+					judge: function (data) {
+						var str = AtWs.extractATData(String(data), '^SYSCFGEX');
+						if (!str) return { level: 'warn', text: '取不到 ^SYSCFGEX（不影响上网本身）' };
+						var d = str.split(',');
+						var SRV = { 0: '仅语音 CS_ONLY', 1: '仅数据 PS_ONLY', 2: '语音+数据 CS_PS', 3: '不限 ANY', 4: '不修改' };
+						var sv = d.length >= 4 ? Number(String(d[3]).replace(/"/g, '').trim()) : NaN;
+						var txt = '接入顺序 ' + String(d[0] || '').replace(/"/g, '')
+							+ (isNaN(sv) ? '' : ' · 服务域 ' + (SRV[sv] || sv));
+						if (sv === 0) return { level: 'bad', text: txt + ' —— 只注册语音，上不了网', fix: '把服务域改成 2（语音+数据）：AT^SYSCFGEX=,,2' };
+						if (sv === 1) return { level: 'warn', text: txt + ' —— 只注册数据，接打电话与收发短信会失效' };
+						return { level: 'ok', text: txt };
 					}
 				},
 				{
@@ -507,9 +608,12 @@ return L.view.extend({
 						var list = (Parse.parseCgpaddr(String(data)) || [])
 							.filter(function (a) { return a && a.address; });
 						if (!list.length) return { level: 'bad', text: 'PDP 已激活但没拿到地址 —— 多为 APN 或运营商侧问题' };
+						/* raw 供 L2「接口地址与模组一致」交叉比对用（那里要的是地址本身，
+						   不是拼好的展示文本，从文本里正则抠 IP 太脆）。 */
 						return {
 							level: 'ok',
-							text: list.map(function (a) { return a.address; }).join(' / ')
+							text: list.map(function (a) { return a.address; }).join(' / '),
+							raw: list.map(function (a) { return a.address; })
 						};
 					}
 				},
@@ -528,75 +632,496 @@ return L.view.extend({
 			];
 		}
 
-		function buildCheckBlock() {
-			var t = state.tools.check;
-			var btn = Mt5700.ghostButton(t.busy ? '检查中…' : (t.steps ? '重新自检' : '开始自检'), runSelfCheck);
-			var box = toolBlock('连通性自检', btn);
-			if (!t.steps) {
-				box.appendChild(E('p', { 'class': 'mt5700-hint' },
-					'按 SIM → 注册 → PDP → 拨号 → 取址 → 网关 逐层查一遍，'
-					+ '卡在哪一步就直接告诉你。只读查询，不改任何设置。'));
-				return box;
+		/* ---------- 系统侧事实的两个小工具 ----------
+		 * 后端输出的是 key=value，**值全是字符串**。
+		 * ★ fnum 的默认值语义：探测不到 = -1（未知），不是 0（假失败）。
+		 *   判错的代价（照着不存在的问题去改配置）远大于"没测到"。 */
+		function fv(f, k) {
+			var v = f[k];
+			return (v == null) ? '' : String(v);
+		}
+		function fnum(f, k, dflt) {
+			var s = fv(f, k);
+			if (s === '') return dflt;
+			var n = parseFloat(s);
+			return isNaN(n) ? dflt : n;
+		}
+
+		/* ---------- L1 派生 + L2 + L3：全部由事实判定，不再占 AT 通道 ----------
+		 *
+		 * L1 的两项派生（信号 / 温度）复用页面已有读数 —— 信号质量卡与 SIM 与设备卡
+		 * 本来就在刷，为排查再各发一条 AT 是纯浪费。
+		 *
+		 * L2/L3 的每一项都对应一个真机踩过的坑，注释里写明是哪一次。
+		 * 加项时请同步补 tests/diag-contract.test.js 的「事实键存在性」断言。
+		 */
+		function sysChecks() {
+			return [
+				/* ---- L1 派生 ---- */
+				{
+					layer: 'L1', name: '信号质量', eval: function (f, st) {
+						var c = st.cell || {};
+						if (c.rsrp == null && c.sinr == null) return { level: 'warn', text: '还没读到信号（信号质量卡无数据）' };
+						var txt = 'RSRP ' + (c.rsrp == null ? '—' : c.rsrp) + ' dBm · SINR ' + (c.sinr == null ? '—' : c.sinr) + ' dB';
+						if (c.rsrp != null && c.rsrp < -110) {
+							return {
+								level: 'bad', text: txt + ' —— RSRP 低于 -110 dBm，基本注册不上',
+								fix: '挪动设备或接外置天线；再看「网络设置 → 邻区扫描」挑别的小区'
+							};
+						}
+						if (c.sinr != null && c.sinr < 0) {
+							return { level: 'warn', text: txt + ' —— SINR 为负，干扰重，能注册也跑不动', fix: '避开干扰源；必要时锁频到别的频点' };
+						}
+						return { level: 'ok', text: txt };
+					}
+				},
+				{
+					layer: 'L1', name: '模组温度', eval: function (f, st) {
+						var v = [];
+						for (var k in (st.temps || {})) {
+							var n = Number(st.temps[k]);
+							if (n > 0) v.push(n);
+						}
+						if (!v.length) return { level: 'warn', text: '还没读到温度' };
+						var mx = Math.max.apply(null, v);
+						if (mx >= 85) {
+							return { level: 'bad', text: '最高 ' + mx + ' ℃ —— 过热会降速甚至掉网', fix: '改善通风 / 清灰；H5000M 可调风扇转速策略' };
+						}
+						if (mx >= 70) return { level: 'warn', text: '最高 ' + mx + ' ℃，偏高' };
+						return { level: 'ok', text: '最高 ' + mx + ' ℃' };
+					}
+				},
+
+				/* ---- L2 系统与网络 ---- */
+				{
+					layer: 'L2', name: 'AT 服务在运行', eval: function (f) {
+						if (fnum(f, 'svc_at_running', -1) === 1) return { level: 'ok', text: '运行中' };
+						return { level: 'bad', text: 'AT 服务没在跑 —— 本页所有模组读数都会是空的', fix: '/etc/init.d/at-webserver start' };
+					}
+				},
+				{
+					layer: 'L2', name: 'AT 服务开机自启', eval: function (f) {
+						return fnum(f, 'svc_at_enabled', 0) === 1
+							? { level: 'ok', text: '已启用' }
+							: { level: 'warn', text: '没设开机自启，重启后要手动拉起来', fix: '/etc/init.d/at-webserver enable' };
+					}
+				},
+				{
+					/* ★ 三大高复发故障之一：git 不继承 exec 位，100644 的 init.d 开机根本不自启
+					   （用户实测踩过，项目红线第 9 条就是这个）。 */
+					layer: 'L2', name: 'init.d 脚本权限', eval: function (f) {
+						var m = fv(f, 'initd_mode');
+						if (!m) return { level: 'bad', text: '找不到 /etc/init.d/at-webserver', fix: '重装 luci-app-mt5700' };
+						if (m === '755' || m === '0755') return { level: 'ok', text: m };
+						return {
+							level: 'bad', text: '权限是 ' + m + '（缺执行位）—— 开机不会自启',
+							fix: 'chmod 755 /etc/init.d/at-webserver && /etc/init.d/at-webserver enable'
+						};
+					}
+				},
+				{
+					layer: 'L2', name: '串口设备', eval: function (f) {
+						var n = fnum(f, 'ttyusb_count', -1);
+						/* ★ -1 = 脚本没取到（wc -l 失败之类），不是"没有串口"。
+						   把它判成 bad 会让人照着不存在的问题去拆机。 */
+						if (n < 0) return { level: 'warn', text: '取不到串口数量' };
+						if (n > 0) return { level: 'ok', text: n + ' 个 /dev/ttyUSB*' };
+						return {
+							level: 'bad', text: '没有 /dev/ttyUSB* —— 模组没被枚举上（USB 没起来 / 被切到别的模式 / 掉了电）',
+							fix: 'dmesg | grep -i usb 看重枚举记录；必要时重新插拔模组或重启设备'
+						};
+					}
+				},
+				{
+					/* ★ 真机实测：开机枚举成 1-1 480M，几百秒后重枚举成 2-1 5000M，速率差三倍多。
+					   所以 480 只判"存疑"并说明会自动恢复，不判死。 */
+					layer: 'L2', name: 'USB 链路速率', eval: function (f) {
+						var s = fnum(f, 'usb_speed', -1), p = fv(f, 'usb_path'), v = fv(f, 'usb_version');
+						if (s < 0) return { level: 'warn', text: '取不到 USB 速率' };
+						var txt = s + ' Mbps（' + (p || '未知路径') + (v ? ' · USB ' + v : '') + '）';
+						if (s >= 5000) return { level: 'ok', text: txt };
+						if (s === 480) {
+							return {
+								level: 'warn',
+								text: txt + ' —— 这是 USB2.0 速率。开机早期常见，几百秒后会自己重枚举成 5000；'
+									+ '若一直是 480，下行会被限在 ~400 Mbps',
+								fix: '等几分钟再看；始终如此则检查 M.2 插槽与 USB 线缆'
+							};
+						}
+						return { level: 'bad', text: txt + ' —— 比 USB2.0 还低，链路有问题', fix: '检查硬件连接' };
+					}
+				},
+				{
+					/* ★ 三大高复发故障之一：刷机后缺接口 → 完全没网，而模组侧读数一切正常 */
+					layer: 'L2', name: '接口存在', eval: function (f) {
+						var n = fv(f, 'iface_name');
+						if (fnum(f, 'iface_exists', 0) === 1) return { level: 'ok', text: n + '（设备 ' + fv(f, 'iface_device') + '）' };
+						return {
+							level: 'bad', text: '找不到接口 ' + n + ' —— 刷机后最常见的"完全没网"，而模组一切正常',
+							fix: '在 /etc/config/network 里补上该接口（别漏 auto=1），再 /etc/init.d/network restart'
+						};
+					}
+				},
+				{
+					layer: 'L2', name: '接口自动拉起', eval: function (f) {
+						var a = fv(f, 'iface_auto');
+						/* netifd 里 auto 缺省即为 1，没写不算问题 */
+						if (a === '' || a === '1') return { level: 'ok', text: a === '' ? '未设置（netifd 默认自动）' : 'auto=1' };
+						return {
+							level: 'bad', text: 'auto=' + a + ' —— 接口不会自动拉起，重启后没网',
+							fix: 'uci set network.' + fv(f, 'iface_name') + '.auto=1 && uci commit network'
+						};
+					}
+				},
+				{
+					layer: 'L2', name: '接口状态', eval: function (f) {
+						if (fnum(f, 'iface_up', 0) === 1) return { level: 'ok', text: '已 UP' };
+						if (fnum(f, 'iface_pending', 0) === 1) return { level: 'warn', text: '正在协商（pending）—— 稍等再排查一次' };
+						return { level: 'bad', text: '接口是 DOWN', fix: 'ifup ' + fv(f, 'iface_name') + '；起不来就回头看上面几项' };
+					}
+				},
+				{
+					layer: 'L2', name: '默认路由', eval: function (f) {
+						var gw = fv(f, 'route_gw'), dev = fv(f, 'route_dev'), cnt = fnum(f, 'route_count', 0);
+						if (!gw) return { level: 'bad', text: '没有默认路由 —— 有 IP 也出不去', fix: 'ifup ' + fv(f, 'iface_name') + ' 重新协商' };
+						var txt = '网关 ' + gw + ' 走 ' + dev;
+						if (dev && fv(f, 'iface_device') && dev !== fv(f, 'iface_device')) {
+							return { level: 'warn', text: txt + ' —— 默认路由不在 5G 口上，流量实际走的是 ' + dev };
+						}
+						if (cnt > 1) return { level: 'warn', text: txt + ' · 共 ' + cnt + ' 条默认路由（5G 与有线并存时按 metric 选路）' };
+						return { level: 'ok', text: txt };
+					}
+				},
+				{
+					/* ★ 静默断网的经典形态：模组 USB 重枚举后 netifd 不续约，
+					   接口 UP、有 IP，但网关邻居永远 INCOMPLETE —— 最后靠 watchdog.sh 兜住。 */
+					layer: 'L2', name: '网关 ARP', eval: function (f) {
+						var n = fv(f, 'gw_neigh');
+						if (!n) return { level: 'warn', text: '没查到网关邻居项（网关为空或接口刚起）' };
+						if (n === 'REACHABLE' || n === 'STALE' || n === 'DELAY' || n === 'PROBE') return { level: 'ok', text: n };
+						return {
+							level: 'bad',
+							text: '网关邻居状态 ' + n + ' —— 解析不到网关 MAC，表现为「接口 UP、有 IP，但就是上不了网」',
+							fix: 'ifdown ' + fv(f, 'iface_name') + '; sleep 2; ifup ' + fv(f, 'iface_name') + '（重新协商租约）'
+						};
+					}
+				},
+				{
+					layer: 'L2', name: '接口地址与模组一致', eval: function (f, st) {
+						var sys = fv(f, 'iface_addr');
+						var mod = (st.tools && st.tools.diag && st.tools.diag.modAddrs) || [];
+						if (!sys) return { level: 'warn', text: '系统侧没取到接口地址' };
+						if (!mod.length) return { level: 'warn', text: '模组侧没取到地址（见 L1「拿到 IP 地址」）' };
+						if (mod.indexOf(sys) >= 0) return { level: 'ok', text: sys };
+						return {
+							level: 'bad', text: '系统是 ' + sys + '、模组是 ' + mod.join(' / ') + ' —— 租约已失效',
+							fix: 'ifdown/ifup ' + fv(f, 'iface_name') + ' 重新拿地址'
+						};
+					}
+				},
+				{
+					/* ★ 三大高复发故障之一：加了 WAN 没 restart firewall → 有 IP 但出不去 */
+					layer: 'L2', name: '防火墙覆盖 WAN', eval: function (f) {
+						if (fnum(f, 'fw_wan_cover', 0) === 1) return { level: 'ok', text: 'wan zone 已包含 ' + fv(f, 'iface_name') };
+						return {
+							level: 'bad',
+							text: 'wan zone 里没有 ' + fv(f, 'iface_name') + '（当前包含：' + (fv(f, 'fw_wan_nets') || '空') + '）—— 有 IP 也出不去',
+							fix: '把该接口加进 wan zone 后**必须** /etc/init.d/firewall restart（不 restart 不生效）'
+						};
+					}
+				},
+				{
+					layer: 'L2', name: 'DNS 配置', eval: function (f) {
+						var d = fv(f, 'dns_servers');
+						var dnsm = fnum(f, 'dnsmasq_running', -1);
+						if (!d) return { level: 'warn', text: 'resolv.conf 里没有 nameserver', fix: '检查接口有没有拿到 DNS' };
+						return {
+							level: dnsm === 1 ? 'ok' : 'warn',
+							text: d + (dnsm === 1 ? ' · dnsmasq 运行中' : ' · dnsmasq 没在跑')
+						};
+					}
+				},
+				{
+					/* ★ SQM 配到 eth1（DOWN）是陷阱；且 SQM 与 flow offload 互斥
+					   （被卸载的连接绕过 qdisc，CAKE 直接失效）。 */
+					layer: 'L2', name: 'SQM 与分载', eval: function (f) {
+						var sqm = fnum(f, 'sqm_enabled', 0), si = fv(f, 'sqm_iface');
+						var fo = fnum(f, 'flow_offload', 0), foh = fnum(f, 'flow_offload_hw', 0);
+						var dev = fv(f, 'iface_device');
+						var bits = [], fixes = [];
+						/* ★ level 只许升不许降：SQM 配错接口是 bad，后面"分载互斥"是 warn，
+						   让后者覆盖前者会把严重问题降级成提醒（真机上就会漏掉限速落空）。 */
+						var level = 'ok';
+						function worse(l) {
+							var rank = { ok: 0, warn: 1, bad: 2 };
+							if (rank[l] > rank[level]) level = l;
+						}
+						if (sqm === 1) {
+							if (si && dev && si !== dev) {
+								worse('bad');
+								bits.push('SQM 配在 ' + si + '，而当前出口是 ' + dev + ' —— 限速落在别的接口上');
+								fixes.push('把 SQM 的 interface 改成 ' + dev);
+							} else {
+								bits.push('SQM 已启用（' + si + '）');
+							}
+							if (fo === 1) {
+								worse('warn');
+								bits.push('flow offload 也开着，二者互斥，CAKE 会被绕过');
+								fixes.push('SQM 与 flow offload 只留一个');
+							}
+						} else {
+							bits.push('SQM 关闭（不限速）');
+						}
+						bits.push('软件分载 ' + (fo === 1 ? '开' : '关') + ' · 硬件分载 ' + (foh === 1 ? '开' : '关'));
+						return { level: level, text: bits.join('；'), fix: fixes.join('；') };
+					}
+				},
+				{
+					layer: 'L2', name: '看门狗', eval: function (f) {
+						return fnum(f, 'svc_watchdog', 0) === 1
+							? { level: 'ok', text: '已启用（断网会自动续约 / 复位）' }
+							: { level: 'warn', text: '没开自愈看门狗，断网后要人工处理', fix: 'uci set at-webserver.config.watch_enabled=1 && uci commit at-webserver' };
+					}
+				},
+				{
+					layer: 'L2', name: 'MTU', eval: function (f) {
+						var m = fnum(f, 'iface_mtu', 0);
+						if (!m) return { level: 'warn', text: '取不到 MTU' };
+						if (m === 1500) return { level: 'ok', text: '1500' };
+						return { level: 'warn', text: m + '（非 1500）—— 与对端不一致时会出现部分站点打不开' };
+					}
+				},
+				{
+					/* 时间不同步 → HTTPS 证书校验失败 → 表现为"部分网站打不开" */
+					layer: 'L2', name: '系统时间', eval: function (f) {
+						var s = fnum(f, 'time_synced', -1);
+						if (s === 1) return { level: 'ok', text: '已同步' };
+						if (s < 0) return { level: 'warn', text: '取不到系统时间' };
+						return { level: 'bad', text: '时间明显不对 —— HTTPS 证书校验会失败', fix: '确认 NTP 能通（sysntpd / ntpclient）' };
+					}
+				},
+
+				/* ---- L3 端到端连通 ---- */
+				{
+					layer: 'L3', name: 'ping 网关', eval: function (f) {
+						var v = fnum(f, 'ping_gw', -1);
+						if (v === 1) return { level: 'ok', text: '通' };
+						if (v < 0) return { level: 'warn', text: '没测（没有网关，或设备上没有 ping 命令）' };
+						return { level: 'bad', text: '网关 ping 不通 —— 二层就没到出口', fix: '回头看 L2 的「网关 ARP」那一项' };
+					}
+				},
+				{
+					/* ★ 探测目标用公网 IP 而不是域名：本机装过 mosdns / OpenClash，
+					   拿域名探测会被本地解析器误导，得出"能上网"的错误结论。 */
+					layer: 'L3', name: 'ping 公网 IP', eval: function (f) {
+						var a = fnum(f, 'ping_public_a', -1), b = fnum(f, 'ping_public_b', -1);
+						if (a < 0 && b < 0) return { level: 'warn', text: '没测（设备上没有 ping 命令）' };
+						if (a === 1 || b === 1) return { level: 'ok', text: '至少一路通（119.29.29.29 / 223.5.5.5）' };
+						return {
+							level: 'bad',
+							text: '两路公网 IP 都 ping 不通 —— 用 IP 而非域名探测，可确定是「网络不通」而不是「DNS 不通」',
+							fix: '回头看 L2 的路由 / ARP / 防火墙三项'
+						};
+					}
+				},
+				{
+					layer: 'L3', name: 'DNS 解析', eval: function (f) {
+						var v = fnum(f, 'dns_resolve_ok', -1);
+						if (v < 0) return { level: 'warn', text: '没测（设备上没有 nslookup / drill）' };
+						if (v === 1) return { level: 'ok', text: 'www.qq.com 解析成功' };
+						return {
+							level: 'bad',
+							text: '解析失败 —— 若上面 ping 公网 IP 是通的，那就是纯 DNS 问题',
+							fix: '检查 /etc/resolv.conf 与 dnsmasq；本机装过 mosdns / OpenClash，注意它们会接管解析'
+						};
+					}
+				},
+				{
+					/* 有些网络禁 ICMP：ping 不通不代表上不了网，这一项兜住那种情况 */
+					layer: 'L3', name: 'TCP 443', eval: function (f) {
+						var v = fnum(f, 'tcp_443', -1);
+						if (v < 0) return { level: 'warn', text: '没测（设备上没有 nc）' };
+						if (v === 1) return { level: 'ok', text: '443 建连成功' };
+						return { level: 'warn', text: '443 建连失败 —— 若这项也不通，那是真的上不了网（不是 ICMP 被禁的假象）' };
+					}
+				}
+			];
+		}
+
+		/*
+		 * 把所有检查项按「注册表顺序」铺平：
+		 * 已跑过的用结果，没跑过的显示「待检查」。
+		 * 这样排查前就能看到完整清单（知道自己会被查哪些项），而不是点了才冒出来一堆行。
+		 */
+		function diagItems() {
+			var t = state.tools.diag;
+			var done = {};
+			(t.atSteps || []).forEach(function (s) { done[s.name] = s; });
+			(t.items || []).forEach(function (s) { done[s.name] = s; });
+			var out = [];
+			function push(layer, name, cmd) {
+				var d = done[name];
+				out.push(d
+					? { layer: layer, name: name, cmd: cmd || '', level: d.level, text: d.text, fix: d.fix || '', done: true }
+					: { layer: layer, name: name, cmd: cmd || '', level: 'idle', text: '待检查', fix: '', done: false });
 			}
-			/* 结论摘要插进标题行（与 ADC 同一写法），6 步明细**始终**铺开在下面 ——
-			   原来做成「默认折叠 + 点按钮展开」，但结论只有一句「卡在第 N 步」，
-			   不给明细等于没说清卡在哪、为什么，还得再点一次才看得到，
-			   比一张固定表格多一道没有收益的交互。 */
-			var failed = null;
-			for (var i = 0; i < t.steps.length; i++) {
-				if (t.steps[i].level === 'bad') { failed = t.steps[i]; break; }
+			checkSteps().forEach(function (s) { push('L1', s.name, s.cmd); });
+			sysChecks().forEach(function (c) { push(c.layer, c.name, ''); });
+			return out;
+		}
+
+		/* 明细表的一行：结论 + 说明（建议命令挂在说明下面，不另起一列 ——
+		   4 列会把「说明」挤成窄条，而建议往往是一整条命令）。 */
+		function diagRow(i) {
+			var cell = E('div');
+			cell.appendChild(E('span', {}, i.text));
+			if (i.fix) {
+				cell.appendChild(E('div', { 'class': 'mt5700-hint mt5700-mt-sm' }, '建议：' + i.fix));
 			}
-			var summaryText = failed
-				? ('卡在第 ' + (t.steps.indexOf(failed) + 1) + ' 步：' + failed.name)
-				: '六步全部通过';
-			/* 用现成 badge 而不是 .mt5700-diag-summary：后者是给块级结论用的
-			   （padding 12px + margin-bottom 12px），塞进标题行会把整行撑高。 */
-			box.firstChild.insertBefore(
-				Mt5700.badge(summaryText, failed ? 'danger' : 'success'), btn);
-			box.appendChild(Mt5700.table(['步骤', '结果', '说明'],
-				t.steps.map(function (s) {
-					return [
-						s.name,
-						E('b', { 'class': 'mt5700-diag-verdict is-' + (s.level || 'ok') },
-							s.level === 'ok' ? '通过' : (s.level === 'warn' ? '存疑' : '未通过')),
-						s.text
-					];
-				}), { striped: true }));
+			if (i.cmd) {
+				cell.appendChild(E('div', { 'class': 'mt5700-hint mt5700-mt-sm mt5700-mono' }, i.cmd));
+			}
+			return [
+				i.name,
+				E('b', { 'class': 'mt5700-diag-verdict is-' + i.level }, DIAG_VERDICT[i.level] || '—'),
+				cell
+			];
+		}
+
+		function renderDiagDetail() {
+			if (!diagDetailBody) return;
+			diagDetailBody.innerHTML = '';
+			var t = state.tools.diag;
+			if (t.factsErr) {
+				/* 后端没升级（老固件没有 mt5700.sysdiag）时必须说清楚，
+				   否则 L2/L3 那些「待检查」会被误读成「都正常」。 */
+				diagDetailBody.appendChild(Mt5700.empty('系统侧事实没取到：' + t.factsErr
+					+ ' —— 需要升级设备端的 luci-app-mt5700。模组层（L1）的检查不受影响。'));
+			}
+			var items = diagItems();
+			var rows = [];
+			DIAG_LAYERS.forEach(function (L) {
+				var list = items.filter(function (i) { return i.layer === L.id; });
+				if (!list.length) return;
+				/* 事实没取到时 L2/L3 全部是「待检查」，摆出来只会误导 */
+				if (t.factsErr && L.id !== 'L1') return;
+				rows.push({ group: L.id + ' ' + L.name });
+				list.forEach(function (i) { rows.push(diagRow(i)); });
+			});
+			diagDetailBody.appendChild(Mt5700.table(['项目', '结论', '说明'], rows, { striped: true }));
+			diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+				'判定标准与阈值写在本页源码的检查项注册表里；「建议」只是命令，不会自动执行 —— '
+				+ '续约、重启服务这类动作本身就会短暂断网，确认后再在终端里执行。'));
+		}
+
+		/* ---------- 总控块（右列卡片） ---------- */
+		function buildDiagBlock() {
+			var t = state.tools.diag;
+			var btn = Mt5700.ghostButton(t.busy ? '排查中…' : (t.ran ? '重新排查' : '开始排查'), runDiagnosis);
+			var box = toolBlock('三层体检', btn);
+
+			var items = diagItems();
+			var bad = null, warnN = 0;
+			items.forEach(function (i) {
+				if (!i.done) return;
+				if (i.level === 'bad') { if (!bad) bad = i; }
+				else if (i.level === 'warn') warnN++;
+			});
+			var summaryText = t.busy ? '排查中…'
+				: (!t.ran ? '未排查'
+					: (bad ? ('未通过：' + bad.name) : (warnN ? (warnN + ' 项存疑') : '全部通过')));
+			/* 用现成 badge 而不是块级摘要：它是行内元素，塞进标题行不会把行撑高。 */
+			box.firstChild.insertBefore(Mt5700.badge(summaryText,
+				bad ? 'danger' : (warnN ? 'warning' : (t.ran && !t.busy ? 'success' : 'neutral'))), btn);
+
+			/* 三层计数：一眼看出问题落在哪一层，不用到底部明细里数 */
+			var chips = E('div', { 'class': 'mt5700-diag-chips' });
+			DIAG_LAYERS.forEach(function (L) {
+				var list = items.filter(function (i) { return i.layer === L.id; });
+				var done = list.filter(function (i) { return i.done; });
+				var b = 0, w = 0;
+				done.forEach(function (i) {
+					if (i.level === 'bad') b++;
+					else if (i.level === 'warn') w++;
+				});
+				var txt = L.name + ' ' + (done.length ? (done.length - b - w) + '/' + done.length : '—');
+				chips.appendChild(Mt5700.badge(txt,
+					b ? 'danger' : (w ? 'warning' : (done.length ? 'success' : 'neutral'))));
+			});
+			box.appendChild(chips);
+
+			box.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+				'共 ' + items.length + ' 项：L1 走 AT 只读命令，L2/L3 走后端只读采集。'
+				+ '只给事实与建议命令，不自动改任何配置。明细见页面底部。'));
 			return box;
 		}
 
-		function runSelfCheck() {
-			var t = state.tools.check;
-			if (t.busy) return;
-			t.busy = true; t.steps = [];
+		/*
+		 * 跑一次完整排查。三步串行走，全程只读：
+		 *   ① L1：9 条 AT 只读命令，走唯一的 AT 通道（独占，必须串行）
+		 *   ② 取系统侧事实：一次 mt5700.sysdiag（后端跑 diag-probe.sh，不碰 AT 通道）
+		 *   ③ L2/L3：拿事实逐项判定（纯前端计算，不额外发请求）
+		 *
+		 * ★ 为什么 sysdiag 放在 AT 之后：它内部有 3 次 ICMP + 1 次 DNS + 1 次 TCP 握手，
+		 *   最坏 15 秒；先让 AT 这条独占通道跑完，免得 rpcd 那边慢下来拖住模组查询。
+		 * ★ 全程不写任何配置、不下发任何写命令（用户 2026-09-19 明确只要诊断）。
+		 */
+		function runDiagnosis() {
+			var t = state.tools.diag;
+			/* ★ 必须返回 Promise：入口是 readAdcPins().then(runDiagnosis)，
+			   busy 时 return undefined 会让调用方抛 TypeError，被吞进没人 catch 的
+			   rejected promise —— 表现为「排查静默不跑，页面上没有任何提示」。 */
+			if (t.busy) return Promise.resolve();
+			t.busy = true; t.atSteps = []; t.items = []; t.facts = {}; t.factsErr = ''; t.modAddrs = [];
 			renderTools();
-			var steps = checkSteps();
+
 			var chain = Promise.resolve();
-			steps.forEach(function (s) {
+			checkSteps().forEach(function (s) {
 				chain = chain.then(function () {
 					if (disposed) return;
-					/* 已经卡在某一步就没必要继续往下查了 */
-					for (var i = 0; i < t.steps.length; i++) {
-						if (t.steps[i].level === 'bad') return;
-					}
 					return AtWs.client.sendCommand(s.cmd).then(function (res) {
 						var data = (res && res.success) ? String(res.data || '') : '';
 						var r = s.judge(data) || {};
-						t.steps.push({
+						t.atSteps.push({
 							name: s.name,
 							level: r.level || 'warn',
-							text: r.text || '（无法判断）'
+							text: r.text || '（无法判断）',
+							fix: r.fix || ''
 						});
+						/* 模组侧地址留给 L2「接口地址与模组一致」交叉比对 */
+						if (r.raw) t.modAddrs = r.raw;
 					}).catch(function (e) {
-						t.steps.push({
+						t.atSteps.push({
 							name: s.name, level: 'bad',
-							text: '查询失败：' + ((e && e.message) || '模组无响应')
+							text: '查询失败：' + ((e && e.message) || '模组无响应'),
+							fix: '确认 AT 服务在运行（见 L2「AT 服务在运行」）'
 						});
 					}).then(renderTools);
 				});
 			});
+
 			return chain.then(function () {
-				t.busy = false; t.at = Date.now();
+				if (disposed) return;
+				return AtWs.sysDiag();
+			}).then(function (r) {
+				if (!r) return;
+				t.facts = r.facts || {};
+				t.factsErr = r.success ? '' : (r.error || '后端未返回');
+			}).then(function () {
+				t.items = sysChecks().map(function (c) {
+					var r;
+					try {
+						r = c.eval(t.facts, state) || {};
+					} catch (e) {
+						/* 一项判定写崩不该带走整页：兜成「存疑」而不是让排查卡住 */
+						r = { level: 'warn', text: '判定异常：' + ((e && e.message) || '未知错误') };
+					}
+					return {
+						layer: c.layer, name: c.name,
+						level: r.level || 'warn', text: r.text || '（无数据）', fix: r.fix || ''
+					};
+				});
+				t.busy = false; t.at = Date.now(); t.ran = true;
 				if (!disposed) renderTools();
 			});
 		}
@@ -1954,7 +2479,7 @@ return L.view.extend({
 		renderSignal();
 		renderCarriers();
 		renderConnDetail();    /* 连接明细：诊断 + 地址与 DNS（一张表） */
-		renderTools();   /* 连接工具（右列独立卡片） */
+		renderTools();   /* 断网排查：右列总控卡 + 底部满宽明细卡 */
 		renderSpeed();
 		renderFlow();
 		renderTemp();
@@ -1977,17 +2502,19 @@ return L.view.extend({
 			}
 		}).then(function () {
 			refreshAll();
-			/* ADC 自动读一次：结果直接铺在「连接工具」里，不必先点按钮。
+			/* ADC 自动读一次：结果直接铺在排查卡里，不必先点按钮。
 			   5 条只读查询、失败即停，不会在模组里留下任何状态（安全底线的例外批准项）。
-			   ★ 自检排在 ADC 之后**串行**跑，不并发：两者都是只读查询，同时发起会让
-			   11 条命令一起挤在 AT 通道上排队。串行后总体耗时略长，但不会放大排队。 */
-			readAdcPins().then(runSelfCheck).catch(function () { /* 两条链内部都已各自兜错 */ });
+			   ★ 排查排在 ADC 之后**串行**跑，不并发：两者都是只读查询，同时发起会让
+			   十几条命令一起挤在 AT 通道上排队。串行后总体耗时略长，但不会放大排队。
+			   ★ 排查整体也是进页面自动跑一次（与旧版自检一致）—— 用户要的是"打开页面
+			   就知道哪里不通"，不能要求先点按钮才知道。它全程只读、无副作用。 */
+			readAdcPins().then(runDiagnosis).catch(function () { /* 两条链内部都已各自兜错 */ });
 		});
 
 		self._dispose = function () {
 			/* 离开页面必须清干净：三个定时器 + 可见性监听 + 只读缓存，
 			   否则反复进出会叠加倍轮询。
-			   disposed 同时让已发起的「ADC → 自检」链尽快停下（见其声明处注释）。
+			   disposed 同时让已发起的「ADC → 排查」链尽快停下（见其声明处注释）。
 			   （本页已无任何常驻上报开关，不需要再做「关不掉就报警」的收尾） */
 			disposed = true;
 			if (timer) clearInterval(timer);

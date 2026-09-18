@@ -2801,10 +2801,24 @@
 }
 
 /* 结论列：配色取在浅底与深底上都还能看清的中亮度值，不复用 accent 蓝
-   （蓝色在项目里已代表「信息/中性」，拿来当「正常」会和告警色混淆） */
+   （蓝色在项目里已代表「信息/中性」，拿来当「正常」会和告警色混淆）
+   is-idle = 还没跑到的检查项。★ 必须显式给色：不写就会掉成继承色，
+   在暗色主题下和「通过」几乎分不出来，用户会误以为已经查过了。 */
 .mt5700-diag-verdict.is-ok   { color: #22c55e; }
 .mt5700-diag-verdict.is-warn { color: #f59e0b; }
 .mt5700-diag-verdict.is-bad  { color: #ef4444; }
+.mt5700-diag-verdict.is-idle { color: var(--mt5700-text-secondary); opacity: .7; }
+
+/* 断网排查：总控卡里的三层计数徽章（CSS v5.5.12）
+   三个 badge 横排，窄栏里允许整块换行，不许把单个 badge 压扁
+   —— 压扁的教训见 .mt5700-readout（竖向堆叠那次事故）。 */
+.mt5700-diag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 8px;
+}
 
 /* ==========================================================================
    可编辑的自定义 DNS（CSS v5.5.9）

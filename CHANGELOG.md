@@ -5,6 +5,50 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.11] - 2026-09-19
+
+### 新增：断网排查（原「连接工具」升级，三层 33 项）
+
+- **为什么换掉 6 步连通性自检**：那 6 步全在模组内部，只能回答「模组自己觉得通不通」。
+  而真机踩过的断网事故有一半不在模组里 —— 缺 MT5700M 接口、加了 WAN 没 restart firewall、
+  init.d 是 100644、USB 枚举成 480M、重枚举后不续约导致网关 ARP 永远 INCOMPLETE。
+  所以补 L1 的 APN / 射频开关 / 服务域，再加 L2、L3 两层。
+- **L1 模组与空口（11）**：AT 只读 9 步（CFUN → CPIN → CGDCONT → SYSCFGEX → C5GREG →
+  CGACT → NDISSTATQRY → CGPADDR → DHCP）+ 信号 / 温度两项派生（复用页面已有读数，不多占通道）
+- **L2 系统与网络（17）**：AT 服务与自启、init.d 执行位、串口、USB 链路速率、接口存在/auto/up、
+  默认路由、网关 ARP、接口地址与模组交叉比对、防火墙覆盖 WAN、DNS、SQM 与分载互斥、
+  看门狗、MTU、系统时间
+- **L3 端到端（5）**：ping 网关 / ping 公网 IP / DNS 解析 / TCP 443
+  （探测目标写死为公网 IP，拿域名会被本机 mosdns / OpenClash 误导）
+- **版式**：右列卡片只放「开始排查 + 一句话结论 + 三层计数 + ADC」，
+  逐项明细铺在页面底部新增的**满宽**卡里
+
+### 后端
+
+- 新增 `root/usr/share/mt5700/diag-probe.sh`：只读采集，输出 `key=value`。
+  不接受任何参数（无注入面）、不写 UCI、不重启服务，探测带 timeout，取不到输出 -1 而非 0
+- `mt5700.uc` 新增 `sysdiag` 方法（`args: {}`，25s 超时、200 行上限）
+- ACL `read` 段放行 `sysdiag`；`rpc.js` 新增 `sysDiag`（30s 超时，后端未升级时明确报错）
+
+### 设计约束（写在源码注释里，防回退）
+
+- **事实与判定分离**：后端只给事实，判定全在前端注册表 —— 加判据只改前端，加事实才改后端
+- **只诊断、不自动修**：只给建议命令，没有修复按钮（续约 / 重启服务本身就会短暂断网，
+  且 watchdog.sh 已负责常驻自愈）
+
+### 修掉的 bug
+
+- SQM 项：先判出「配错接口」(bad) 又被「分载互斥」(warn) 覆盖 → 严重级被降级。
+  改为 level 只升不降
+- 串口数取不到（-1）被判成 bad，会让人照着不存在的问题拆机 → 改判 warn
+
+### 测试
+
+- 新增 `tests/diag-contract.test.js`（79 项）：只读底线、事实键一致性（含扫描器自检）、
+  健康/故障两套事实的判定翻转、后端通路、注册表结构
+- `connection-tools-contract` 98 → 118 项（L1 扩到 9 步的判据）
+- CSS 5.5.13 → 5.5.14（新增 `.mt5700-diag-chips` 与 `is-idle` 配色）
+
 ## [2.3.10] - 2026-09-18
 
 ### 变更

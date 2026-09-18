@@ -89,7 +89,13 @@ eq('字段不足 6 个 → null', Parse.parseRejInfo('^REJINFO: "46000",0,7'), n
 eq('不匹配 → null', Parse.parseRejInfo('OK'), null);
 ok('未知原因值有兜底文案', /未知原因/.test(Parse.rejectCauseText(99999)), Parse.rejectCauseText(99999));
 
-/* ---------- 4. 连通性自检六步判据 ---------- */
+/* ---------- 4. L1 模组与空口：AT 逐步判据 ---------- */
+
+/* ★ 2026-09-19：原「连通性自检」6 步扩成 9 步，并入三层排查的 L1。
+   补的三步都对应真机上真实发生过、而旧 6 步一条都覆盖不到的断网原因：
+     CFUN     —— CFUN=0 会直接把 eth2 挂死（红线级）
+     CGDCONT  —— APN 空/错是最常见的断网原因，旧 6 步里根本没有 APN
+     SYSCFGEX —— 服务域 CS_ONLY 只能打电话不能上网 */
 
 const AtWsStub = {
 	extractATDataMultiline: function (data, prefix) {
@@ -121,10 +127,39 @@ AtWsStub.extractATData = function (data, prefix) {
 const steps = new Function('Parse', 'AtWs',
 	extractFn(nsSrc, 'checkSteps') + '\nreturn checkSteps;')(Parse, AtWsStub)();
 
-eq('自检共 6 步', steps.length, 6);
-eq('六步命令依次是 CPIN→C5GREG→CGACT→NDISSTATQRY→CGPADDR→DHCP',
+eq('L1 共 9 步（原 6 步 + 射频开关 / APN / 服务域）', steps.length, 9);
+eq('九步命令依次是 CFUN→CPIN→CGDCONT→SYSCFGEX→C5GREG→CGACT→NDISSTATQRY→CGPADDR→DHCP',
 	steps.map(function (s) { return s.cmd; }),
-	['AT+CPIN?', 'AT+C5GREG?', 'AT+CGACT?', 'AT^NDISSTATQRY?', 'AT+CGPADDR', 'AT^DHCP?']);
+	['AT+CFUN?', 'AT+CPIN?', 'AT+CGDCONT?', 'AT^SYSCFGEX?', 'AT+C5GREG?', 'AT+CGACT?', 'AT^NDISSTATQRY?', 'AT+CGPADDR', 'AT^DHCP?']);
+
+/* 新增三步的判据（真跑，用手册格式的应答） */
+eq('CFUN=1 → ok', judge('射频开关', '+CFUN: 1\r\nOK').level, 'ok');
+eq('CFUN=0 → bad', judge('射频开关', '+CFUN: 0\r\nOK').level, 'bad');
+ok('CFUN=0 时必须点明 eth2 会被挂死（红线级坑）',
+	/eth2/.test(judge('射频开关', '+CFUN: 0\r\nOK').text));
+ok('CFUN=0 时给出 AT+CFUN=1 与 ifdown/ifup 两条建议，但只是文本（不自动执行）',
+	/AT\+CFUN=1/.test(judge('射频开关', '+CFUN: 0\r\nOK').fix)
+	&& /ifdown/.test(judge('射频开关', '+CFUN: 0\r\nOK').fix));
+eq('CFUN 取不到 → warn（不假判故障）', judge('射频开关', 'ERROR').level, 'warn');
+
+eq('CGDCONT 有 APN → ok', judge('APN 配置', '+CGDCONT: 1,"IP","cmnet","0.0.0.0",0,0\r\nOK').level, 'ok');
+ok('CGDCONT ok 时列出 APN', /cmnet/.test(judge('APN 配置', '+CGDCONT: 1,"IP","cmnet"\r\nOK').text));
+eq('CGDCONT APN 为空 → bad（这是断网最常见的原因）',
+	judge('APN 配置', '+CGDCONT: 1,"IP","","0.0.0.0",0,0\r\nOK').level, 'bad');
+eq('CGDCONT 无应答 → bad', judge('APN 配置', 'ERROR').level, 'bad');
+eq('CGDCONT 多条同名 APN 去重后仍 ok',
+	judge('APN 配置', '+CGDCONT: 1,"IP","cmnet"\r\n+CGDCONT: 5,"IP","cmnet"\r\nOK').level, 'ok');
+
+eq('SYSCFGEX 服务域 2 → ok',
+	judge('服务域与制式', '^SYSCFGEX: "00",3FFFFFFF,1,2,7FFFFFFFFFFFFFFF\r\nOK').level, 'ok');
+eq('SYSCFGEX 服务域 0（CS_ONLY）→ bad（只能打电话）',
+	judge('服务域与制式', '^SYSCFGEX: "00",3FFFFFFF,1,0,7FFFFFFFFFFFFFFF\r\nOK').level, 'bad');
+ok('服务域 CS_ONLY 时说明上不了网',
+	/上不了网/.test(judge('服务域与制式', '^SYSCFGEX: "00",3FFFFFFF,1,0,7FFFFFFFFFFFFFFF\r\nOK').text));
+eq('SYSCFGEX 服务域 1（PS_ONLY）→ warn（能上网但打不了电话）',
+	judge('服务域与制式', '^SYSCFGEX: "00",3FFFFFFF,1,1,7FFFFFFFFFFFFFFF\r\nOK').level, 'warn');
+eq('SYSCFGEX 无应答 → warn（不影响上网本身）',
+	judge('服务域与制式', 'ERROR').level, 'warn');
 
 function judge(name, data) {
 	const st = steps.filter(function (s) { return s.name === name; })[0];
@@ -169,13 +204,16 @@ eq('DHCP 取不到 → warn（不影响上网，不能判故障）',
 
 ok('★ 快照功能已整块下线（不许再搬回来）',
 	!/buildSnapshotBlock|buildSnapshotText|copySnapshot|downloadSnapshot|诊断快照|state\.tools\.snap/.test(nsSrc));
-ok('★ 卡片副标题不再提「快照导出」',
-	/Mt5700\.card\('连接工具', '排查与诊断'\)/.test(nsSrc));
+ok('★ 卡片已改名为「断网排查」（原「连接工具」）',
+	/Mt5700\.card\('断网排查', '三层体检 · 一键定位'\)/.test(nsSrc)
+	&& !/Mt5700\.card\('连接工具'/.test(nsSrc));
 
 /* ---------- 6. ★★ 不占通道底线（2.2.1 事故防回退） ---------- */
 
-ok('卡片已改名为「连接工具」', /Mt5700\.card\('连接工具'/.test(nsSrc));
 ok('旧卡「连接质量」已下线', !/Mt5700\.card\('连接质量'/.test(nsSrc));
+ok('★ 底部有满宽的明细卡（33 项放右列会挤成一团）',
+	/Mt5700\.card\('断网排查明细'/.test(nsSrc)
+	&& /body\.appendChild\(diagDetailCard\)/.test(nsSrc));
 
 ok('★ 不再下发 PDCP 周期上报开关（2.2.1 元凶）',
 	!/sendCommand\('AT\^PDCPDATAINFO=/.test(nsSrc));
@@ -195,14 +233,18 @@ ok('★ 自检那步指路到「网络设置 → 网络拒绝」',
 
 ok('★ 自检也进页面自动跑一次（不必先点按钮），与 ADC 串行不并发',
 	/readAdcPins\(\)\.then\(runSelfCheck\)/.test(nsSrc));
-ok('★ 自检结论用 badge 进标题行（不用块级 .mt5700-diag-summary，它会把行撑高）',
-	/Mt5700\.badge\(summaryText, failed \? 'danger' : 'success'\)/.test(nsSrc)
+ok('★ 排查结论用 badge 进标题行（不用块级 .mt5700-diag-summary，它会把行撑高）',
+	/box\.firstChild\.insertBefore\(Mt5700\.badge\(summaryText,/.test(nsSrc)
 	&& !/mt5700-diag-summary is-' \+ lv/.test(nsSrc));
-ok('★ 自检 6 步明细固定铺开（不再折叠，没有 t.expanded 开关）',
-	!/t\.expanded/.test(nsSrc) && !/expanded/.test(nsSrc)
-	&& /Mt5700\.table\(\['步骤', '结果', '说明'\]/.test(nsSrc));
-ok('★ 标题行仍保留结论徽章（卡在第 N 步 / 六步全部通过）',
-	/Mt5700\.badge\(summaryText, failed \? 'danger' : 'success'\)/.test(nsSrc));
+ok('★ 明细是固定表格，不靠按钮切换（无展开/收起入口）',
+	!/t\.expanded/.test(nsSrc)
+	&& /Mt5700\.table\(\['项目', '结论', '说明'\]/.test(nsSrc));
+ok('★ 四档结论都有对应文案（含新增的 idle 待检查）',
+	/var DIAG_VERDICT = \{ ok: '通过', warn: '存疑', bad: '未通过', idle: '待检查' \}/.test(nsSrc));
+ok('★ 待检查有 CSS 配色（不写会掉成继承色，暗色下和「通过」分不出来）',
+	/\.mt5700-diag-verdict\.is-idle \{/.test(cssSrc));
+ok('★ 三层计数徽章容器有 flex-wrap + min-width:0（不许压扁，重演 ADC 竖排事故）',
+	/\.mt5700-diag-chips \{[\s\S]*?flex-wrap: wrap;[\s\S]*?min-width: 0;/.test(cssSrc));
 ok('★ 流量清零仍保留按钮与二次确认（不可逆，不能做成自动）',
 	/function clearFlowStats[\s\S]{0,300}Mt5700\.confirm/.test(nsSrc));
 
@@ -228,11 +270,14 @@ ok('ADC 用 AT^ADCREADEX=', /sendCommand\('AT\^ADCREADEX=' \+ id\)/.test(nsSrc))
 ok('ADC 管脚数量不写死（逐个试、失败即停）',
 	/var ADC_PIN_IDS = \[/.test(nsSrc) && /if \(v == null\) \{ stopped = true; return; \}/.test(nsSrc));
 ok('★ ADC 进页面自动读一次（连上就调 readAdcPins，不用先点按钮）',
-	/refreshAll\(\);[\s\S]{0,400}readAdcPins\(\)\.then\(runSelfCheck\)/.test(nsSrc));
-ok('★ 自检也进页面自动跑一次，且与 ADC 串行不并发（11 条只读命令别一起挤通道）',
-	/readAdcPins\(\)\.then\(runSelfCheck\)/.test(nsSrc));
+	/refreshAll\(\);[\s\S]{0,900}readAdcPins\(\)\.then\(runDiagnosis\)/.test(nsSrc));
+ok('★ 排查也进页面自动跑一次，且与 ADC 串行不并发（十几条只读命令别一起挤通道）',
+	/readAdcPins\(\)\.then\(runDiagnosis\)/.test(nsSrc));
 ok('自检明细是固定表格，不靠按钮切换（无展开/收起入口）',
 	!/展开步骤/.test(nsSrc) && !/收起步骤/.test(nsSrc));
+ok('★ 排查只给建议命令，没有自动修复按钮（续约/重启服务本身就会断网）',
+	/'建议：' \+ i\.fix/.test(nsSrc)
+	&& !/Mt5700\.confirm\([\s\S]{0,120}ifdown/.test(nsSrc));
 ok('ADC 有结果后按钮变「重新读取」',
 	/t\.rows\.length \? '重新读取' : '读取'/.test(nsSrc));
 ok('★ ADC 结果一行铺开（不再用「管脚/电平」表格，省掉表头 + N 行）',

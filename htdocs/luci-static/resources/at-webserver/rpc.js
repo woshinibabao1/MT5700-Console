@@ -49,6 +49,24 @@ var rpcNetRate = L.rpc.declare({
 });
 
 /*
+ * 断网排查：一次性取回系统侧事实（接口 / 路由 / ARP / 防火墙 / 服务 / USB / 探测）。
+ *
+ * 后端是 root/usr/share/mt5700/diag-probe.sh（只读采集，输出 key=value），
+ * 由 mt5700.uc 的 sysdiag 方法转发。它**只给事实、不做判定** ——
+ * 判定与建议全在页面侧的检查项注册表里。
+ *
+ * ★ 超时给 30s：脚本里三个 ICMP + 一次 DNS + 一次 TCP 握手，最坏约 15s，
+ *   ucode 侧限时 25s，这里再留 rpcd 与网络栈的余量。
+ *   比 AT 查询慢得多，所以只在用户点「开始排查」时才调，绝不进页面自动跑。
+ */
+var rpcSysDiag = L.rpc.declare({
+	object: 'mt5700',
+	method: 'sysdiag',
+	params: [],
+	expect: {}
+});
+
+/*
  * ES9+ 转发（eSIM profile 下载用）。
  *
  * 浏览器没法直连运营商的 SM-DP+ 服务器：SM-DP+ 不发 CORS 头，跨域会被拦
@@ -1159,6 +1177,25 @@ function fetchNetRate(device) {
 }
 
 /*
+ * 取系统侧排查事实。
+ * 返回 Promise<{success, facts, error}>；facts 是 key → 字符串 的扁平映射。
+ * 老固件上还没有 mt5700.sysdiag 这个方法，会被 rpcd 拒掉 —— 那时页面必须
+ * 明确说"后端未升级"，而不是让"开始排查"点了没反应。
+ */
+function fetchSysDiag() {
+	return withTimeout(rpcSysDiag(), 30000, '系统排查超时（脚本未返回）')
+		.then(function (resp) {
+			if (!resp || resp.success === false) {
+				return { success: false, facts: {}, error: (resp && resp.error) || 'rpcd 没有 mt5700.sysdiag 方法' };
+			}
+			return { success: true, facts: resp.facts || {}, at: Number(resp.at) || 0 };
+		})
+		.catch(function (err) {
+			return { success: false, facts: {}, error: (err && err.message) || '系统排查失败' };
+		});
+}
+
+/*
  * ES9+ 转发：向指定 SM-DP+ 主机发一次 JSON POST。
  * 返回 Promise<{success, status, body}>；失败时 success=false 且带 error。
  * 超时给 60s —— 后端 curl 上限 35s，加上 rpcd 与 ucode 的开销留足余量。
@@ -1198,6 +1235,7 @@ function es9pAvailable() {
 var AtWs = {
 	client: atClient(),
 	netRate: fetchNetRate,
+	sysDiag: fetchSysDiag,
 	es9p: es9pPost,
 	es9pAvailable: es9pAvailable,
 	extractATData: extractATData,

@@ -609,6 +609,73 @@ function safeHost(h) {
  * mktemp 用 O_EXCL 创建、权限 0600、文件名含随机数不可预测，且失败会明确报错。
  * 创建不成功就整个调用失败，绝不能退回可预测路径。
  */
+/*
+ * ================= 断网排查：系统侧只读采集 =================
+ *
+ * 分工（与前端的分界必须清楚，否则两边都会长成怪物）：
+ *   本方法   —— 只**采集事实**（接口 up? 路由走哪个口? ARP 什么状态? USB 几速?），
+ *                不做任何"通过/不通过"的判定；
+ *   前端     —— 拿 facts 逐项判定、给文案与建议。
+ * 这样"加一条判据"只改前端，"加一项事实"才动这里，两边都能独立扩展。
+ *
+ * ★ 为什么走外部脚本而不是在这里拼一长串 shell：
+ *   ① 脚本可以手工跑（sh /usr/share/mt5700/diag-probe.sh）直接核对结果，
+ *      排障时不用绕 rpcd；
+ *   ② 脚本里加一项采集只加几行，ucode 不动。
+ *
+ * ★ 安全：命令与参数全部写死，不接受 req.args 的任何输入（脚本本身也忽略参数），
+ *   因此没有命令注入面。
+ */
+const DIAG_PROBE = '/usr/share/mt5700/diag-probe.sh';
+
+/* 上限 25 秒：脚本内三个 ICMP(2s×3) + DNS(5s) + TCP(4s) 最坏约 15s，留足余量。
+   必须限时 —— rpcd 每个调用占一个 ucode 工作线程，脚本卡住会让整个插件无响应。 */
+const DIAG_TIMEOUT = 25;
+/* 事实条数上限，防止脚本异常输出把响应撑爆（同时也兜住下面的读循环） */
+const DIAG_MAX_LINES = 200;
+
+function diagFacts() {
+	let f;
+	try {
+		f = fs.open(DIAG_PROBE, 'r');
+	} catch (e) {
+		return null;
+	}
+	if (!f) {
+		return null;
+	}
+	f.close();
+
+	let p;
+	try {
+		p = fs.popen('timeout ' + DIAG_TIMEOUT + ' /bin/sh ' + DIAG_PROBE, 'r');
+	} catch (e) {
+		return null;
+	}
+	if (!p) {
+		return null;
+	}
+
+	let facts = {};
+	for (let i = 0; i < DIAG_MAX_LINES; i++) {
+		let line = p.read('line');
+		if (line == null) {
+			break;
+		}
+		let s = trim(line);
+		if (s == '') {
+			continue;
+		}
+		let idx = index(s, '=');
+		if (idx <= 0) {
+			continue;
+		}
+		facts[substr(s, 0, idx)] = substr(s, idx + 1);
+	}
+	p.close();
+	return facts;
+}
+
 function es9pMktemp() {
 	let p;
 	try {
@@ -768,6 +835,22 @@ return {
 			args: { device: '' },
 			call: function (req) {
 				return netrateCall(req);
+			}
+		},
+		/* 断网排查：一次性取回系统侧事实（只读，无参数）。
+		   返回 { success, at, facts } —— facts 是 key → 字符串 的扁平映射，
+		   判定全部交给前端。 */
+		sysdiag: {
+			args: {},
+			call: function (req) {
+				let facts = diagFacts();
+				if (facts == null) {
+					return {
+						success: false,
+						error: '系统排查脚本不可用（/usr/share/mt5700/diag-probe.sh 缺失或执行失败）'
+					};
+				}
+				return { success: true, at: time(), facts: facts };
 			}
 		},
 		es9p: {
