@@ -23,6 +23,7 @@
 				"mt5700": [
 					"at",
 					"events",
+					"logs",
 					"netrate",
 					"es9p"
 				],

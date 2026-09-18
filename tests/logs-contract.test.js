@@ -209,8 +209,8 @@ ok('★ 后端日志取不到时有专门分支（不是当成空列表）',
 	/state\.backendLogs === false/.test(src) && /Mt5700\.errorState\(/.test(src));
 ok('★ 报错文案点名依赖的方法（不说「暂无日志」糊弄过去）',
 	/后端未提供 logs 方法/.test(src) || /取不到模组拨号日志/.test(src));
-ok('★ R03 归因不全扣在「后端未提供」：rpcd 拒权限与拒方法排查方向不同，都要提到',
-	/若提示权限不足，还需在 ACL 的 mt5700 段补 logs 读权限/.test(src));
+ok('★ 报错文案既说清依赖的方法，也说清「前端新、设备旧」这个当前真实处境',
+	/ubus mt5700\.logs/.test(src) && /设备上跑的服务二进制还是旧的/.test(src));
 ok('★ 报错给重试入口', /errorState\(([\s\S]{0,400})refresh\(true\)/.test(src));
 ok('★ 探测失败后不轮询、不重试（没有自动重排定时器）',
 	!/retry|重试[\s\S]{0,60}setTimeout/.test(src));
@@ -273,7 +273,8 @@ ok('清空是不可逆操作 → 走 Mt5700.confirm 二次确认',
 /* ---------- 7. 定时器 / 通道占用（红线 4） ---------- */
 
 ok('★ 自动刷新默认关', /auto:\s*false/.test(src));
-ok('★ R03 默认 Tab 不是必然失败的「模组拨号」（当前后端没有 mt5700.logs）',
+ok('★ 默认 Tab 不是「模组拨号」：设备上的服务二进制可能还是旧的，'
+	+ '落在一个必红屏的视图上体验很差',
 	/tab:\s*'iface'/.test(src));
 ok('★ 三个 Tab 的顺序仍与参考实现一致（模组拨号在前）',
 	src.indexOf("'模组拨号'") < src.indexOf("'接口与网络'")
@@ -299,9 +300,56 @@ if (acl) {
 	eq('★ read 段补了 log.read（syslog 视图需要）', rd.log, ['read']);
 	ok('★ write 段没有 log（只读，不给写 syslog 的能力）',
 		!wr || !wr.log, wr && wr.log ? 'write 段出现了 log' : '');
-	ok('mt5700 段未授权 logs（后端目前没有该方法；后端补上时这里必须同步加）',
-		rd.mt5700.indexOf('logs') < 0, JSON.stringify(rd.mt5700));
+	ok('★ mt5700 段授权了 logs（后端内存日志，2.3.8 起提供）',
+		rd.mt5700.indexOf('logs') >= 0, JSON.stringify(rd.mt5700));
+	ok('★ mt5700 段仍含既有四个方法（没被误删）',
+		['at', 'events', 'netrate', 'es9p'].every(function (m) {
+			return rd.mt5700.indexOf(m) >= 0;
+		}), JSON.stringify(rd.mt5700));
 }
+
+/* ---------- 9. ★ 后端 logs 链路四处改动（缺一处就会回到 Access denied） ----------
+ * 「模组拨号」视图要取到数据，四处必须同时到位：
+ *   ① Rust logger.rs 有内存环形缓冲与 snapshot()
+ *   ② Rust rpcserver.rs 有 "logs" 分支
+ *   ③ ucode mt5700.uc 有 logs 转发
+ *   ④ ACL 的 mt5700 段授权 logs
+ * 本机没有 cargo，Rust 改不了本地编译验证 —— 所以这里用源码级断言把四处钉死，
+ * 至少保证「漏改某一处」在 CI 就能发现，而不是等刷完机才发现还是 Access denied。 */
+
+const LOGGER_RS = path.join(ROOT, 'src', 'rust', 'src', 'logger.rs');
+const RPC_RS = path.join(ROOT, 'src', 'rust', 'src', 'rpcserver.rs');
+const UCODE_UC = path.join(ROOT, 'root', 'usr', 'share', 'rpcd', 'ucode', 'mt5700.uc');
+const loggerRs = fs.readFileSync(LOGGER_RS, 'utf8');
+const rpcRs = fs.readFileSync(RPC_RS, 'utf8');
+const ucodeUc = fs.readFileSync(UCODE_UC, 'utf8');
+
+ok('① logger.rs 有环形缓冲容量常量', /const LOG_BUFFER_CAP/.test(loggerRs));
+ok('① logger.rs 导出 snapshot()', /pub fn snapshot\(/.test(loggerRs));
+ok('★ ① 入缓冲在级别判断**之前**（否则级别调高时缓冲为空，等于白留）',
+	loggerRs.indexOf('buffer_push(') < loggerRs.indexOf('if lv < level()')
+	&& loggerRs.indexOf('buffer_push(') < loggerRs.lastIndexOf('if lv < level()'));
+ok('① LogRecord 可序列化（serde derive 已在 Cargo.toml 开启）',
+	/#\[derive\([^\n]*serde::Serialize/.test(loggerRs));
+
+ok('② rpcserver.rs 有 logs 分支', /"logs"\s*=>\s*\{/.test(rpcRs));
+ok('② logs 分支走 crate::logger::snapshot',
+	/crate::logger::snapshot\(since, limit\)/.test(rpcRs));
+ok('② logs 分支限制 limit 上限（防止一次拉爆缓冲）',
+	/\.min\(1200\)/.test(rpcRs));
+
+ok('③ ucode 有 logs 方法', /\blogs:\s*\{/.test(ucodeUc));
+ok('③ ucode logs 转发带 since 与 limit',
+	/rpcCall\('logs', \{ since: since, limit: limit \}\)/.test(ucodeUc));
+ok('③ ucode logs 对 limit 做了边界钳制（<=0 或 >1200 回落 300）',
+	/if \(limit <= 0 \|\| limit > 1200\)/.test(ucodeUc));
+
+ok('★ 前端默认级别是「信息及以上」而不是「全部级别」'
+	+ '（后端会送来大量 DBG 的 AT 命令回显）',
+	/level:\s*'INF'/.test(src) && /含调试（AT 命令回显）/.test(src));
+ok('★ 级别筛选是阈值而非精确匹配（选「警告」时也含错误）',
+	/LEVEL_ORDER\s*=\s*\{ DBG: 0, INF: 1, WRN: 2, ERR: 3 \}/.test(src)
+	&& /o != null && o < minOrder/.test(src));
 
 /* ---------- 汇总 ---------- */
 

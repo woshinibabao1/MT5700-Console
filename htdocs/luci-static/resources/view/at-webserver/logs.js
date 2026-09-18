@@ -52,6 +52,9 @@ function foldRepeats(list) {
 /* 级别中文化：徽章显示中文，原始标识放 title 便于对照 */
 var LEVEL_LABEL = { DBG: '调试', INF: '信息', WRN: '警告', ERR: '错误' };
 var LEVEL_VARIANT = { DBG: 'neutral', INF: 'info', WRN: 'warning', ERR: 'danger' };
+/* 级别序数：筛选用「阈值」而不是「精确匹配」—— 选「警告」时应包含错误，
+   后端补上内存日志后会送来大量 DBG（每条 AT 命令一回显），默认档必须能挡掉它。 */
+var LEVEL_ORDER = { DBG: 0, INF: 1, WRN: 2, ERR: 3 };
 
 /* 后端日志行分类：命中拨号的归「模组拨号」，其余归「接口与网络」 */
 var DIAL_RE = /自动拨号|拨号|SETAUTODIAL|APN|PDP|CGACT|CGDCONT|NDIS|驻网|注册|CREG|CGREG|C5GREG|COPS|SETMODE|串口|ttyUSB|ttyACM|AT通道|CMEE|CNMI|CMGF|CLIP|模组/i;
@@ -174,7 +177,9 @@ return L.view.extend({
 			   —— 那不是报错，那是本页的常态，不该做成第一印象。
 			   三个 Tab 的顺序仍与参考实现一致（模组拨号在前），只是默认不选它。 */
 			tab: 'iface',
-			level: 'all',      /* all | DBG | INF | WRN | ERR */
+			/* ★ 默认「信息及以上」而不是「全部级别」：后端内存日志含 DBG，
+			   AT 命令每条一回显，全开会把真正有用的行淹没。要看 AT 细节再切「含调试」。 */
+			level: 'INF',      /* all | INF | WRN | ERR（阈值，含该级别以上） */
 			query: '',
 			auto: false,       /* ★ 默认关：自动刷新会周期打 ubus，且页面隐藏时纯属浪费 */
 			dial: [],
@@ -225,11 +230,11 @@ return L.view.extend({
 		body.appendChild(tabs.el);
 
 		var levelSel = Mt5700.select([
-			{ label: '全部级别', value: 'all' },
-			{ label: '仅信息', value: 'INF' },
-			{ label: '仅警告', value: 'WRN' },
-			{ label: '仅错误', value: 'ERR' }
-		], 'all');
+			{ label: '信息及以上', value: 'INF' },
+			{ label: '警告及以上', value: 'WRN' },
+			{ label: '仅错误', value: 'ERR' },
+			{ label: '含调试（AT 命令回显）', value: 'all' }
+		], 'INF');
 		levelSel.addEventListener('change', function () { state.level = levelSel.value; renderList(); });
 
 		var searchInput = Mt5700.input('text', '按关键词过滤，如 拨号 / eth2 / 错误', '');
@@ -277,10 +282,17 @@ return L.view.extend({
 
 		function applyFilters(list) {
 			var q = state.query.toLowerCase();
+			/* all = 不限级别；其余按「该级别及以上」 */
+			var minOrder = (state.level === 'all') ? -1
+				: (LEVEL_ORDER[state.level] != null ? LEVEL_ORDER[state.level] : -1);
 			var out = [];
 			for (var i = 0; i < list.length; i++) {
 				var e = list[i];
-				if (state.level !== 'all' && e.level !== state.level) continue;
+				if (minOrder >= 0) {
+					var o = LEVEL_ORDER[e.level];
+					/* 级别未知的行一律保留：宁可多显示，也不能悄悄吞掉 */
+					if (o != null && o < minOrder) continue;
+				}
 				if (q && e.msg.toLowerCase().indexOf(q) < 0) continue;
 				out.push(e);
 			}
@@ -341,10 +353,10 @@ return L.view.extend({
 			if (state.tab === 'dial' && state.backendLogs === false) {
 				listEl.appendChild(Mt5700.errorState(
 					'取不到模组拨号日志：' + (state.backendErr || '后端未提供 logs 方法')
-					+ '。该视图依赖新版后端的内存日志（ubus mt5700.logs）；'
-					+ '若提示权限不足，还需在 ACL 的 mt5700 段补 logs 读权限。'
-					+ '服务进程目前只往 syslog 写启停与初始化记录 —— 它们都在'
-					+ '「接口与网络」视图里；拨号过程细节要等后端补上该接口后才有。',
+					+ '。该视图读的是服务进程的内存日志（ubus mt5700.logs，2.3.8 起提供）；'
+					+ '前端页面已是新版，但设备上跑的服务二进制还是旧的，'
+					+ '需要升级插件（或手动替换 /usr/bin/at-webserver-rust）后重启服务才有。'
+					+ '在此之前，「接口与网络」视图的 syslog 记录仍可正常查看。',
 					function () { refresh(true); }));
 				footerEl.textContent = '数据源不可用';
 				return;

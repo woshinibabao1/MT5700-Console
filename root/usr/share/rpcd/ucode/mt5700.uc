@@ -746,6 +746,24 @@ return {
 				return rpcCall('events', { since: since });
 			}
 		},
+		/* 后端运行日志：服务进程的内存环形缓冲（ubus mt5700.logs）。
+		   本服务的 eprintln 输出不进 syslog，拨号对齐 / 串口探测 / URC 分发这些
+		   过程只在缓冲里，LuCI「运行日志 → 模组拨号」视图读的就是它。 */
+		logs: {
+			args: { since: 0, limit: 300 },
+			call: function (req) {
+				let a = req.args;
+				let since = int(getStr(a, 'since')) || 0;
+				let limit = int(getStr(a, 'limit')) || 300;
+				if (since < 0) {
+					since = 0;
+				}
+				if (limit <= 0 || limit > 1200) {
+					limit = 300;
+				}
+				return rpcCall('logs', { since: since, limit: limit });
+			}
+		},
 		netrate: {
 			args: { device: '' },
 			call: function (req) {
