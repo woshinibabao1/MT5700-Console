@@ -5,6 +5,63 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.17] - 2026-09-19
+
+### 全量审计优化（agent-council 完整模式会审，26 项判据逐条处置）
+先做全量功能逻辑盘点（F01–F25 覆盖全部功能域），再逐项排查七维度，
+论证与验证通过后只落地有可观测收益的项；无可观测收益的一律进「不改清单」（N01–N11）。
+
+### 已落地（10 项 + 3 项复核修正）
+- **P01** 升级版本复核（`AT+CGMR`）改为带 `{ fresh: true }` —— 它命中前端 10 分钟
+  IDENTIFIER 缓存，而写命令只清 STATE 档，升级耗时 <10 分钟时复核读到的是**升级前版本**，
+  界面会据此给出错误的成功/失败结论（项目唯一的 FOTA 成功判据被缓存吃掉）
+- **P02** `urc.rs` 的 `^HCSQ` 按制式取字段：NR 取 parts[1]、LTE 取 parts[2]（旧实现一律取
+  parts[1]，LTE 下把 srxlev 当 RSRP，与前端差约 19 dB）；并移植四个换算函数，
+  边界值（`raw==0` / `>=97` / `>=34` / `>=251` / `>=96`）逐一对齐 `rpc.js:731-737`
+- **P03** ucode 把 `AT^ICCID?` 移出「不变类」缓存 —— 该文件自己写的入选标准是
+  「没有任何界面能改它」，而换卡 / eSIM 切 profile 会改它
+- **P04** 前端命令队列加总预算（默认 20000ms，对齐 ucode 的 `timeout 20`）：
+  原本 3 次重试 × 14s ≈ 42.6s，其中约 29s 是后端（最坏 13s）早已放弃后的纯空等，
+  而 `commandQueue` 是全局单链，这段时间其它页面与手动刷新全排在后面
+- **P05** ucode 的 `cacheClear()` 改为只由「确认写命令」触发：原本 cls==0 就清空，
+  而 `AT+CSQ` / `AT+CNUM` / `AT` 这类纯读也落在 cls==0，每查一次就把 300 秒的
+  IMEI / 型号 / 固件缓存整目录删光
+- **P08** ucode `NEVER_CACHE` 的 `AT^SMSJOB` 修正为 `AT+SMSJOB`（差一个字符则前缀匹配
+  永不命中，`read_cache_ttl>0` 时短信作业状态会被缓存）
+- **P09** `AT+SMSJOB?` 轮询加 `{ fresh: true }`（350ms 轮询被 2500ms 读缓存稀释成 7 拍一刷）
+- **P11** `withTimeout` 竞速后清掉另一路定时器（**等价改写**，只消除悬空定时器，不声称性能提升）
+- **P12** 慢档链每步检查 `disposed`，切页后不再继续占串口
+- **P15** `loadDeviceInfo` 加 in-flight 守卫，连点「刷新」不再叠加两条 9 命令的链
+  （60 秒节流判断仍在守卫之前，语义不变）
+- **R02/R03**（主控复核子代理实现后补）LTE 取 `parts[2]` 却只被 `len>=2` 保护 → 补越界判断；
+  非 NR/LTE 制式补回 `convertRssi` 分支，与前端 `rpc.js:844` 一致
+
+### 改判 / 不落地（证据不足，不是遗漏）
+- **P07 改判**：原方案要给 `safe_handle` / `safe_tick` 加 `catch_unwind`。
+  但 `Cargo.toml` 的 `profile.release` 是 `panic = "abort"` —— release 下 panic 不 unwind
+  而是**直接终止进程**（procd respawn 有 5 次重试上限），`catch_unwind` 是无效修复，
+  写上去只会制造虚假安全感。改为：注释改准（不再承诺捕获）+ 消除 panic 源
+- **P06 不落地**：看门狗 ping 绑 `-I <dev>`。busybox 精简版是否支持本机无法验证，
+  而误判的后果是看门狗**自己制造断网**（反复 ifdown/ifup），正是它想防的事故
+- **P13 / P14 / P16 / P17 / P18 不落地**：分别是「历史实测值不能当基线」「并发化改变
+  `memory_full_notified` 复位顺序」「`AT^VERSION?` 应答格式未验证」「需真机渲染基线」
+  「ucode 无 `system()` / `logger` 先例，属未验证 API」
+- **P10 降级分批**（默认 PDU 模式不触发），**P18** 同上
+
+### 测试
+- 新增 4 个静态契约测试（共 32 项），**每条都带反向验证**：把改动前的旧代码文本喂给
+  同一个检查函数，必须判红 —— 报不了红说明守卫根本没在检查
+  - `tests/read-command-fresh-contract.test.js`（P01/P09）
+  - `tests/rpc-command-budget-contract.test.js`（P04/P11）
+  - `tests/ucode-cache-class-contract.test.js`（P03/P05/P08）
+  - `tests/refresh-guard-contract.test.js`（P12/P15）
+- `urc.rs` 新增 6 项单测（含「LTE 取 parts[1] 的旧行为」必须不等的反向断言）
+- 全量 34 个测试文件全绿；`audit_refs.py`（基线 2a05cf9）静态 5 段通过
+
+### 已知遗留（需真机 / CI 确认）
+- Rust 侧改动本机无 cargo，未编译验证；ucode 侧本机无 `ucode` 二进制，未语法校验
+- 10 个视图 render 的桩环境伪报与基线一致，仍需真机 `page_check.py`
+
 ## [2.3.16] - 2026-09-19
 
 ### 断网排查：删除「收起明细」，明细默认展开

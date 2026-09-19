@@ -473,7 +473,13 @@ return L.view.extend({
 					 * 故用一个模块级标志 + 句柄双保险。
 					 */
 					if (disposed) { jobPollers[pending] = null; reject(new Error('页面已离开，等待中止')); return; }
-					AtWs.client.sendCommand('AT+SMSJOB?').then(function (res) {
+					/*
+		 * ★ P09（2026-09-19 会审）：必须带 fresh。
+		 * 前端读缓存 TTL 2500ms（rpc.js CACHE_TTL_STATE 之外那一档）大于这里 350ms 的轮询
+		 * 间隔，不带 fresh 时连续 7 拍拿到同一个缓存对象，350ms 的设计意图直接落空，
+		 * 发送结果反馈最多延迟 2.5 秒。与 euicc.js:648 的已有写法一致。
+		 */
+		AtWs.client.sendCommand('AT+SMSJOB?', { fresh: true }).then(function (res) {
 						var st = null;
 						try { st = JSON.parse(String(res && res.data ? res.data : '{}')); }
 						catch (e) { st = null; }

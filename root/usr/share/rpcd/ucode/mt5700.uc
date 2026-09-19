@@ -405,16 +405,29 @@ const READ_CACHE_DIR = '/tmp/mt5700-read-cache';
  * 但缓存的语义是「这项不会变」，可写的项放进来等于给自己埋雷
  * （比如从别的途径改了短信中心号，界面最多陈旧 5 分钟）。
  */
+/*
+ * ★ P03（2026-09-19 会审）：'AT^ICCID?' 已移出本档。
+ * 入选标准只有一条 ——「没有任何界面能改它」。ICCID 在换卡 / eSIM 切换 profile 之后
+ * 会变，属于可被改的标识，放进来等于给自己埋雷（换完 profile 最长陈旧 5 分钟）。
+ * 前端 esim.js 早已用 { fresh: true } 绕开前端缓存，但绕不过 ucode 侧这 300 秒。
+ */
 const STATIC_READS = [
 	'ATI', 'AT+CGMM', 'AT+CGMR', 'AT+CGSN', 'AT+CIMI', 'AT+CGMI',
-	'AT^ICCID?', 'AT^PHYNUM?', 'AT^VERSION?'
+	'AT^PHYNUM?', 'AT^VERSION?'
 ];
 
 /* 无问号但属只读的查询（默认不启用缓存，留给 read_cache_ttl>0 时用） */
 const BARE_READS = ['AT^DSFLOWQRY', 'AT^MONNC', 'AT^MONSC', 'AT^MONSSC'];
 
 /* 后端自己维护状态：**永不缓存** */
-const NEVER_CACHE = ['AT^CELLSCAN', 'AT^SMSJOB', 'AT^FOTA', 'AT^FWUP', 'AT+CMG'];
+/*
+ * ★ P08（2026-09-19 会审）：第二项原写 'AT^SMSJOB'（脱字符），而真实命令是
+ * 'AT+SMSJOB?'（加号 + 问号，见 rpcserver.rs:49 与 sms_center.js:476）。
+ * cacheClass 用 index(cmd, ...) == 0 做前缀匹配，差一个字符就永不命中 ——
+ * 一旦用户把 read_cache_ttl 调成非 0，短信作业状态就会被缓存住，与这里
+ * 「后端自己维护状态的命令永不缓存」的约定完全相反。
+ */
+const NEVER_CACHE = ['AT^CELLSCAN', 'AT+SMSJOB', 'AT^FOTA', 'AT^FWUP', 'AT+CMG'];
 
 function trimCmd(s) {
 	let a = 0;
@@ -520,8 +533,20 @@ function atCallCached(cmdRaw) {
 		if (resp != null && resp.success) { cachePut(cmd, resp); }
 		return resp;
 	}
-	/* 写命令（或后端状态类命令）：清掉读缓存，避免"保存后读回旧值" */
-	cacheClear();
+	/*
+	 * ★ P05（2026-09-19 会审）：这里原来是「cls == 0 就无条件 cacheClear()」。
+	 * 但 cls == 0 里混着一堆**纯读**命令 —— AT+CSQ、AT+CNUM（network_status.js:236）、
+	 * AT 这类既不带 '?' 也不在只读名单里的查询（cacheClass 只认「以 ? 结尾且不含 =」）。
+	 * 后果：每查一次 AT+CNUM 就把 300 秒的 IMEI / 型号 / 固件缓存整目录删光，
+	 * 本文件上面声称的「页面多次加载不再重复问模组」收益直接归零。
+	 * 改为只在**确认是写命令**时清：含 '='，且不是 '=?' 测试命令（测试命令是只读的）。
+	 * 判不准则宁可不清 —— 缓存最坏是陈旧（有 TTL 兜底），误清是白白多打串口。
+	 */
+	let eqIdx = index(cmd, '=');
+	if (eqIdx >= 0 && substr(cmd, eqIdx + 1, 1) != '?') {
+		/* 写命令：清掉读缓存，避免"保存后读回旧值" */
+		cacheClear();
+	}
 	return rpcCall('at', { cmd: cmd });
 }
 

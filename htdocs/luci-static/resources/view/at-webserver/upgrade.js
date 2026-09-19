@@ -211,7 +211,7 @@ return L.view.extend({
 
 		/* ---------- 逻辑（对齐基准 v1.3.4） ---------- */
 		function fetchVersion() {
-			return AtWs.client.sendCommand('AT+CGMR').then(function (res) {
+			return AtWs.client.sendCommand('AT+CGMR', { fresh: true }).then(function (res) {
 				if (res.success && typeof res.data === 'string') {
 					var lines = res.data.replace(/\r/g, '').split('\n')
 						.map(function (s) { return s.trim(); })
@@ -314,7 +314,7 @@ return L.view.extend({
 		 */
 		function finishByIdle() {
 			stopTimer();
-			AtWs.client.sendCommand('AT+CGMR').then(function (res) {
+			AtWs.client.sendCommand('AT+CGMR', { fresh: true }).then(function (res) {
 				var now = '';
 				if (res.success && typeof res.data === 'string') {
 					var lines = res.data.replace(/\r/g, '').split('\n')

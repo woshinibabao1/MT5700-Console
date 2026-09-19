@@ -173,6 +173,12 @@ impl Scheduler {
         );
     }
 
+    /*
+     * ★ 2026-09-19 会审：与 urc.rs 的 safe_handle 同一口径 —— 这里**不捕获 panic**。
+     * profile.release 是 `panic = "abort"`，panic 不会 unwind 而是直接终止进程，
+     * 所以 catch_unwind 在这里无效。要保证的是 tick() 内部不 panic（不裸索引、
+     * 不做 unwrap 于外部数据），而不是在外面套一层捕获。
+     */
     async fn safe_tick(&self) {
         self.tick().await;
     }

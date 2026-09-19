@@ -84,11 +84,21 @@ var rpcEs9p = L.rpc.declare({
 });
 
 function withTimeout(p, ms, msg) {
+	/*
+	 * ★ P11（2026-09-19 会审）：竞速胜出后清掉另一路的定时器。
+	 * 原来是 Promise.race([p, guard])，p 胜出后 guard 的 setTimeout 仍挂到 ms 到期 ——
+	 * 每条 AT 命令都会留下一个最长 14 秒的悬空定时器，稳态下长期挂着二十几个。
+	 * 这是**等价改写**（只消除悬空定时器），不声称任何性能提升。
+	 */
+	var h = null;
+	var guard = new Promise(function (resolve, reject) {
+		h = setTimeout(function () { reject(new Error(msg || '请求超时')); }, ms);
+	});
+	var clear = function () { if (h != null) { clearTimeout(h); h = null; } };
 	return Promise.race([
-		p,
-		new Promise(function (resolve, reject) {
-			setTimeout(function () { reject(new Error(msg || '请求超时')); }, ms);
-		})
+		Promise.resolve(p).then(function (v) { clear(); return v; },
+			function (e) { clear(); throw e; }),
+		guard
 	]);
 }
 
@@ -467,13 +477,28 @@ ATClient.prototype.sendCommand = function (command, opts) {
 	var maxAttempts = opt.attempts != null
 		? opt.attempts
 		: (isRetryableRead(command) ? 3 : 1);
+	/*
+	 * ★ P04（2026-09-19 会审）：给单条命令加总预算。
+	 * 后端最坏 13s（atclient 2s 应答 + 8s 排队 + 3s 写入）、ucode 侧 `timeout 20 nc` 兜底；
+	 * 而前端原本 3 次重试 × 14s ≈ 42.6s —— 其中约 29s 是后端早已放弃之后的纯空等，
+	 * 并且 commandQueue 是全局单链，这段时间本页快/慢档、其它页面、用户手动刷新
+	 * 的全部 AT 都排在它后面。默认 20000 与 ucode 对齐；调用方可传 opt.budgetMs 覆盖。
+	 */
+	var budget = opt.budgetMs != null ? opt.budgetMs : 20000;
+	var t0 = Date.now();
 
 	this.commandQueue = this.commandQueue.then(function () {
 		var attempt = 0;
 		var attemptOnce = function () {
 			attempt++;
 			if (!self.connected) return { success: false, error: '未连接到调制解调器' };
-			return withTimeout(rpcAt(command), self.commandTimeout,
+			/* 第一次必发；此后预算用尽就不再重试 —— 不再空等后端已放弃的窗口 */
+			if (attempt > 1 && (Date.now() - t0) >= budget) {
+				return { success: false, error: '命令总预算已用尽（' + budget + 'ms）' };
+			}
+			var waitMs = Math.max(1000,
+				Math.min(self.commandTimeout, budget - (Date.now() - t0)));
+			return withTimeout(rpcAt(command), waitMs,
 				'命令执行超时（模组可能正忙或正在重连，请稍后重试）').then(function (resp) {
 				resp = resp || {};
 				if (resp.success === false || isErrorText(resp.data)) {

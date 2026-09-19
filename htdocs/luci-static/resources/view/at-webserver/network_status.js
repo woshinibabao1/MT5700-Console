@@ -217,17 +217,26 @@ return L.view.extend({
 
 	var _devInfoAt = 0;
 
+		var devRunning = null;   /* ★ P15：同 fastRunning / slowRunning，撞车时复用在跑的那条 */
 		function loadDeviceInfo(force) {
 			// 设备信息变化很慢：首次加载与每 60s 刷新一次，避免每轮都打十几条查询
 			var now = Date.now();
 			if (!force && _devInfoAt && now - _devInfoAt < 60000) return;
+			/*
+			 * ★ P15（2026-09-19 会审）：连点「刷新」会叠加两条 9 命令的链。
+			 * refreshAll() 每次都 loadDeviceInfo(true) 强制绕过 60 秒节流，按钮也没有
+			 * disabled，而 commandQueue 是全局单链 —— 撞车时 SIMSQ / CPIN / CNUM /
+			 * TDSIMHP 会实发两次，把本页与其它页面的命令一起堵住。
+			 * 与 refreshFast / refreshSlow 同一模式：撞车就复用在跑的那条。
+			 */
+			if (devRunning) return devRunning;
 			_devInfoAt = now;
 
 			var st = {};
 			var q = function (cmd) {
 				return AtWs.client.sendCommand(cmd).catch(function () { return { success: false }; });
 			};
-			return q('AT^SIMSQ?').then(function (r) {
+			var chain = q('AT^SIMSQ?').then(function (r) {
 				var m = String(r && r.data ? r.data : '').match(/SIMSQ:\s*(\d+)\s*,\s*(\d+)/);
 				st.sim = m ? parseInt(m[2], 10) : null;
 				return q('AT+CPIN?');
@@ -258,6 +267,10 @@ return L.view.extend({
 				st.imei = (String(r && r.data ? r.data : '').match(/\d{10,}/) || [''])[0];
 				renderDeviceInfo(st);
 			});
+			/* 守卫：链跑完（含失败）就清空，下一次 force 仍能真正重跑一次 */
+			devRunning = chain.catch(function () { /* 失败时保留上一次数据，与快档一致 */ })
+				.then(function () { devRunning = null; });
+			return devRunning;
 		}
 
 		/*
@@ -2443,6 +2456,13 @@ return L.view.extend({
 			var chain = Promise.resolve();
 			SLOW_TASKS.forEach(function (fn) {
 				chain = chain.then(function () {
+					/*
+					 * ★ P12（2026-09-19 会审）：切页之后，已在飞的链不再继续打串口。
+					 * 慢档一轮十余次串口往返，_dispose 只清定时器、管不到已经发出去的链；
+					 * 撞在切页那一瞬间，就会让下一个页面的头十几秒跟着变慢。
+					 * 与排查链（逐步检查 disposed）同一写法。
+					 */
+					if (disposed) return null;
 					return Promise.resolve()
 						.then(fn)
 						.catch(function (err) { slowFailures[fn.name || '匿名任务'] = err; });

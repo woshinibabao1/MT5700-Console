@@ -14,6 +14,22 @@ const SIGNAL_CHANGE_THRESHOLD: f64 = 1.0;
 const PARTIAL_SMS_TTL: Duration = Duration::from_secs(3600);
 const MAX_PARTIAL_SMS: usize = 100;
 
+// ============= 信号换算（边界值逐一对齐前端 rpc.js 的 convertRsrp/Rsrq/Sinr/Rssi） =============
+// 这些函数与前端共用同一套换算口径，改动任一侧都要同步另一侧（见 tests/hcsq-contract.test.js）。
+fn convert_rsrp(raw: f64) -> f64 {
+    if raw == 0.0 { -140.0 } else if raw >= 97.0 { -44.0 } else { -140.0 + raw }
+}
+fn convert_rsrq(raw: f64) -> f64 {
+    if raw == 0.0 { -19.5 } else if raw >= 34.0 { -3.0 } else { -19.5 + raw * 0.5 }
+}
+fn convert_sinr(raw: f64) -> f64 {
+    let v = if raw == 0.0 { -20.0 } else if raw >= 251.0 { 30.0 } else { -20.0 + raw * 0.2 };
+    v.min(30.0).max(-20.0)
+}
+fn convert_rssi(raw: f64) -> f64 {
+    if raw == 0.0 { -120.0 } else if raw >= 96.0 { -25.0 } else { -121.0 + raw }
+}
+
 pub type Broadcaster = Arc<dyn Fn(serde_json::Value) + Send + Sync>;
 
 #[allow(dead_code)] // sender 保留（分段归属校验）
@@ -96,7 +112,19 @@ impl Dispatcher {
         (self.ws)(msg);
     }
 
-    /// 某一条上报解析失败时只丢这一条，不会拖垮整个分发。
+    /*
+     * 某一条上报解析失败时只丢这一条，不会拖垮整个分发。
+     *
+     * ★ 2026-09-19 会审后的口径修正：这里**不捕获 panic**，也不该指望捕获 ——
+     * Cargo.toml 的 profile.release 写的是 `panic = "abort"`，release 构建下 panic
+     * 根本不会 unwind，而是**直接终止整个服务进程**（init.d 有 procd respawn 兜底，
+     * 但重试次数有限）。也就是说 catch_unwind 在 abort 模式下是**无效修复**，
+     * 写上去只会制造「已经兜住了」的虚假安全感 —— 比不写更危险。
+     *
+     * 真正的做法是**消除 panic 源**：handler 里凡是按下标取字段的地方都要先判长度
+     * （见 handle_signal 中 ^HCSQ 的 `parts.len() > idx`），解析失败走「放弃这一条」，
+     * 绝不让索引越界。新增 handler 时照此办理。
+     */
     async fn safe_handle(&mut self, line: String) {
         self.handle(&line).await;
     }
@@ -383,11 +411,31 @@ impl Dispatcher {
             }
         } else if line.contains("^HCSQ:") {
             let parts = split_fields(line, "^HCSQ:");
-            if parts.len() >= 4 {
-                if let Ok(raw) = parts[1].parse::<f64>() {
-                    rsrp = -140.0 + raw;
-                    sys_mode = parts[0].trim_matches('"').to_string();
-                    ok = true;
+            // parts[0] 为带引号的制式名。字段顺序随制式变化：
+            //   NR    : "NR",<rsrp>,<sinr>,<rsrq>
+            //   LTE   : "LTE",<srxlev>,<rsrp>,<rsrq>,<sinr>,<rssi>
+            //   其余  : <rssi/其它>
+            // 旧实现一律取 parts[1] 且用 -140+raw 线性换算，LTE 下 rsrp 取错字段、
+            // 且换算与前端 rpc.js 不一致。这里按制式选字段并用对齐前端的换算。
+            if parts.len() >= 2 {
+                let mode = parts[0].trim_matches('"');
+                // 制式名可能带后缀，前端 rpc.js:824-826 用 indexOf 前缀匹配，这里保持一致
+                let is_lte = mode.starts_with("LTE");
+                let is_nr = mode.starts_with("NR");
+                let idx = if is_lte { 2 } else { 1 };
+                /*
+                 * ★ 越界保护（主控复核补）：LTE 要取 parts[2]，而这里只保证 len>=2。
+                 * 少了这层判断，字段不足的 ^HCSQ 会让 Rust 索引越界 panic ——
+                 * 而 panic 会打断整个 URC 分发循环（见 safe_handle 的注释承诺）。
+                 * 拿不到就算了，绝不能因为一条畸形上报把分发链打掉。
+                 */
+                if parts.len() > idx {
+                    if let Ok(raw) = parts[idx].parse::<f64>() {
+                        // 非 NR/LTE 制式那一路在前端是 convertRssi（量纲不同），不能统一用 rsrp
+                        rsrp = if is_nr || is_lte { convert_rsrp(raw) } else { convert_rssi(raw) };
+                        sys_mode = mode.to_string();
+                        ok = true;
+                    }
                 }
             }
         }
@@ -705,5 +753,72 @@ mod tests {
         assert!(cmti_capture("+CMTI: \"ME\",abc").is_none());
         assert!(cmti_capture("+CMTI: \"ME\",").is_none());
         assert!(cmti_capture("+CMT: \"ME\",12").is_none());
+    }
+
+    // ============= P02：^HCSQ 信号换算（边界值逐一对齐前端 rpc.js） =============
+    // 这些断言锁定 convert_* 与 rpc.js:731-737 完全一致，任一侧改坏都会红。
+
+    #[test]
+    fn convert_rsrp_边界对齐_rpcjs() {
+        // rpc.js: raw==0 -> -140; raw>=97 -> -44; 否则 -140+raw
+        assert_eq!(convert_rsrp(0.0), -140.0);
+        assert_eq!(convert_rsrp(96.0), -44.0);
+        assert_eq!(convert_rsrp(97.0), -44.0);
+        assert_eq!(convert_rsrp(50.0), -90.0);
+        assert_eq!(convert_rsrp(77.0), -63.0);
+    }
+
+    #[test]
+    fn convert_rsrq_边界对齐_rpcjs() {
+        // rpc.js: raw==0 -> -19.5; raw>=34 -> -3; 否则 -19.5 + raw*0.5
+        assert_eq!(convert_rsrq(0.0), -19.5);
+        assert_eq!(convert_rsrq(34.0), -3.0);
+        assert_eq!(convert_rsrq(31.0), -4.0);
+        assert_eq!(convert_rsrq(33.0), -3.0);
+    }
+
+    #[test]
+    fn convert_sinr_边界对齐_rpcjs() {
+        // rpc.js: raw==0 -> -20; raw>=251 -> 30; 否则 -20 + raw*0.2; 限幅 [-20, 30]
+        assert_eq!(convert_sinr(0.0), -20.0);
+        assert_eq!(convert_sinr(251.0), 30.0);
+        assert_eq!(convert_sinr(236.0), 27.2);
+        assert_eq!(convert_sinr(300.0), 30.0); // 超上限被夹回 30
+        assert_eq!(convert_sinr(20.0), -16.0);
+    }
+
+    #[test]
+    fn convert_rssi_边界对齐_rpcjs() {
+        // rpc.js: raw==0 -> -120; raw>=96 -> -25; 否则 -121 + raw
+        assert_eq!(convert_rssi(0.0), -120.0);
+        assert_eq!(convert_rssi(96.0), -25.0);
+        assert_eq!(convert_rssi(40.0), -81.0);
+    }
+
+    // 反向验证（必需）：新实现下 LTE 必须取 rsrp 字段（parts[2]），而非旧实现的 parts[1]。
+    // 若把「旧行为」喂给同一检查逻辑，断言必红 —— 证明字段映射真的改了。
+    #[test]
+    fn hcsq_lte_取_rsrp_字段_而非旧_parts1() {
+        let line = "^HCSQ: \"LTE\",50,72,31,20";
+        let parts = split_fields(line, "^HCSQ:");
+        let mode = parts[0].trim_matches('"');
+        let rsrp_idx = if mode == "LTE" { 2 } else { 1 };
+        let new_val = convert_rsrp(parts[rsrp_idx].parse::<f64>().unwrap());
+        // 旧实现：一律 parts[1]，且 -140+raw 线性换算
+        let old_val = -140.0 + parts[1].parse::<f64>().unwrap();
+        assert_ne!(new_val, old_val, "LTE 下新旧换算必须不同，否则修复无效");
+        assert_eq!(new_val, -68.0); // convert_rsrp(72) = -140 + 72
+    }
+
+    // 越界保护（主控复核补）：LTE 的 rsrp 取自 parts[2]，因此字段不足时必须放弃。
+    // release 下 panic = "abort"，这里越界不是「丢一条上报」，而是终止整个进程。
+    #[test]
+    fn hcsq_lte_取第三个字段_故字段数必须大于二() {
+        let idx_lte: usize = 2;
+        let short: Vec<&str> = vec!["\"LTE\"", "50"];
+        assert!(short.len() <= idx_lte, "字段不足时必须走放弃分支，不得取 parts[2]");
+        let full: Vec<&str> = vec!["\"LTE\"", "50", "72"];
+        assert!(full.len() > idx_lte);
+        assert_eq!(convert_rsrp(full[2].parse::<f64>().unwrap()), -68.0);
     }
 }
