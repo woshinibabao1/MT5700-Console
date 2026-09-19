@@ -975,12 +975,15 @@ return L.view.extend({
 					diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-error' },
 						'系统侧事实没取到（' + t.factsErr + '）：需升级 luci-app-mt5700，模组层 L1 不受影响。'));
 				}
-			var entryLabel = t.ran ? '明细' : '明细 · 未排查';
-			diagDetailBody.appendChild(toolBlock(entryLabel,
+			/* mt5700-diag-entry：宽屏下这块预留区会被 flex 拉满剩余高度，纵向居中显示 ——
+			   读起来是「点这里展开明细」的面板，而不是固化高度后一片来路不明的空白。 */
+			var entry = toolBlock(t.ran ? '明细' : '明细 · 未排查',
 				Mt5700.ghostButton('展开明细', function () {
 					diagDetailOpen = true;
 					renderTools();
-				})));
+				}));
+			entry.classList.add('mt5700-diag-entry');
+			diagDetailBody.appendChild(entry);
 			/* 收起态也留一行说明：卡片高度被右列拉平后下方会有富余空间，
 			   有这行字就不是一个突兀的空白（也顺带讲清明细不会另占区块）。 */
 			diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },

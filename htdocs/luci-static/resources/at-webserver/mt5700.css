@@ -2954,6 +2954,16 @@
    只在 >=1100px 的双列版式下生效：窄屏单列没有「拉平」的对象。
    ========================================================================== */
 @media (min-width: 1100px) {
+  /* ① 最关键的一环：卡**自己**必须能在右列里长高。
+     上一版只写了「卡体 flex + 明细区吸收」，漏了这条，结果整条链是断的：
+     .mt5700-stack 是纵向 flex，子项默认 flex:0 1 auto **不增长**，
+     于是富余空间留在断网排查卡**的下面**（stack 内的空白），
+     表现就是「右列最后一张卡的底边比左列连接状态高一截」。
+     卡长高后，多出来的高度经卡体传导给明细区，由它内部滚动吸收。 */
+  .mt5700-stack > .mt5700-card-fill {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
   .mt5700-card-fill {
     display: flex;
     flex-direction: column;
@@ -2967,14 +2977,31 @@
   }
   /* 卡体内除明细区外的元素（总控块）保持自身高度，空间紧张时不被压缩 */
   .mt5700-card-fill > .mt5700-card-body > * { flex: 0 0 auto; }
+  /* ② 明细区给**固定基准高度**，不能写 auto。
+     参与「这一行有多高」计算的是 flex-basis：写 auto 时它就取内容高度，
+     收起 ≈34px、展开 ≈450px，行高跟着数据抖 —— 这正是上一版没做到「固化」的原因。
+     写成 340px 后，无论收起/展开、无论一层 4 项还是 17 项，卡片对行高的贡献恒定；
+     富余时再 grow（底边跟左列齐平），紧张时 shrink（min-height:0，内部滚动顶上）。 */
   .mt5700-card-fill > .mt5700-card-body > .mt5700-diag-detail {
-    flex: 1 1 auto;
+    flex: 1 1 340px;
     display: flex;
     flex-direction: column;
     min-height: 0;
   }
-  /* 明细区内除滚动表格外的元素（入口条 / 分段控件 / 底部说明）保持自身高度，
+  /* 明细区内除滚动表格外的元素（分段控件 / 底部说明）保持自身高度，
      既不压缩也不拉伸 */
   .mt5700-diag-detail > * { flex: 0 0 auto; }
+  /* 收起态那一行入口：把预留区整块吃掉并纵向居中，读起来是「点这里展开明细」
+     的面板，而不是一片来路不明的空白（固化高度后这块空间必然存在）。 */
+  .mt5700-diag-detail > .mt5700-diag-entry {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    min-height: 0;
+  }
   .mt5700-diag-detail > .mt5700-diag-scroll { flex: 1 1 auto; }
+  /* 富余高度既然交给 flex 分配，就不能再拿 max-height 封顶 ——
+     否则 grow 出来的那一段被 340px 卡住，多余部分退回成卡内空白。
+     窄屏单列（无拉平需求）仍保留封顶。 */
+  .mt5700-diag-detail .mt5700-diag-scroll { max-height: none; }
 }

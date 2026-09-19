@@ -264,24 +264,33 @@ ok('★ 不新增任何独立明细卡片（明细容器挂在 diagCard._body �
 	!/Mt5700\.card\('断网排查明细'/.test(nsSrc)
 	&& /diagCard\._body\.appendChild\(diagDetailBody\)/.test(nsSrc));
 
-/* ★ 2026-09-19 第二轮：排查卡「占地固化」+「右列底边与左列对齐」。
-   两条是一件事的两面：两列拉平（stretch）后，矮的那侧多出来的高度必须
-   有人吃掉，否则就是当初被抱怨的「卡底一片空白」。做法是把富余空间整块
-   给明细区（内部滚动），于是卡片总高只跟左列有关，排查出 4 项还是 17 项
-   都一样高。下面四条各自都能独立把改动钉住，缺一条就能静默回退：
-     ① 卡上有 .mt5700-card-fill（否则没有东西吸收剩余高度 → 空白）
-     ② 两列 stretch（改成 start 立刻对不齐）
-     ③ 明细区是 flex 吸收（写成固定 max-height 就会随内容变矮/变高）
-     ④ 表格区仍可滚动（内容多时不撑开卡片） */
+/* ★ 2026-09-19 第二轮（v2.3.13）+ 第三轮修正（v2.3.14）：
+   排查卡「占地固化」+「右列底边与左列对齐」。
+   两列拉平（stretch）后，矮的那侧多出来的高度必须有人吃掉，否则就是当初被
+   抱怨的「卡底一片空白」。吸收链一共三节，缺任何一节都静默失效：
+       stack → 卡（.mt5700-card-fill 必须能增长）
+       → 卡体 → 明细区（flex-basis 必须是**固定值**）
+       → 表格区（内部滚动，且宽屏下不得用 max-height 封顶）
+   ★ v2.3.13 漏的正是第一节：只让卡体内部 flex，卡**自己**在 stack 里不增长
+     （flex 子项默认 0 1 auto），富余空间留在卡下面，底边照样差一截；
+     同时明细区写的是 flex:1 1 auto（basis 取内容高度，收起 34px / 展开 450px），
+     行高依旧跟着数据抖。下面每条断言各钉一节。 */
 ok('★ 排查卡带 .mt5700-card-fill（吃掉右列剩余高度，底边才能拉平）',
 	/diagCard\.classList\.add\('mt5700-card-fill'\)/.test(nsSrc));
 ok('★ 双列卡区 align-items: stretch（两列等高；start 会让底边对不齐）',
 	/\.mt5700-cards \{ align-items: stretch; \}/.test(cssSrc));
-ok('★ 明细区用 flex 吸收富余高度（不是写死高度，故不随排查项数变化）',
-	/\.mt5700-diag-detail \{[\s\S]*?flex: 1 1 auto;/.test(cssSrc)
-	&& /\.mt5700-diag-detail > \.mt5700-diag-scroll \{ flex: 1 1 auto; \}/.test(cssSrc));
-ok('★ 表格区仍能滚动（内容多时不把卡片撑高）',
+ok('★ ① 卡自己在 .mt5700-stack 里必须能增长（漏这条＝富余空间留在卡下方，底边差一截）',
+	/\.mt5700-stack > \.mt5700-card-fill \{[\s\S]*?flex: 1 1 auto;[\s\S]*?min-height: 0;/.test(cssSrc));
+ok('★ ② 明细区 flex-basis 必须是固定值（写 auto 就取内容高度，收起/展开行高会变）',
+	/\.mt5700-card-fill > \.mt5700-card-body > \.mt5700-diag-detail \{[\s\S]*?flex: 1 1 340px;/.test(cssSrc));
+ok('★ ③ 表格区 flex 吸收 + 宽屏解除 max-height 封顶（否则 grow 出的高度被卡住，退回空白）',
+	/\.mt5700-diag-detail > \.mt5700-diag-scroll \{ flex: 1 1 auto; \}/.test(cssSrc)
+	&& /\.mt5700-diag-detail \.mt5700-diag-scroll \{ max-height: none; \}/.test(cssSrc));
+ok('★ ④ 表格区仍能滚动（内容多时不把卡片撑高）',
 	/\.mt5700-diag-detail \.mt5700-diag-scroll \{[\s\S]*?overflow-y: auto;/.test(cssSrc));
+ok('★ ⑤ 收起态入口撑满预留区并居中（固化后那块空间必然存在，不能看着像空白）',
+	/mt5700-diag-entry/.test(nsSrc)
+	&& /\.mt5700-diag-detail > \.mt5700-diag-entry \{[\s\S]*?align-items: center;/.test(cssSrc));
 ok('★ 四档结论都有对应文案（含新增的 idle 待检查）',
 	/var DIAG_VERDICT = \{ ok: '通过', warn: '存疑', bad: '未通过', idle: '待检查' \}/.test(nsSrc));
 ok('★ 待检查有 CSS 配色（不写会掉成继承色，暗色下和「通过」分不出来）',
