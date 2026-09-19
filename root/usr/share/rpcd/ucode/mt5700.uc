@@ -565,8 +565,9 @@ function atCallCached(cmdRaw) {
  *      否则这条通道就成了登录用户打内网的跳板（SSRF）；
  *   ③ 路径必须在 ES9+ 的 5 个端点白名单里，不接受任意路径；
  *   ④ 请求体必须是合法 JSON 且 ≤256KB；
- *   ⑤ 证书验证**保持开启**（不加 -k）。服务器链不全时会明确报失败，
- *      由界面原样呈现，而不是偷偷降低安全级别。
+ *   ⑤ 证书验证**保持开启**（不加 -k）。信任库＝系统 CA + 插件自带的
+ *      GSMA CI（见下面 es9pCaBundle）；验不过就明确报失败，由界面原样
+ *      呈现，而不是偷偷降低安全级别。
  */
 const ES9P_PATHS = {
 	initiateAuthentication: '/gsma/rsp2/es9plus/initiateAuthentication',
@@ -727,6 +728,82 @@ function es9pUnlink(path) {
 	try { fs.unlink(path); } catch (e) { }
 }
 
+/*
+ * ★ 为什么必须自带一份 GSMA CI（2026-09-19 真机实测）：
+ *   运营商的 SM-DP+ 用的是 **GSMA 自己的 PKI**，证书由 "GSM Association -
+ *   RSP2 Root CI1" 这类根 CI 签发。这套根**不在任何公开 CA 库里**
+ *   （Windows / OpenWrt 的 ca-certificates.crt 都没有），所以 curl 一律报
+ *       SSL certificate ... unable to get local issuer certificate (20)
+ *   HTTP 状态码 000 —— 表现就是「下载永远卡在第一步」，看起来像网络问题，
+ *   实际是信任库缺根。真实案例：consumer.rsp.world 的叶子证书 issuer 正是
+ *   RSP2 Root CI1，用系统库怎么验都失败，补上这根后立刻验过。
+ *
+ *   解决办法是**补根**而不是绕过：把插件自带的 GSMA CI 与系统信任库合并成
+ *   一份临时 bundle 交给 curl --cacert，证书验证继续开着（不加 -k）。
+ *   只信任 GSMA 会漏掉「SM-DP+ 用普通 Web PKI 证书」的运营商，
+ *   只信系统会漏掉 GSMA PKI —— 所以两者都要，合并使用。
+ */
+const GSMA_CI_PEM = '/etc/ssl/certs/mt5700-gsma-rsp-ci.pem';
+const SYS_CA_PEM = '/etc/ssl/certs/ca-certificates.crt';
+
+/* 读不到（不存在 / 没权限 / 抛异常）就返回 null，不让任何一处 IO 拖垮请求 */
+function es9pReadOpt(path) {
+	let r;
+	try {
+		r = fs.readfile(path);
+	} catch (e) {
+		return null;
+	}
+	if (r == null || length(r) == 0) {
+		return null;
+	}
+	return r;
+}
+
+/*
+ * 返回 { arg: " --cacert '<file>'", temp: <要事后删除的路径 或 null> }；
+ * 两份都读不到时返回 null —— 那时不加参数，交回 curl 的默认行为
+ * （仍然验证，不降级）。
+ */
+function es9pCaBundle() {
+	const sys = es9pReadOpt(SYS_CA_PEM);
+	const gsma = es9pReadOpt(GSMA_CI_PEM);
+
+	if (sys == null && gsma == null) {
+		return null;
+	}
+	if (gsma == null) {
+		return { arg: " --cacert '" + SYS_CA_PEM + "'", temp: null };
+	}
+	if (sys == null) {
+		return { arg: " --cacert '" + GSMA_CI_PEM + "'", temp: null };
+	}
+
+	/* 两份都有：合并成一份临时 bundle（顺序无关，curl 会逐个试） */
+	const tmp = es9pMktemp();
+	if (tmp == null) {
+		/* 合不了也别失败：退到系统库，总比没有强 */
+		return { arg: " --cacert '" + SYS_CA_PEM + "'", temp: null };
+	}
+	let f = fs.open(tmp, 'w');
+	if (!f) {
+		es9pUnlink(tmp);
+		return { arg: " --cacert '" + SYS_CA_PEM + "'", temp: null };
+	}
+	f.write(sys);
+	f.write('\n');
+	f.write(gsma);
+	f.close();
+	return { arg: " --cacert '" + tmp + "'", temp: tmp };
+}
+
+/* 清掉 es9pCaBundle() 生成的临时 bundle（它自己不带生命周期） */
+function es9pCaDone(ca) {
+	if (ca != null && ca.temp != null) {
+		es9pUnlink(ca.temp);
+	}
+}
+
 function es9pToolAvailable() {
 	let p;
 	try {
@@ -751,10 +828,15 @@ function es9pPost(host, path, body) {
 		return { success: false, error: '无法创建临时文件（设备上没有 mktemp？）' };
 	}
 
+	/* 信任库：系统 CA + GSMA CI，缺根就永远验不过（见上面 GSMA_CI_PEM 的注释） */
+	const ca = es9pCaBundle();
+	const caArg = (ca != null) ? ca.arg : '';
+
 	let f = fs.open(bodyFile, 'w');
 	if (!f) {
 		es9pUnlink(bodyFile);
 		es9pUnlink(outFile);
+		es9pCaDone(ca);
 		return { success: false, error: '无法写临时文件' };
 	}
 	f.write(body);
@@ -767,6 +849,7 @@ function es9pPost(host, path, body) {
 		' --data-binary @' + bodyFile +
 		' -o ' + outFile +
 		" -w '%{http_code}'" +
+		caArg +
 		" 'https://" + host + path + "'";
 
 	let p;
@@ -775,16 +858,19 @@ function es9pPost(host, path, body) {
 	} catch (e) {
 		es9pUnlink(bodyFile);
 		es9pUnlink(outFile);
+		es9pCaDone(ca);
 		return { success: false, error: '无法发起 HTTPS 请求' };
 	}
 	if (!p) {
 		es9pUnlink(bodyFile);
 		es9pUnlink(outFile);
+		es9pCaDone(ca);
 		return { success: false, error: '无法发起 HTTPS 请求' };
 	}
 	let codeLine = p.read('line');
 	p.close();
 	es9pUnlink(bodyFile);
+	es9pCaDone(ca);
 
 	let respBody = '';
 	try {

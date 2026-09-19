@@ -349,6 +349,74 @@ asyncTests.push((function () {
 	});
 })());
 
+/* ---------- 9b. AT+CSIM 单条响应 256 字节上限 → EUICC_CSIM_TRUNCATED ----------
+ *
+ * ★ 2026-09-19 真机实测（H5000M / MT5700）：ES10b.AuthenticateServer 的响应 TLV
+ *   声明 1631 字节，AT+CSIM 只回得来 256 字节，且卡上没有任何残留可取
+ *   （81C0000000 / 81C00000FF / 81C0000080 / 81C0000001 四种 GET RESPONSE 全 0 字节，
+ *    重发末块回 6A86）。也就是说超过 256 字节的响应在本设备上永远取不全。
+ *   没有这道闸时，残片会被当完整响应发往 SM-DP+，表现为服务器侧
+ *   「Server authentication failed（1.2/4.2）」+ 卡侧 6A80 —— 把固件能力上限
+ *   报成了本地组包 bug，排查方向完全跑偏。这两条用例就是钉死这个因果的。
+ */
+
+eq('tlvTotalBytes 短格式', Euicc.tlvTotalBytes('8002AABB'), 4);
+eq('tlvTotalBytes 0x81 长格式', Euicc.tlvTotalBytes('808103AABBCC'), 6);
+eq('tlvTotalBytes 0x82 长格式', Euicc.tlvTotalBytes('80820003AABBCC'), 7);
+eq('tlvTotalBytes 双字节 tag（真机 BF38 82 065F）',
+	Euicc.tlvTotalBytes('BF3882065F'), 2 + 3 + 0x065F);
+eq('tlvTotalBytes 解析不出返回 -1（不抛，交由调用方忽略）',
+	[Euicc.tlvTotalBytes(''), Euicc.tlvTotalBytes('80'), Euicc.tlvTotalBytes('ZZ'),
+		Euicc.tlvTotalBytes('808200')],
+	[-1, -1, -1, -1]);
+
+/* 顶层结构：tag BF3E(2) + 长度 82 XX XX(3) = 5 字节头，值 251 字节 → 合计 256 */
+/* 声明 516 字节、实收正好 256 字节（被切在缓冲区边界上） */
+const CUT_256 = 'BF3E' + '8201FF' + 'AA'.repeat(251);
+/* 完整的 256 字节响应：声明 = 实收 = 256，绝不能误判成截断 */
+const FULL_256 = 'BF3E' + '8200FB' + 'AA'.repeat(251);
+eq('截断样本实收 256 字节', CUT_256.length / 2, 256);
+eq('完整样本也是 256 字节（同为边界值，用来守误判）', FULL_256.length / 2, 256);
+
+function csimSendFor(eidHex) {
+	return mockSend({
+		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },
+		'AT+CSIM=?': { success: true, data: '+CSIM: (4-520),(cmd)' },
+		[Euicc.csimCommand(Euicc.openChannelApdu())]: { success: true, data: csimAnswer('019000') },
+		[Euicc.csimCommand(Euicc.selectIsdrApdu(1))]: { success: true, data: csimAnswer('9000') },
+		[Euicc.csimCommand(Euicc.buildGetEid(1))]: { success: true, data: csimAnswer(eidHex + '9000') },
+		[Euicc.csimCommand(Euicc.closeChannelApdu(1))]: { success: true, data: csimAnswer('9000') }
+	});
+}
+
+asyncTests.push((function () {
+	return Promise.resolve().then(function () {
+		return Euicc.withIsdrSession(csimSendFor(CUT_256), function (ch, sendApdu) {
+			return sendApdu(Euicc.buildGetEid(ch));
+		});
+	}).then(function () {
+		fails.push('★ 响应被 256 字节上限截断必须抛 EUICC_CSIM_TRUNCATED  → 本应抛错却成功了');
+	}, function (e) {
+		if ((e && e.code) !== 'EUICC_CSIM_TRUNCATED') {
+			fails.push('★ 响应被 256 字节上限截断必须抛 EUICC_CSIM_TRUNCATED  → code 实际 ' +
+				(e && e.code) + '：' + (e && e.message));
+		} else {
+			pass++;
+		}
+	});
+})());
+
+asyncTests.push((function () {
+	/* 反向守卫：同样 256 字节，但声明与实收一致 —— 不能误报截断，否则正常卡会被冤枉 */
+	return Euicc.withIsdrSession(csimSendFor(FULL_256), function (ch, sendApdu) {
+		return sendApdu(Euicc.buildGetEid(ch));
+	}).then(function (r) {
+		ok('★ 完整的 256 字节响应不误判为截断', r && r.sw === '9000', r && r.sw);
+	}, function (e) {
+		fails.push('完整的 256 字节响应被误判为截断：code=' + (e && e.code));
+	});
+})());
+
 /* ---------- 10. 异常 code 集合固定（双向全等，R11） ---------- */
 
 var EXPECTED_CODES = [
@@ -356,7 +424,9 @@ var EXPECTED_CODES = [
 	'EUICC_AT_ERROR', 'EUICC_NO_CSIM', 'EUICC_NO_CARD', 'EUICC_NO_CHANNEL',
 	'EUICC_CHANNEL_LEAK', 'EUICC_NO_EUICC', 'EUICC_BUSY', 'EUICC_POLICY_DENIED', 'EUICC_OP_FAILED',
 	/* 下载链路（ES9+ 走后端转发）专有：设备无转发通道 / SM-DP+ 侧失败 */
-	'EUICC_NO_ES9P', 'EUICC_ES9P_FAILED'
+	'EUICC_NO_ES9P', 'EUICC_ES9P_FAILED',
+	/* 模组 AT+CSIM 单条响应装不下（完整下载在本设备上不可用的唯一根因） */
+	'EUICC_CSIM_TRUNCATED'
 ];
 ok('异常 code 集合与 §1.2 完全一致（双向，含 R05 新增 EUICC_NO_CARD）',
 	Euicc.ERR_CODES.length === EXPECTED_CODES.length &&

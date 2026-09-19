@@ -24,6 +24,23 @@ var Euicc = (function () {
 
 	var ISDR_AID = 'A0000005591010FFFFFFFF8900000100';
 	var MAX_ROUNDS = 8;
+	/*
+	 * AT+CSIM 单条响应能带回的**最大数据字节数**。
+	 *
+	 * ★ 2026-09-19 真机实测（H5000M / MT5700）：这是**模组固件**的硬上限，不是我们
+	 *   或卡的限制，已经用四条独立证据钉死：
+	 *     ① ES10b.AuthenticateServer 的响应 TLV 声明 1631 字节，实收恰好 256 字节；
+	 *     ② 响应里 SW=9000（不是 61xx），也就是说模组自己认为「已经给完了」；
+	 *     ③ 截断后立刻补发 81C0000000 / 81C00000FF / 81C0000080 / 81C0000001
+	 *        四种 GET RESPONSE，全部 0 字节（9000 / 6700）—— 卡上没有残留；
+	 *     ④ 重发末块回 6A86，卡不会重吐一次响应。
+	 *   （AT+CCHO / AT+CGLA / AT+CRSM / AT+CLAC 该模组全部不支持，AT+CSIM 是唯一
+	 *     APDU 通路；STORE DATA 带 Le 的 case 4 无论 Le 取何值都被 AT 层拒。）
+	 *
+	 * 后果：完整 Profile 下载在本设备上走不通 —— AuthenticateServer 的响应必然
+	 * 超过 256 字节。读取 / 启用 / 禁用 / 删除这类短响应操作不受影响。
+	 */
+	var CSIM_MAX_RESPONSE_BYTES = 256;
 
 	/* 通道号记录（R04）：检测通道泄漏。每次 open 成功更新；若本次通道号比上次大，
 	 * 记下疑似泄漏提示，交由上层（probe → esim.js）展示，避免悄然累积到第 20 次后 open 失败。 */
@@ -40,7 +57,9 @@ var Euicc = (function () {
 		'EUICC_NO_CARD', 'EUICC_NO_CHANNEL', 'EUICC_CHANNEL_LEAK', 'EUICC_NO_EUICC',
 		'EUICC_BUSY', 'EUICC_POLICY_DENIED', 'EUICC_OP_FAILED',
 		/* 下载链路（ES9+ 走后端转发）专有：通道缺失 / 服务器侧失败 */
-		'EUICC_NO_ES9P', 'EUICC_ES9P_FAILED'
+		'EUICC_NO_ES9P', 'EUICC_ES9P_FAILED',
+		/* 模组 AT+CSIM 单条响应装不下（见 CSIM_MAX_RESPONSE_BYTES 注释） */
+		'EUICC_CSIM_TRUNCATED'
 	];
 
 	function makeError(code, message) {
@@ -605,7 +624,28 @@ var Euicc = (function () {
 				return sendAndCollect(send, ch, gr, round + 1, acc + a.data);
 			}
 			var data = acc + a.data;
-		if (a.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
+			/*
+			 * ★ 2026-09-19 真机实测：AT+CSIM 单条响应上限 256 字节，且**卡上不留残留**
+			 *   （四种 GET RESPONSE 全 0 字节）。也就是说超过 256 字节的响应永远取不全。
+			 *
+			 *   不加这道闸的后果（这次就是这么被误导的）：AuthenticateServer 只拿到
+			 *   前 256 字节，我们把残片当完整响应发给 SM-DP+，服务器回 1.2/4.2
+			 *   「Server authentication failed」，随后 PrepareDownload 又回 6A80。
+			 *   页面于是显示「下发的数据卡片读不懂（本地 TLV 组装有误）」——
+			 *   把固件的能力上限报成了我们自己的组包 bug，排查方向完全跑偏。
+			 *
+			 *   判据：实收字节数是 256 的整数倍（被切在缓冲区边界上）且小于 TLV 声明的总长。
+			 */
+			var want = api.tlvTotalBytes(data);
+			var got = data.length / 2;
+			if (want > 0 && got < want && (got % CSIM_MAX_RESPONSE_BYTES) === 0) {
+				throw makeError('EUICC_CSIM_TRUNCATED',
+					'这条响应需要 ' + want + ' 字节，但模组只回传了 ' + got +
+					' 字节（AT+CSIM 单条响应上限 256 字节，且卡上没有残留可再取）。' +
+					'本设备无法完成 Profile 下载；读取 Profile、启用 / 禁用 / 删除等' +
+					'短响应操作不受影响。');
+			}
+			if (a.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
 		var info = api.swInfo(a.sw);
 		/* R08 带人话文案。channelUnsupported 供 withIsdrSession 判定是否回退基本通道 ——
 		   不能靠 err.code 区分，因为 6881 与其它操作失败共用 EUICC_OP_FAILED。 */
@@ -1103,7 +1143,41 @@ var Euicc = (function () {
 	}
 	api.tlvHex = tlvHex;
 
-	api.buildEs10b = function (ch, tag, derHex) {
+	/*
+ * 读一个 BER-TLV 的「整体字节数」（tag 字节 + 长度字节 + 值字节）。
+ * 只看最外层：tag 占 1 或 2 字节（低位 5 位全 1 则还有第二个字节），
+ * 长度支持短格式（<0x80）与 0x81/0x82 长格式。
+ * 解析不出来（太短 / 十六进制非法 / 长度字段不完整）返回 -1，由调用方决定怎么处理。
+ *
+ * 用途：判断响应是否被 AT+CSIM 的 256 字节上限截断 —— ES10b 的每个响应都是
+ * 单个顶层 BER-TLV，声明长度大于实收长度且实收恰好 256 的整数倍，就是被切了。
+ */
+api.tlvTotalBytes = function (hex) {
+	if (!hex || !api.isHex(hex) || hex.length < 4) return -1;
+	var i = 0;
+	var b0 = parseInt(hex.substr(0, 2), 16);
+	i = 2;
+	if ((b0 & 0x1f) === 0x1f) {
+		if (hex.length < 4) return -1;
+		i = 4;
+	}
+	if (i + 2 > hex.length) return -1;
+	var l8 = parseInt(hex.substr(i, 2), 16);
+	i += 2;
+	var valueLen;
+	if ((l8 & 0x80) === 0) {
+		valueLen = l8;
+	} else {
+		var n = l8 & 0x7f;
+		if (n < 1 || n > 2) return -1;
+		if (i + n * 2 > hex.length) return -1;
+		valueLen = parseInt(hex.substr(i, n * 2), 16);
+		i += n * 2;
+	}
+	return i / 2 + valueLen;
+};
+
+api.buildEs10b = function (ch, tag, derHex) {
 		if (ES10B_TAGS.indexOf(tag) < 0) {
 			throw makeError('EUICC_BAD_APDU', '不允许的 ES10b tag：' + tag);
 		}
@@ -1130,6 +1204,35 @@ var Euicc = (function () {
 				p1: last ? 0x91 : 0x11, p2: idx & 0xff
 			});
 		});
+	};
+
+	/*
+	 * ctxParams1 —— ES10b.AuthenticateServer 的**必带**字段（SGP.22 里它不是
+	 * OPTIONAL）。装配方式照 lpac 的实现（euicc/es10b.c 的
+	 * es10b_authenticate_server_r），真机可验：
+	 *
+	 *   A0                      CtxParams1 = CHOICE 的 ctxParamsForCommonAuthentication
+	 *   ├─ 80 <matchingId>      [0] UTF8String（激活码里的匹配码）
+	 *   └─ A1                   [1] DeviceInfo
+	 *      ├─ 80 04 <tac>       [0] Octet4（IMEI 前 4 位；没有就用 lpac 的默认值）
+	 *      ├─ A1 00             [1] deviceCapabilities（lpac 留空）
+	 *      └─ 82 <imei>         [2] Octet8，可选，本项目不填
+	 *
+	 * ★ 为什么必须补（2026-09-19 真机实测）：缺这一段时卡直接回
+	 *   `BF38 17 A1 15 80 10 <transactionId> 02 01 7F` —— 按规范这是
+	 *   AuthenticateResponseError，authenticateErrorCode = 127 = undefinedError，
+	 *   下载永远停在第 4 步「卡片校验服务器」。matchingId 还负责把这次下载
+	 *   与激活码绑定，缺了它即便卡放行，服务器也会拒。
+	 */
+	api.buildCtxParams1 = function (matchingId, tacHex) {
+		var tac = (tacHex && api.isHex(tacHex) && tacHex.length === 8) ? tacHex : '35290611';
+		var deviceInfo = tlvHex('A1', tlvHex('80', tac) + 'A100');
+		var body = '';
+		if (matchingId) {
+			body += tlvHex('80', api.bytesToHex(utf8ToBytes(String(matchingId))));
+		}
+		body += deviceInfo;
+		return tlvHex('A0', body);
 	};
 
 	api.buildGetEuiccChallenge = function (ch) { return api.buildEs10b(ch, 'BF2E', ''); };
@@ -1277,13 +1380,66 @@ var Euicc = (function () {
 				});
 			}
 
+			/*
+			 * 长命令分块下发（★ 2026-09-19 真机实测）：
+			 *   本模组的 AT+CSIM 单条上限是 **520 个十六进制字符（260 字节）**
+			 *   （`AT+CSIM=?` 实报 `(4-520),(cmd)`），而 AuthenticateServer(BF38) /
+			 *   PrepareDownload(BF21) 要带服务器证书链，动辄几百字节 —— 一条装不下，
+			 *   单条下发会直接撞 csimCommand 的长度上限抛 EUICC_BAD_APDU，
+			 *   下载卡在第 4 步。按 ES10b 的分块 STORE DATA 下发即可
+			 *   （P1=0x11 中间块 / 0x91 末块，P2 递增；与 BPP 同一套）。
+			 *   装得下就仍走单条 —— 少一轮交互，也避免改变既有短命令的行为。
+			 */
+			function apduAuto(tag, der, label) {
+				var single = api.buildEs10b(ch, tag, der || '');
+				if (single.length <= 520) return apdu(tag, der, label);
+
+				var chunks = api.buildEs10bChunks(ch, tag, der || '', mss);
+				log((label || tag) + ' 超单条上限（' + single.length + ' 字符），分 ' +
+					chunks.length + ' 块下发');
+				var chain = Promise.resolve('');
+				chunks.forEach(function (c, idx) {
+					chain = chain.then(function () {
+						return sendApdu(c);
+					}).then(function (r) {
+						log('卡 ← ' + (label || tag) + ' ' + (idx + 1) + '/' +
+							chunks.length + ' SW=' + r.sw + ' 数据 ' +
+							((r.data || '').length / 2) + ' 字节');
+						if (idx === chunks.length - 1) {
+							log('  末块原文: ' + (r.data || '(空)'));
+						}
+						if (r.sw !== '9000' && r.sw !== '9100') {
+							throw makeSwError('EUICC_OP_FAILED', r.sw);
+						}
+						return r.data || '';
+					});
+				});
+				return chain;
+			}
+
 			/* ① eUICC 挑战值 —— 服务器要用它证明「这次是这张卡在请求」 */
 			onStep(1, '读取 eUICC 挑战值');
 			return apdu('BF2E', '', 'GetEuiccChallenge')
 				.then(function (data) {
 					challenge = api.pickTagValue(data, '80');
-					if (!challenge || challenge.length !== 16) {   /* 8 字节 */
-						throw makeError('EUICC_TLV_TRUNCATED', '取不到 8 字节的 eUICC 挑战值');
+					/*
+					 * ★ 2026-09-19 真机实测（H5000M + 本机 eUICC）：euiccChallenge 是
+					 *   **16 字节**（`80 10 <16 bytes>`，32 个十六进制字符）—— SGP.22
+					 *   规定的就是 16 字节，不是 8。这里原来写死 `length !== 16`，
+					 *   于是每张符合规范的卡都会在这一步抛「取不到 8 字节的挑战值」，
+					 *   下载流程根本走不到 ES9+（本机实测正是卡死在这里，
+					 *   卡侧明明已经把挑战值回回来了）。
+					 *
+					 *   改法：**不猜长度**。服务器与卡按同一份值做绑定，原样透传永远
+					 *   比猜长度安全 —— 卡给多少就发多少，只校验「非空且偶数长度」，
+					 *   不是 16 字节时记一条 warn（便于定位异常卡，但不阻断流程）。
+					 */
+					if (!challenge || challenge.length < 2 || challenge.length % 2 !== 0) {
+						throw makeError('EUICC_TLV_TRUNCATED', '取不到 eUICC 挑战值（tag 80 缺失或长度异常）');
+					}
+					if (challenge.length !== 32 && typeof console !== 'undefined' && console.warn) {
+						console.warn('[euicc] euiccChallenge 为 ' + (challenge.length / 2) +
+							' 字节（SGP.22 规定 16 字节），按原样透传');
 					}
 					/* ② eUICC 信息（版本 / 支持的算法） */
 					onStep(2, '读取 eUICC 信息');
@@ -1313,7 +1469,10 @@ var Euicc = (function () {
 						+ (resp.serverSignature1 ? api.base64ToHex(resp.serverSignature1) : '')
 						+ (resp.euiccCiPKIdToBeUsed ? api.base64ToHex(resp.euiccCiPKIdToBeUsed) : '')
 						+ (resp.serverCertificate ? api.base64ToHex(resp.serverCertificate) : '');
-					return apdu('BF38', der, 'AuthenticateServer');
+					/* ctxParams1 必带（见 buildCtxParams1 注释）：缺了它卡回
+					   undefinedError(127)，且服务器无法把这次下载与激活码绑定 */
+					der += api.buildCtxParams1(act.matchingId, opts.tac);
+					return apduAuto('BF38', der, 'AuthenticateServer');
 				})
 				.then(function (data) {
 					/* ⑤ 把卡的应答回给服务器 */
@@ -1332,7 +1491,7 @@ var Euicc = (function () {
 						+ (resp.smdpSignature2 ? api.base64ToHex(resp.smdpSignature2) : '')
 						+ (resp.smdpCertificate ? api.base64ToHex(resp.smdpCertificate) : '');
 					if (ccHash) der += tlvHex('04', ccHash);
-					return apdu('BF21', der, 'PrepareDownload');
+					return apduAuto('BF21', der, 'PrepareDownload');
 				})
 				.then(function (data) {
 					/* ⑦ 取回 BPP（加密的 Profile 包，只有这张卡解得开） */

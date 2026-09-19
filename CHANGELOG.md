@@ -5,6 +5,41 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.20] - 2026-09-19
+
+### Fixed — eSIM 下载链路：真机实测修掉三个真 bug
+用一张真实激活码（`LPA:1$consumer.rsp.world$…`）在本机 H5000M 上跑到第 6 步之前，
+一路撞出三个此前从未被真机验证过的错误，逐个定位并修：
+
+- **euiccChallenge 是 16 字节，不是 8**。原代码写死 `length !== 16`（即 8 字节），
+  于是**每张符合 SGP.22 的卡**都会在第一步抛「取不到 8 字节的挑战值」。现改为不猜长度，
+  只校验非空且偶数，长度异常时 warn 后原样透传
+- **长命令必须分块**。`AT+CSIM` 单条上限 520 个十六进制字符（`AT+CSIM=?` 实报 `(4-520)`），
+  而 AuthenticateServer(BF38) 要带服务器证书链，实测 1702 字符，单条下发直接撞上限。
+  新增 `apduAuto()`：装得下走单条，装不下按 ES10b 分块 STORE DATA（P1=0x11/0x91、P2 递增）
+- **ctxParams1 是必带字段**（SGP.22 里它不是 OPTIONAL）。缺这一段时卡直接回
+  `BF38 17 A1 15 80 10 <txn> 02 01 7F`，即 `undefinedError(127)`，下载永远停在第 4 步。
+  新增 `buildCtxParams1()`（matchingId + DeviceInfo/tac），照 lpac 的装配方式实现
+
+### Fixed — ES9+ 信任库补上 GSMA 根证书
+运营商 SM-DP+ 用的是 **GSMA 自己的 PKI**（根为 `GSM Association - RSP2 Root CI1`），
+这套根**不在任何公开 CA 库里**，所以 curl 一律报
+`unable to get local issuer certificate (20)`、HTTP 000 —— 表现为「下载永远卡在第一步」，
+看着像网络故障，实际是缺信任锚。现新增 `root/etc/ssl/certs/mt5700-gsma-rsp-ci.pem`，
+并在 `mt5700.uc` 里把系统 CA 与 GSMA CI 合并成临时 bundle 交 `curl --cacert`。
+**验证保持开启，全程没有 `-k` / `--insecure`** —— 是补根，不是绕过。
+
+### Added — 识别「模组回传装不下」，不再报成组包 bug
+`AT+CSIM` 单条响应的**硬上限是 256 字节**（模组固件限制），且卡上不留残留。
+AuthenticateServer 的响应实测 1636 字节，取不全。此前没有这道识别，残片会被当完整响应
+发给 SM-DP+，最终表现为服务器 `1.2/4.2 Server authentication failed` + 卡侧 `6A80`
+「下发的数据卡片读不懂（本地 TLV 组装有误）」—— 把固件能力上限报成了我们自己的 bug。
+现新增 `tlvTotalBytes()` + 截断守卫，命中即抛 `EUICC_CSIM_TRUNCATED` 并说明
+「本设备无法完成 Profile 下载；读取 Profile、启用/禁用/删除不受影响」。
+
+**注**：完整 Profile 下载在本设备（MT5700M-CN，无 MBIM/QMI、只有 AT 串口）上走不通；
+EID 读取、Profile 列表、通知、启用/禁用/删除等短响应操作均正常。
+
 ## [2.3.19] - 2026-09-19
 
 ### Fixed — eSIM 二维码录入：图片与扫码在 http 下彻底可用
