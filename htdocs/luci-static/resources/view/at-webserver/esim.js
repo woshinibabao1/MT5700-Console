@@ -105,6 +105,15 @@ return L.view.extend({
 				/* 服务器侧的失败原因必须原样带出来：不同运营商的报错差得很远，
 				   统一成一句「下载失败」等于让用户无从下手。 */
 				msg = (e && e.message) || '运营商服务器返回失败';
+			} else if (code === 'EUICC_CSIM_TRUNCATED') {
+				/*
+				 * ★ 2026-09-19 真机实测：这是模组固件的能力上限（AT+CSIM 单条响应
+				 *   只回 256 字节），不是配置问题也不是组包 bug —— 重试没有任何意义。
+				 *   必须单独成支：落到 else 分支只会显示一句原始 message，
+				 *   用户看不出「这是设备做不到」，会反复重试甚至怀疑是插件坏了。
+				 */
+				msg = '当前设备无法下载 Profile：' + ((e && e.message) || '模组 AT+CSIM 单条响应上限 256 字节')
+					+ ' 这是模组固件的限制，重试无效；读取 Profile、启用 / 禁用 / 删除不受影响。';
 			} else if (code === 'EUICC_OP_FAILED' && e.swText) {
 				/* R08：优先用 §1.5① 错误矩阵的人话文案 + 提示 */
 				msg = e.swText + (e.swHint ? '；' + e.swHint : '');

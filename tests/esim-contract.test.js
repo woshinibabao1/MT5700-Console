@@ -323,6 +323,47 @@ ok('P02 esim.js 源码含 showPendingReceipts 调用', /showPendingReceipts\(\)/
 ok('P04 esim.js 源码含 移除 二次确认文案', /移除回执不可逆/.test(esimSrc));
 ok('R02 esim.js 源码已删除逐行发送按钮（无 sendNotification）', !/sendNotification/.test(esimSrc));
 
+/* ---------- 9. 256 字节截断必须被识别成「设备做不到」，不许赖到我们自己头上 ----------
+ *
+ * ★ 起因（2026-09-19 真机实测，H5000M + 真 eUICC）：AT+CSIM 单条响应只有 256 字节，
+ *   AuthenticateServer 需要 1631 字节 → 拿到的是残片。旧实现没有识别，残片被当完整
+ *   响应发给服务器，页面显示「下发的数据卡片读不懂（本地 TLV 组装有误）」，
+ *   把**固件的能力上限报成了我们自己的组包 bug**，排查方向被彻底带偏。
+ *
+ *   判据：
+ *   A. euicc.js 在拿到数据后先比对 TLV 声明长度，命中抛 EUICC_CSIM_TRUNCATED；
+ *   B. esim.js 的 handleErr 必须给 EUICC_CSIM_TRUNCATED 一个**独立分支**——
+ *      落到 else 只会显示裸 message，用户看不出「这是设备做不到」，会反复重试；
+ *   C. swInfo('6A80') 的文案不得再写死「本地 TLV 组装有误」。
+ */
+
+function hasTruncationGuard(src) {
+	/*
+	 * 守卫本体：tlvTotalBytes 取声明长度 → 与实收 got 比对 → 命中抛 EUICC_CSIM_TRUNCATED。
+	 * ★ 三段都要锚：只锚首尾的话，把中间的比较换成恒假也照样匹配，
+	 *   守卫就变成「永远绿」的摆设（本仓库已在 findMultiArgECalls 上栽过一次同型跟头）。
+	 */
+	return /tlvTotalBytes\s*\([\s\S]{0,200}?got\s*<\s*want[\s\S]{0,200}?EUICC_CSIM_TRUNCATED/.test(src);
+}
+function hasTruncationBranch(src) {
+	/* handleErr 里的独立分支 */
+	return /code === 'EUICC_CSIM_TRUNCATED'/.test(src);
+}
+
+ok('A1 euicc.js 有 TLV 声明长度比对 + 抛 EUICC_CSIM_TRUNCATED 的守卫', hasTruncationGuard(euiccSrc));
+ok('A2 反向：把守卫去掉（改用恒假条件）必须判红',
+	hasTruncationGuard(euiccSrc.replace("got < want && (got % CSIM_MAX_RESPONSE_BYTES) === 0", "false")) === false);
+
+ok('B1 esim.js handleErr 有 EUICC_CSIM_TRUNCATED 独立分支', hasTruncationBranch(esimSrc));
+ok('B2 反向：删掉该分支（回到裸 message）必须判红',
+	hasTruncationBranch(esimSrc.replace("code === 'EUICC_CSIM_TRUNCATED'", "code === '__NEVER__'")) === false);
+
+const sw6a80 = Euicc.swInfo('6A80');
+ok('C1 swInfo(6A80) 文案不再写死「本地 TLV 组装有误」',
+	!/本地 TLV 组装有误/.test(sw6a80.text || ''), sw6a80.text);
+ok('C2 swInfo(6A80) 文案点出「不完整」这个真实可能',
+	/不完整/.test(sw6a80.text || ''), sw6a80.text);
+
 /* ---------- 汇总 ---------- */
 
 Promise.all(asyncTests).then(function () {

@@ -5,6 +5,26 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.21] - 2026-09-19
+
+### Fixed — 256 字节截断的报错不再把锅甩给「本地组包」
+真机实测里最耽误时间的一处：响应被 `AT+CSIM` 的 256 字节上限切成残片后，
+旧实现把残片当完整响应往下发，页面显示「下发的数据卡片读不懂（本地 TLV 组装有误）」——
+把**模组固件的能力上限报成了我们自己的 bug**，排查方向被彻底带偏。
+
+- **6A80 文案改掉**：由「本地 TLV 组装有误」改为「数据不正确或不完整」，
+  并提示「若发生在下载中途，多为上一步响应被截断所致」
+- **`EUICC_CSIM_TRUNCATED` 在页面侧有了独立分支**：原先落到 `handleErr` 的 else，
+  只显示一句裸 message，用户看不出「这是设备做不到」，会反复重试。
+  现在明确写出「这是模组固件的限制，重试无效；读取 / 启用 / 禁用 / 删除不受影响」
+- 同步订正两处事实性错误的注释（`euiccChallenge` 字节数、BF2E 响应描述）
+
+### Added — 两条反向守卫（防「永远绿」的摆设）
+`tests/esim-contract.test.js` 新增 4 项：截断守卫必须同时锚住
+`tlvTotalBytes → got < want → EUICC_CSIM_TRUNCATED` 三段（只锚首尾的话，
+把中间比较换成恒假也照样匹配，守卫就白写了），以及 `handleErr` 分支存在性。
+两条都带「改坏必须判红」的反向断言。
+
 ## [2.3.20] - 2026-09-19
 
 ### Fixed — eSIM 下载链路：真机实测修掉三个真 bug

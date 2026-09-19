@@ -252,10 +252,19 @@ var Euicc = (function () {
 			};
 		}
 		if (sw === '6A80') {
+			/*
+			 * ★ 2026-09-19 真机实测更正：本设备（AT+CSIM 单条响应上限 256 字节）上，
+			 *   下载走到 PrepareDownload 时的 6A80 **不是本地组包的锅** —— 是上一步
+			 *   AuthenticateServer 的响应被截成残片、又被原样发给服务器/卡造成的。
+			 *   旧文案写死「本地 TLV 组装有误」，等于把固件的能力上限报成我们自己的 bug，
+			 *   排查方向会被彻底带偏（我就是被这句带着翻了半天组包代码）。
+			 *   真正的截断现在由上层的 EUICC_CSIM_TRUNCATED 守卫拦下（见 sendAndCollect），
+			 *   走到这里说明数据本身确实有问题，但文案必须同时点出「数据不完整」这个可能。
+			 */
 			return {
 				level: 'error',
-				text: '下发的数据卡片读不懂（本地 TLV 组装有误）',
-				hint: '请勿重试并提 issue'
+				text: '下发的数据卡片读不懂（数据不正确或不完整）',
+				hint: '若发生在下载中途，多为上一步响应被截断所致，见上方提示；否则请勿重试并提 issue'
 			};
 		}
 		if (sw === '6A82') {
@@ -1120,7 +1129,7 @@ var Euicc = (function () {
 
 	/* ---------- ES10b 下载相关 APDU ----------
 	 * tag 出处：lpac euicc/es10b.c 的 es10b_*_r 定义
-	 *   BF2E GetEuiccChallenge（响应内含 80 = 8 字节挑战值）
+	 *   BF2E GetEuiccChallenge（响应内含 80 = 16 字节挑战值，SGP.22 规定）
 	 *   BF20 GetEuiccInfo1  （响应整体即 EUICCInfo1 的 DER，原样交给 SM-DP+）
 	 *   BF38 AuthenticateServer
 	 *   BF21 PrepareDownload（内含 0x04 = hashCC，仅确认码必需时带）
@@ -1423,16 +1432,11 @@ api.buildEs10b = function (ch, tag, derHex) {
 				.then(function (data) {
 					challenge = api.pickTagValue(data, '80');
 					/*
-					 * ★ 2026-09-19 真机实测（H5000M + 本机 eUICC）：euiccChallenge 是
-					 *   **16 字节**（`80 10 <16 bytes>`，32 个十六进制字符）—— SGP.22
-					 *   规定的就是 16 字节，不是 8。这里原来写死 `length !== 16`，
-					 *   于是每张符合规范的卡都会在这一步抛「取不到 8 字节的挑战值」，
-					 *   下载流程根本走不到 ES9+（本机实测正是卡死在这里，
-					 *   卡侧明明已经把挑战值回回来了）。
-					 *
-					 *   改法：**不猜长度**。服务器与卡按同一份值做绑定，原样透传永远
-					 *   比猜长度安全 —— 卡给多少就发多少，只校验「非空且偶数长度」，
-					 *   不是 16 字节时记一条 warn（便于定位异常卡，但不阻断流程）。
+					 * euiccChallenge 是 16 字节（tag 80 后跟 16 字节，32 个十六进制字符），
+					 * SGP.22 规定。但这里**不校验长度**：服务器与卡按同一份值做绑定，
+					 * 卡给多少就原样透传多少最安全；写死长度只会拦掉正常的卡
+					 * （早期写死成 8 字节，结果每张合规卡都在这一步失败、流程走不到 ES9+）。
+					 * 只校验非空且偶数，长度异常时记一条 warn 便于定位异常卡。
 					 */
 					if (!challenge || challenge.length < 2 || challenge.length % 2 !== 0) {
 						throw makeError('EUICC_TLV_TRUNCATED', '取不到 eUICC 挑战值（tag 80 缺失或长度异常）');
