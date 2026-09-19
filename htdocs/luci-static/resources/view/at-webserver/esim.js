@@ -3,7 +3,11 @@
 'require at-webserver/ui';
 'require at-webserver/mt5700';
 'require at-webserver/euicc';
-/* global L, AtWs, Ui, Mt5700, Euicc */
+/* global L, AtWs, Ui, Mt5700, Euicc, jsQR */
+/* 注：jsQR **不走** 'require' —— LuCI 的 require 要求每个模块 return 一个 Class，
+   而 jsQR 是第三方 UMD 包（只往全局挂 window.jsQR），硬塞进去会破坏加载契约；
+   改为用户真的去用「上传图片 / 拍照」时才按需 <script> 注入（见 loadJsQr），
+   平时这 250KB 根本不会下载，不拖慢任何其它页面。 */
 
 /**
  * eSIM 管理（eUICC profile 引导态）
@@ -16,8 +20,16 @@
  *   - APDU 那一半（ES10b）本页自己拼，经 AT+CSIM 下发；
  *   - HTTPS 那一半（ES9+）浏览器做不了（SM-DP+ 不发 CORS 头），
  *     经新增的 ubus `mt5700.es9p` 由路由器上的 curl 代发一次 POST。
- *   录入支持：粘贴激活码 / 摄像头扫码 / 二维码图片 / 手动填 SM-DP+ 与匹配码，
+ *   录入支持：粘贴激活码 / 摄像头扫码 / 二维码图片（选择·拖放·粘贴） / 手动填 SM-DP+ 与匹配码，
  *   四条路都收口到 Euicc.parseActivationCode 校验。
+ *
+ * 二维码识别（2026-09-19 重写）：原先只用 window.BarcodeDetector，而它**只在安全上下文
+ *   （https / localhost）提供** —— 用 http://192.168.x.x 访问路由器时它是 undefined，
+ *   「扫描二维码」「上传图片」两条路都变成「当前环境不支持」，等于功能没有。
+ *   现改为：原生 BarcodeDetector 可用就先用（硬件加速、快），否则一律退回内置的 jsQR
+ *   （纯 JS，任何协议下都能解）。摄像头本身仍受同一限制（http 下 getUserMedia 不可用），
+ *   故 http 时把「扫码」降级成「用相机拍照」—— 走 <input capture> 调起系统相机，
+ *   不需要网页摄像头权限，效果等价。
  *
  * 红线：
  *   - P01  只允许 sendCommand，禁止直连串口 / lpac
@@ -288,6 +300,215 @@ return L.view.extend({
 			return (typeof window !== 'undefined') && !!window.BarcodeDetector;
 		}
 
+		/* 摄像头能否调用。与 BarcodeDetector 一样受安全上下文限制：http 下为 false。 */
+		function hasCamera() {
+			return (typeof navigator !== 'undefined')
+				&& !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+		}
+
+		/* ---------- 二维码识别：原生优先、内置兜底（2026-09-19） ----------
+		 * 原实现只认 window.BarcodeDetector，而它仅在 https / localhost 提供 →
+		 * http 访问路由器时扫码与图片识别双双不可用。这里把「能不能识别」和
+		 * 「用哪种实现」解耦：原生可用就用原生，否则一律用内置 jsQR。
+		 * 全程只在本机 <canvas> 里解码，图片不上传、不走网络。 */
+
+		/* 把 image / video / ImageBitmap 画进 canvas 取像素。maxSide 用于降采样提速。 */
+		function qrToImageData(src, maxSide) {
+			var w = src.videoWidth || src.naturalWidth || src.width;
+			var h = src.videoHeight || src.naturalHeight || src.height;
+			if (!w || !h) return null;
+			var scale = 1;
+			if (maxSide && (w > maxSide || h > maxSide)) scale = maxSide / Math.max(w, h);
+			var cw = Math.max(1, Math.round(w * scale));
+			var ch = Math.max(1, Math.round(h * scale));
+			var cv = document.createElement('canvas');
+			cv.width = cw;
+			cv.height = ch;
+			var ctx = cv.getContext('2d', { willReadFrequently: true });
+			if (!ctx) return null;
+			ctx.drawImage(src, 0, 0, cw, ch);
+			return ctx.getImageData(0, 0, cw, ch);
+		}
+
+		/* 按需加载内置解码器。同一个向导里只注入一次（jsQrLoading 复用同一个 Promise），
+		 * 失败时把标志清掉，下次点还会再试（不能因为一次网络抖动就永久废掉这条路）。 */
+		var jsQrLoading = null;
+		function loadJsQr() {
+			if (typeof jsQR === 'function') return Promise.resolve(jsQR);
+			if (jsQrLoading) return jsQrLoading;
+			jsQrLoading = new Promise(function (resolve, reject) {
+				var s = document.createElement('script');
+				s.src = '/luci-static/resources/at-webserver/jsqr.js';
+				s.async = true;
+				s.onload = function () {
+					resolve(typeof jsQR === 'function' ? jsQR : null);
+				};
+				s.onerror = function () {
+					jsQrLoading = null;   /* 清掉才能重试 */
+					reject(new Error('二维码解码库加载失败'));
+				};
+				document.head.appendChild(s);
+			});
+			return jsQrLoading;
+		}
+
+		/* 返回 Promise<string|null>：null = 没识别到（不抛异常，不打断录入流程） */
+		function jsQrText(img) {
+			return loadJsQr().then(function (fn) {
+				if (!fn) return null;
+				var r = null;
+				/* 解码器对极端图可能抛异常：吞掉并按「没识别到」处理，
+				   让它与「图里确实没有二维码」走同一条提示，不把用户带到报错页面。 */
+				try {
+					r = fn(img.data, img.width, img.height);
+				} catch (e) {
+					return null;
+				}
+				return (r && r.data) ? String(r.data) : null;
+			}).catch(function () { return null; });
+		}
+
+		/* 统一入口：返回 Promise<string|null>。null = 没识别到（不抛异常）。 */
+		function decodeQr(src, maxSide) {
+			var img = qrToImageData(src, maxSide);
+			if (!img) return Promise.resolve(null);
+			if (!hasBarcodeDetector()) return jsQrText(img);
+			return Promise.resolve()
+				.then(function () {
+					return new window.BarcodeDetector({ formats: ['qr_code'] }).detect(src);
+				})
+				.then(function (codes) {
+					if (codes && codes.length && codes[0].rawValue) return String(codes[0].rawValue);
+					return null;
+				})
+				.catch(function () { return null; })
+				/* 原生没认出来不等于图里没有：再让 jsQR 试一次（两者算法不同，互补） */
+				.then(function (v) { return (v != null && v !== '') ? v : jsQrText(img); });
+		}
+
+		function fileToImage(file) {
+			return new Promise(function (resolve, reject) {
+				var rd = new FileReader();
+				rd.onload = function () {
+					var im = new Image();
+					im.onload = function () { resolve(im); };
+					im.onerror = function () { reject(new Error('这个图片格式解不开')); };
+					im.src = String(rd.result);
+				};
+				rd.onerror = function () { reject(new Error('读取文件失败')); };
+				rd.readAsDataURL(file);
+			});
+		}
+
+		/* 剪贴板粘贴：整个页面只挂一次监听，具体 handler 由当前向导按需设置/清空，
+		   避免每次打开向导都重复挂一个（旧 handler 的闭包指向已销毁的 DOM）。 */
+		var pasteHandler = null;
+		var pasteBound = false;
+		function bindPasteOnce() {
+			if (pasteBound || typeof document === 'undefined') return;
+			pasteBound = true;
+			document.addEventListener('paste', function (e) {
+				if (!pasteHandler) return;
+				var items = e.clipboardData && e.clipboardData.items;
+				if (!items) return;
+				for (var i = 0; i < items.length; i++) {
+					var it = items[i];
+					if (it && it.type && String(it.type).indexOf('image/') === 0) {
+						var f = (typeof it.getAsFile === 'function') ? it.getAsFile() : null;
+						if (f) {
+							e.preventDefault();
+							pasteHandler(f);
+							return;
+						}
+					}
+				}
+			});
+		}
+
+		/* 逐级换尺度再解一次：小码在高倍降采样下会糊掉，尺度太大又慢。
+		 * 两档基本覆盖手机截图与相机原图；都不行就如实判「没识别到」（不抛异常）。 */
+		function decodeQrTry(im) {
+			var sizes = [1000, 2000];
+			var i = 0;
+			function next() {
+				if (i >= sizes.length) return Promise.resolve(null);
+				var max = sizes[i++];
+				return decodeQr(im, max).then(function (v) {
+					return (v != null && v !== '') ? v : next();
+				});
+			}
+			return next();
+		}
+
+		/* 图片录入的统一控件：选文件 / 拖放 / 剪贴板粘贴，三条路都收口到 opts.onText。
+		 * opts.capture=true 时给 input 加 capture='environment'（手机直接调起后置相机），
+		 * 这正是 http 页面无法 getUserMedia 时的替代方案：拍照不需要任何网页权限。 */
+		function buildImagePicker(opts) {
+			opts = opts || {};
+			var tip = E('p', { 'class': 'mt5700-hint' }, opts.tip0 || '选择二维码图片。');
+			var file = E('input', { 'class': 'mt5700-input', 'type': 'file', 'accept': 'image/*' });
+			file.style.width = '100%';
+			if (opts.capture) file.setAttribute('capture', 'environment');
+
+			var zone = E('div', { 'class': 'mt5700-hint' },
+				'也可以把二维码图片拖到这里，或直接粘贴（电脑 Ctrl+V / 手机长按粘贴）');
+			zone.style.border = '1px dashed var(--mt5700-border, #999)';
+			zone.style.padding = '14px';
+			zone.style.textAlign = 'center';
+			zone.style.cursor = 'pointer';
+			zone.style.marginTop = '8px';
+
+			function mark(on) { zone.style.background = on ? 'rgba(127,127,127,.12)' : ''; }
+
+			function pick(f) {
+				if (!f) return;
+				/* 控件可能已被下一次 paintInput 换掉：还挂在文档上才继续，顺手解绑粘贴 */
+				if (!tip.parentNode) { pasteHandler = null; return; }
+				if (f.type && String(f.type).indexOf('image/') !== 0) {
+					tip.textContent = '这不是图片文件（' + f.type + '）。';
+					return;
+				}
+				tip.textContent = '识别中…';
+				fileToImage(f).then(function (im) {
+					return decodeQrTry(im);
+				}).then(function (v) {
+					if (!tip.parentNode) return;
+					if (v == null || v === '') {
+						tip.textContent = '这张图里没识别到二维码：换一张更清晰的（别裁掉四周白边），或改用「粘贴激活码」。';
+						return;
+					}
+					opts.onText(String(v), tip);
+				}).catch(function (e) {
+					if (!tip.parentNode) return;
+					tip.textContent = '识别失败：' + ((e && e.message) || '这个文件打不开');
+				});
+			}
+
+			file.addEventListener('change', function () { pick(file.files && file.files[0]); });
+			zone.addEventListener('click', function () { file.click(); });
+			['dragenter', 'dragover'].forEach(function (ev) {
+				zone.addEventListener(ev, function (e) { e.preventDefault(); mark(true); });
+			});
+			['dragleave', 'dragend'].forEach(function (ev) {
+				zone.addEventListener(ev, function () { mark(false); });
+			});
+			zone.addEventListener('drop', function (e) {
+				e.preventDefault();
+				mark(false);
+				var dt = e.dataTransfer;
+				pick(dt && dt.files && dt.files[0]);
+			});
+			/* 页面级 paste 监听只挂一次（bindPasteOnce），这里只换 handler */
+			pasteHandler = pick;
+
+			var wrap = E('div');
+			wrap.appendChild(Mt5700.formGroup(opts.label || '二维码图片', file,
+				opts.hint || '图片只在本机解码，不上传'));
+			wrap.appendChild(zone);
+			wrap.appendChild(tip);
+			return wrap;
+		}
+
 		function openAddWizard(host) {
 			host.innerHTML = '';
 			var box = E('div', { 'class': 'mt5700-card' });
@@ -308,11 +529,13 @@ return L.view.extend({
 				{ label: '手动填写', value: 'manual' }
 			], mode, function (v) { stopScan(); mode = v; paintInput(); });
 			b.appendChild(seg.el);
-			if (!hasBarcodeDetector()) {
+			if (!hasCamera()) {
 				b.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-					'本浏览器没有二维码识别能力（BarcodeDetector 只在 https 或 localhost 下提供）。'
-					+ '用 https 访问路由器即可启用扫码，或直接粘贴激活码 / 手动填写。'));
+					'识别二维码本身不需要 https（已内置解码器）；但浏览器不允许 http 页面'
+					+ '直接调用摄像头，所以「扫描二维码」在这里会改用相机拍照 —— 手机上点它就'
+					+ '会打开相机，拍完自动识别，效果一样。（想要实时取景扫码，请用 https 访问路由器。）'));
 			}
+			bindPasteOnce();
 
 			var inputBox = E('div', { 'class': 'mt5700-mt-sm' });
 			b.appendChild(inputBox);
@@ -375,6 +598,7 @@ return L.view.extend({
 			}
 
 			function stopScan() {
+				pasteHandler = null;   /* 关向导 / 换录入方式时解绑，避免旧 handler 指向已销毁的 DOM */
 				if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
 				if (stream) {
 					try {
@@ -385,11 +609,38 @@ return L.view.extend({
 			}
 			cleanups.push(stopScan);
 
+			/* 识别结果落地：摄像头 / 拍照 / 图片三条路都过一遍 parseActivationCode；
+			 * 不合法的也填进输入框让用户核对，而不是悄悄丢掉（P08：不许假成功也不许无反馈）。 */
+			function applyQrText(text, tip) {
+				if (!codeInput) return;
+				var t = String(text == null ? '' : text).trim();
+				if (!t) { tip.textContent = '识别结果为空，请重试或手动填写。'; return; }
+				codeInput.value = t;
+				var p = Euicc.parseActivationCode(t);
+				tip.textContent = p.ok
+					? '已识别，确认无误后点「开始下载」。'
+					: '识别到了内容，但不是有效的激活码（' + p.error + '）；已填入下方输入框，请核对或手动修正。';
+				showPreview();
+			}
+
+			/* 剪贴板里粘进来的是图片（而不是文字）时，直接切到「上传图片」——
+			 * 用户本来就是想扫这张图，不该让他先手动切模式再粘一次。 */
+			function pasteImageSwitch(f) {
+				if (!f) return;
+				stopScan();
+				mode = 'image';
+				seg.setValue('image');
+				paintInput();
+				var h = pasteHandler;
+				if (h && h !== pasteImageSwitch) h(f);
+			}
+
 			function paintInput() {
 				inputBox.innerHTML = '';
 				preview.innerHTML = '';
 				ccBox.innerHTML = '';
 				ccInput = null;
+				pasteHandler = null;
 
 				if (mode === 'code') {
 					codeInput = E('textarea', {
@@ -400,13 +651,28 @@ return L.view.extend({
 					codeInput.addEventListener('input', showPreview);
 					inputBox.appendChild(Mt5700.formGroup('激活码', codeInput,
 						'运营商给的二维码扫出来就是这串；也可以直接粘贴。'));
+					pasteHandler = pasteImageSwitch;
 					return;
 				}
 
 				if (mode === 'scan') {
-					if (!hasBarcodeDetector()) {
-						inputBox.appendChild(E('div', { 'class': 'mt5700-notice-warning' },
-							'当前环境不支持扫码，请改用「粘贴激活码」或「手动填写」。'));
+					if (!hasCamera()) {
+						/* http 页面拿不到 getUserMedia（浏览器只给安全上下文），但「拍照」不需要
+						 * 任何网页权限：<input capture> 由系统相机接管，拍完直接回页面解码，
+						 * 手机上与实时取景扫码体验一致。 */
+						inputBox.appendChild(E('p', { 'class': 'mt5700-hint' },
+							'当前环境不能实时取景（浏览器只允许 https 页面直接开摄像头）。'
+							+ '已改为「拍照识别」：点下面的按钮调起系统相机，拍完自动识别。'));
+						codeInput = Mt5700.input('text', '识别结果');
+						codeInput.addEventListener('input', showPreview);
+						inputBox.appendChild(buildImagePicker({
+							label: '拍照 / 选择二维码',
+							capture: true,
+							hint: '会调起系统相机（不是网页取景），拍完自动识别',
+							tip0: '对准运营商给的二维码拍照。',
+							onText: function (t, tip) { applyQrText(t, tip); }
+						}));
+						inputBox.appendChild(Mt5700.formGroup('识别结果', codeInput, '也可手动修正'));
 						return;
 					}
 					var video = E('video');
@@ -425,17 +691,15 @@ return L.view.extend({
 							stream = s;
 							video.srcObject = s;
 							video.play();
-							var det = new window.BarcodeDetector({ formats: ['qr_code'] });
 							tip.textContent = '把运营商的二维码对准摄像头…';
 							(function loop() {
 								scanTimer = setTimeout(function () {
 									if (!stream) return;
-									det.detect(video).then(function (codes) {
-										if (codes && codes.length) {
-											codeInput.value = String(codes[0].rawValue || '');
-											tip.textContent = '已识别，确认无误后点「开始下载」。';
+									/* 逐帧解码走统一入口：原生 BarcodeDetector 可用就用，否则内置 jsQR */
+									decodeQr(video, 640).then(function (v) {
+										if (v != null && v !== '') {
+											applyQrText(v, tip);
 											stopScan();
-											showPreview();
 											return;
 										}
 										if (stream) loop();
@@ -450,52 +714,20 @@ return L.view.extend({
 				}
 
 				if (mode === 'image') {
-					if (!hasBarcodeDetector()) {
-						inputBox.appendChild(E('div', { 'class': 'mt5700-notice-warning' },
-							'当前环境不支持识别二维码图片，请改用「粘贴激活码」或「手动填写」。'));
-						return;
-					}
-					var file = E('input', { 'class': 'mt5700-input', 'type': 'file', 'accept': 'image/*' });
-					var tip = E('p', { 'class': 'mt5700-hint' }, '选择运营商给的二维码截图。');
-					inputBox.appendChild(Mt5700.formGroup('二维码图片', file, '图片只在本机解码，不上传'));
 					codeInput = Mt5700.input('text', '识别结果');
 					codeInput.addEventListener('input', showPreview);
+					inputBox.appendChild(buildImagePicker({
+						label: '二维码图片',
+						hint: '图片只在本机解码，不上传',
+						tip0: '选择运营商给的二维码截图。',
+						onText: function (t, tip) { applyQrText(t, tip); }
+					}));
 					inputBox.appendChild(Mt5700.formGroup('识别结果', codeInput, '也可手动修正'));
-					file.addEventListener('change', function () {
-						if (!file.files || !file.files[0]) return;
-						var det = new window.BarcodeDetector({ formats: ['qr_code'] });
-						tip.textContent = '识别中…';
-						/* 优先用 ImageBitmap（解码更稳），失败了退回 <img> */
-						var bitmap = null;
-						Promise.resolve()
-							.then(function () {
-								if (typeof createImageBitmap === 'function') {
-									return createImageBitmap(file.files[0]).then(function (bm) {
-										bitmap = bm;
-										return bm;
-									});
-								}
-								return null;
-							})
-							.then(function (src) { return det.detect(src || file.files[0]); })
-							.then(function (codes) {
-								if (bitmap && bitmap.close) bitmap.close();
-								if (!codes || !codes.length) {
-									tip.textContent = '这张图里没识别到二维码，换一张或改用「粘贴激活码」。';
-									return;
-								}
-								codeInput.value = String(codes[0].rawValue || '');
-								tip.textContent = '已识别，确认无误后点「开始下载」。';
-								showPreview();
-							}).catch(function (e) {
-								tip.textContent = '识别失败：' + ((e && e.message) || '不支持的图片');
-							});
-					});
-					inputBox.appendChild(tip);
 					return;
 				}
 
 				/* manual */
+				pasteHandler = pasteImageSwitch;
 				smdpInput = Mt5700.input('text', 'smdp.example.com');
 				midInput = Mt5700.input('text', 'MATCHING-ID');
 				oidInput = Mt5700.input('text', '可留空');

@@ -5,6 +5,41 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.19] - 2026-09-19
+
+### Fixed — eSIM 二维码录入：图片与扫码在 http 下彻底可用
+反馈「eSIM 不能传图片、不能扫码」。根因不是没做 UI，而是**两条录入路径被同一个前置条件
+卡死**：识别只依赖 `window.BarcodeDetector`，而该 API **只在安全上下文（https / localhost）
+提供** —— 用 `http://192.168.x.x` 打开路由器时它是 `undefined`，于是「扫描二维码」直接显示
+「当前环境不支持扫码」、「上传图片」同样不可用，功能等于没有。
+
+- **内置纯 JS 解码器 jsQR 1.4.0**（`resources/at-webserver/jsqr.js`，UMD，Apache-2.0，
+  含许可全文）。把「能不能识别」与「用哪种实现」解耦：原生 `BarcodeDetector` 可用就用原生
+  （硬件加速），否则一律退回 jsQR —— **任何访问方式都能识别**
+- 加载方式：**不走** LuCI 的 `require`（它要求每个模块 `return` 一个 Class，而 jsQR 是只挂
+  全局的第三方 UMD 包，硬塞会破坏加载契约），改为用户真的去用「上传图片 / 拍照」时才按需
+  `<script>` 注入，平时这 250KB 不下载，不影响任何页面
+- 「上传图片」支持 **选择 / 拖放 / 剪贴板粘贴** 三条路，收口到同一个解码入口；
+  解码失败会分档提示（不是图片 / 这张图里没二维码 / 文件打不开），不再只有一句「识别失败」
+- 多尺度重试（1000px → 2000px）：小码在高倍降采样下会糊掉，只压一档容易漏解
+
+### Added — 无摄像头时「扫码」降级为拍照识别
+`getUserMedia` 与 `BarcodeDetector` 同受安全上下文限制，http 下拿不到。原先这里是死路，
+现改为：`<input type=file capture="environment">` 由**系统相机**接管（不需要任何网页摄像头
+权限），拍完回页面解码 —— 手机上与实时取景扫码体验一致，桌面上则退化为选图。
+
+- 识别结果一律过 `Euicc.parseActivationCode`：不合法的也填回输入框并说明原因，
+  不让用户拿到一串「看着像激活码其实不合格」的东西（P08：不许假成功也不许无反馈）
+- 在「粘贴激活码」里粘进来的是图片时，自动切到「上传图片」并直接识别
+- 切模式 / 关向导时解绑粘贴监听，避免旧 handler 指向已销毁的 DOM
+
+### Tests
+新增 `tests/esim-qr-decode-contract.test.js`（31 项）：UMD 在无 `module`/`exports`/`define`
+的浏览器环境里必须挂上全局 `jsQR`；内嵌真实形态的 29×29 激活码点阵（生成方式见
+`.workbuddy/tmp/gen_qr_fixture.js`，测试本身零外部依赖）必须解出原文；空白 / 噪声图不得误判；
+以及六组**反向验证**（旧实现的死路文案、只剩原生实现、写成 `require`、路径写错、
+只有 file input、拿掉 `capture`、跳过校验 —— 任何一种退化都必须判红）。
+
 ## [2.3.18] - 2026-09-19
 
 ### Fixed — eSIM 读到不信息（真机实测定位）
