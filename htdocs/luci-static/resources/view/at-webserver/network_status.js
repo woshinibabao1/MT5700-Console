@@ -424,10 +424,9 @@ return L.view.extend({
 			{ id: 'L3', name: '端到端连通', short: '连通' }
 		];
 
-		/* ★ 2026-09-19（P05）：明细折叠/当前层用闭包变量，不塞进 state.tools.diag。
-		   理由：① runDiagnosis 开头会整块重置 t（重置 atSteps/items/facts），状态放进去会被清掉；
-		        ② 不能把展开状态写进 state.tools.diag —— tests/connection-tools-contract.test.js 用 !/t\.expanded/ 钉死。 */
-		var diagDetailOpen = false;
+		/* ★ 当前层用闭包变量，不塞进 state.tools.diag：runDiagnosis 开头会整块重置 t
+		   （atSteps/items/facts），状态放进去会被清掉。
+		   ★ 2026-09-19：明细恒为展开态 —— 折叠/展开那套开关（入口按钮）已整体删除。 */
 		var diagLayer = 'L1';
 
 		function renderTools() {
@@ -993,37 +992,13 @@ return L.view.extend({
 			var t = state.tools.diag;
 			var items = diagItems();
 
-			/* ★ 2026-09-19（P04/P05/P07，R01 修订）：默认折叠成一行入口，不占右列额外高度。
-			   折叠态若有 factsErr 只用一行高对比提示（.mt5700-error），不放大块 empty ——
-			   否则会复现用户否决的「多出来一大块」。状态用闭包变量，不放 state.tools.diag。 */
-			if (!diagDetailOpen) {
-				if (t.factsErr) {
-					diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-error' },
-						'系统侧事实没取到（' + t.factsErr + '）：需升级 luci-app-mt5700，模组层 L1 不受影响。'));
-				}
-			/* mt5700-diag-entry：宽屏下这块预留区会被 flex 拉满剩余高度，纵向居中显示 ——
-			   读起来是「点这里展开明细」的面板，而不是固化高度后一片来路不明的空白。 */
-			var entry = toolBlock(t.ran ? '明细' : '明细 · 未排查',
-				Mt5700.ghostButton('展开明细', function () {
-					diagDetailOpen = true;
-					renderTools();
-				}));
-			entry.classList.add('mt5700-diag-entry');
-			diagDetailBody.appendChild(entry);
-			/* 收起态也留一行说明：卡片高度被右列拉平后下方会有富余空间，
-			   有这行字就不是一个突兀的空白（也顺带讲清明细不会另占区块）。 */
-			diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-				'共 ' + items.length + ' 项；展开后按 L1 / L2 / L3 分段，明细在本卡内滚动，不再占页面其它位置。'));
-			return;
-			}
-
-			/* 展开态：factsErr 才放大块 empty 提示（R01：大块只在展开态出现） */
+			/* factsErr：系统侧事实没取到时给块级提示 —— 模组层（L1）的检查不受影响。 */
 			if (t.factsErr) {
 				diagDetailBody.appendChild(Mt5700.empty('系统侧事实没取到：' + t.factsErr
 					+ ' —— 需要升级设备端的 luci-app-mt5700。模组层（L1）的检查不受影响。'));
 			}
 
-			/* 展开态：三层分段切换（复用现成 Mt5700.segmented + DIAG_LAYERS，P06；label 用「ID + 短名」省宽度）。不再插 {group} 分组行。 */
+			/* 三层分段切换（复用现成 Mt5700.segmented + DIAG_LAYERS，label 用「ID + 短名」省宽度）。不再插 {group} 分组行。 */
 			var head = E('div', { 'class': 'mt5700-toolbar' });
 			head.appendChild(Mt5700.segmented(DIAG_LAYERS.map(function (L) {
 				return { label: L.id + ' ' + L.short, value: L.id };
@@ -1031,10 +1006,6 @@ return L.view.extend({
 				diagLayer = v;
 				renderTools();
 			}).el);
-			head.appendChild(Mt5700.ghostButton('收起明细', function () {
-				diagDetailOpen = false;
-				renderTools();
-			}));
 			diagDetailBody.appendChild(head);
 
 			var list = items.filter(function (i) { return i.layer === diagLayer; });
@@ -1105,7 +1076,7 @@ return L.view.extend({
 
 			box.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
 				'共 ' + items.length + ' 项：L1 走 AT 只读命令，L2/L3 走后端只读采集。'
-				+ '只给事实与建议命令，不自动改任何配置。明细在本卡内，默认折叠，点「展开明细」查看。'));
+				+ '只给事实与建议命令，不自动改任何配置。明细就在本卡内，按 L1 / L2 / L3 分段查看。'));
 			return box;
 		}
 
@@ -1176,10 +1147,9 @@ return L.view.extend({
 						level: r.level || 'warn', text: r.text || '（无数据）', fix: r.fix || ''
 					};
 				});
-			/* ★ 2026-09-19（P04，Reviewer 修正）：跑完无条件定位首个问题层；
-			   无问题项则保持原层与展开状态不变；折叠态且有问题项则自动展开。
-			   状态用闭包变量，不放 state.tools.diag（开头会被整块重置）。 */
-				var _prob = [];
+			/* ★ 2026-09-19（P04，Reviewer 修正）：跑完无条件定位首个问题层，让用户一睁眼就落在问题上；
+			   无问题项则保持当前层不变（不再有「展开/折叠」要管 —— 明细恒展开）。 */
+			var _prob = [];
 				(t.atSteps || []).forEach(function (s) {
 					if (s.level === 'bad' || s.level === 'warn') _prob.push({ name: s.name, layer: 'L1' });
 				});
@@ -1188,7 +1158,6 @@ return L.view.extend({
 				});
 				if (_prob.length) {
 					diagLayer = _prob[0].layer || 'L1';
-					diagDetailOpen = true; /* 折叠态遇问题项 → 展开，让其可见 */
 				}
 				t.busy = false; t.at = Date.now(); t.ran = true;
 				if (!disposed) renderTools();

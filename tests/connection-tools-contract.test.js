@@ -251,24 +251,28 @@ ok('★ 按钮恒定叫「一键排查」（不再分「开始排查」/「重�
 ok('★ 排查结论用 badge 进标题行（不用块级 .mt5700-diag-summary，它会把行撑高）',
 	/box\.firstChild\.insertBefore\(Mt5700\.badge\(summaryText,/.test(nsSrc)
 	&& !/mt5700-diag-summary is-' \+ lv/.test(nsSrc));
-/* 2026-09-19 用户口径变更：允许卡内折叠/分段/滚动，但禁止新增独立卡片。
-   旧口径（收起态/展开态都固定平铺、不靠按钮切换）已作废。新口径守卫：
+/* 2026-09-19 用户口径变更：明细恒为展开态（第二轮）——「收起明细 / 展开明细」那对入口
+   整体删除，进页面直接看得见当前层的明细；只保留 L1/L2/L3 分段切换。
+   新口径守卫：
    · 表字面量保留（项目/结论/说明三列原样）
    · 不把折叠状态塞进 state.tools.diag（无 t.expanded，会被 runDiagnosis 重置）
-   · 收起态有「展开明细」入口，展开后三层分段切换（Mt5700.segmented + DIAG_LAYERS）
+   · 三层分段切换仍在（Mt5700.segmented + DIAG_LAYERS）
+   · ★ 源码里不得再出现折叠开关（diagDetailOpen）与两个入口按钮
    · 严禁再新建「断网排查明细」独立卡片（P03 已删除，明细容器挂在 diagCard._body） */
 ok('★ 明细表字面量保留（项目/结论/说明三列原样）',
 	/Mt5700\.table\(\['项目', '结论', '说明'\]/.test(nsSrc));
 ok('★ 不把折叠状态塞进 state.tools.diag（无 t.expanded，避免被 runDiagnosis 整块重置）',
 	!/t\.expanded/.test(nsSrc));
-ok('★ 收起态有「展开明细」入口，展开后三层分段切换（复用现成 Mt5700.segmented + DIAG_LAYERS）',
-	/Mt5700\.ghostButton\('展开明细'/.test(nsSrc)
-	&& /Mt5700\.segmented\(DIAG_LAYERS/.test(nsSrc)
-	&& /diagDetailOpen/.test(nsSrc));
-/* ★ 2026-09-19 口径变更：钉死「默认折叠」这个核心口径——把 var diagDetailOpen 初值改成 true 必须让这条红。
-   光钉「存在 diagDetailOpen」不够（旧断言改成 true 仍全绿），所以单独钉初值 false。 */
-ok('★ 默认折叠（核心口径）：diagDetailOpen 初值为 false，未排查/无问题时收起',
-	/var diagDetailOpen = false;/.test(nsSrc));
+ok('★ 明细恒展开：三层分段切换仍在（复用现成 Mt5700.segmented + DIAG_LAYERS）',
+	/Mt5700\.segmented\(DIAG_LAYERS/.test(nsSrc)
+	&& /var diagLayer = 'L1';/.test(nsSrc));
+/* ★ 2026-09-19 口径变更（核心口径）：钉死「默认展开、没有收起功能」。
+   光钉「不存在收起按钮」不够（把初值改回 false 也能全绿），所以标识符与按钮一并钉死。 */
+ok('★ 默认展开且没有收起功能（核心口径）：无折叠开关 diagDetailOpen，也无两个入口按钮',
+	!/diagDetailOpen/.test(nsSrc)
+	&& !/Mt5700\.ghostButton\('展开明细'/.test(nsSrc)
+	&& !/Mt5700\.ghostButton\('收起明细'/.test(nsSrc)
+	&& !/mt5700-diag-entry/.test(nsSrc));
 ok('★ 不新增任何独立明细卡片（明细容器挂在 diagCard._body 内）',
 	!/Mt5700\.card\('断网排查明细'/.test(nsSrc)
 	&& /diagCard\._body\.appendChild\(diagDetailBody\)/.test(nsSrc));
@@ -297,9 +301,10 @@ ok('★ ③ 表格区 flex 吸收 + 宽屏解除 max-height 封顶（否则 grow
 	&& /\.mt5700-diag-detail \.mt5700-diag-scroll \{ max-height: none; \}/.test(cssSrc));
 ok('★ ④ 表格区仍能滚动（内容多时不把卡片撑高）',
 	/\.mt5700-diag-detail \.mt5700-diag-scroll \{[\s\S]*?overflow-y: auto;/.test(cssSrc));
-ok('★ ⑤ 收起态入口撑满预留区并居中（固化后那块空间必然存在，不能看着像空白）',
-	/mt5700-diag-entry/.test(nsSrc)
-	&& /\.mt5700-diag-detail > \.mt5700-diag-entry \{[\s\S]*?align-items: center;/.test(cssSrc));
+/* ★ 明细已恒展开，不再有「收起态入口」这节吸收链；富余高度统一交给滚动表格
+   （.mt5700-diag-scroll）吸收，因此 CSS 里也不该再留 .mt5700-diag-entry。 */
+ok('★ 收起态入口已彻底移除（CSS 里也不留 .mt5700-diag-entry）',
+	!/mt5700-diag-entry/.test(cssSrc));
 ok('★ 四档结论都有对应文案（含新增的 idle 待检查）',
 	/var DIAG_VERDICT = \{ ok: '通过', warn: '存疑', bad: '未通过', idle: '待检查' \}/.test(nsSrc));
 ok('★ 待检查有 CSS 配色（不写会掉成继承色，暗色下和「通过」分不出来）',
@@ -327,9 +332,8 @@ ok('★ 连接工具里不再有独立的清零块（已迁走）',
 	&& !/buildFlowClearBlock/.test(nsSrc));
 ok('★ 卡头「实时监测」的文字没有被 E() 静默丢掉（E 只挂第 3 参）',
 	/var rateLabel = E\('label', \{\}, rateChk\);[\s\S]{0,160}createTextNode\(' 实时监测'\)/.test(nsSrc));
-/* 2026-09-19 用户口径变更：允许卡内折叠/分段/滚动（见上方守卫）。
-   此处只钉死旧代码里误用的「展开步骤/收起步骤」向导式字眼不得重现
-   （旧版曾是「逐步展开/收起」的向导式交互，已被否决）。本卡用「展开明细/收起明细」入口。 */
+/* 2026-09-19：卡内分段/滚动保留（见上方守卫）。此处只钉死旧代码里误用的
+   「展开步骤/收起步骤」向导式字眼不得重现（旧版曾是「逐步展开/收起」的向导式交互，已被否决）。 */
 ok('自检明细不再用「展开步骤/收起步骤」向导式字眼（旧口径已作废）',
 	!/展开步骤/.test(nsSrc) && !/收起步骤/.test(nsSrc));
 ok('★ 排查只给建议命令，没有自动修复按钮（续约/重启服务本身就会断网）',

@@ -2991,14 +2991,7 @@
   /* 明细区内除滚动表格外的元素（分段控件 / 底部说明）保持自身高度，
      既不压缩也不拉伸 */
   .mt5700-diag-detail > * { flex: 0 0 auto; }
-  /* 收起态那一行入口：把预留区整块吃掉并纵向居中，读起来是「点这里展开明细」
-     的面板，而不是一片来路不明的空白（固化高度后这块空间必然存在）。 */
-  .mt5700-diag-detail > .mt5700-diag-entry {
-    flex: 1 1 auto;
-    display: flex;
-    align-items: center;
-    min-height: 0;
-  }
+  /* 明细区纵向 flex：只有滚动表格吸收富余高度（明细恒展开，不再有收起态入口）。 */
   .mt5700-diag-detail > .mt5700-diag-scroll { flex: 1 1 auto; }
   /* 富余高度既然交给 flex 分配，就不能再拿 max-height 封顶 ——
      否则 grow 出来的那一段被 340px 卡住，多余部分退回成卡内空白。
