@@ -15,7 +15,7 @@
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量（卡头带「实时监测」开关与「清零」）
  *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
- *   ⑥ 断网排查     三层体检（L1 模组 / L2 系统 / L3 端到端），进页面自动跑一次的只读查询
+ *   ⑥ 断网排查     三层体检（L1 模组 / L2 系统 / L3 端到端），点「一键排查」才跑的只读查询
  * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
  * [连接状态 | 右列（SIM 与设备 → 连接质量）]。
  *
@@ -91,7 +91,7 @@ return L.view.extend({
 		devCard._body.appendChild(devBody);
 
 		/* ⑥ 断网排查：这一页别处全是读数，这里放**能做事的工具**。
-		 *   · 右列这张卡同时是「总控 + 明细」：开始排查按钮 + 一句话结论 + 三层通过计数，
+		 *   · 右列这张卡同时是「总控 + 明细」：一键排查按钮 + 一句话结论 + 三层通过计数，
 		 *     明细默认折叠成一行入口，展开后在**卡内**分段切换（2026-09-19 用户口径：
 		 *     不许再单独占一个页面区块）
 		 *   · 逐项明细铺在页面底部那张**满宽**卡里（33 项，窄栏挤不下）
@@ -265,6 +265,26 @@ return L.view.extend({
 		 * 温度数据由 getTemp（慢档 30s，AT^CHIPTEMP? 只取一次）写入 state.temps，
 		 * 两路数据到齐时都走同一个 renderDevCard，不会互相覆盖。
 		 */
+		/* ★ 5G 模块温度的**唯一取法**：12 路传感器取最高（AT^CHIPTEMP?，单位 0.1℃）。
+		   2026-09-19：排查项「模组温度」直接采用「SIM 与设备」卡的「5G模块温度」，
+		   两处必须同源于这一个函数 —— 否则会出现「卡上显示 48℃、排查里却说没读到」
+		   这种自相矛盾。
+		   0 视为「未上报」，既不参与取 max 也不进明细（实测部分传感器恒报 0）。
+		   传感器名不对外：名字源在 parse.js 按手册修正前长期错标，把名字写进 UI
+		   等于把历史错误固化（会审 R01）。
+		   返回 { max: 最高温|null, vals: 各路有效读数 }。
+		   ★ temps 可传：排查项的 eval(f, st) 是纯函数、用传入的 st 判定（测试靠这点
+		   注入温度），不传时取页面当前的 state.temps。 */
+		function maxModuleTemp(temps) {
+			var t = temps || state.temps || {};
+			var vals = [];
+			for (var k in t) {
+				var n = Number(t[k]);
+				if (n > 0) vals.push(n);
+			}
+			return { max: vals.length ? Math.max.apply(null, vals) : null, vals: vals };
+		}
+
 		var devState = null;
 
 		function renderDevCard() {
@@ -306,20 +326,16 @@ return L.view.extend({
 				['模块 / 固件', (st.model || '—') + ' / ' + (st.fw || '—')]
 			];
 
-			/* 5G 模块温度：12 路传感器取最高（AT^CHIPTEMP?，单位 0.1℃）。
+			/* 5G 模块温度：与排查项「模组温度」同源，都走 maxModuleTemp()（12 路取最高）。
 			   明细挂 title，但**只给数值、不给传感器名** —— 名字源在 parse.js
 			   按手册修正前长期错标（peri1/peri2/ap1 被标成 ap1/ap2/modem1），
 			   现在把名字写进 UI 等于把历史错误固化；等名字稳定后再加不迟（会审 R01）。
-			   0 视为「未上报」，既不参与取 max 也不进明细。 */
-			var t = state.temps || {};
-			var tempVals = Object.keys(t)
-				.map(function (k) { return Number(t[k]) || 0; })
-				.filter(function (v) { return v > 0; });
-			if (tempVals.length) {
-				var maxTemp = Math.max.apply(null, tempVals);
+			   温度属慢档 30s 才取一次，刚进页面会短暂显示「—」，排查项同样按「未读到」处理。 */
+			var mt = maxModuleTemp();
+			if (mt.max != null) {
 				rows.push(['5G模块温度', E('span',
-					{ title: '各传感器明细（℃）：' + tempVals.join(' / ') },
-					maxTemp + ' ℃')]);
+					{ title: '各传感器明细（℃）：' + mt.vals.join(' / ') },
+					mt.max + ' ℃')]);
 			} else {
 				rows.push(['5G模块温度', '—']);
 			}
@@ -381,7 +397,7 @@ return L.view.extend({
 		 *   守卫：tests/connection-tools-contract.test.js / tests/diag-contract.test.js
 		 */
 
-		/* ★ 页面已卸载标记。进页面自动跑的排查链一共十几条只读查询 + 一次系统侧采集，
+		/* ★ 页面已卸载标记。点「一键排查」发起的链一共十几条只读查询 + 一次系统侧采集，
 		   用户反复进出时，前一次的链还在独占的 AT 通道上排队（2.2.1 事故的形态：
 		   虽是只读、不留下常驻状态，但排队本身会让整页读数变慢）。
 		   _dispose 里置 true，链内每一步开头检查，让已发起的链尽快自然终止。 */
@@ -616,19 +632,29 @@ return L.view.extend({
 					}
 				},
 				{
+					/* ★ 直接采用「SIM 与设备」卡的「5G模块温度」：同一个 maxModuleTemp()、
+					   同一份 state.temps，两处永远一致（2026-09-19 用户口径）。
+					   ★ 没读到时是「待检查」而不是「存疑」：温度走慢档 30s 才取一次，
+					   刚进页面就点排查会暂时没有 —— 那是没取到，不是有故障，
+					   挂「存疑」会让人以为温度出了问题。它也不计入通过/存疑的计数。 */
 					layer: 'L1', name: '模组温度', eval: function (f, st) {
-						var v = [];
-						for (var k in (st.temps || {})) {
-							var n = Number(st.temps[k]);
-							if (n > 0) v.push(n);
+						var mt = maxModuleTemp(st && st.temps);
+						if (mt.max == null) {
+							return {
+								level: 'idle',
+								text: '没读到温度 —— 与「SIM 与设备」卡的「5G模块温度」同源（12 路取最高，慢档 30 秒才取一次）；那边显示「—」时这里同样是待检查'
+							};
 						}
-						if (!v.length) return { level: 'warn', text: '还没读到温度' };
-						var mx = Math.max.apply(null, v);
+						var mx = mt.max;
 						if (mx >= 85) {
-							return { level: 'bad', text: '最高 ' + mx + ' ℃ —— 过热会降速甚至掉网', fix: '改善通风 / 清灰；H5000M 可调风扇转速策略' };
+							return {
+								level: 'bad',
+								text: '最高 ' + mx + ' ℃（同「SIM 与设备」卡）—— 过热会降速甚至掉网',
+								fix: '改善通风 / 清灰；H5000M 可调风扇转速策略'
+							};
 						}
-						if (mx >= 70) return { level: 'warn', text: '最高 ' + mx + ' ℃，偏高' };
-						return { level: 'ok', text: '最高 ' + mx + ' ℃' };
+						if (mx >= 70) return { level: 'warn', text: '最高 ' + mx + ' ℃（同「SIM 与设备」卡），偏高' };
+						return { level: 'ok', text: '最高 ' + mx + ' ℃（同「SIM 与设备」卡）' };
 					}
 				},
 
@@ -1029,7 +1055,7 @@ return L.view.extend({
 			/* R05/R06：底部说明 —— 未排查时引导先排查，已排查时给「本层 N / 共 N」避免「丢了 21 项」的错觉 */
 			if (!t.ran) {
 				diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-					'尚未排查 —— 点上方「开始排查」后，这里才会出各层的结论与建议命令。'));
+					'尚未排查 —— 点上方「一键排查」后，这里才会出各层的结论与建议命令。'));
 			} else {
 				diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
 					'本层 ' + list.length + ' 项 / 共 ' + items.length + ' 项。判定标准与阈值写在本页源码的注册表里；'
@@ -1040,7 +1066,9 @@ return L.view.extend({
 		/* ---------- 总控块（右列卡片） ---------- */
 		function buildDiagBlock() {
 			var t = state.tools.diag;
-			var btn = Mt5700.ghostButton(t.busy ? '排查中…' : (t.ran ? '重新排查' : '开始排查'), runDiagnosis);
+			/* ★ 2026-09-19：按钮恒定叫「一键排查」。排查改成只由点击触发后，
+			   不再有「首次 / 重新」之分 —— 跑完再点就是再跑一次。 */
+			var btn = Mt5700.ghostButton(t.busy ? '排查中…' : '一键排查', runDiagnosis);
 			var box = toolBlock('三层体检', btn);
 
 			var items = diagItems();
@@ -1061,7 +1089,9 @@ return L.view.extend({
 			var chips = E('div', { 'class': 'mt5700-diag-chips' });
 			DIAG_LAYERS.forEach(function (L) {
 				var list = items.filter(function (i) { return i.layer === L.id; });
-				var done = list.filter(function (i) { return i.done; });
+				/* ★ 计数排除 idle：已排查但没取到数据的项（如温度没读到）是「待检查」，
+				   既不该算通过也不该算存疑 —— 混进分母会让「N/N 全通过」掺假。 */
+				var done = list.filter(function (i) { return i.done && i.level !== 'idle'; });
 				var b = 0, w = 0;
 				done.forEach(function (i) {
 					if (i.level === 'bad') b++;
@@ -1088,10 +1118,12 @@ return L.view.extend({
 		 * ★ 为什么 sysdiag 放在 AT 之后：它内部有 3 次 ICMP + 1 次 DNS + 1 次 TCP 握手，
 		 *   最坏 15 秒；先让 AT 这条独占通道跑完，免得 rpcd 那边慢下来拖住模组查询。
 		 * ★ 全程不写任何配置、不下发任何写命令（用户 2026-09-19 明确只要诊断）。
+		 * ★ 只在用户点「一键排查」时触发（v2.3.15）：这条链要占住独占的 AT 通道十几秒，
+		 *   自动跑会和页面轮询、用户手动 AT 抢通道 —— 项目对"持续下发 AT"早有定论。
 		 */
 		function runDiagnosis() {
 			var t = state.tools.diag;
-			/* ★ 必须返回 Promise：入口是进页面自动跑的 runDiagnosis()，
+			/* ★ 必须返回 Promise：按钮回调里如果哪天变成 .then(...) 链，
 			   busy 时 return undefined 会让调用方抛 TypeError，被吞进没人 catch 的
 			   rejected promise —— 表现为「排查静默不跑，页面上没有任何提示」。 */
 			if (t.busy) return Promise.resolve();
@@ -2544,10 +2576,13 @@ return L.view.extend({
 			}
 		}).then(function () {
 			refreshAll();
-			/* ★ 排查进页面自动跑一次（与旧版自检一致）—— 用户要的是"打开页面就知道哪里不通"，
-			   不能要求先点按钮才知道。全程只读、无副作用，不会在模组里留下任何状态。
-			   （2026-09-19：原先排在它前面的 ADC 管脚电压已整块下线，现在只剩这一条链。） */
-			runDiagnosis().catch(function () { /* runDiagnosis 内部已兜错 */ });
+			/* ★ 2026-09-19：排查**不再进页面自动跑**，只在用户点「一键排查」时才走。
+			   这条链是 9 条 AT + 一次系统侧采集（后端含 3 次 ICMP / DNS / TCP 握手，
+			   最坏 15 秒），要占住独占的 AT 通道十几秒；而页面本身有快档与慢档轮询，
+			   每次进页面都插一杠子，等于让整页读数在头十几秒里变慢，也把用户手动发的
+			   AT（短信 / 终端 / 拨号）挤到后面排队。用户口径：只有我按才排查。
+			   （自动跑时代的两个前置项已先后下线：ADC 管脚电压 v2.3.13、本链 v2.3.15。）
+			   未排查时明细区显示引导文案，不会让人误以为已经查过。 */
 		});
 
 		self._dispose = function () {

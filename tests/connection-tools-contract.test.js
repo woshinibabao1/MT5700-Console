@@ -75,8 +75,8 @@ ok('★ parse.js 不再提供 parseAdcValue（不留死代码）', typeof Parse.
 ok('★ 页面不再下发 AT^ADCREADEX', !/ADCREADEX/.test(nsSrc));
 ok('★ 页面不再有 ADC_PIN_IDS / buildAdcBlock / readAdcPins',
 	!/ADC_PIN_IDS/.test(nsSrc) && !/buildAdcBlock/.test(nsSrc) && !/readAdcPins/.test(nsSrc));
-ok('★ 排查不再挂在 ADC 链之后（进页面直接跑 runDiagnosis）',
-	/runDiagnosis\(\)\.catch/.test(nsSrc) && !/readAdcPins\(\)\.then/.test(nsSrc));
+ok('★ 排查不再挂在 ADC 链之后（已无任何自动入口，见第 4 节「不进页面自动跑」）',
+	!/readAdcPins\(\)\.then/.test(nsSrc));
 
 /* ---------- 2. ^REJINFO（手册 13.14，解析器留在 parse.js，UI 在 network_settings.js） ---------- */
 
@@ -238,7 +238,16 @@ ok('★ 本卡没有任何周期上报开关（无 SRV_LISTEN_MS / 无订阅回�
 ok('★ 自检那步指路到「网络设置 → 网络拒绝」',
 	/网络设置 → 网络拒绝/.test(nsSrc));
 
-ok('★ 排查进页面自动跑一次（不必先点按钮）', /\n\t\t\trunDiagnosis\(\)\.catch/.test(nsSrc));
+/* ★ 2026-09-19 v2.3.15 用户口径：排查**不主动跑**，只有点按钮才跑。
+   理由：这条链是 9 条 AT + 一次系统侧采集（最坏 15 秒），要占住独占的 AT 通道
+   十几秒；进页面就跑会和页面轮询、用户手动发的 AT（短信/终端/拨号）抢通道。
+   钉法：源码里不许出现任何"自动发起排查"的调用（runDiagnosis() 只应出现在按钮回调里，
+   而按钮回调是传引用 `runDiagnosis` 不带括号），且按钮文案恒为「一键排查」。 */
+ok('★ 排查不进页面自动跑（源码无 runDiagnosis() 形式的自动调用）',
+	!/runDiagnosis\(\)\.catch/.test(nsSrc) && !/runDiagnosis\(\)\.then/.test(nsSrc));
+ok('★ 按钮恒定叫「一键排查」（不再分「开始排查」/「重新排查」）',
+	/Mt5700\.ghostButton\(t\.busy \? '排查中…' : '一键排查', runDiagnosis\)/.test(nsSrc)
+	&& !/'开始排查'/.test(nsSrc) && !/'重新排查'/.test(nsSrc));
 ok('★ 排查结论用 badge 进标题行（不用块级 .mt5700-diag-summary，它会把行撑高）',
 	/box\.firstChild\.insertBefore\(Mt5700\.badge\(summaryText,/.test(nsSrc)
 	&& !/mt5700-diag-summary is-' \+ lv/.test(nsSrc));

@@ -182,8 +182,18 @@ ok('★ 键扫描器自检：喂不存在的键必须被判缺失（防假守卫
 /* ---------- 3. 判定正确性（喂两套事实真跑） ---------- */
 
 /* eslint-disable no-eval */
-const sysChecks = new Function('fv', 'fnum',
+/* ★ maxModuleTemp 是「模组温度」的取法（12 路取最高）。排查项现在直接调它，
+   而 sysChecks 是被扣出来单独 eval 的 —— 不把它一起注入，eval 里就会
+   ReferenceError → 那一项判成 THREW，断言全红。这里给一份同签名的实现。 */
+function maxModuleTempImpl(temps) {
+	const t = temps || {};
+	const vals = [];
+	for (const k in t) { const n = Number(t[k]); if (n > 0) vals.push(n); }
+	return { max: vals.length ? Math.max.apply(null, vals) : null, vals: vals };
+}
+const sysChecks = new Function('fv', 'fnum', 'maxModuleTemp',
 	extractFn(nsSrc, 'fv') + '\n' + extractFn(nsSrc, 'fnum') + '\n'
+	+ extractFn(nsSrc, 'maxModuleTemp') + '\n'
 	+ sysChecksSrc + '\nreturn sysChecks;')(
 	function (f, k) { const v = f[k]; return (v == null) ? '' : String(v); },
 	function (f, k, d) {
@@ -191,7 +201,8 @@ const sysChecks = new Function('fv', 'fnum',
 		if (s === '') return d;
 		const n = parseFloat(s);
 		return isNaN(n) ? d : n;
-	})();
+	},
+	maxModuleTempImpl)();
 
 const HEALTHY = {
 	svc_at_running: '1', svc_at_enabled: '1', initd_mode: '-rwxr-xr-x', initd_exec: '1',
@@ -288,6 +299,26 @@ eq('温度 90℃ → bad',
 	run(HEALTHY, { cell: {}, temps: { ap1: 90 }, tools: HEALTHY_ST.tools })['模组温度'].level, 'bad');
 eq('温度 45℃ → ok',
 	run(HEALTHY, { cell: {}, temps: { ap1: 45 }, tools: HEALTHY_ST.tools })['模组温度'].level, 'ok');
+eq('温度 70℃ → warn',
+	run(HEALTHY, { cell: {}, temps: { ap1: 70 }, tools: HEALTHY_ST.tools })['模组温度'].level, 'warn');
+/* 2026-09-19 真机反馈：进页面就自动排查时温度（慢档 30s）还没取到，这项挂「存疑 ·
+   还没读到温度」，让人以为温度出了问题。改：① 排查改为点按钮才跑；② 没读到时判
+   idle（待检查）—— 那是"没取到"不是"有故障"，也不计入通过/存疑的计数。 */
+eq('★ 没读到温度 → idle（不是 warn）',
+	run(HEALTHY, { cell: {}, temps: {}, tools: HEALTHY_ST.tools })['模组温度'].level, 'idle');
+
+/* ★ 温度同源（用户 2026-09-19 明确要求：排查项采用「SIM 与设备」卡的 5G模块温度）。
+   两处必须走同一个 maxModuleTemp，否则会出现「卡上 48℃、排查说没读到」的自相矛盾。 */
+ok('★ 温度取法唯一：maxModuleTemp 定义处接受 temps 参数（好让判定是纯函数）',
+	/function maxModuleTemp\(temps\)/.test(nsSrc));
+ok('★ 「SIM 与设备」卡的 5G模块温度走 maxModuleTemp（不另算一遍）',
+	/var mt = maxModuleTemp\(\);/.test(nsSrc) && /mt\.max \+ ' ℃'/.test(nsSrc));
+ok('★ 排查项的温度走传入的 st.temps（纯函数；读闭包 state 会让判定与卡片脱钩、测试也注入不了）',
+	/maxModuleTemp\(st && st\.temps\)/.test(nsSrc));
+ok('★ 温度判定不再直接遍历 st.temps（那是两处会走偏的旧写法）',
+	!/for \(var k in \(st\.temps/.test(nsSrc));
+ok('★ 三层计数排除 idle（没取到数据的项不算通过，避免「N/N 全通过」掺假）',
+	/i\.done && i\.level !== 'idle'/.test(nsSrc));
 
 /* ---------- 4. 注册表结构 ---------- */
 

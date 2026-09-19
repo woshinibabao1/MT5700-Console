@@ -57,7 +57,7 @@ var rpcNetRate = L.rpc.declare({
  *
  * ★ 超时给 30s：脚本里三个 ICMP + 一次 DNS + 一次 TCP 握手，最坏约 15s，
  *   ucode 侧限时 25s，这里再留 rpcd 与网络栈的余量。
- *   比 AT 查询慢得多，所以只在用户点「开始排查」时才调，绝不进页面自动跑。
+ *   比 AT 查询慢得多，所以只在用户点「一键排查」时才调（排查本身也不进页面自动跑）。
  */
 var rpcSysDiag = L.rpc.declare({
 	object: 'mt5700',
@@ -1180,7 +1180,7 @@ function fetchNetRate(device) {
  * 取系统侧排查事实。
  * 返回 Promise<{success, facts, error}>；facts 是 key → 字符串 的扁平映射。
  * 老固件上还没有 mt5700.sysdiag 这个方法，会被 rpcd 拒掉 —— 那时页面必须
- * 明确说"后端未升级"，而不是让"开始排查"点了没反应。
+ * 明确说"后端未升级"，而不是让"一键排查"点了没反应。
  */
 function fetchSysDiag() {
 	return withTimeout(rpcSysDiag(), 30000, '系统排查超时（脚本未返回）')
