@@ -152,7 +152,15 @@ asyncTests.push(function () {
 	});
 });
 
-/* ---------- C. 6A82（不是 eUICC）不得回退、不得误判 ---------- */
+/* ---------- C. 6A82：两通道皆 6A82 才判「不是 eUICC」，且只回退一次 ----------
+ *
+ * ★ 2026-09-20 真机实测修订：旧断言「6A82 不触发基本通道重试」是错的。
+ *   本机恰是 MANAGE CHANNEL OPEN 成功（分配通道 2/3）、该通道 SELECT 一律 6A82，
+ *   而基本通道（CLA=00）SELECT 回 6121、GET EID 正确返回 32 位 EID ——
+ *   卡是真 eUICC，只是逻辑通道够不着。无条件判「不是 eUICC」等于把通道能力
+ *   问题报成卡的身份问题。现在 6A82 必须先回退基本通道复核。
+ *   本组 mock 两条通道都是 6A82，因此回退后仍然要判 EUICC_NO_EUICC。
+ */
 
 asyncTests.push(function () {
 	const card = makeCard({ selectSw: '6A82', basicSelectSw: '6A82' });
@@ -160,10 +168,27 @@ asyncTests.push(function () {
 	return Euicc.withIsdrSession(card.send, function () {
 		return Promise.resolve({ ok: true });
 	}).catch(function (e) { code = e && e.code; }).then(function () {
-		eq('C1 6A82 抛 EUICC_NO_EUICC（不因回退变成别的错）', code, 'EUICC_NO_EUICC');
-		ok('C2 6A82 不触发基本通道重试（真实病因不该被换掉）',
-			!card.state.apdus.some(function (a) { return a.indexOf('00A4040C10') === 0; }),
-			'apdus=' + card.state.apdus.join(','));
+		eq('C1 两条通道都 6A82 → EUICC_NO_EUICC（这张卡真没有 ISD-R）', code, 'EUICC_NO_EUICC');
+		const basicSelects = card.state.apdus.filter(function (a) { return a.indexOf('00A4040C10') === 0; });
+		eq('C2 基本通道只复核一次，不重复回退', basicSelects.length, 1);
+	});
+});
+
+/* ---------- C3. 逻辑通道 6A82 但基本通道正常 → 回退成功（本机真机形态） ---------- */
+
+asyncTests.push(function () {
+	const card = makeCard({ selectSw: '6A82' });
+	let seenChannel = null;
+	return Euicc.withIsdrSession(card.send, function (ch, sendApdu) {
+		seenChannel = ch;
+		return sendApdu(Euicc.buildGetProfiles(ch));
+	}).then(function (r) {
+		eq('C3 逻辑通道 6A82 + 基本通道正常 → 回退到基本通道', seenChannel, 0);
+		eq('C4 回退后业务 APDU 成功', r.sw, '9000');
+		ok('C5 业务 APDU 走基本通道 CLA=0x80', /^80E2/.test(Euicc.buildGetProfiles(0)),
+			Euicc.buildGetProfiles(0));
+	}).catch(function (e) {
+		fails.push('C3 基本通道可用时不该判「不是 eUICC」，实际抛 ' + (e && e.code));
 	});
 });
 

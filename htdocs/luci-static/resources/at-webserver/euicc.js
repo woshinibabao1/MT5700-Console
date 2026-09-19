@@ -806,14 +806,34 @@ var Euicc = (function () {
 					'切到该通路即可（它会分多轮把大响应吐完）；' +
 					'读取 Profile、启用 / 禁用 / 删除等短响应操作不受影响。');
 			}
-			if (a.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
-		var info = api.swInfo(a.sw);
+			/*
+			 * ★ 2026-09-20 真机实测：这里**原先**有一句
+			 *     if (a.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
+			 *   已删除，理由两条：
+			 *   ① 越权：sendAndCollect 是通用收发，却对**任何** APDU 的 6A82 都判
+			 *      「卡不是 eUICC」，连文案都写死 SELECT —— 而 GET EID / GetProfiles
+			 *      在逻辑通道上同样可能回 6A82，那与卡的身份毫无关系；
+			 *   ② 不回退：它抛的错不带回退标记，withIsdrSession 不会去基本通道复核，
+			 *      于是一次通道能力问题被直接坐实成「这张卡不是 eUICC」。
+			 *   6A82 统一交给下面的 swInfo（fatal）处理，并在那里按通道号决定是否
+			 *   先回退基本通道复核；SELECT 场景另有 selectAndPing 里的明确判定。
+			 */
+			var info = api.swInfo(a.sw);
 		/* R08 带人话文案。channelUnsupported 供 withIsdrSession 判定是否回退基本通道 ——
 		   不能靠 err.code 区分，因为 6881 与其它操作失败共用 EUICC_OP_FAILED。 */
 		if (info.level === 'fatal' || info.level === 'error') {
 			var se = makeSwError(info.level === 'fatal' ? 'EUICC_NO_EUICC' : 'EUICC_OP_FAILED', a.sw);
 			se.swInfo = info;
 			if (api.isChannelUnsupportedSw(a.sw)) se.channelUnsupported = true;
+			/*
+			 * ★ 逻辑通道上的 6A82 先回退基本通道复核（2026-09-20 真机实测）。
+			 *   本机卡：MANAGE CHANNEL OPEN 成功（分配通道 2/3），但该通道的 CLA
+			 *   去 SELECT ISD-R / GET EID 一律 6A82 或 6D00；同一张卡走基本通道
+			 *   （CLA=00/80）SELECT 返回 6121、GET EID 正确回 32 位 EID。
+			 *   —— 卡是真 eUICC，只是这条逻辑通道上够不着。
+			 *   `ch !== 0` 是防重复回退的闸门：基本通道上仍 6A82 才是真的没有 ISD-R。
+			 */
+			if (a.sw === '6A82' && ch !== 0) se.maybeNoEuicc = true;
 			throw se;
 		}
 		return { data: data, sw: a.sw };
@@ -855,7 +875,27 @@ var Euicc = (function () {
 	function selectAndPing(send, ch) {
 		return sendAndCollect(send, ch, api.selectIsdrApdu(ch), 0, '')
 			.then(function (sel) {
-				if (sel.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
+				/*
+				 * ★ 2026-09-20 真机实测更正：6A82 **不能**一律判成「这张卡不是 eUICC」。
+				 *
+				 *   现象：AT+CSIM 通路下 MANAGE CHANNEL OPEN 成功（卡分配通道 2/3），
+				 *   但用该通道的 CLA（82/83）去 SELECT ISD-R 一律 6A82；
+				 *   而同一张卡走基本通道（CLA=00）SELECT 返回 6121、
+				 *   GET EID 三种 CLA（00/80/81）全部正确返回 32 位 EID。
+				 *   —— 卡是真 eUICC，只是「这条逻辑通道上选不到」。
+				 *
+				 *   旧代码无条件 throw EUICC_NO_EUICC，而回退只认 6881/6A81，
+				 *   于是这类卡被直接判成普通 USIM，页面显示「这张卡不是 eUICC」。
+				 *   把固件/通道的能力问题报成卡的身份问题，是彻底的误判。
+				 *
+				 *   改法：6A82 打上 maybeNoEuicc 标记抛出，由 pingOn 先回退基本通道复核；
+				 *   基本通道（ch=0）上仍然 6A82，才真是卡上没有 ISD-R。
+				 */
+				if (sel.sw === '6A82') {
+					var e = makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82（通道 ' + ch + '）');
+					e.maybeNoEuicc = true;
+					throw e;
+				}
 				return sel;
 			})
 			.then(function () {
@@ -921,10 +961,20 @@ var Euicc = (function () {
 
 		function pingOn(ch) {
 			return selectAndPing(send, ch).catch(function (e) {
-				/* 逻辑通道撞 6881 / 6A81 → 回退基本通道（ch=0）。
-				   除 EUICC_NO_CHANNEL / channelUnsupported 之外的错误（如 6A82 不是 eUICC、
-				   AT 服务未就绪）都**不**回退，直接抛，避免把真实病因换成一次无效重试。 */
-				if (ch !== 0 && e && (e.code === 'EUICC_NO_CHANNEL' || e.channelUnsupported === true)) {
+				/*
+				 * 逻辑通道撞 6881 / 6A81 → 回退基本通道（ch=0）。
+				 * 6A82 现在**也要回退**（见 selectAndPing 注释）：它在本机卡上只是
+				 * 「这条逻辑通道选不到 ISD-R」，基本通道却能正常读 EID，
+				 * 直接判成「不是 eUICC」是把通道能力问题误报成卡的身份问题。
+				 *
+				 * ★ 回退条件里的 `ch !== 0` 是防死循环的关键：基本通道（ch=0）上
+				 *   仍然 6A82，才真的说明卡上没有 ISD-R，此时不再回退、直接上抛。
+				 *
+				 * 其余错误（AT 服务未就绪等）都**不**回退，直接抛，
+				 * 避免把真实病因换成一次无效重试。
+				 */
+				if (ch !== 0 && e && (e.code === 'EUICC_NO_CHANNEL'
+					|| e.channelUnsupported === true || e.maybeNoEuicc === true)) {
 					return doClose(send, ch).then(function () {
 						channel = 0;
 						channelLeakNote = ''; /* 已放弃逻辑通道，泄漏提示不再有意义 */
@@ -943,8 +993,19 @@ var Euicc = (function () {
 			.then(function (ch) {
 				return pingOn(ch);
 			}, function (e) {
-				/* open 本身就失败 → 直接走基本通道。AT 服务未就绪之类不回退。 */
-				if (e && e.code === 'EUICC_NO_CHANNEL') {
+				/*
+				 * open 本身就失败 → 直接走基本通道。
+				 *
+				 * ★ 2026-09-20 真机实测：通道被耗尽后 MANAGE CHANNEL OPEN 直接回
+				 *   6A81（功能不支持）。sendAndCollect 把它归成 EUICC_OP_FAILED 并
+				 *   打了 channelUnsupported 标记，**不是** EUICC_NO_CHANNEL，
+				 *   旧条件认不出来 → 不回退 → 整条通路报废。
+				 *   这里两个条件都要认：拿不到通道号，本来就该走基本通道。
+				 *
+				 * AT 服务未就绪（EUICC_AT_ERROR）之类不回退 —— 那不是通道问题，
+				 *   回退也救不回来，只会把真实病因换成一次无效重试。
+				 */
+				if (e && (e.code === 'EUICC_NO_CHANNEL' || e.channelUnsupported === true)) {
 					channel = 0;
 					return selectAndPing(send, 0);
 				}
@@ -1138,10 +1199,16 @@ var Euicc = (function () {
 	 *   所以 HTTPS 那一半只能由路由器代发（ubus mt5700.es9p → curl）。
 	 *   APDU 那一半本来就在本地（AT+CSIM），不受影响。
 	 *
-	 * ★ 未经真机验证的部分：本机当前是普通 USIM（SELECT ISD-R 返回 6A82），
-	 *   下面的下载链路没有真 eUICC 可跑。所有 SM-DP+ 应答与 APDU 状态字
-	 *   都会原样写进 opts.log 交给界面展示，一旦协议细节对不上能立刻定位，
-	 *   不会静默失败。已知不确定点记在 FRONTEND_REVIEW_REPORT.md。
+	 * ★ 真机状态（2026-09-20 实测更正，旧注释写的「本机是普通 USIM」是错的）：
+	 *   本机卡**是真 eUICC**：EID = 89086030202200000026000173326959，
+	 *   GET IDENTITY 稳定返回，EUICCInfo2（BF22）也读得到。
+	 *   旧结论来自一次误判 —— 在 open 出来的逻辑通道上 SELECT ISD-R 回 6A82，
+	 *   而基本通道（CLA=00）回 6121、GET EID 三种 CLA 全部成功。
+	 *   「6A82 = 不是 eUICC」只在基本通道上也 6A82 时才成立（见 selectAndPing）。
+	 *   卡上当前 0 个 Profile（GetProfiles 回 BF2D02A000），所以设备没有网络。
+	 *
+	 *   下载链路仍未端到端跑通的唯一卡点是 BPP 写入到 8160 字节必回 6A84，
+	 *   与通路无关（CGLA / CSIM 两条都一致）。其余步骤 1~7 已真机通过。
 	 * =================================================================== */
 
 	/* ---------- SHA-256（确认码必须先哈希再进 APDU） ----------

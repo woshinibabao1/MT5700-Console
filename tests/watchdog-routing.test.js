@@ -181,6 +181,31 @@ ok('界面会回填 watch_iface / watch_device / watch_gateway',
 	/set\('watch_gateway'|watch_gateway'\)/.test(svc) && /watch_gateway/.test(svc));
 
 /* ---------------------------------------------------------------------------
+ * A8. 连续失败必须退避（2026-09-20 真机实测加的）
+ *
+ * 背景：卡上没有 Profile 时模组永远注册不上网，看门狗却固定每 60 秒
+ *   ifdown/ifup 一次、每轮再写 2~3 条 syslog —— 真机异常累计一路涨到 400+，
+ *   这是设备「越来越卡」的一个真实来源。
+ *   改法：连续失败按 2 的幂拉长间隔（封顶），成功一次立刻回到 W_INTERVAL。
+ * ------------------------------------------------------------------------- */
+
+const wdBackoff = read(WD_SH);
+ok('定义退避上限 BACKOFF_MAX', /BACKOFF_MAX=\d+/.test(wdBackoff));
+ok('定义最大翻倍次数 BACKOFF_MAX_STEPS', /BACKOFF_MAX_STEPS=\d+/.test(wdBackoff));
+ok('失败时按 _wait 睡眠，不再是恒定 W_INTERVAL',
+	/fails"\s*-gt\s*0/.test(wdBackoff) && /sleep "\$_wait"/.test(wdBackoff));
+ok('退避封顶不超过 BACKOFF_MAX', /_wait"\s*-gt\s*"\$BACKOFF_MAX"/.test(wdBackoff));
+ok('成功一次立刻回到 W_INTERVAL（同时重置 fails 与 _last_wait）',
+	/fails=0[\s\S]{0,80}_last_wait=0/.test(wdBackoff));
+/* 反向断言：改回固定间隔必须判红（全局替换，避免只换第一处造成恒绿） */
+ok('反向：若把退避改回固定间隔必须判红',
+	!/sleep "\$_wait"/.test(wdBackoff.split('sleep "$_wait"').join('sleep "$W_INTERVAL"')));
+/* 反向断言：删掉封顶也必须判红 */
+ok('反向：若删掉封顶判断必须判红',
+	!/_wait"\s*-gt\s*"\$BACKOFF_MAX"/.test(
+		wdBackoff.split('if [ "$_wait" -gt "$BACKOFF_MAX" ]; then _wait=$BACKOFF_MAX; fi').join('')));
+
+/* ---------------------------------------------------------------------------
  * B. 行为测试（需要 sh）
  * ------------------------------------------------------------------------- */
 

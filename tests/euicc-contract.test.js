@@ -220,19 +220,48 @@ eq('R13 aid 长度 33 → EUICC_BAD_APDU', (function () {
 	catch (e) { return e.code; }
 })(), 'EUICC_BAD_APDU');
 
-/* ---------- 5. P06 / 6A82 → EUICC_NO_EUICC（引导态 G1，不报错） ---------- */
-
+/* ---------- 5. P06 / 6A82 → EUICC_NO_EUICC（引导态 G1，不报错） ----------
+ *
+ * ★ 2026-09-20 真机实测修订：6A82 只在**基本通道上也 6A82** 时才代表
+ *   「卡上没有 ISD-R」。逻辑通道上单独出现 6A82 时，必须先回退基本通道复核 ——
+ *   本机卡正是 MANAGE CHANNEL OPEN 成功、但该通道 SELECT 一律 6A82，
+ *   而基本通道（CLA=00）SELECT 回 6121、GET EID 正确返回 32 位 EID。
+ *   因此这里把两条通道都配成 6A82，才是「这张卡真的不是 eUICC」的 mock。
+ */
 asyncTests.push((function () {
 	const send = mockSend({
 		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },
 		'AT+CSIM=?': { success: true, data: '+CSIM: (4-520),(cmd)' },
 		[Euicc.csimCommand(Euicc.openChannelApdu())]: { success: true, data: csimAnswer('019000') },
-		[Euicc.csimCommand(Euicc.selectIsdrApdu(1))]: { success: true, data: csimAnswer('6A82') }
+		[Euicc.csimCommand(Euicc.selectIsdrApdu(1))]: { success: true, data: csimAnswer('6A82') },
+		[Euicc.csimCommand(Euicc.selectIsdrApdu(0))]: { success: true, data: csimAnswer('6A82') }
 	});
 	return Euicc.listProfiles(send).then(function () {
 		fails.push('6A82 应当抛 EUICC_NO_EUICC，但 resolve 了');
 	}, function (e) {
-		eq('6A82 → EUICC_NO_EUICC', e.code, 'EUICC_NO_EUICC');
+		eq('两条通道都 6A82 → EUICC_NO_EUICC（真不是 eUICC）', e.code, 'EUICC_NO_EUICC');
+	});
+})());
+
+/* ---------- 5b. 逻辑通道 6A82 但基本通道正常 → 回退成功，不得误判 ----------
+ * 本机真机形态（2026-09-20）：open 成功分配通道 2/3，该通道 SELECT 6A82；
+ * 基本通道 SELECT 6121、GET EID 正常。旧代码会把这种卡判成「不是 eUICC」。
+ */
+asyncTests.push((function () {
+	const send = mockSend({
+		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },
+		'AT+CSIM=?': { success: true, data: '+CSIM: (4-520),(cmd)' },
+		[Euicc.csimCommand(Euicc.openChannelApdu())]: { success: true, data: csimAnswer('029000') },
+		[Euicc.csimCommand(Euicc.selectIsdrApdu(2))]: { success: true, data: csimAnswer('6A82') },
+		[Euicc.csimCommand(Euicc.selectIsdrApdu(0))]: { success: true, data: csimAnswer('9000') },
+		[Euicc.csimCommand(Euicc.buildGetEid(0))]: { success: true, data: csimAnswer('BF3E125A10890860302022000000260001733269599000') },
+		[Euicc.csimCommand(Euicc.buildGetProfiles(0))]: { success: true, data: csimAnswer('BF2D02A0009000') }
+	});
+	return Euicc.listProfiles(send).then(function (list) {
+		eq('逻辑通道 6A82 + 基本通道正常 → 回退后读空列表成功', JSON.stringify(list), '{"list":[]}');
+	}, function (e) {
+		fails.push('基本通道可用时不应判「不是 eUICC」，实际抛 ' + (e && e.code)
+			+ ' / ' + (e && e.message));
 	});
 })());
 

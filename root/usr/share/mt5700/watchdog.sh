@@ -68,6 +68,16 @@ CMD_GAP=1
 PROBE_TIMEOUT=2
 PROBE_COUNT=1
 
+# 连续失败时的退避（2026-09-20 实测加的）：
+#   固定间隔在「注定失败」的场景下会变成持续的整机负担 —— 例如卡上没有 Profile，
+#   模组永远注册不上网，看门狗却每 60 秒 ifdown/ifup 一次、每轮再写 2~3 条 syslog，
+#   日积月累就是设备「越来越卡」的一个真实来源（真机实测：异常累计一路涨到 400+）。
+#   改法：连续失败时按 2 的幂拉长间隔，成功一次立刻回到 W_INTERVAL。
+#   短暂故障（1~2 次）仍然快速重试，恢复速度不受影响；长期无望则退到上限。
+BACKOFF_MAX=600
+# 最多翻几次倍：60→120→240→480→600（封顶）
+BACKOFF_MAX_STEPS=4
+
 W_ENABLED=1
 W_IFACE="$DEF_IFACE"
 W_DEV="$DEF_DEV"
@@ -450,15 +460,41 @@ daemon)
 	[ -n "$_cmds_n" ] || _cmds_n=0
 	log_msg "看门狗启动：接口=$W_IFACE 设备=$W_DEV 探测=$(probe_banner) 间隔=${W_INTERVAL}s 阈值=$W_THRESHOLD 复位模组=$W_RESET_MODEM 复位命令=${_cmds_n}条（AT/SH 自动分流，RPC=$W_RPC_HOST:$W_RPC_PORT）"
 	fails=0
+	# 初值取 W_INTERVAL：第一次失败时 _wait 正好等于它，不会误记一条「退避」日志
+	_last_wait=$W_INTERVAL
 	while :; do
-		sleep "$W_INTERVAL"
+		# ★ 退避（理由见文件头 BACKOFF_MAX 注释）：
+		#   连续失败时按 2 的幂拉长间隔，避免在注定失败的场景下每 60 秒
+		#   ifdown/ifup 一次、无休止地 churn。第一次失败仍按 W_INTERVAL，
+		#   之后每多失败一次翻倍，封顶 BACKOFF_MAX；成功一次立刻回到 W_INTERVAL。
+		if [ "$fails" -gt 0 ]; then
+			_steps=$((fails - 1))
+			if [ "$_steps" -gt "$BACKOFF_MAX_STEPS" ]; then _steps=$BACKOFF_MAX_STEPS; fi
+			_wait=$W_INTERVAL
+			_i=0
+			while [ "$_i" -lt "$_steps" ]; do
+				_wait=$((_wait * 2))
+				_i=$((_i + 1))
+			done
+			if [ "$_wait" -gt "$BACKOFF_MAX" ]; then _wait=$BACKOFF_MAX; fi
+			# 只在档位变化时记一条，避免每轮都写 syslog 反而制造新噪音
+			if [ "$_wait" != "$_last_wait" ]; then
+				log_msg "连续异常 ${fails} 次，探测间隔退避至 ${_wait}s（恢复后自动回到 ${W_INTERVAL}s）"
+				_last_wait=$_wait
+			fi
+			sleep "$_wait"
+		else
+			sleep "$W_INTERVAL"
+		fi
 		# 每轮重新读配置，让 LuCI 改动能即时生效，无需重启服务
 		load_cfg
 		[ "$W_ENABLED" = "1" ] || continue
 		check_once
 		case $? in
-			0) fails=0 ;;
-			1) fails=0 ;;
+			0|1)
+				fails=0
+				_last_wait=0
+				;;
 			*)
 				fails=$((fails + 1))
 				log_msg "异常累计 $fails/$W_THRESHOLD"
