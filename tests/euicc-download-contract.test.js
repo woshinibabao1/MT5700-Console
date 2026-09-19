@@ -217,7 +217,86 @@ eq('畸形长度不越界（截断的 0x82）', Euicc.pickTagValue('808200', '80
 
 const CH = 1;
 const CHALLENGE = '0102030405060708';
-const BPP_BODY = 'AA'.repeat(400);
+/*
+ * ★ 2026-09-20：BPP 必须是**真实结构**（BF36 内 BF23/A0/A1+子项/A3+子项）。
+ *   旧 mock 用 'AA'.repeat(400) 这种纯填充，掩盖了一个致命 bug —— 旧实现把
+ *   整包当一个逻辑命令连发，卡得攒齐整包才解析，攒到 8160 字节必 6A84。
+ *   mock 不像真包，就永远测不出「分段」这件事。
+ */
+const BPP_BODY = Euicc.tlvHex('BF36',
+	Euicc.tlvHex('BF23', '11'.repeat(90)) +
+	Euicc.tlvHex('A0', '22'.repeat(20)) +
+	Euicc.tlvHex('A1',
+		Euicc.tlvHex('87', 'A1'.repeat(120)) +
+		Euicc.tlvHex('87', 'B2'.repeat(260))) +
+		Euicc.tlvHex('A3',
+		Euicc.tlvHex('88', 'C3'.repeat(400)) +
+		Euicc.tlvHex('88', 'D4'.repeat(30))));
+
+/* ---------- 8.5 ★ BPP 结构化分段（6A84 的真正修法） ---------- */
+
+const SEGS = Euicc.splitBoundProfilePackage(BPP_BODY);
+const SEG_MAX = Math.max.apply(null, SEGS.map(function (s) { return s.hex.length / 2; }));
+
+ok('分段结果不少于 6 段（BF23 / A0 / A1头 / A1子×2 / A3头 / A3子×2）',
+	SEGS.length >= 6, '段数 ' + SEGS.length);
+eq('各段按序拼回 = 原包（既不丢字节也不重发）',
+	SEGS.map(function (s) { return s.hex; }).join(''), BPP_BODY);
+eq('第一段就是 BF36 头 + BF23 整块', SEGS[0].hex.indexOf('BF36') === 0 &&
+	SEGS[0].hex.indexOf('BF23') > 0, true);
+eq('★ A1 只发容器头（含值就变成整块连发）', (function () {
+	const a1 = SEGS.filter(function (s) { return s.label.indexOf('A1 容器头') === 0; })[0];
+	return a1 && a1.hex.length <= 8;   /* tag+长度，最多 4 字节 = 8 字符 */
+})(), true);
+eq('★ A3 只发容器头', (function () {
+	const a3 = SEGS.filter(function (s) { return s.label.indexOf('A3 容器头') === 0; })[0];
+	return a3 && a3.hex.length <= 8;
+})(), true);
+/*
+ * ★ 这条是 6A84 的回归守卫本身：整包连发时卡要把整包攒进链接缓冲，
+ *   攒到 8160 字节必炸。分段后「最大单段」必须**显著小于整包**。
+ */
+ok('★ 最大单段 < 整包长度（整包连发会撞卡侧缓冲 → 6A84）',
+	SEG_MAX < BPP_BODY.length / 2,
+	'最大单段 ' + SEG_MAX + 'B / 整包 ' + (BPP_BODY.length / 2) + 'B');
+eq('每段自己的 P2 从 0 起算（每段都是新命令，lpac 的 reqseq 亦然）', (function () {
+	return SEGS.every(function (s) {
+		return Euicc.buildEs10bRawChunks(1, s.hex, 120)[0].substr(6, 2) === '00';
+	});
+})(), true);
+eq('每段都以 P1=0x91 末块收尾', (function () {
+	return SEGS.every(function (s) {
+		const cs = Euicc.buildEs10bRawChunks(1, s.hex, 120);
+		return cs[cs.length - 1].substr(4, 2) === '91';
+	});
+})(), true);
+eq('缺 BF23 抛 EUICC_BAD_APDU', (function () {
+	try { Euicc.splitBoundProfilePackage(Euicc.tlvHex('BF36', Euicc.tlvHex('A0', '00'))); return 'no-throw'; }
+	catch (e) { return e.code; }
+})(), 'EUICC_BAD_APDU');
+eq('缺 A3 抛 EUICC_BAD_APDU', (function () {
+	try { Euicc.splitBoundProfilePackage(Euicc.tlvHex('BF36', Euicc.tlvHex('BF23', '00'))); return 'no-throw'; }
+	catch (e) { return e.code; }
+})(), 'EUICC_BAD_APDU');
+eq('非 BF36 开头抛 EUICC_BAD_APDU', (function () {
+	try { Euicc.splitBoundProfilePackage(Euicc.tlvHex('BF3C', '00')); return 'no-throw'; }
+	catch (e) { return e.code; }
+})(), 'EUICC_BAD_APDU');
+
+/*
+ * ★ 反向：把 A1 改回「整块下发」（子项照旧再发一遍 = 字节重复），
+ *   「各段拼接 == 原包」必须翻红 —— 证明上面那条不是恒绿。
+ *   （注意不能拿「段数变少」当判据：子项循环还在，段数不变，只有字节重复。）
+ */
+const negSrc = src
+	.split("segs.push({ hex: bppHex.slice(a1.start, a1.valueStart), label: 'A1 容器头' });")
+	.join("segs.push({ hex: bppHex.slice(a1.start, a1.end), label: 'A1 整块' });");
+ok('★ 反向：改回整块下发 → 拼接不再等于原包（守卫不恒绿）', (function () {
+	if (negSrc === src) return false;   /* 替换没打中 → 反向用例本身失效 */
+	const neg = eval('(' + negSrc.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+	return neg.splitBoundProfilePackage(BPP_BODY).map(function (s) { return s.hex; })
+		.join('') !== BPP_BODY;
+})(), '替换未生效或断言恒绿');
 
 /* 卡侧 mock：按 APDU 里的 ES10b tag 分派 */
 function makeCard(opts) {
@@ -324,12 +403,21 @@ asyncTests.push((function () {
 			JSON.parse(srv.state.calls[1].json).transactionId, 'TX-1');
 		eq('getBoundProfilePackage 带 transactionId',
 			JSON.parse(srv.state.calls[2].json).transactionId, 'TX-1');
-		eq('BPP 按 BF36 分块下发完（块数 = 分块函数算出的块数）',
-			card.state.bppChunks, Euicc.buildEs10bChunks(CH, 'BF36', BPP_BODY, 120).length);
-		eq('第一块确实带 BF36 头', card.state.cmds.some(function (c) {
+		/* ★ 分段后每段是一条独立命令，块数 = 各段块数之和（不再等于「整包块数」） */
+		const bppSegs = Euicc.splitBoundProfilePackage(BPP_BODY);
+		let expectBlocks = 0;
+		bppSegs.forEach(function (s) {
+			expectBlocks += Euicc.buildEs10bRawChunks(CH, s.hex, 120).length;
+		});
+		ok('★ BPP 被切成多段（不是整包连发）', bppSegs.length >= 5,
+			'段数 ' + bppSegs.length);
+		eq('BPP 按结构分段后分块下发完', card.state.bppChunks, expectBlocks);
+		eq('第一段确实带 BF36 头', card.state.cmds.some(function (c) {
 			const mm = /"([0-9A-Fa-f]*)"/.exec(c);
 			return mm && mm[1].substr(10, 4) === 'BF36';
 		}), true);
+		eq('★ 不再把整包再套一层 BF36（旧 bug：BF36 里又套 BF36）',
+			bppSegs.filter(function (s) { return s.hex.indexOf('BF36') === 0; }).length, 1);
 		ok('步骤推进到「完成」', steps[steps.length - 1].indexOf('10:') === 0,
 			steps.join(' | '));
 		eq('无待发回执时 sent=0', r.notification.sent, 0);

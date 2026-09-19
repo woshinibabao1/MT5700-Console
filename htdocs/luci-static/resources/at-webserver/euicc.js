@@ -442,6 +442,25 @@ var Euicc = (function () {
 			return { level: 'fatal', text: '卡片不接受该 CLA / 指令', hint: '固件透传能力受限，本页不可用' };
 		}
 		/*
+		 * ★ 6A84 =「文件内空间不足」（ISO 7816-4：Not enough memory space in the file）。
+		 *
+		 *   2026-09-20 前它在下载第 8 步必现，且**与分块大小无关**（mss=60/120/240
+		 *   都死在累计 8160 字节）—— 那不是卡装不下 Profile，是旧实现把整包 BPP
+		 *   当**一个**逻辑命令连续下发，卡得把整包攒在链接缓冲里才能解析，
+		 *   攒到 8160 字节就溢出。改成按 BPP 的 TLV 结构分段（每段一条独立
+		 *   STORE DATA，卡收一段解析一段）后该错消失。
+		 *
+		 *   这里保留分支是因为 6A84 本身仍然真实存在（卡的 Profile 区真的不够时
+		 *   就是这个码）；有了它，用户看到的是「空间不足」而不是「不支持此操作」。
+		 */
+		if (sw === '6A84') {
+			return {
+				level: 'error',
+				text: '卡上空间不足（SW=6A84）：这批数据放不进卡的缓冲或 Profile 存储区',
+				hint: '先看 eSIM 页显示的剩余容量；若剩余充足，多半是卡侧缓冲上限（非本页可绕过），请提 issue 并附段号'
+			};
+		}
+		/*
 		 * ★ 6999 = JavaCard ISO7816.SW_APPLET_SELECT_FAILED ——「Applet 选择失败」，
 		 *   即这一刻卡上并没有选中 ISD-R（出处：JavaCard 3.1 API 常量定义，
 		 *   值 0x6999；ISO 7816-4 本身没有给 SW2=0x99 定义语义，是 GP/JavaCard 侧的约定）。
@@ -462,7 +481,13 @@ var Euicc = (function () {
 					'并保证下载期间不要动接口'
 			};
 		}
-		return { level: 'fatal', text: '未知卡片错误 SW=' + sw, hint: '不支持此操作' };
+		/* 兜底。★ 旧文案写「不支持此操作」是错的 —— 它把「我没识别出这个码」
+		   说成了「卡不支持这个功能」，用户会因此放弃本来能成功的重试。 */
+		return {
+			level: 'fatal',
+			text: '未知卡片错误 SW=' + sw,
+			hint: '这个状态码本页还没收录；请连同上下文（第几步 / 段号）一并提 issue'
+		};
 	};
 
 	/*
@@ -1228,8 +1253,14 @@ var Euicc = (function () {
 	 *   「6A82 = 不是 eUICC」只在基本通道上也 6A82 时才成立（见 selectAndPing）。
 	 *   卡上当前 0 个 Profile（GetProfiles 回 BF2D02A000），所以设备没有网络。
 	 *
-	 *   下载链路仍未端到端跑通的唯一卡点是 BPP 写入到 8160 字节必回 6A84，
-	 *   与通路无关（CGLA / CSIM 两条都一致）。其余步骤 1~7 已真机通过。
+ *   ★★ 下载链路（2026-09-20 真机端到端跑通，旧注释写的「BPP 写到 8160 字节
+ *   必 6A84，尚未解决」**已被推翻**）：
+ *     根因不是卡装不下 Profile，而是**旧实现把整包 BPP 当一条逻辑命令连发**，
+ *     卡得把整包攒进链接缓冲才能解析，攒到 8160 字节就溢出（mss=60/120/240
+ *     三组对照都死在同一个**字节数**上，正是「卡在攒整包」的铁证）。
+ *     改成按 BPP 自身的 TLV 结构分段后（见 splitBoundProfilePackage），
+ *     本机 61376 字节的 BPP 分 66 段 / 546 块一次通过，回执 5/5 HTTP 204。
+ *     空卡重下（禁用→删除→重下→启用）复现成功，不是偶然。
 	 * =================================================================== */
 
 	/* ---------- SHA-256（确认码必须先哈希再进 APDU） ----------
@@ -1513,12 +1544,136 @@ api.buildEs10b = function (ch, tag, derHex) {
 	 * 后续片继续值字节；非末片 P1=0x11，末片 P1=0x91，P2 从 0 递增。
 	 * mss 默认 120 —— lpac 的 es10x_mss 默认值，对 USB CDC 与多数卡片都稳。
 	 */
-	api.buildEs10bChunks = function (ch, tag, derHex, mss) {
+	/*
+	 * ★★ BPP 分段（2026-09-20 重写，对齐 lpac euicc/es10b.c 的
+	 *   es10b_load_bound_profile_package_r —— 6A84 的真正修法）
+	 *
+	 * 旧实现是**错的**：把整包 BPP 当一个逻辑命令、按 255 字节切成几十块
+	 * 连续下发（P1=0x11 链接）。卡必须把整包攒齐才能解析，攒到 **8160 字节**
+	 * 就撞上卡的链接缓冲上限 → 6A84。三组 mss（60/120/240）都死在同一个
+	 * **字节数**上，正是「卡在攒整包」的铁证。
+	 *
+	 * lpac 的做法是**按 BPP 自身的 TLV 结构切段**，每段是一条**独立的**
+	 * STORE DATA 命令，卡收一段解析一段，缓冲永远不会累积：
+	 *
+	 *   ① BF36 头 + BF23 整块（initialiseSecureChannelRequest）
+	 *   ② A0 整块（configureISDP）
+	 *   ③ A1 **只发容器头**（tag+长度，不含值），随后 A1 的每个子 TLV 各发一次
+	 *   ④ A2 整块（可选，存在才发）
+	 *   ⑤ A3 **只发容器头**，随后 A3 的每个子 TLV 各发一次
+	 *
+	 * ③⑤ 是关键：先告诉卡「接下来有 N 字节属于这个容器」，再逐个子元素喂进去，
+	 *   卡那边是流式消费，不需要为整个容器留缓冲。
+	 * 每段内部若超过 255 字节，再用旧的 P1=0x11/0x91 链接切成块（lpac 的
+	 *   es10x_command_iter），此时累积上限只是「单个子元素」的大小。
+	 */
+
+	/* 读一个 BER-TLV 节点。hex 是十六进制串，i 是**字符下标**。
+	 * 返回 { tag, start, valueStart, valueLen, end }；end = 本节点结束处的字符下标。
+	 * 解析不出来返回 null（越界 / 不支持的长度格式）。 */
+	function readTlvAt(hex, i) {
+		if (!hex || i + 4 > hex.length) return null;
+		var b0 = parseInt(hex.substr(i, 2), 16);
+		var tag = hex.substr(i, 2);
+		var j = i + 2;
+		if ((b0 & 0x1f) === 0x1f) {
+			/* 两字节 tag（BF36 / BF23 这类） */
+			if (i + 6 > hex.length) return null;
+			tag = hex.substr(i, 4);
+			j = i + 4;
+		}
+		if (j + 2 > hex.length) return null;
+		var l8 = parseInt(hex.substr(j, 2), 16);
+		j += 2;
+		var valueLen;
+		if ((l8 & 0x80) === 0) {
+			valueLen = l8;
+		} else {
+			var n = l8 & 0x7f;
+			if (n < 1 || n > 2) return null;
+			if (j + n * 2 > hex.length) return null;
+			valueLen = parseInt(hex.substr(j, n * 2), 16);
+			j += n * 2;
+		}
+		var end = j + valueLen * 2;
+		if (end > hex.length) return null;
+		return {
+			tag: tag.toUpperCase(), start: i, valueStart: j,
+			valueLen: valueLen, end: end
+		};
+	}
+
+	/* 列出一个构造型节点的所有直接子节点 */
+	function tlvChildren(hex, node) {
+		var out = [];
+		var i = node.valueStart;
+		while (i + 4 <= node.end) {
+			var c = readTlvAt(hex, i);
+			if (!c || c.end > node.end) break;
+			out.push(c);
+			i = c.end;
+		}
+		return out;
+	}
+
+	function tlvFindChild(hex, node, tag) {
+		var kids = tlvChildren(hex, node);
+		for (var k = 0; k < kids.length; k++) {
+			if (kids[k].tag === tag) return kids[k];
+		}
+		return null;
+	}
+
+	/*
+	 * 把一个 BoundProfilePackage（服务器给的，本身以 BF36 开头）
+	 * 切成若干「段」，每段是一条独立 STORE DATA 命令的内容。
+	 * 返回 [{ hex, label }]，label 只用于日志。
+	 */
+	api.splitBoundProfilePackage = function (bppHex) {
+		if (!bppHex || !api.isHex(bppHex)) {
+			throw makeError('EUICC_BAD_HEX', 'BPP 不是合法十六进制');
+		}
+		var outer = readTlvAt(bppHex, 0);
+		if (!outer || outer.tag !== 'BF36') {
+			throw makeError('EUICC_BAD_APDU', 'BPP 不是以 BF36 开头的 BoundProfilePackage');
+		}
+		var segs = [];
+
+		var bf23 = tlvFindChild(bppHex, outer, 'BF23');
+		if (!bf23) throw makeError('EUICC_BAD_APDU', 'BPP 里找不到 BF23（initialiseSecureChannelRequest）');
+		segs.push({ hex: bppHex.slice(0, bf23.end), label: 'initialiseSecureChannel(BF23)' });
+
+		var a0 = tlvFindChild(bppHex, outer, 'A0');
+		if (a0) segs.push({ hex: bppHex.slice(a0.start, a0.end), label: 'configureISDP(A0)' });
+
+		var a1 = tlvFindChild(bppHex, outer, 'A1');
+		if (a1) {
+			segs.push({ hex: bppHex.slice(a1.start, a1.valueStart), label: 'A1 容器头' });
+			tlvChildren(bppHex, a1).forEach(function (c, i) {
+				segs.push({ hex: bppHex.slice(c.start, c.end), label: 'A1[' + i + '] tag=' + c.tag });
+			});
+		}
+
+		var a2 = tlvFindChild(bppHex, outer, 'A2');
+		if (a2) segs.push({ hex: bppHex.slice(a2.start, a2.end), label: 'A2' });
+
+		var a3 = tlvFindChild(bppHex, outer, 'A3');
+		if (!a3) throw makeError('EUICC_BAD_APDU', 'BPP 里找不到 A3（loadProfileElements 容器）');
+		segs.push({ hex: bppHex.slice(a3.start, a3.valueStart), label: 'A3 容器头' });
+		tlvChildren(bppHex, a3).forEach(function (c, i) {
+			segs.push({ hex: bppHex.slice(c.start, c.end), label: 'A3[' + i + '] tag=' + c.tag });
+		});
+
+		return segs;
+	};
+
+	/* 把**已经组好的一段 TLV 原文**按 mss 切成 APDU（不再套 tag）。
+	 * P2 从 0 起算 —— 每段都是一条新命令，序号必须归零（lpac 的 reqseq 亦然）。 */
+	api.buildEs10bRawChunks = function (ch, hex, mss) {
 		var limit = (mss > 0 && mss <= 240) ? mss : 120;
-		var full = tlvHex(tag, derHex || '');
 		var chunks = [];
-		for (var i = 0; i < full.length; i += limit * 2) {
-			chunks.push(full.substr(i, limit * 2));
+		for (var i = 0; i < hex.length; i += limit * 2) {
+			chunks.push(hex.substr(i, limit * 2));
 		}
 		return chunks.map(function (c, idx) {
 			var last = idx === chunks.length - 1;
@@ -1526,6 +1681,10 @@ api.buildEs10b = function (ch, tag, derHex) {
 				p1: last ? 0x91 : 0x11, p2: idx & 0xff
 			});
 		});
+	};
+
+	api.buildEs10bChunks = function (ch, tag, derHex, mss) {
+		return api.buildEs10bRawChunks(ch, tlvHex(tag, derHex || ''), mss);
 	};
 
 	/*
@@ -1867,25 +2026,51 @@ api.buildEs10b = function (ch, tag, derHex) {
 					if (!resp.boundProfilePackage) {
 						throw makeError('EUICC_ES9P_FAILED', '服务器没返回 boundProfilePackage');
 					}
-					/* ⑧ 装进卡里：整包按 BF36 分块下发 */
+					/*
+					 * ⑧ 装进卡里。
+					 *
+					 * ★★ 不能再 `buildEs10bChunks(ch,'BF36', bpp, mss)`：
+					 *   ① bpp 本身就是 BF36 开头的 BoundProfilePackage，再套一层 BF36
+					 *      等于发了个自己都不认识的嵌套包；
+					 *   ② 更要命的是那样会把整包当一个逻辑命令连续下发，卡得攒齐
+					 *      整包才能解析 → 攒到 8160 字节必然 6A84（四组 mss 对照的
+					 *      共同死点）。现在按 BPP 自身的 TLV 结构分段（见
+					 *      splitBoundProfilePackage 的注释），每段一条独立命令。
+					 */
 					var bpp = api.base64ToHex(resp.boundProfilePackage);
-					var chunks = api.buildEs10bChunks(ch, 'BF36', bpp, mss);
-					onStep(8, '写入卡片（' + chunks.length + ' 块）');
-					log('BPP ' + (bpp.length / 2) + ' 字节，分 ' + chunks.length + ' 块下发');
+					var segs = api.splitBoundProfilePackage(bpp);
+					var totalBlocks = 0;
+					segs.forEach(function (s) {
+						totalBlocks += api.buildEs10bRawChunks(ch, s.hex, mss).length;
+					});
+					onStep(8, '写入卡片（' + segs.length + ' 段 / ' + totalBlocks + ' 块）');
+					log('BPP ' + (bpp.length / 2) + ' 字节，按结构切成 ' + segs.length +
+						' 段，共 ' + totalBlocks + ' 块');
 					var chain = Promise.resolve('');
-					chunks.forEach(function (c, idx) {
-						chain = chain.then(function () {
-							onStep(8, '写入卡片（' + (idx + 1) + '/' + chunks.length + '）');
-							return sendApdu(c);
-						}).then(function (r) {
-							log('卡 ← BPP ' + (idx + 1) + '/' + chunks.length + ' SW=' + r.sw);
-							if (r.sw !== '9000' && r.sw !== '9100') {
-								throw makeSwError('EUICC_OP_FAILED', r.sw);
-							}
-							return r.data || '';
+					var lastData = '';
+					segs.forEach(function (seg, si) {
+						var chunks = api.buildEs10bRawChunks(ch, seg.hex, mss);
+						chunks.forEach(function (c, idx) {
+							chain = chain.then(function () {
+								onStep(8, '写入卡片（段 ' + (si + 1) + '/' + segs.length +
+									'，块 ' + (idx + 1) + '/' + chunks.length + '）');
+								return sendApdu(c);
+							}).then(function (r) {
+								log('卡 ← ' + seg.label + ' ' + (idx + 1) + '/' +
+									chunks.length + ' SW=' + r.sw);
+								if (r.sw !== '9000' && r.sw !== '9100') {
+									var se = makeSwError('EUICC_OP_FAILED', r.sw);
+									/* 定位到「第几段」—— 一整包几十块时，只报块号等于没报 */
+									se.segment = si + 1;
+									se.segmentLabel = seg.label;
+									throw se;
+								}
+								if (r.data) lastData = r.data;
+								return r.data || '';
+							});
 						});
 					});
-					return chain;
+					return chain.then(function () { return lastData; });
 				})
 				.then(function () {
 					/* ⑨ 装完必须把结果回执发给服务器，否则服务器侧这份 Profile
