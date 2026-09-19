@@ -27,6 +27,8 @@ const EUICC_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources'
 const ESIM_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'esim.js');
 const euiccSrc = fs.readFileSync(EUICC_JS, 'utf8');
 const esimSrc = fs.readFileSync(ESIM_JS, 'utf8');
+const rpcSrc = fs.readFileSync(path.join(__dirname, '..', 'htdocs', 'luci-static',
+	'resources', 'at-webserver', 'rpc.js'), 'utf8');
 
 /* 同款正则 eval 加载 euicc.js（与 euicc-download-contract.test.js:23 一致） */
 const m = euiccSrc.match(/var Euicc = \((function[\s\S]*?)\)\(\);/);
@@ -339,11 +341,20 @@ ok('R02 esim.js 源码已删除逐行发送按钮（无 sendNotification）', !/
 
 function hasTruncationGuard(src) {
 	/*
-	 * 守卫本体：tlvTotalBytes 取声明长度 → 与实收 got 比对 → 命中抛 EUICC_CSIM_TRUNCATED。
-	 * ★ 三段都要锚：只锚首尾的话，把中间的比较换成恒假也照样匹配，
-	 *   守卫就变成「永远绿」的摆设（本仓库已在 findMultiArgECalls 上栽过一次同型跟头）。
+	 * 要素式守卫：拆成五个必要条件，缺任一即判红。
+	 *
+	 * ★ 为什么不用「首尾锚定 + [\s\S]{0,200}? 字符距离」那种写法：
+	 *   它同时对两件事敏感 —— 中间插入注释/判据会把距离撑爆（静默不匹配 → 假红），
+	 *   而只锚首尾又会漏掉中间的比对条件（改坏恒假照样绿）。
+	 *   2026-09-20 真的踩到了：给守卫加 TRANSPORT 判据后它立刻假红。
+	 *   要素式对排版不敏感，只认「这几件事都做了没有」，两个方向都守得住。
 	 */
-	return /tlvTotalBytes\s*\([\s\S]{0,200}?got\s*<\s*want[\s\S]{0,200}?EUICC_CSIM_TRUNCATED/.test(src);
+	var hasWant = /var want\s*=\s*api\.tlvTotalBytes\(/.test(src);
+	var hasGot = /var got\s*=\s*data\.length\s*\/\s*2/.test(src);
+	var hasCmp = /got\s*<\s*want/.test(src);
+	var hasBoundary = /got\s*%\s*CSIM_MAX_RESPONSE_BYTES\s*\)\s*===\s*0/.test(src);
+	var hasThrow = /EUICC_CSIM_TRUNCATED/.test(src);
+	return hasWant && hasGot && hasCmp && hasBoundary && hasThrow;
 }
 function hasTruncationBranch(src) {
 	/* handleErr 里的独立分支 */
@@ -351,8 +362,21 @@ function hasTruncationBranch(src) {
 }
 
 ok('A1 euicc.js 有 TLV 声明长度比对 + 抛 EUICC_CSIM_TRUNCATED 的守卫', hasTruncationGuard(euiccSrc));
-ok('A2 反向：把守卫去掉（改用恒假条件）必须判红',
-	hasTruncationGuard(euiccSrc.replace("got < want && (got % CSIM_MAX_RESPONSE_BYTES) === 0", "false")) === false);
+/*
+ * ★ 反向用例必须用**全局**替换：CSIM_MAX_RESPONSE_BYTES / EUICC_CSIM_TRUNCATED
+ *   在文件里都出现多次（常量定义、ERR_CODES、抛错处），String.replace 只换第一个，
+ *   打不到守卫本体 —— 那样反向用例会「看起来在测、其实恒绿」。
+ */
+function replaceAll(src, from, to) {
+	return src.split(from).join(to);
+}
+
+ok('A2 反向：把比对条件换成恒假必须判红',
+	hasTruncationGuard(replaceAll(euiccSrc, 'got < want', 'false')) === false);
+ok('A3 反向：去掉 256 边界判据必须判红',
+	hasTruncationGuard(replaceAll(euiccSrc, 'CSIM_MAX_RESPONSE_BYTES', '__NOPE__')) === false);
+ok('A4 反向：去掉抛错必须判红',
+	hasTruncationGuard(replaceAll(euiccSrc, 'EUICC_CSIM_TRUNCATED', '__NOPE__')) === false);
 
 ok('B1 esim.js handleErr 有 EUICC_CSIM_TRUNCATED 独立分支', hasTruncationBranch(esimSrc));
 ok('B2 反向：删掉该分支（回到裸 message）必须判红',
@@ -363,6 +387,52 @@ ok('C1 swInfo(6A80) 文案不再写死「本地 TLV 组装有误」',
 	!/本地 TLV 组装有误/.test(sw6a80.text || ''), sw6a80.text);
 ok('C2 swInfo(6A80) 文案点出「不完整」这个真实可能',
 	/不完整/.test(sw6a80.text || ''), sw6a80.text);
+
+/* ---------- D. B 方案：APDU 通路可切 + lpac 运行时探测（2026-09-20） ----------
+ *
+ * 钉的是「两条通路并存时的契约」：
+ *   - euicc.js 必须同时具备 csim 与 cgla 两套命令/解析，且能被 setTransport 切换；
+ *   - ucode 必须暴露 mt5700.lpac 探测，且**只探测不执行**；
+ *   - 前端必须把当前通路显示出来（走 CSIM 时下载不可用，不能让用户瞎重试）。
+ * 反向用例：改坏任一条都要判红（静态守卫的老毛病：恒绿的摆设比没有更危险）。
+ */
+
+function hasApduTransport(src) {
+	return /api\.cglaCommand\s*=/.test(src) &&
+		/api\.parseCglaAnswer\s*=/.test(src) &&
+		/api\.csimCommand\s*=/.test(src) &&
+		/api\.parseCsimAnswer\s*=/.test(src) &&
+		/api\.setTransport\s*=/.test(src) &&
+		/api\.detectTransport\s*=/.test(src);
+}
+ok('D1 euicc.js 同时具备 CSIM / CGLA 两套命令与解析，且可切换',
+	hasApduTransport(euiccSrc));
+ok('D2 反向：删掉 cglaCommand 必须判红',
+	hasApduTransport(replaceAll(euiccSrc, 'api.cglaCommand', 'api.__NOPE__')) === false);
+ok('D3 反向：删掉 detectTransport 必须判红',
+	hasApduTransport(replaceAll(euiccSrc, 'api.detectTransport', 'api.__NOPE__')) === false);
+ok('D4 euicc.js 走 CGLA 时不发 MANAGE CHANNEL（模组自己管通道）',
+	/TRANSPORT === 'cgla'[\s\S]{0,200}?Promise\.resolve\(1\)/.test(euiccSrc));
+ok('D5 反向：CGLA 分支若改回显式 open 必须判红',
+	/Promise\.resolve\(1\)/.test(replaceAll(euiccSrc, 'Promise.resolve(1)', '__NOPE__')) === false);
+
+/* ucode：lpac 探测必须存在，且**不能执行 lpac**（撞串口 / 必然失败） */
+const ucSrc = fs.readFileSync(path.join(__dirname, '..', 'root', 'usr', 'share',
+	'rpcd', 'ucode', 'mt5700.uc'), 'utf8');
+ok('D6 ucode 暴露 mt5700.lpac 探测方法', /lpac:\s*\{/.test(ucSrc));
+ok('D7 ucode 的 lpac 探测只读（command -v，不执行 lpac 本体）',
+	/command -v lpac/.test(ucSrc) && !/popen\('lpac/.test(ucSrc));
+ok('D8 反向：若改成执行 lpac 本体必须判红',
+	/command -v lpac/.test(replaceAll(ucSrc, 'command -v lpac', '__NOPE__')) === false);
+
+/* rpc.js / esim.js：探测结果的承接 */
+ok('D9 rpc.js 有 lpacAvailable 且走 mt5700.lpac',
+	/function lpacAvailable/.test(rpcSrc) && /method: 'lpac'/.test(rpcSrc) &&
+	/lpacAvailable: lpacAvailable/.test(rpcSrc));
+ok('D10 esim.js 展示当前 APDU 通路（CSIM 时点明下载不可用）',
+	/APDU 通路：/.test(esimSrc) && /下载不可用/.test(esimSrc));
+ok('D11 esim.js 的 lpac 探测失败不阻塞（只是可选增强）',
+	/probeLpac/.test(esimSrc) && /lpac 后端：未安装/.test(esimSrc));
 
 /* ---------- 汇总 ---------- */
 

@@ -5,6 +5,45 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.22] - 2026-09-20
+
+### Added — APDU 传输层：新增 AT+CGLA 通路（下载能力的关键前提）
+
+翻 AT 命令手册 3.16 节发现：**`AT+CGLA` 是 `AT+CSIM` 的扩展**，手册原文——
+「主要体现在卡返回的数据长度**超过 255 个字节**时，会通过 `<flag>` 指示当前
+接收的数据是否为最后一包」。这正是绕开 256 字节上限的正路。
+
+- **新增 `AT+CGLA` 传输通路**：`cglaCommand` / `parseCglaAnswer` /
+  `setTransport` / `getTransport` / `detectTransport`
+- **运行时自动选路**：`probe` 会探测 CGLA，可用就用、不可用回退 CSIM；
+  页面「eSIM 状态」卡显示当前走哪条通路，CSIM 时直接点明「下载不可用」，
+  避免用户反复重试
+- **走 CGLA 时不发 MANAGE CHANNEL**：sessionid=0 下逻辑通道由模组自己管，
+  TE 再插手会被拒（6A81）
+- **GET RESPONSE 轮次按通路放宽**：CSIM 仍 8 轮（它只可能拿到 1 轮），
+  CGLA 放宽到 64 轮 —— 真机 1636 字节的 AuthenticateServer 响应要靠 7 轮拼出来
+- **lpac 运行时探测**：新增 `ubus mt5700.lpac`（只读，判断二进制是否存在）。
+  **刻意不执行 lpac** —— `/usr/bin/lpac` 默认后端是 uqmi + `/dev/cdc-wdm0`，
+  本设备没有 cdc-wdm，执行必然失败；若后端被配成 at 还会去开 AT 串口，
+  与独占 ttyUSB1 的 Rust 服务撞车
+
+### Fixed — 订正被推翻的旧结论（排查期错误逻辑清理）
+
+- 删除「`AT+CCHO` / `AT+CGLA` 该模组全部不支持，AT+CSIM 是唯一 APDU 通路」
+  —— 这是用 `=?` 测试命令探测得出的**假阴性**，真实用法完全可用
+- 删除由此推出的「完整 Profile 下载在本设备上走不通」
+- `EUICC_CSIM_TRUNCATED` 的判据限定到 CSIM 通路：它描述的是该通路特有的
+  固件行为（切在 256 字节边界、卡上不留残留），放到 CGLA 下属于错误归因
+- 修一个真 bug：CGLA 分支只 resolve 通道号、没给外层 `channel` 赋值，
+  导致业务回调拿到的 `ch` 是 `null`，ES10b 的 CLA 从 `0x81` 退化成 `0x80`
+
+### Changed — 静态守卫改成要素式
+
+`hasTruncationGuard` 原先是「首尾锚定 + `[\s\S]{0,200}?` 字符距离」，加一条
+判据就会把距离撑爆、静默不匹配（本次加 `TRANSPORT` 判据时立刻假红）。
+改为拆成五个必要条件分别断言；反向用例改用**全局**替换（`String.replace`
+只换第一个，打不到守卫本体，反向断言会变成恒绿的摆设）。
+
 ## [2.3.21] - 2026-09-19
 
 ### Fixed — 256 字节截断的报错不再把锅甩给「本地组包」

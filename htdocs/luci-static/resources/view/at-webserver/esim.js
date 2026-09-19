@@ -258,6 +258,27 @@ return L.view.extend({
 			}).then(function () { cb(); });
 		}
 
+		/*
+		 * lpac（可选后端）可用性，同样只问一次。
+		 *
+		 * ★ 它是**增强项不是必需项**：自研通路（AT+CGLA，探测不到时回退 AT+CSIM）
+		 *   覆盖了读 / 启 / 禁 / 删，lpac 只在「下载要不要多一条成熟实现」上有意义。
+		 *   所以探测失败一律按「没有」处理 —— 不报错、不阻塞、不改变任何可用功能。
+		 */
+		var lpacState = { asked: false, available: false, path: '', error: '' };
+		function probeLpac(cb) {
+			if (lpacState.asked) { if (cb) cb(); return; }
+			lpacState.asked = true;
+			AtWs.lpacAvailable().then(function (r) {
+				lpacState.available = !!(r && r.available);
+				lpacState.path = (r && r.path) || '';
+				lpacState.error = (r && r.error) || '';
+			}, function () {
+				lpacState.available = false;
+				lpacState.error = '探测失败';
+			}).then(function () { if (cb) cb(); });
+		}
+
 		/* ---------- 添加 Profile（二维码 / 激活码 / 手动参数） ----------
 		 *
 		 * 三种录入方式都收口到同一个 parseActivationCode，差别只在「怎么把码弄进来」：
@@ -990,6 +1011,29 @@ return L.view.extend({
 			if (p.channelNote) {
 				headCard._body.appendChild(E('div', { 'class': 'mt5700-notice-warning' }, p.channelNote));
 			}
+
+			/*
+			 * APDU 通路：由 Euicc.probe() 运行时探测得到（能 CGLA 就 CGLA，否则 CSIM）。
+			 * 写清楚它，是因为**只有 CGLA 能取全大响应** —— 走 CSIM 时下载必然
+			 * 卡在 AuthenticateServer，与其让用户重试，不如一开始就说清楚。
+			 */
+			headCard._body.appendChild(E('div', { 'class': 'mt5700-hint' },
+				'APDU 通路：' + (p.transport === 'cgla'
+					? 'AT+CGLA（响应分多轮取全，下载可用）'
+					: 'AT+CSIM（单条响应上限 256 字节，下载不可用）')));
+
+			/*
+			 * lpac 是**可选**后端：异步探测后回填，探测失败也不影响任何功能
+			 * （自研通路不依赖它）。页面若已切走则不写 DOM。
+			 */
+			var lpacLine = E('div', { 'class': 'mt5700-hint' }, '正在探测 lpac…');
+			headCard._body.appendChild(lpacLine);
+			probeLpac(function () {
+				if (!body.contains(lpacLine)) return;
+				lpacLine.textContent = lpacState.available
+					? 'lpac 后端：可用（' + lpacState.path + '），可作为可选下载通路'
+					: 'lpac 后端：未安装（不影响使用，本页走自研通路）';
+			});
 			body.appendChild(headCard);
 
 			var listCard = Mt5700.card('Profile 列表', '启用 / 禁用会触发卡片刷新，期间网络将短暂中断并重注册（约 10~30 秒）');

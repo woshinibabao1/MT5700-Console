@@ -378,7 +378,7 @@ const FULL_256 = 'BF3E' + '8200FB' + 'AA'.repeat(251);
 eq('截断样本实收 256 字节', CUT_256.length / 2, 256);
 eq('完整样本也是 256 字节（同为边界值，用来守误判）', FULL_256.length / 2, 256);
 
-function csimSendFor(eidHex) {
+function csimSendFor(eidHex, counter) {
 	return mockSend({
 		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },
 		'AT+CSIM=?': { success: true, data: '+CSIM: (4-520),(cmd)' },
@@ -386,7 +386,7 @@ function csimSendFor(eidHex) {
 		[Euicc.csimCommand(Euicc.selectIsdrApdu(1))]: { success: true, data: csimAnswer('9000') },
 		[Euicc.csimCommand(Euicc.buildGetEid(1))]: { success: true, data: csimAnswer(eidHex + '9000') },
 		[Euicc.csimCommand(Euicc.closeChannelApdu(1))]: { success: true, data: csimAnswer('9000') }
-	});
+	}, counter);
 }
 
 asyncTests.push((function () {
@@ -425,7 +425,7 @@ var EXPECTED_CODES = [
 	'EUICC_CHANNEL_LEAK', 'EUICC_NO_EUICC', 'EUICC_BUSY', 'EUICC_POLICY_DENIED', 'EUICC_OP_FAILED',
 	/* 下载链路（ES9+ 走后端转发）专有：设备无转发通道 / SM-DP+ 侧失败 */
 	'EUICC_NO_ES9P', 'EUICC_ES9P_FAILED',
-	/* 模组 AT+CSIM 单条响应装不下（完整下载在本设备上不可用的唯一根因） */
+	/* 模组 AT+CSIM 单条响应装不下（CSIM 通路取不全大响应的根因；走 CGLA 不受限） */
 	'EUICC_CSIM_TRUNCATED'
 ];
 ok('异常 code 集合与 §1.2 完全一致（双向，含 R05 新增 EUICC_NO_CARD）',
@@ -433,9 +433,118 @@ ok('异常 code 集合与 §1.2 完全一致（双向，含 R05 新增 EUICC_NO_
 	EXPECTED_CODES.every(function (c) { return Euicc.ERR_CODES.indexOf(c) >= 0; }) &&
 	Euicc.ERR_CODES.every(function (c) { return EXPECTED_CODES.indexOf(c) >= 0; }));
 
+/* ---------- 11. AT+CGLA 传输通路（手册 3.16，真机 2026-09-19 取证） ----------
+ *
+ * ★ 这一组**必须串行跑**：transport 是模块级全局状态，而 asyncTests 是
+ *   Promise.all 并发的 —— 并发改它会让 CSIM 那组用例发出的命令变成
+ *   `AT+CGLA=...`，mock 匹配不上而集体假红。所以整组串成一条链，
+ *   在 Promise.all 之后单独跑，跑完复位成 csim。
+ *
+ * 钉死三件事：
+ *   ① CGLA 下**不发 MANAGE CHANNEL**（模组自己管逻辑通道，发了反而 6A81）；
+ *   ② CGLA 下 61xx 由本模块自己发 GET RESPONSE，**多轮能拼出 >256 字节**的响应
+ *      （这正是 CSIM 通路做不到、而 Profile 下载必须依赖的能力）；
+ *   ③ detectTransport 的判据是「AT 层是否接受命令」，不是「SW 是否为 9000」
+ *      —— 用 `=?` 测试形式探测在本模组上是假阴性，那正是上一次误判的起因。
+ */
+
+function cglaAnswer(dataAndSw) {
+	return '+CGLA: ' + dataAndSw.length + ',"' + dataAndSw + '"';
+}
+
+eq('cglaCommand 拼装（sessionid 固定 0，length 是十六进制字符数）',
+	Euicc.cglaCommand('00A40804047FFF6F07'),
+	'AT+CGLA=0,18,"00A40804047FFF6F07"');
+eq('cglaCommand 长度校验与 CSIM 一致（521 字符 → 抛错）', (function () {
+	try { Euicc.cglaCommand(new Array(523).join('0')); return 'no-throw'; } catch (e) { return e.code; }
+})(), 'EUICC_BAD_APDU');
+eq('cglaCommand 非法 hex → 抛错', (function () {
+	try { Euicc.cglaCommand('00A4ZZ'); return 'no-throw'; } catch (e) { return e.code; }
+})(), 'EUICC_BAD_APDU');
+eq('parseCglaAnswer 抽取 + 末 4 字符为 SW',
+	Euicc.parseCglaAnswer('+CGLA: 6,"019000"'),
+	{ data: '01', sw: '9000', hasMore: false, le: 0 });
+eq('parseCglaAnswer 61xx → hasMore + le',
+	Euicc.parseCglaAnswer('+CGLA: 8,"123461F0"'),
+	{ data: '1234', sw: '61F0', hasMore: true, le: 240 });
+eq('parseCglaAnswer 无 +CGLA 行 → null', Euicc.parseCglaAnswer('ERROR'), null);
+eq('setTransport 只接受 csim/cgla（拼错时保持现状，不静默降级）', (function () {
+	var a = Euicc.setTransport('cgla'), b = Euicc.getTransport();
+	var c = Euicc.setTransport('bogus'), d = Euicc.getTransport();
+	Euicc.setTransport('csim');
+	return [a, b, c, d];
+})(), ['cgla', 'cgla', 'cgla', 'cgla']);
+
+/* 三轮拼出 256+256+100 = 612 字节 —— 远超 CSIM 通路的 256 上限 */
+const CHUNK_A = 'AA'.repeat(256);
+const CHUNK_B = 'BB'.repeat(256);
+const CHUNK_C = 'CC'.repeat(100);
+
+function cglaSend(counter) {
+	const map = {
+		[Euicc.cglaCommand(Euicc.selectIsdrApdu(1))]: { success: true, data: cglaAnswer('9000') },
+		[Euicc.cglaCommand(Euicc.buildGetEid(1))]: { success: true, data: cglaAnswer(CHUNK_A + '61F0') },
+		[Euicc.cglaCommand(Euicc.getResponseApdu(1, 240))]: { success: true, data: cglaAnswer(CHUNK_B + '6164') },
+		[Euicc.cglaCommand(Euicc.getResponseApdu(1, 100))]: { success: true, data: cglaAnswer(CHUNK_C + '9000') }
+	};
+	return function (cmd) {
+		if (counter) counter.push(cmd);
+		return Promise.resolve(map[cmd] || { success: true, data: '' });
+	};
+}
+
+function cglaChain() {
+	const sent = [];
+	Euicc.setTransport('cgla');
+	return Euicc.withIsdrSession(cglaSend(sent), function (ch, sendApdu) {
+		return sendApdu(Euicc.buildGetEid(ch));
+	}).then(function (r) {
+		eq('★ CGLA：多轮 GET RESPONSE 拼出超过 256 字节的完整响应', r.data.length / 2, 612);
+		/* A 占字符 0~511，B 占 512~1023，C 占 1024~1223（各段按字节数 ×2） */
+		eq('★ CGLA：拼接顺序正确（A→B→C，无错位无覆盖）',
+			r.data.slice(0, 6) + r.data.slice(512, 518) + r.data.slice(1024, 1030),
+			'AAAAAA' + 'BBBBBB' + 'CCCCCC');
+		eq('★ CGLA：末轮 SW', r.sw, '9000');
+		/* 通道管理：open=0070000001，close=0070800100。CGLA 下一条都不该出现。 */
+		const mgmt = sent.filter(function (c) { return /CGLA=0,\d+,"007[08]/.test(c); });
+		eq('★ CGLA：不发 MANAGE CHANNEL（open/close 各 0 条，模组自己管通道）', mgmt.length, 0);
+		/* 对照：CSIM 通路**必须**发 open —— 证明上面那条不是「两条通路都不发」 */
+		const csent = [];
+		Euicc.setTransport('csim');
+		return Euicc.withIsdrSession(csimSendFor(FULL_256, csent), function (ch2, sendApdu2) {
+			return sendApdu2(Euicc.buildGetEid(ch2));
+		}).then(function () {
+			const mgmt2 = csent.filter(function (c) { return /CSIM=10,"007[08]/.test(c); });
+			eq('对照：CSIM 通路照旧发 open + close（与 CGLA 分支形成反证）', mgmt2.length, 2);
+		});
+	}).then(function () {
+		/* detectTransport：判据是「AT 层是否接受命令」，与 SW 无关 */
+		return Euicc.detectTransport(mockSend({
+			[Euicc.cglaCommand(Euicc.selectIsdrApdu(1))]: { success: true, data: cglaAnswer('6A82') }
+		}));
+	}).then(function (t) {
+		eq('★ detectTransport：AT 层接受命令即判 cgla（卡回 6A82 不影响判定）', t, 'cgla');
+		return Euicc.detectTransport(mockSend({
+			[Euicc.cglaCommand(Euicc.selectIsdrApdu(1))]: { success: true, data: 'ERROR' }
+		}));
+	}).then(function (t2) {
+		eq('detectTransport：AT 层 ERROR → 回退 csim', t2, 'csim');
+		return Euicc.detectTransport(mockSend({}));
+	}).then(function (t3) {
+		eq('detectTransport：无 +CGLA 应答 → 回退 csim', t3, 'csim');
+	}, function (e) {
+		fails.push('CGLA 用例链异常：' + (e && e.stack || e));
+	});
+}
+
 /* ---------- 汇总（等所有异步用例完成，R11） ---------- */
 
 Promise.all(asyncTests).then(function () {
+	/* CGLA 组要改模块级 transport，**必须**在并发用例跑完之后串行执行 */
+	return cglaChain();
+}).then(function () {
+	Euicc.setTransport('csim'); /* 复位，避免污染同进程内的其它用例 */
+}).then(function () {
 	console.log('通过 ' + pass + ' 项，失败 ' + fails.length + ' 项');
 	if (fails.length) {
 		console.log('');

@@ -24,6 +24,49 @@ var Euicc = (function () {
 
 	var ISDR_AID = 'A0000005591010FFFFFFFF8900000100';
 	var MAX_ROUNDS = 8;
+
+	/*
+	 * GET RESPONSE 轮次上限 —— 按传输分别取。
+	 *
+	 * AT+CSIM 下 8 轮已经绰绰有余：它只可能拿到 1 轮（见下面的 256 字节上限），
+	 * 超过就是异常，早抛早好。
+	 *
+	 * AT+CGLA 下必须放宽：★ 2026-09-19 真机实测，ES10b.AuthenticateServer 的
+	 * 1636 字节响应是靠 **7 轮** `81C00000xx` 拼出来的（每轮 256 字节）。
+	 * 8 轮只剩 1 轮余量，BPP 阶段任何一次多取都会撞上限。64 轮对应 16KB，
+	 * 对 BPP 之外所有 ES10b 响应都够，撞上限时仍由 EUICC_TLV_TRUNCATED 兜住。
+	 */
+	var MAX_ROUNDS_CGLA = 64;
+
+	/*
+	 * ======================= APDU 传输层 =======================
+	 *
+	 * 两条通路，运行时二选一（默认 csim，探测到 CGLA 可用就升到 cgla）：
+	 *
+	 *   AT+CSIM —— 通用兜底。★ 单条响应硬上限 256 字节（模组固件限制），
+	 *     且模组**自己把 GET RESPONSE 做完了再返回**，卡上不留残留，
+	 *     所以超过 256 字节的响应永远取不全。读 / 管这类短响应够用，
+	 *     Profile 下载必然卡死在 AuthenticateServer。
+	 *
+	 *   AT+CGLA —— 手册 3.16 节写明「是对 AT+CSIM 命令的扩展。主要体现在
+	 *     卡返回的数据长度**超过 255 个字节**时，会通过 <flag> 指示当前接收
+	 *     的数据是否为最后一包」。★ 真机实测：它**透传卡的 61xx**，
+	 *     由 TE 自己发 GET RESPONSE 控制每轮取多少、多轮拼起来
+	 *     —— 这正是 lpac 依赖的行为，也是本设备唯一能取全大响应的方式。
+	 *
+	 * ★★ 探测方式踩过的坑（2026-09-19，写在这里防止再犯）：
+	 *   我最早用 `AT+CGLA=?` 这类**测试命令**探测，三个（CCHO/CCHC/CGLA）
+	 *   全回裸 ERROR，于是判定「本模组不支持 CGLA」，并据此写了下面那段
+	 *   「下载在本设备不可行」的结论 —— **结论是错的**。
+	 *   真实用法 `AT+CGLA=0,<len>,"<apdu>"` 完全可用。
+	 *   → 教训：本模组的 `=?` 测试形式会**假阴性**，探测能力必须用真实参数试。
+	 *
+	 * ★★ 另一个坑：CCHO 开的 session 不 CCHC 掉会占住通道，导致后续数据
+	 *   APDU 变 6A81（我因此误判过一次「卡不支持逻辑通道」）。
+	 *   → 所以这里**永远不用 CCHO**，固定 sessionid=0（模组自己管通道）。
+	 */
+	var TRANSPORT = 'csim';
+
 	/*
 	 * AT+CSIM 单条响应能带回的**最大数据字节数**。
 	 *
@@ -34,11 +77,17 @@ var Euicc = (function () {
 	 *     ③ 截断后立刻补发 81C0000000 / 81C00000FF / 81C0000080 / 81C0000001
 	 *        四种 GET RESPONSE，全部 0 字节（9000 / 6700）—— 卡上没有残留；
 	 *     ④ 重发末块回 6A86，卡不会重吐一次响应。
-	 *   （AT+CCHO / AT+CGLA / AT+CRSM / AT+CLAC 该模组全部不支持，AT+CSIM 是唯一
-	 *     APDU 通路；STORE DATA 带 Le 的 case 4 无论 Le 取何值都被 AT 层拒。）
+	 *   （STORE DATA 带 Le 的 case 4 无论 Le 取何值都被 AT+CSIM 层拒。）
 	 *
-	 * 后果：完整 Profile 下载在本设备上走不通 —— AuthenticateServer 的响应必然
-	 * 超过 256 字节。读取 / 启用 / 禁用 / 删除这类短响应操作不受影响。
+	 * ⚠️ 旧注释这里还写着「AT+CCHO / AT+CGLA 该模组全部不支持，AT+CSIM 是唯一
+	 *    APDU 通路」，以及由此推出的「完整 Profile 下载在本设备上走不通」——
+	 *    **这两句都已被推翻**（见上方「APDU 传输层」注释块的踩坑记录）：
+	 *    那次判定的依据是 `=?` 测试命令假阴性，真实用法下 AT+CGLA 完全可用，
+	 *    且能把 1636 字节的响应分 7 轮完整吐出。
+	 *
+	 * 现状：256 只是 **AT+CSIM 这一条通路**的上限。走 AT+CGLA 不受它约束；
+	 *   仍走 CSIM 时（CGLA 不可用、或尚未探测），下面的截断守卫照旧生效，
+	 *   读取 / 启用 / 禁用 / 删除这类短响应操作也照旧不受影响。
 	 */
 	var CSIM_MAX_RESPONSE_BYTES = 256;
 
@@ -203,6 +252,99 @@ var Euicc = (function () {
 		var hasMore = sw.charAt(0) === '6' && sw.charAt(1) === '1';
 		var le = parseInt(sw.slice(2), 16) || 0;
 		return { data: data, sw: sw, hasMore: hasMore, le: le };
+	};
+
+	/* ============ 传输层：AT+CGLA ============ */
+
+	/*
+	 * AT+CGLA=<sessionid>,<length>,<command>（手册 3.16）。
+	 *
+	 * sessionid 固定 0：★ 真机实测，sessionid=0 时**模组自己管逻辑通道** ——
+	 *   不 open 也能直接 SELECT ISD-R / 读 EID；而 TE 再插手 MANAGE CHANNEL
+	 *   （0070000001）反而被拒（6A81）。所以走 CGLA 时必须跳过 open / close。
+	 *
+	 * <length> 与 AT+CSIM 同为**十六进制字符数**（不是字节数）。
+	 * 长度上限同样按 4~520 字符校验：CSIM 侧是实测 `(4-520)`，CGLA 侧手册未给上限，
+	 * 保守沿用同一上限既能挡异常输入，也让两条通路的分块策略完全一致。
+	 */
+	api.cglaCommand = function (apduHex) {
+		if (!api.isHex(apduHex)) throw makeError('EUICC_BAD_APDU', 'APDU 不是合法十六进制串');
+		if (apduHex.length < 4 || apduHex.length > 520) {
+			throw makeError('EUICC_BAD_APDU', 'APDU 长度超出 4~520 字符');
+		}
+		return 'AT+CGLA=0,' + String(apduHex.length) + ',"' + apduHex.toUpperCase() + '"';
+	};
+
+	/*
+	 * 抽取 +CGLA 应答。形态与 +CSIM 一致：`+CGLA: <len>,"<hex>"`，
+	 * 末 4 字符是 SW。hasMore / le 的判定也一致（SW1==61 表示卡上还有数据）。
+	 *
+	 * ★ 关键差异不在解析，而在**谁发 GET RESPONSE**：AT+CSIM 下模组自己取完
+	 *   再返回（于是被 256 截断且不留残留）；AT+CGLA 下它把 61xx 原样透传给 TE，
+	 *   由本文件的 sendAndCollect 循环取余 —— 多轮拼起来就能拿到完整响应。
+	 */
+	api.parseCglaAnswer = function (atText) {
+		if (!atText) return null;
+		var m = String(atText).match(/[+]CGLA:\s*(\d+)\s*,\s*"?([0-9A-Fa-f]*)"?/);
+		if (!m) return null;
+		var hex = m[2];
+		if (hex.length < 4) return { data: hex, sw: '', hasMore: false, le: 0 };
+		var data = hex.slice(0, hex.length - 4);
+		var sw = hex.slice(hex.length - 4);
+		var hasMore = sw.charAt(0) === '6' && sw.charAt(1) === '1';
+		var le = parseInt(sw.slice(2), 16) || 0;
+		return { data: data, sw: sw, hasMore: hasMore, le: le };
+	};
+
+	/**
+	 * 切换 APDU 传输通路。返回切换后的值（非法值不改，保持现状）。
+	 * 只接受 'csim' / 'cgla'，避免拼错时静默走成默认通路。
+	 */
+	api.setTransport = function (name) {
+		if (name !== 'csim' && name !== 'cgla') return TRANSPORT;
+		TRANSPORT = name;
+		return TRANSPORT;
+	};
+
+	api.getTransport = function () {
+		return TRANSPORT;
+	};
+
+	/** 按当前通路拼 AT 命令 / 解析应答。模块内所有下发都必须过这两个函数。 */
+	function apduCommand(apduHex) {
+		return TRANSPORT === 'cgla' ? api.cglaCommand(apduHex) : api.csimCommand(apduHex);
+	}
+
+	function parseApduAnswer(text) {
+		return TRANSPORT === 'cgla' ? api.parseCglaAnswer(text) : api.parseCsimAnswer(text);
+	}
+
+	function maxRounds() {
+		return TRANSPORT === 'cgla' ? MAX_ROUNDS_CGLA : MAX_ROUNDS;
+	}
+
+	/*
+	 * 运行时探测：本模组到底能不能用 AT+CGLA。
+	 *
+	 * ★ 判据是「AT 层是否接受这条命令」，**不是**「SW 是不是 9000」。
+	 *   用 SELECT ISD-R 试：普通 USIM 会回 6A82 —— 命令照样被 AT 层接受了，
+	 *   那已经足以证明 CGLA 通路可用（卡是不是 eUICC 是另一回事，交给上层判）。
+	 *   反过来，`AT+CGLA=?` 这种测试形式在本模组上回裸 ERROR（假阴性），
+	 *   绝不能拿它当判据 —— 那正是我上一次误判「CGLA 不支持」的原因。
+	 *
+	 * 探测失败一律回退 'csim'：CGLA 只是更强的通路，没有它旧路径照样能用。
+	 */
+	api.detectTransport = function (send) {
+		return send(api.cglaCommand(api.selectIsdrApdu(1))).then(function (res) {
+			var fail = api.atFailure(res);
+			if (fail.kind === 'ok') {
+				/* AT 层接受了命令；再确认应答能被解析（否则后面每条都会炸） */
+				if (api.parseCglaAnswer(res && res.data)) return 'cgla';
+			}
+			return 'csim';
+		}, function () {
+			return 'csim';
+		});
 	};
 
 	/* ============ AT 层失败归类（§1.5 ②） ============ */
@@ -601,7 +743,7 @@ var Euicc = (function () {
 	 * 返回 { data, sw }，data 为拼接完整的响应数据（不含 SW）。
 	 */
 	function sendAndCollect(send, ch, apdu, round, acc) {
-		return send(api.csimCommand(apdu)).then(function (res) {
+		return send(apduCommand(apdu)).then(function (res) {
 			/* R05：统一先过 atFailure，把 AT 层失败按形态分流，避免「AT 未连接」被误报成「固件不支持」。 */
 			var fail = api.atFailure(res);
 			if (fail.kind === 'error') {
@@ -623,11 +765,12 @@ var Euicc = (function () {
 			if (fail.kind === 'transport') {
 				throw makeError('EUICC_AT_ERROR', 'AT 层拒绝了这条 APDU（透传未返回结果，多为 APDU 格式问题）');
 			}
-			var a = api.parseCsimAnswer(res && res.data);
-			if (!a) throw makeError('EUICC_AT_ERROR', '无法解析 CSIM 应答');
+			var a = parseApduAnswer(res && res.data);
+			if (!a) throw makeError('EUICC_AT_ERROR', '无法解析 ' +
+				(TRANSPORT === 'cgla' ? 'CGLA' : 'CSIM') + ' 应答');
 			if (a.hasMore) {
-				if (round + 1 >= MAX_ROUNDS) {
-					throw makeError('EUICC_TLV_TRUNCATED', 'GET RESPONSE 超过 ' + MAX_ROUNDS + ' 轮');
+				if (round + 1 >= maxRounds()) {
+					throw makeError('EUICC_TLV_TRUNCATED', 'GET RESPONSE 超过 ' + maxRounds() + ' 轮');
 				}
 				var gr = api.getResponseApdu(ch, a.le);
 				return sendAndCollect(send, ch, gr, round + 1, acc + a.data);
@@ -647,12 +790,21 @@ var Euicc = (function () {
 			 */
 			var want = api.tlvTotalBytes(data);
 			var got = data.length / 2;
-			if (want > 0 && got < want && (got % CSIM_MAX_RESPONSE_BYTES) === 0) {
+			/*
+			 * 只在 AT+CSIM 通路下判：这条判据描述的是**该通路特有的固件行为**
+			 * （响应被切在 256 字节缓冲区边界上、且卡上不留残留）。
+			 * AT+CGLA 由本模块自己控制取余轮次，不存在这个行为；在那里套用
+			 * 同一判据会把病因归成「CSIM 的 256 上限」，属于错误归因。
+			 * CGLA 侧取不全由上面的 maxRounds() 闸（EUICC_TLV_TRUNCATED）兜住。
+			 */
+			if (TRANSPORT === 'csim' && want > 0 && got < want &&
+				(got % CSIM_MAX_RESPONSE_BYTES) === 0) {
 				throw makeError('EUICC_CSIM_TRUNCATED',
 					'这条响应需要 ' + want + ' 字节，但模组只回传了 ' + got +
 					' 字节（AT+CSIM 单条响应上限 256 字节，且卡上没有残留可再取）。' +
-					'本设备无法完成 Profile 下载；读取 Profile、启用 / 禁用 / 删除等' +
-					'短响应操作不受影响。');
+					'Profile 下载需要把响应取全 —— 若本设备支持 AT+CGLA，' +
+					'切到该通路即可（它会分多轮把大响应吐完）；' +
+					'读取 Profile、启用 / 禁用 / 删除等短响应操作不受影响。');
 			}
 			if (a.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
 		var info = api.swInfo(a.sw);
@@ -669,12 +821,18 @@ var Euicc = (function () {
 	}
 
 	function doClose(send, channel) {
-		/* ★ 基本通道（channel === 0）不 close：它没有「关闭」的概念，
-		   而 0070800000 会把基本通道一起关掉，可能打断模组 SIM 驱动自己的操作。 */
-		if (channel == null || channel === 0) return Promise.resolve();
-		return send(api.csimCommand(api.closeChannelApdu(channel)))
+		/*
+		 * ★ 基本通道（channel === 0）不 close：它没有「关闭」的概念，
+		 *   而 0070800000 会把基本通道一起关掉，可能打断模组 SIM 驱动自己的操作。
+		 *
+		 * ★ CGLA 通路同样不 close：sessionid=0 下逻辑通道**由模组自己管**，
+		 *   TE 发 007080xxxx 会被拒（6A81）。走这条通路时 withIsdrSession
+		 *   也根本不会 open，自然没有要关的东西。
+		 */
+		if (channel == null || channel === 0 || TRANSPORT === 'cgla') return Promise.resolve();
+		return send(apduCommand(api.closeChannelApdu(channel)))
 			.then(function (res) {
-				var a = api.parseCsimAnswer(res && res.data);
+				var a = parseApduAnswer(res && res.data);
 				if (a && a.sw && a.sw.charAt(0) === '6' && a.sw.charAt(1) === '2') {
 					/* P05：关通道返回 62xx 仅 warn，不报错 */
 					if (typeof console !== 'undefined' && console.warn) {
@@ -723,23 +881,43 @@ var Euicc = (function () {
 		var channel = null;
 		var result;
 
-		/* 第一步：尝试逻辑通道。隔离性最好 —— 不占用基本通道的当前选择，
-		   不会打断模组 SIM 驱动自己的操作。 */
-		var opened = sendAndCollect(send, 0, api.openChannelApdu(), 0, '')
-			.then(function (open) {
-				if (open.sw !== '9000') throw makeError('EUICC_NO_CHANNEL', 'open 失败 SW=' + open.sw);
-				var b = api.hexToBytes(open.data);
-				if (!b.length) throw makeError('EUICC_NO_CHANNEL', 'open 响应无通道号');
-				var ch = b[0];
-				if (!(ch >= 1 && ch <= 19)) throw makeError('EUICC_NO_CHANNEL', '通道号越界 ' + ch);
-				channel = ch;
-				/* R04：通道号比上次大 → 疑似泄漏，记下提示（不抛错，避免页面直接挂掉）。 */
-				if (ch > lastChannel && lastChannel > 0) {
-					channelLeakNote = '疑似通道泄漏（本次通道号 ' + ch + '，上次 ' + lastChannel + '），建议重启模组';
-				}
-				lastChannel = ch;
-				return ch;
-			});
+		/*
+		 * 第一步：拿到可用的通道号。
+		 *
+		 * CGLA 通路：**不发 MANAGE CHANNEL**。sessionid=0 下逻辑通道由模组自己管，
+		 *   真机实测 TE 再插手会被拒（6A81）。这里只取一个**名义通道号 1** 用来拼
+		 *   CLA=0x81 —— 与 lpac 一致（它同样用 CLA = 0x80 | channel），且真机
+		 *   下载链路全程以 CLA=0x81 经 CGLA 下发，步骤 4~8 全部通过。
+		 *
+		 * CSIM 通路：照旧显式 open，隔离性最好 —— 不占用基本通道的当前选择，
+		 *   不会打断模组 SIM 驱动自己的操作。
+		 */
+		var opened;
+		if (TRANSPORT === 'cgla') {
+			/*
+			 * ★ channel 必须在这里赋值：opened 只 resolve 通道号，
+			 *   而 fn 拿到的是外层变量 channel —— 不赋值的话 fn 会收到 null，
+			 *   ES10b 的 CLA 从 0x81 退化成 0x80，与探活用的不是同一条通道。
+			 */
+			channel = 1;
+			opened = Promise.resolve(1);
+		} else {
+			opened = sendAndCollect(send, 0, api.openChannelApdu(), 0, '')
+				.then(function (open) {
+					if (open.sw !== '9000') throw makeError('EUICC_NO_CHANNEL', 'open 失败 SW=' + open.sw);
+					var b = api.hexToBytes(open.data);
+					if (!b.length) throw makeError('EUICC_NO_CHANNEL', 'open 响应无通道号');
+					var ch = b[0];
+					if (!(ch >= 1 && ch <= 19)) throw makeError('EUICC_NO_CHANNEL', '通道号越界 ' + ch);
+					channel = ch;
+					/* R04：通道号比上次大 → 疑似泄漏，记下提示（不抛错，避免页面直接挂掉）。 */
+					if (ch > lastChannel && lastChannel > 0) {
+						channelLeakNote = '疑似通道泄漏（本次通道号 ' + ch + '，上次 ' + lastChannel + '），建议重启模组';
+					}
+					lastChannel = ch;
+					return ch;
+				});
+		}
 
 		function pingOn(ch) {
 			return selectAndPing(send, ch).catch(function (e) {
@@ -843,13 +1021,34 @@ var Euicc = (function () {
 			.then(function (r) { if (r && r.state) return r; return checkCsim(); })
 			.then(function (r) {
 				if (r && r.state) return r;
+				/*
+				 * 传输通路升级：能用 AT+CGLA 就用（它能分多轮取全大响应，
+				 * Profile 下载靠的就是这个）；用不了就留在 AT+CSIM。
+				 * 探测失败静默回退，不阻断 —— 两条通路都能读卡。
+				 */
+				return api.detectTransport(send).then(function (t) {
+					api.setTransport(t);
+					return null;
+				}, function () {
+					api.setTransport('csim');
+					return null;
+				});
+			})
+			.then(function (r) {
+				if (r && r.state) return r;
 				return api.withIsdrSession(send, function (ch, sendApdu) {
 					return sendApdu(api.buildGetEid(ch)).then(function (r2) {
 						return { eid: parseEid(r2.data) };
 					});
 				}).then(function (info) {
-					/* R04：把疑似通道泄漏提示一并带回，交给 esim.js 展示。 */
-					return { state: 'ok', eid: info.eid, channelNote: channelLeakNote };
+					/* R04：把疑似通道泄漏提示一并带回，交给 esim.js 展示。
+					   transport 一并回传，供界面说明当前走的是哪条通路。 */
+					return {
+						state: 'ok',
+						eid: info.eid,
+						channelNote: channelLeakNote,
+						transport: api.getTransport()
+					};
 				}).catch(function (e) {
 					if (e.code === 'EUICC_NO_EUICC') return { state: 'no_euicc' };
 					if (e.code === 'EUICC_NO_CHANNEL') return { state: 'no_csim', channelNote: 'open 通道失败' };
