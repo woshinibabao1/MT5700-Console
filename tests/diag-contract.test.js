@@ -214,7 +214,8 @@ const HEALTHY = {
 	fw_wan_cover: '1', fw_wan_nets: 'wan wan6 MT5700M',
 	dns_servers: '119.29.29.29,223.5.5.5', dnsmasq_running: '1',
 	sqm_enabled: '0', sqm_iface: '', flow_offload: '1', flow_offload_hw: '0',
-	svc_watchdog: '1', time_synced: '1',
+	/* svc_watchdog 已于 2026-09-20 随看门狗一并删除，不再出现在事实表里 */
+	time_synced: '1',
 	ping_gw: '1', ping_public_a: '1', ping_public_b: '1', dns_resolve_ok: '1', tcp_443: '1'
 };
 const HEALTHY_ST = {

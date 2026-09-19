@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '5.5.18';
+var MT5700_CSS_VERSION = '5.5.19';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -135,10 +135,22 @@ var Mt5700 = (function () {
 
 	/* ================= 指标卡片 ================= */
 
+	/*
+	 * 指标卡片。
+	 *
+	 * ★ value 过长时自动加 .is-long（默认 9 个字符）：
+	 *   .mt5700-metrics 的格子是 minmax(150px, 1fr)，而读数本身是
+	 *   white-space: nowrap（防止「1000 Mbps」被挤成两行）。两者一撞，
+	 *   「未注册，正在搜索（但允许紧急呼叫）」这类长中文就直接顶破卡片。
+	 *   这里不改容器宽度（用户要求固定尺寸、不按内容撑开），而是让长文本
+	 *   换行并降一号字 —— 由 .is-long 在 CSS 侧消化，短数值不受任何影响。
+	 */
 	api.metric = function (label, value, color) {
 		var m = E('div', { 'class': 'mt5700-metric' });
 		m.appendChild(E('div', { 'class': 'mt5700-metric-label' }, label));
-		var v = E('div', { 'class': 'mt5700-metric-value' }, value || '—');
+		var text = value || '—';
+		var v = E('div', { 'class': 'mt5700-metric-value' }, text);
+		if (String(text).length > 9) v.classList.add('is-long');
 		if (color) v.classList.add(color);
 		m.appendChild(v);
 		return m;

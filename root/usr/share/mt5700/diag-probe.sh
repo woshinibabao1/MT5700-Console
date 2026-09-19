@@ -18,11 +18,10 @@
 #   ③ 每条网络探测都带 timeout，且命令缺失时输出 -1（未知）而不是 0（假失败）
 #      —— 判错的代价比"没测到"大得多。
 #
-# 与 watchdog.sh 的分工（别混）：
-#   watchdog.sh  = 常驻自愈，发现不通就动手续约/复位；
-#   本文件       = 一次性体检，只回答"是哪一层、哪一项不通"。
-#   两者都会 ping，但 watchdog 用的是它自己的探测目标（UCI watch_gateway），
-#   这里的探测目标写死为公共 DNS IP：本机装过 mosdns / OpenClash，
+# 本文件是**唯一的体检入口**（看门狗已于 2026-09-20 整体移除）：
+#   一次性体检，只回答"是哪一层、哪一项不通"，不做任何自愈动作。
+#   断网后的恢复由用户在终端里决定——自动动作本身也是断网源（见前端说明）。
+# 探测目标写死为公共 DNS IP 而不是域名：本机装过 mosdns / OpenClash，
 #   拿域名当探测目标会被本地解析器误导，得出"能上网"的错误结论。
 # ============================================================================
 
@@ -150,7 +149,6 @@ else
 	emit svc_at_running 0
 	emit svc_at_enabled 0
 fi
-emit svc_watchdog "$(uci -q get at-webserver.config.watch_enabled 2>/dev/null)"
 
 tty_n=$(ls /dev/ttyUSB* 2>/dev/null | wc -l | tr -d ' ')
 emit ttyusb_count "$tty_n"

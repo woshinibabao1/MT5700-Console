@@ -82,6 +82,23 @@ return L.view.extend({
 			return String(res.data || '');
 		}
 
+		/*
+		 * 下载失败的**步骤条**文案。
+		 *
+		 * ★ 不能只贴 e.message：卡片类错误的 message 就是裸状态码
+		 *   （makeSwError 把 SW 直接当 message，如「6999」）。用户看到「下载失败：6999」
+		 *   既不知道是什么、也不知道该重试还是该放弃 —— 这是真实反馈过的。
+		 *   这里统一补上 swInfo 的人话解释，状态码本身仍保留（便于对账）。
+		 */
+		function downloadFailText(e) {
+			if (!e) return '未知错误';
+			if (e.swText) {
+				return e.swText + '（SW=' + (e.message || '') + '）'
+					+ (e.swHint ? '；' + e.swHint : '');
+			}
+			return (e && e.message) || '未知错误';
+		}
+
 		function handleErr(e) {
 			var code = e && e.code;
 			var msg;
@@ -876,7 +893,7 @@ return L.view.extend({
 					stepEl.textContent = '已取消下载。';
 					return;
 				}
-				stepEl.textContent = '下载失败：' + ((e && e.message) || '未知错误');
+				stepEl.textContent = '下载失败：' + downloadFailText(e);
 				handleErr(e);
 			});
 		}

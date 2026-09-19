@@ -441,6 +441,27 @@ var Euicc = (function () {
 		if (sw === '6E00' || sw === '6D00') {
 			return { level: 'fatal', text: '卡片不接受该 CLA / 指令', hint: '固件透传能力受限，本页不可用' };
 		}
+		/*
+		 * ★ 6999 = JavaCard ISO7816.SW_APPLET_SELECT_FAILED ——「Applet 选择失败」，
+		 *   即这一刻卡上并没有选中 ISD-R（出处：JavaCard 3.1 API 常量定义，
+		 *   值 0x6999；ISO 7816-4 本身没有给 SW2=0x99 定义语义，是 GP/JavaCard 侧的约定）。
+		 *
+		 *   真机背景（2026-09-20 用户遇到「下载失败：6999」）：下载要走十几条
+		 *   STORE DATA，中途一旦 SIM 被复位（手工 ifdown/ifup 重拨、模组重搜网、
+		 *   或热插拔都会重新初始化 SIM），ISD-R 的选择就丢了，后续每一条都被回 6999。
+		 *   —— 它不是「卡不支持下载」，也不是参数错了，是**选择态丢失**。
+		 *
+		 * 文案必须点出这一层：只报一个裸状态码，用户无从判断是该重试还是该放弃。
+		 */
+		if (sw === '6999') {
+			return {
+				level: 'error',
+				text: '卡上的 ISD-R 没被选中（Applet 选择失败，SW=6999）',
+				hint: '多因下载途中 SIM 被复位（手工重拨 ifdown/ifup、模组重搜网、热插拔）' +
+					'导致选择态丢失；先刷新页面让插件重新选中 ISD-R 再试，' +
+					'并保证下载期间不要动接口'
+			};
+		}
 		return { level: 'fatal', text: '未知卡片错误 SW=' + sw, hint: '不支持此操作' };
 	};
 

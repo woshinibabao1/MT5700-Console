@@ -468,6 +468,22 @@ ok('E7 esim.js 展示剩余量，并明确「卡不给总容量」（不编造�
 ok('E8 esim.js 在卡未上报容量时给出明确说明（不静默留空）',
 	/未在 EUICCInfo2 中上报 extCardResource/.test(esimSrc));
 
+/* ---------- F. 下载失败要给人话，不能只贴裸状态码（2026-09-20） ----------
+ *
+ * 真机反馈「下载失败：6999」：makeSwError 把 SW 直接当 message，
+ * 步骤条只贴 e.message 就只剩一个状态码 —— 用户既不知道是什么、
+ * 也不知道该重试还是该放弃。这里钉住「必须补 swInfo 的人话解释」。
+ */
+ok('F1 esim.js 有 downloadFailText，且优先用 swText 而不是裸 message',
+	/function downloadFailText\(/.test(esimSrc) && /e\.swText/.test(esimSrc));
+ok('F2 人话里仍保留 SW 原值（便于对账）', /SW='/.test(esimSrc));
+ok('F3 步骤条走 downloadFailText（不再直接贴 e.message）',
+	/'下载失败：'\s*\+\s*downloadFailText\(e\)/.test(esimSrc));
+ok('F4 反向：若改回直接贴 e.message 必须判红',
+	/'下载失败：'\s*\+\s*downloadFailText\(e\)/
+		.test(replaceAll(esimSrc, "'下载失败：' + downloadFailText(e)",
+			"'下载失败：' + ((e && e.message) || '未知错误')")) === false);
+
 /* ---------- 汇总 ---------- */
 
 Promise.all(asyncTests).then(function () {

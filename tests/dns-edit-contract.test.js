@@ -7,8 +7,11 @@
  *   1) 这两个值原来来自 AT^DHCP?，是**运营商下发的**，改 UCI 不会让它变。
  *      所以显示必须「自定义 ?? 运营商下发」，否则改完界面纹丝不动，
  *      用户会以为没保存成功。
- *   2) 接口名不能写死 MT5700M —— 它来自 at-webserver.config.watch_iface
- *      （跟「服务配置」页同一个），否则改了接口名的机器会写到不存在的 section。
+ *   2) 接口名不能写死 MT5700M —— 由 detectNetIface 从 network 配置反查
+ *      （原名优先，改名过的按 ethN 设备名兜底），否则改了接口名的机器
+ *      会写到不存在的 section。
+ *      ★ 它不能再读 at-webserver.config.watch_iface：那个键随「连接看门狗」
+ *        于 2026-09-20 一并删除，继续读只会恒为空、静默退回默认值。
  *   3) ACL 必须放行 network；老版本 ACL 的机器要**静默降级为只读**，
  *      不能报错也不能给一个点了没反应的假按钮。
  *   4) 清空两项 = 删 dns + peerdns 还原 1，彻底交回运营商下发（留兜底）。
@@ -65,10 +68,17 @@ ok('降级时把 dnsEditable 置 false（不给点了没反应的假按钮）',
 	/dnsEditable = false;/.test(loadSrc));
 ok('只有 dnsEditable 为真才挂点击', /if \(!dnsEditable\) return wrap;/.test(js));
 
-/* ---------- 3. 接口名不写死 ---------- */
-ok('接口名取 at-webserver.config.watch_iface',
-	/L\.uci\.get\('at-webserver', 'config', 'watch_iface'\)/.test(js));
-ok('拿不到时有 MT5700M 兜底', /var netIface = 'MT5700M';/.test(js));
+/* ---------- 3. 接口名不写死，且不能依赖已删除的看门狗配置 ---------- */
+const detectSrc = extractFn(js, 'detectNetIface');
+ok('接口名由 detectNetIface 反查（不写死）', /function detectNetIface\(/.test(js));
+ok('优先命中 MT5700M 原名', /if \(name === fallback\) return fallback;/.test(detectSrc));
+ok('改名过的机器按 ethN 设备名兜底', /\/\^eth\\d\+\$\/\.test\(/.test(detectSrc));
+ok('拿不到时回退 MT5700M', /var netIface = 'MT5700M';/.test(js));
+/* ★ 反向：watch_iface 随看门狗一并删除，再读只会恒为空（项目红线 16） */
+ok('★ 反向：不再读 at-webserver.config.watch_iface',
+	!/watch_iface/.test(js));
+ok('★ 反向：不再为取接口名而加载 at-webserver 配置',
+	!/L\.uci\.load\('at-webserver'\)/.test(js));
 
 /* ---------- 4. 显示值：自定义优先于运营商下发 ---------- */
 ok('单元格显示取「自定义 ?? 运营商下发」',

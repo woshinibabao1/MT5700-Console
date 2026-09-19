@@ -93,17 +93,19 @@ eq('冒号后没内容的不收（避免空行刷屏）',
 	Fns.entriesFromSyslog([{ time: 5, msg: 'at-webserver:' }]), []);
 eq('缺 time 时不产生 NaN 时间戳', Fns.entriesFromSyslog([{ msg: 'at-webserver: x' }])[0].ts > 0, true);
 
-/* ★ 真机实测：本插件在 syslog 里有**三种** tag，只认 at-webserver 一种会把
-   看门狗与 UCI 那两批行全丢掉 —— 页面上就表现为「没有任何数据」。
-   这是 2.3.6 修的主 bug 之一，钉死防回退。 */
-eq('★ 收 mt5700-watchdog 的行', Fns.entriesFromSyslog([
-	{ time: 1000, msg: 'mt5700-watchdog: 连接看门狗已启动' }
-]), [{ ts: 1000, level: 'INF', msg: '连接看门狗已启动' }]);
+/* ★ 真机实测：本插件在 syslog 里有**两种** tag（at-webserver / mt5700-uci），
+   只认 at-webserver 一种会把 UCI 那批行全丢掉 —— 页面上就表现为「没有任何数据」。
+   这是 2.3.6 修的主 bug 之一，钉死防回退。
+   正则里 `mt5700-` 是通配的（不是枚举），所以历史上 mt5700-watchdog 那类
+   已随看门狗移除的 tag 依然收得到 —— 那是 ring buffer 里的旧记录，属无害的历史。 */
+eq('★ 收 mt5700- 前缀的其它 tag（不止 at-webserver）', Fns.entriesFromSyslog([
+	{ time: 1000, msg: 'mt5700-diag: 体检完成' }
+]), [{ ts: 1000, level: 'INF', msg: '体检完成' }]);
 eq('★ 收 mt5700-uci 的行', Fns.entriesFromSyslog([
 	{ time: 1000, msg: 'mt5700-uci: at-webserver 已设为开机自启（S99at-webserver）' }
 ])[0].msg, 'at-webserver 已设为开机自启（S99at-webserver）');
 eq('带 PID 的 mt5700 系 tag 也认',
-	Fns.entriesFromSyslog([{ time: 1, msg: 'mt5700-watchdog[88]: ping' }])[0].msg, 'ping');
+	Fns.entriesFromSyslog([{ time: 1, msg: 'mt5700-uci[88]: ping' }])[0].msg, 'ping');
 eq('★ Rust 进程那类的行仍被排除（内存日志已提供，两边都收会重复）',
 	Fns.entriesFromSyslog([{ time: 5, msg: 'at-webserver-rust[9]: dial ok' }]), []);
 eq('★ 别家插件的行仍被排除（不能因为放开 tag 就收一堆噪音）',

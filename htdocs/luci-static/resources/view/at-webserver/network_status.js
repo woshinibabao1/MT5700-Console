@@ -165,6 +165,18 @@ return L.view.extend({
 			uplinkMCS: null, downlinkMCS: null,
 			activeCid: null,
 			networkStatus: '等待状态中',
+			/*
+			 * PS 注册状态码原始值（AT+CGREG 的 <stat>），与 networkStatus 配对存放。
+			 *
+			 * ★ 存在的理由：网络制式的显示必须受它约束（见 systemModeLabel）。
+			 *   真机实测：卡上没有可用 Profile 时 CGREG 报 1,2（未注册），但
+			 *   AT^MONSC 照样回 `^MONSC: NR,000,000,0,0,...` —— 制式字段仍是 NR，
+			 *   小区/PLMN 却全是 0。照单显示就成了「没网也显示 5G-NR」。
+			 *   null = 这一轮没取到 stat（查询失败），此时退化为看 PLMN 是否有效。
+			 */
+			psRegStat: null,
+			/* EPS 注册（AT+CEREG），5G 模组以它为准；判定顺序见 hasAnyPsService。 */
+			psRegStatEps: null,
 			operator: '未知运营商',
 			apn: '未知',
 			qci: '未知',
@@ -405,8 +417,8 @@ return L.view.extend({
 		 *
 		 * ★★★ 排查不自动修（用户 2026-09-19 明确选择）：
 		 *   只给「建议命令」，不提供修复按钮。续约 DHCP、重启 AT 服务这类动作
-		 *   本身就是断网源（ifdown/ifup 会短暂断网），由用户在终端里确认后执行更稳妥；
-		 *   而且 watchdog.sh 已经负责常驻自愈，这里再动手会和它抢职责。
+		 *   本身就是断网源（ifdown/ifup 会短暂断网），由用户在终端里确认后执行更稳妥。
+		 *   （看门狗已于 2026-09-20 整体移除，现在没有任何常驻自愈，全靠人工处置。）
 		 *   守卫：tests/connection-tools-contract.test.js / tests/diag-contract.test.js
 		 */
 
@@ -777,7 +789,8 @@ return L.view.extend({
 				},
 				{
 					/* ★ 静默断网的经典形态：模组 USB 重枚举后 netifd 不续约，
-					   接口 UP、有 IP，但网关邻居永远 INCOMPLETE —— 最后靠 watchdog.sh 兜住。 */
+					   接口 UP、有 IP，但网关邻居永远 INCOMPLETE —— 表现为
+					   「路由能进但完全没网」，只能靠重新拉起接口（ifdown/ifup）解决。 */
 					layer: 'L2', name: '网关 ARP', eval: function (f) {
 						var n = fv(f, 'gw_neigh');
 						if (!n) return { level: 'warn', text: '没查到网关邻居项（网关为空或接口刚起）' };
@@ -857,13 +870,6 @@ return L.view.extend({
 						}
 						bits.push('软件分载 ' + (fo === 1 ? '开' : '关') + ' · 硬件分载 ' + (foh === 1 ? '开' : '关'));
 						return { level: level, text: bits.join('；'), fix: fixes.join('；') };
-					}
-				},
-				{
-					layer: 'L2', name: '看门狗', eval: function (f) {
-						return fnum(f, 'svc_watchdog', 0) === 1
-							? { level: 'ok', text: '已启用（断网会自动续约 / 复位）' }
-							: { level: 'warn', text: '没开自愈看门狗，断网后要人工处理', fix: 'uci set at-webserver.config.watch_enabled=1 && uci commit at-webserver' };
 					}
 				},
 				{
@@ -1242,10 +1248,64 @@ return L.view.extend({
 		 *   手册全文检索不到 5G-A / 5GA / Advanced。所以只能按用户约定的规则推断：
 		 *   NR 且聚合载波数 ≥ 2 → 5GA-NR，NR 单载波 → 5G-NR。
 		 *
+		 * ★ 另一条真机事实（2026-09-20）：**制式只在已注册时才成立**。
+		 *   卡上没有可用 Profile 时，CGREG 报 1,2 / CEREG 报 2,2（都未注册），
+		 *   但 AT^MONSC 照样回 `^MONSC: NR,000,000,0,0,0,...` —— 制式字段是 NR，
+		 *   MCC/MNC/CID/PCI 却全是 0，AT^HFREQINFO? 直接 ERROR（一个载波都没有）。
+		 *   这种情况把 NR 原样显示成「5G-NR」，等于告诉用户「你在 5G 网上」，
+		 *   而实际连网都没有。故未注册时一律显示「—」：制式是驻留结果，
+		 *   没有驻留就没有制式可报，宁可空着也不编。
+		 *
 		 * 后缀始终跟随真实 sysMode，不会把 LTE 标成 NR；无法识别的制式原样返回裸值
 		 * （宁可显示 "NR-5GC" 也不要编一个代际出来）。
 		 */
-		function systemModeLabel(sysMode, carrierCount) {
+		/* AT 响应里的 <stat> 是字符串，取不到 / 非数字一律归一成 null（未知）。 */
+		function normStat(stat) {
+			if (stat === null || stat === undefined || String(stat).trim() === '') return null;
+			var n = parseInt(stat, 10);
+			return isNaN(n) ? null : n;
+		}
+
+		/* 单条注册状态的档位：1 = 已注册，0 = 明确未注册，-1 = 未知（没取到）。 */
+		function regRank(psStat) {
+			if (psStat === 1 || psStat === 5) return 1;
+			if (psStat === 0 || psStat === 2 || psStat === 3 || psStat === 4) return 0;
+			return -1;
+		}
+
+		function hasPsService(psStat, cell) {
+			var r = regRank(psStat);
+			if (r === 1) return true;
+			if (r === 0) return false;
+			/*
+			 * null = 这一轮没取到（查询失败）。这时不能武断判「没服务」，
+			 * 否则一次查询失败就把好端端的制式抹成「—」，反而丢信息。
+			 * 退化为看驻留小区是否真实：未注册时 MONSC 的 MCC 是 "000"。
+			 */
+			var mcc = String((cell && cell.mcc) || '').replace(/[^0-9]/g, '');
+			return !!mcc && !/^0+$/.test(mcc);
+		}
+
+		/*
+		 * 综合判定「有没有真的驻留上」。
+		 *
+		 * ★ 取两条：CEREG（EPS = LTE/NR）与 CGREG（GPRS = 2G/3G）。
+		 *   这条模组是 5G 的，**以 CEREG 为准**；CGREG 只在 CEREG 没取到时兜底 ——
+		 *   否则纯 LTE/NR 场景下 CGREG 恒报 0，会把「已驻留」误判成没服务。
+		 *   反过来只看 CGREG 也不行：NR-only 时它同样可能不反映真实驻留。
+		 *
+		 * 两条都没取到 → 退化看 MCC（未注册时 MONSC 的 MCC 是 "000"）。
+		 */
+		function hasAnyPsService(epsStat, gprsStat, cell) {
+			var r = regRank(epsStat);
+			if (r < 0) r = regRank(gprsStat);
+			if (r === 1) return true;
+			if (r === 0) return false;
+			return hasPsService(null, cell);
+		}
+
+		function systemModeLabel(sysMode, carrierCount, registered) {
+			if (registered === false) return '—';
 			var m = String(sysMode || '').trim().toUpperCase();
 			if (m === 'NR' || m === 'NR-5GC' || m === '5G') {
 				return (carrierCount >= 2 ? '5GA' : '5G') + '-NR';
@@ -1272,9 +1332,11 @@ return L.view.extend({
 			var grid = E('div', { 'class': 'mt5700-metrics' });
 			[
 				{ label: '网络状态', value: state.networkStatus, color: 'info' },
-				/* 制式改成「5GA-NR / 5G-NR / 4G-LTE」写法，判定规则见 systemModeLabel。
-				   载波数是 ^HFREQINFO 聚合出来的载波条数（state.carriers）。 */
-				{ label: '网络制式', value: systemModeLabel(state.cell.sysMode, state.carriers.length) },
+			/* 制式改成「5GA-NR / 5G-NR / 4G-LTE」写法，判定规则见 systemModeLabel。
+			   载波数是 ^HFREQINFO 聚合出来的载波条数（state.carriers）。
+			   第三个参数是「是否真的驻留上」：未注册时显示「—」，不把模组的
+			   残留制式字段当成正在用的网络（真机依据见 systemModeLabel 注释）。 */
+			{ label: '网络制式', value: systemModeLabel(state.cell.sysMode, state.carriers.length, hasAnyPsService(state.psRegStatEps, state.psRegStat, state.cell)) },
 				/* 信号强度不在此重复：上方环形仪表与顶部状态条已各有一处 */
 				{ label: 'APN', value: state.apn },
 				{ label: 'QCI', value: state.qci },
@@ -1817,14 +1879,44 @@ return L.view.extend({
 		 *      /tmp/resolv.conf.d/resolv.conf.auto，优先级高于运营商下发的。
 		 *   所以显示值取「自定义 ?? 运营商下发」，改完显示立刻跟着自定义项走。
 		 *
-		 * 接口名不写死：取 at-webserver.config.watch_iface（与「服务配置」页同一个），
-		 * 拿不到才回退 MT5700M。
+		 * 接口名的来源：原先读服务配置页里那个「监控接口」UCI 键，
+		 * 但连接看门狗功能已于 2026-09-20 整体移除，那个键随之删除，
+		 * 继续读只会恒为空、静默退回默认值。改为从 network 配置自己反查，
+		 * 见 detectNetIface。
 		 *
 		 * 权限：rpcd ACL 的 uci 读写白名单必须含 network，否则 L.uci.load 会被拒。
 		 * 被拒时这里**静默降级为只读**（dnsEditable=false），页面其余部分照常工作 ——
 		 * 老版本 ACL 的机器上不会出现报错或空白。
 		 */
 		var netIface = 'MT5700M';
+
+		/*
+		 * 反查模组所在的逻辑接口名。
+		 *
+		 * ① 本机默认就叫 MT5700M，命中直接返回 —— 绝大多数情况走这条，零风险。
+		 * ② 改名过的场景兜底：取 device 形如 ethN 的那个（模组是 USB 网口，
+		 *    LAN 侧通常是 br-lan / 交换机端口，不会是 ethN 这种裸设备名）。
+		 * ③ 全都拿不到（ACL 拒绝、旧版 uci 没有 sections）→ 回退 MT5700M。
+		 *
+		 * ★ 只做**读**判断，不会写 network；这里选错接口会导致 DNS 改到别的
+		 *   接口上，所以宁可回退默认也不要瞎猜。
+		 */
+		function detectNetIface() {
+			var fallback = 'MT5700M';
+			try {
+				var secs = (L.uci && L.uci.sections) ? (L.uci.sections('network', 'interface') || []) : [];
+				var i, name;
+				for (i = 0; i < secs.length; i++) {
+					name = secs[i]['.name'];
+					if (name === fallback) return fallback;
+				}
+				for (i = 0; i < secs.length; i++) {
+					if (/^eth\d+$/.test(String(secs[i].device || '').trim())) return secs[i]['.name'];
+				}
+			} catch (e) { /* 读不到就用默认值，不影响页面其余部分 */ }
+			return fallback;
+		}
+
 		var dnsCustom = [];      /* UCI 已配置的自定义 DNS：[主, 备] */
 		var dnsEditable = false; /* ACL 允许写 network 才为 true */
 
@@ -1842,11 +1934,7 @@ return L.view.extend({
 		function loadDnsConfig() {
 			if (!L.uci || !L.uci.load) return Promise.resolve();
 			return L.uci.load('network').then(function () {
-				/* at-webserver 只用来取接口名，失败也不影响主流程 */
-				return L.uci.load('at-webserver').catch(function () { });
-			}).then(function () {
-				var iface = L.uci.get('at-webserver', 'config', 'watch_iface');
-				if (iface) netIface = String(iface).trim() || netIface;
+				netIface = detectNetIface();
 				var dns = L.uci.get('network', netIface, 'dns');
 				dnsCustom = Array.isArray(dns) ? dns.slice(0, 2)
 					: (dns ? String(dns).split(/\s+/).filter(Boolean).slice(0, 2) : []);
@@ -1979,8 +2067,29 @@ return L.view.extend({
 						var p = row.split(',');
 						if (p.length >= 2) stat = p[1].trim();
 					});
+					/* 原始码单独存一份：网络制式要靠它判断「有没有真的驻留上」，
+					   只留文案的话只能去做字符串比较，一改文案就失效。 */
+					state.psRegStat = normStat(stat);
 					state.networkStatus = AtWs.psRegText(stat);
 				}
+			}).then(function () {
+				/*
+				 * EPS 注册状态（AT+CEREG）：**5G 模组以它为准**。
+				 * CGREG 是 2G/3G 的 GPRS 注册口径，纯 LTE/NR 的模组上它可能恒报 0，
+				 * 单看它会把「已驻留 LTE」误判成没服务；反过来单看 CGREG 又会在
+				 * NR-only 场景漏判。所以两条都取，判定顺序见 hasAnyPsService。
+				 * 拿不到就留 null（= 未知），绝不拿 0 冒充「未注册」。
+				 */
+				return AtWs.client.sendCommand('AT+CEREG?').then(function (res) {
+					if (res.success && res.data) {
+						var stat = null;
+						AtWs.extractATDataMultiline(res.data, '+CEREG').forEach(function (row) {
+							var p = row.split(',');
+							if (p.length >= 2) stat = p[1].trim();
+						});
+						state.psRegStatEps = normStat(stat);
+					}
+				});
 			});
 		}
 

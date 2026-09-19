@@ -5,6 +5,45 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.25] - 2026-09-20
+
+### Fixed — 没网也显示「5G-NR」：制式没跟着注册状态走
+
+- **现象**：卡上没有 Profile → 模组一直注册不上，页面「网络制式」却照样写 `5G-NR`，
+  读起来像「已经连上 5G 了」，实际 `AT+CGREG?` 的 `<stat>` 是 2（未注册，正在搜索）
+- **原因**：制式来自 `AT^MONSC`/系统模式字段，那个字段只反映**模组当前驻留的技术**，
+  不代表**已注册上 PS 业务**；之前缺一层「到底注册上没有」的闸门
+- **改法**：`network_status.js` 新增 `psRegStat`（取自 `AT+CGREG?` 的 `<stat>`）与
+  `hasPsService()` —— `stat` 为 0/2/3/4 一律判「没有 PS 业务」，只有 1/5 才算真注册；
+  `systemModeLabel()` 在没有 PS 业务时不再亮出制式（显示「—」/未注册）。
+  `stat` 万一读不到，降级用 PLMN 的 MCC 判断，不至于失明
+
+### Fixed — 长状态文本顶出卡片（「未注册，正在搜索（但允许紧急呼叫）」）
+
+- `mt5700.js` 的 `api.metric()` 现在自动识别超长取值：加 `is-long` 类、
+  字号自动降档并允许换行；`mt5700.css` 补 `.mt5700-metric-value.is-long`
+- 同步 bump `MT5700_CSS_VERSION` 到 `5.5.19` 并刷新 `css-cachebust` 指纹
+
+### Fixed — 「下载失败：6999」不再是天书
+
+- `6999` 是 JavaCard 的 `SW_APPLET_SELECT_FAILED`：ISD-R 的**选择态丢了**，
+  典型是下载途中 SIM 被复位（重拨 / 接口 ifdown-ifup / 拔插）把卡踢回初始态
+- `euicc.js` 的 `swInfo()` 新增 6999 分支；`esim.js` 的 `downloadFailText()`
+  把它翻成「SIM 被复位（ISD-R 选择态丢失）…保证下载期间不要触发重拨」，
+  **不再误报成「卡不支持」**
+
+### Removed — ★ 彻底删除「连接看门狗」（用户要求）
+
+- 删代码：`root/etc/init.d/mt5700-watchdog`、`root/usr/share/mt5700/watchdog.sh`
+- 删配置：UCI `at-webserver` 里 7 个 `watch_*` 选项、`uci-defaults` 里的默认值 /
+  迁移块 / chmod / enable+start
+- 删界面：`service.js`「服务配置」页的三块看门狗 UI（渲染、读 UCI、保存）
+- 删联动：断网排查不再有「看门狗」检查项（`diag-probe.sh` 不再 emit `svc_watchdog`），
+  `99-mt5700-renew` 同步清理
+- 删测试与文档：3 个看门狗专项测试删除，README / 前端审查报告同步
+- **新增 `tests/watchdog-removed-contract.test.js`**：钉住「确实删干净了」，
+  含反向断言（若有人把 `svc_watchdog` 加回来必须被检出）
+
 ## [2.3.24] - 2026-09-20
 
 ### Fixed — ★「这张卡不是 eUICC」是把通道问题误报成卡的身份

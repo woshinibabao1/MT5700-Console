@@ -350,73 +350,6 @@ return L.view.extend({
 		var webhookInput = Mt5700.input('text', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx', '');
 		notifBody.appendChild(Mt5700.formGroup('企业微信 WebHook', webhookInput, '通知将推送到该 WebHook 地址'));
 
-		/* ---------- 连接看门狗 ---------- */
-		var wdCard = Mt5700.card('连接看门狗',
-			'模组掉线或 DHCP 租约失效时自动续约，避免「路由能进但完全没网」');
-		var wdBody = E('div');
-		wdCard._body.appendChild(wdBody);
-		body.appendChild(wdCard);
-
-		var wdSwitch = E('div', { 'class': 'mt5700-switch' });
-		var wdChk = E('input', { type: 'checkbox' });
-		wdSwitch.appendChild(wdChk);
-		wdBody.appendChild(Mt5700.formGroup('启用看门狗', wdSwitch,
-			'默认开启。先看接口是否 up，再探测下方「默认网关」，异常时自动续约 DHCP，不会主动复位模组'));
-
-		var wdIfaceInput = Mt5700.input('text', 'MT5700M');
-		wdBody.appendChild(Mt5700.formGroup('监控接口', wdIfaceInput,
-			'netifd 里的逻辑接口名，默认 MT5700M。改这里之后，复位命令里的接口名要一起改'));
-
-		var wdDevInput = Mt5700.input('text', 'eth2');
-		wdBody.appendChild(Mt5700.formGroup('网口设备', wdDevInput,
-			'模组的 USB 网口，默认 eth2。用于推断默认网关与查邻居状态'));
-
-		/* 连通性探测目标（界面名沿用用户习惯的「默认网关」）。 */
-		var WATCH_GATEWAY_DEFAULT = '119.29.29.29';
-		var wdGwInput = Mt5700.input('text', WATCH_GATEWAY_DEFAULT);
-		wdBody.appendChild(Mt5700.formGroup('默认网关（探测目标）', wdGwInput,
-			'默认 119.29.29.29 —— 腾讯 DNS / DNSPod。看门狗用 ICMP 探测它来判断「到底有没有网」，' +
-			'这是最贴近实际上网体验的判据。刻意用 IP 不用域名：本机有过 DNS 劫持，' +
-			'域名探测会被本地解析器误导。填 none 则不做 ICMP 探测，改为自动推断默认网关并查其邻居状态。'));
-
-		var wdIntervalInput = Mt5700.input('number', '60', '');
-		wdBody.appendChild(Mt5700.formGroup('检查间隔（秒）', wdIntervalInput, '下限 15 秒，默认 60'));
-
-		var wdThresholdInput = Mt5700.input('number', '3', '');
-		wdBody.appendChild(Mt5700.formGroup('连续异常阈值', wdThresholdInput,
-			'连续异常达到该次数后才触发下方的复位动作'));
-
-		var wdResetSwitch = E('div', { 'class': 'mt5700-switch' });
-		var wdResetChk = E('input', { type: 'checkbox' });
-		wdResetSwitch.appendChild(wdResetChk);
-		wdBody.appendChild(Mt5700.formGroup('达阈值时执行复位', wdResetSwitch,
-			'连续异常达到阈值后，按下方命令逐条下发（最后手段，会短暂断网）'));
-
-		/* 复位命令：多行、自定义、按顺序执行。
-		 * 两类命令**按行首自动分流**（与 watchdog.sh::is_at_cmd 同一口径）：
-		 *   行首 AT / at → 经本机 RPC 下发给模组，并校验应答里的 success；
-		 *   其余任意行   → 本机 shell 执行（带 30s 超时）。
-		 * 默认值是纯 shell 的「重拉 MT5700M 接口」：ifdown → sleep 2 → ifup。
-		 * 刻意没把 AT+CFUN=1,1 放进默认值——协议栈复位会让 eth2 数据面挂死，
-		 * 本机实测的故障（USB 重枚举后 DHCP 租约失效）重拉接口就能恢复，不必动模组。 */
-		var WATCH_RESET_CMDS_DEFAULT = 'ifdown MT5700M\nsleep 2\nifup MT5700M';
-		var wdCmdsArea = E('textarea', { 'class': 'mt5700-input', 'rows': '4',
-			'placeholder': 'ifdown MT5700M\nsleep 2\nifup MT5700M' });
-		wdCmdsArea.style.width = '100%';
-		wdCmdsArea.style.fontFamily = 'var(--mt5700-font-mono)';
-		wdCmdsArea.style.minHeight = '84px';
-		wdBody.appendChild(Mt5700.formGroup('复位命令（每行一条，按顺序执行）', wdCmdsArea,
-			'行首是 AT / at 的行当 AT 指令下发给模组（ATE0、ATI、AT+CFUN=1,1、AT^HVSST=1,0…都算）；' +
-			'其余行作为本机 shell 命令执行（ifdown MT5700M、sleep 2、ifup MT5700M）。' +
-			'空行与 # 开头的行会被忽略，每条之间间隔 1 秒；' +
-			'AT 指令会校验模组应答，回 ERROR 会被记进日志而不是当成成功。' +
-			'注意 AT 复位会让数据面短暂中断，想加协议栈级兜底再补 AT+CFUN=1,1。'));
-
-		wdBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-			'看门狗每轮都会重新读取配置，保存后最多一个检查间隔即生效，无需重启服务。' +
-			'查看它的处置记录：SSH 执行 logread -e mt5700-watchdog，' +
-			'或查看日志文件 /tmp/at-notifications.log 里带 [watchdog] 的行。'));
-
 		/* ---------- 载入 UCI（单 section `config` + 扁平键，与 Rust/ucode 一致） ---------- */
 		var get = function (key, def) {
 			var v = L.uci.get('at-webserver', 'config', key);
@@ -440,21 +373,6 @@ return L.view.extend({
 		notifySignal.input.checked = get('notify_signal', '1') === '1';
 		notifyMem.input.checked = get('notify_memory_full', '1') === '1';
 		webhookInput.value = String(get('wechat_webhook', ''));
-		/* 连接看门狗（此前这排控件已渲染但没接 UCI：既读不到当前配置，改了也存不下去） */
-		wdChk.checked = get('watch_enabled', '1') === '1';
-		wdIntervalInput.value = String(get('watch_interval', '60'));
-		wdThresholdInput.value = String(get('watch_fail_threshold', '3'));
-		wdResetChk.checked = get('watch_reset_modem', '0') === '1';
-		wdIfaceInput.value = String(get('watch_iface', 'MT5700M'));
-		wdDevInput.value = String(get('watch_device', 'eth2'));
-		/* 探测目标要读**原始值**：config_get 是 `:-` 语义，空值与未设置都会落回默认，
-		 * 所以这里也把空值一并按默认值展示（与保存侧一致），但用户显式填的 none 要原样保留。 */
-		var gwRaw = L.uci.get('at-webserver', 'config', 'watch_gateway');
-		wdGwInput.value = (gwRaw == null || String(gwRaw) === '')
-			? WATCH_GATEWAY_DEFAULT : String(gwRaw);
-		/* UCI 里以字面 \n 存多行命令，这里还原成换行显示 */
-		wdCmdsArea.value = String(get('watch_reset_cmds', WATCH_RESET_CMDS_DEFAULT)).replace(/\\n/g, '\n');
-
 		/* ---------- 保存（OpenWrt 标准「保存并应用」流程） ----------
 		 *
 		 * 修复（问题一）：
@@ -490,25 +408,6 @@ return L.view.extend({
 			set('notify_signal', notifySignal.input.checked ? '1' : '0');
 			set('notify_memory_full', notifyMem.input.checked ? '1' : '0');
 			set('wechat_webhook', webhookInput.value.trim());
-			/* 看门狗：间隔下限 15 秒（与 watchdog.sh 一致），阈值至少 1 次 */
-			set('watch_enabled', wdChk.checked ? '1' : '0');
-			set('watch_interval', String(Math.max(15, parseInt(wdIntervalInput.value, 10) || 60)));
-			set('watch_fail_threshold', String(Math.max(1, parseInt(wdThresholdInput.value, 10) || 3)));
-			set('watch_reset_modem', wdResetChk.checked ? '1' : '0');
-			set('watch_iface', wdIfaceInput.value.trim() || 'MT5700M');
-			set('watch_device', wdDevInput.value.trim() || 'eth2');
-			/* 空白视为「用默认值」——config_get 本来就分不出空值和未设置，统一成显式默认值。 */
-			var gwVal = wdGwInput.value.trim();
-			set('watch_gateway', gwVal === '' ? WATCH_GATEWAY_DEFAULT : gwVal);
-			/* 多行 → 字面 \n（UCI 值不能带真实换行），看门狗侧只翻译 \n、不动其它反斜杠。
-			 * 逐行去首尾空白 + 丢掉空行 + 用字面 \n 连接；**不做反斜杠转义**——
-			 * 命令里合法出现的反斜杠要原样保留。
-			 * （旧实现用 /^\s*|\s*$/g，少了 m 标志，只能裁整串首尾，行首空白没裁掉。） */
-			var wdCmdLines = wdCmdsArea.value.replace(/\r\n?/g, '\n').split('\n')
-				.map(function (x) { return x.replace(/^\s+|\s+$/g, ''); })
-				.filter(function (x) { return x !== ''; });
-			set('watch_reset_cmds', wdCmdLines.join('\\n'));
-
 			// 写内存后立刻标脏，未点保存就离开会被浏览器拦截
 			AtWs.uci.markDirty();
 			saveBtn.disabled = true;

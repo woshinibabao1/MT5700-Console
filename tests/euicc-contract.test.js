@@ -608,6 +608,18 @@ eq('parseExtCardResource：只报 82 一项也要给出来（不要求三项齐�
 	Euicc.parseExtCardResource('BF220584038201FF'),
 	{ freeNonVolatileMemory: 255 });
 
+/* ---------- 6999：Applet 选择失败（真机「下载失败：6999」） ---------- */
+const SW6999 = Euicc.swInfo('6999');
+eq('6999 不是 fatal（是「选择态丢失」，可重试）', SW6999.level, 'error');
+ok('6999 说清是 ISD-R 没被选中', /ISD-R/.test(SW6999.text), SW6999.text);
+ok('6999 点出「SIM 被复位」这一层病因（不是卡不支持下载）',
+	/复位/.test(SW6999.hint), SW6999.hint);
+/* ★ 反向：把 6999 分支整段删掉后必须退化成「未知卡片错误」—— 证明上面不是恒绿 */
+eq('★ 反向：删掉 6999 分支 → 退化成未知卡片错误（守卫不恒绿）',
+	eval('(' + src.replace(/if \(sw === '6999'\) \{[\s\S]*?\n\t\t\}\n/, '').match(
+		/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')().swInfo('6999').level,
+	'fatal');
+
 /* ---------- 汇总（等所有异步用例完成，R11） ---------- */
 
 Promise.all(asyncTests).then(function () {

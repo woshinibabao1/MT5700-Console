@@ -8,7 +8,7 @@
 [![Release](https://img.shields.io/github/v/release/woshinibabao1/MT5700-Console?label=release)](https://github.com/woshinibabao1/MT5700-Console/releases)
 [![OpenWrt](https://img.shields.io/badge/OpenWrt-23.05%20%7C%2024.10%2B-brightgreen)](https://openwrt.org/)
 
-信号 · 短信 · 锁频 · 拨号 · 看门狗 —— 常驻在路由器后台，浏览器只是它的操作台。
+信号 · 短信 · 锁频 · 拨号 —— 常驻在路由器后台，浏览器只是它的操作台。
 
 </div>
 
@@ -16,7 +16,7 @@
 
 ## 它是什么
 
-一个 LuCI 插件加一个 Rust 常驻服务，把 MT5700M-CN 的 AT 能力搬进 OpenWrt：串口独占、AT 命令队列、URC 事件分发、短信 PDU 收发、定时锁频、断网续约看门狗都在后台完成。
+一个 LuCI 插件加一个 Rust 常驻服务，把 MT5700M-CN 的 AT 能力搬进 OpenWrt：串口独占、AT 命令队列、URC 事件分发、短信 PDU 收发、定时锁频都在后台完成。
 
 | 项 | 值 |
 |:--|:--|
@@ -85,10 +85,15 @@ ls -l /usr/bin/at-webserver-rust        # 后端应存在
 | `connection_type` | `SERIAL` | `SERIAL`=PCUI 串口；`NETWORK`=TCP |
 | `serial_port` | `auto` | `auto` 优先探测 ttyUSB1 |
 | `autodial_enable` | `1` | 关掉则网口拿不到 IP |
-| `watch_enabled` / `watch_iface` / `watch_interval` | `1` / `MT5700M` / `60` | 连接看门狗 |
 | `wechat_webhook` | 空 | 企业微信机器人通知 |
 
-改完 `uci commit at-webserver && service at-webserver restart`，或在「服务配置」页点「保存并应用」。完整键（通知 / 看门狗 / 定时锁频）见随包默认配置文件。
+改完 `uci commit at-webserver && service at-webserver restart`，或在「服务配置」页点「保存并应用」。完整键（通知 / 定时锁频）见随包默认配置文件。
+
+> **连接看门狗已于 2026-09-20（2.3.25）整体移除**：原先它常驻轮询、断网后自动
+> 续约 / 复位，但在「卡上没有 Profile → 永远注册不上网」这类注定失败的场景下
+> 会持续制造 `ifdown/ifup` churn。断网排查请用「断网排查」页（只读体检，
+> 只给建议命令，不自动动手）；网口重枚举时的 DHCP 续约仍由 hotplug 脚本
+> `99-mt5700-renew` **事件驱动**地做一次。
 
 ### 脚本下发 AT
 

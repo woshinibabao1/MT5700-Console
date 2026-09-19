@@ -33,7 +33,6 @@ const MODEM_JS = path.join(ROOT, 'htdocs/luci-static/resources/view/at-webserver
 const RUST_SRC = path.join(ROOT, 'src/rust/src');
 const UCI_CFG = path.join(ROOT, 'root/etc/config/at-webserver');
 const UCI_DEF = path.join(ROOT, 'root/etc/uci-defaults/at-webserver');
-const WD_SH = path.join(ROOT, 'root/usr/share/mt5700/watchdog.sh');
 
 let pass = 0;
 let fail = 0;
@@ -160,9 +159,11 @@ for (const [label, p] of [
 console.log('== 4. 一切 AT 指令都走 Rust ==');
 
 const shellFiles = [
-	['watchdog.sh', WD_SH],
+	/* 看门狗（watchdog.sh / init.d/mt5700-watchdog）已于 2026-09-20 整体移除，
+	   这里不再列它 —— read() 对不存在的文件返回空，会被 `if (!t) continue` 静默跳过，
+	   那就变成了恒绿的空守卫（项目红线 16：写了守卫不等于有了守卫）。 */
 	['hotplug 续约脚本', path.join(ROOT, 'root/etc/hotplug.d/net/99-mt5700-renew')],
-	['init.d 脚本', path.join(ROOT, 'root/etc/init.d/mt5700-watchdog')]
+	['init.d 脚本', path.join(ROOT, 'root/etc/init.d/at-webserver')]
 ];
 for (const [label, p] of shellFiles) {
 	const t = read(p);
