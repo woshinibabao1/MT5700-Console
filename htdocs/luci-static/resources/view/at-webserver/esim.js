@@ -158,14 +158,43 @@ return L.view.extend({
 			card._body.appendChild(buildAddZone());
 			body.appendChild(card);
 		}
+		/*
+		 * ★ 2026-09-19 真机排查暴露的问题：探测失败时页面只有一句「读取 eSIM 信息失败，
+		 *   请稍后重试」，真实病因（err.code）只写进 console —— 用户（和排查的人）无从判断
+		 *   到底是卡不支持、固件不支持透传、还是 AT 服务没起来，只能干等重试。
+		 *   这里给每个 code 配一句中文说明显示出来。
+		 *   R12 保持不变：内部诊断码字面量（EUICC_xxx）不进用户可见文案，只出中文。
+		 */
+		var ERR_HINT = {
+			EUICC_AT_ERROR: 'AT 服务未就绪，或 AT 层拒绝了某条指令 —— 先确认模组已连接（状态页有信号），再重试。',
+			EUICC_NO_CSIM: '固件不支持 AT+CSIM 透传，本页无法管理 eUICC（这与卡本身无关）。',
+			EUICC_NO_CARD: '卡槽里没有检测到卡片。',
+			EUICC_NO_CHANNEL: '逻辑通道申请失败，已自动改用基本通道后仍然失败。',
+			EUICC_CHANNEL_LEAK: '疑似逻辑通道泄漏，建议重启模组后再试。',
+			EUICC_NO_EUICC: '这张卡上没有 ISD-R（通常是普通 USIM，不是 eUICC）。',
+			EUICC_BUSY: '卡片正忙，约 10 秒后重试。',
+			EUICC_POLICY_DENIED: '卡片拒绝了该操作（可能是 M2M 卡或厂家锁卡，再试通常也不会变）。',
+			EUICC_OP_FAILED: '卡片返回了失败状态字，本页无法完成该操作。',
+			EUICC_TLV_TRUNCATED: '卡片返回的数据过长，分次取余超过了上限。',
+			EUICC_UNSUPPORTED_TAG: '卡片返回了本页不认识的数据字段。',
+			EUICC_BAD_HEX: '数据格式异常（十六进制解析失败）。',
+			EUICC_BAD_APDU: '指令组装异常。',
+			EUICC_NO_ES9P: '缺少下载通道（后端未提供 ES9+ 转发）。',
+			EUICC_ES9P_FAILED: '下载服务器返回失败。'
+		};
+
 		function renderError(p) {
 			body.innerHTML = '';
 			body.appendChild(connBar);
 			var card = Mt5700.card('eSIM 管理');
 			/* R12：code 是内部诊断码，绝不进用户可见文案；只出中文 + 进 console */
 			var code = (p && p.error) || '';
+			/* ★ 2026-09-19：主文案必须带原因。旧版恒为「读取 eSIM 信息失败，请稍后重试。」
+			   而真正的诊断码只进 console —— 用户（和我排查时）根本无从判断是卡的问题、
+			   固件不支持 CSIM、还是 AT 服务没起来。现在把中文原因直接放主文案。 */
+			var hint = ERR_HINT[code];
 			card._body.appendChild(Mt5700.errorState(
-				'读取 eSIM 信息失败，请稍后重试。',
+				hint ? ('读取 eSIM 信息失败：' + hint) : '读取 eSIM 信息失败，请稍后重试。',
 				function () { render(); }));
 			body.appendChild(card);
 			if (code && typeof console !== 'undefined' && console.warn) {

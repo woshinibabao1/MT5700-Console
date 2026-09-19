@@ -144,10 +144,13 @@ eq('tlvHex 超长抛错', (function () {
 	try { Euicc.tlvHex('80', '00'.repeat(70000)); return 'no-throw'; } catch (e) { return e.code; }
 })(), 'EUICC_BAD_APDU');
 
-eq('buildEs10b 组装：CLA/INS/Lc/Le 全对', (function () {
+/* ★ 2026-09-19 真机实测：本卡（及 MT5700M 透传）在 STORE DATA 带 Le=00 时，
+   AT+CSIM 传输层直接返回 ERROR（不是卡片 SW）；不带 Le 才返回 9000。
+   故 storeDataApdu 不再拼 Le，这里的期望同步去掉末尾两个字符。 */
+eq('buildEs10b 组装：CLA/INS/Lc 全对（★ 不带 Le，实测带 Le 会传输层 ERROR）', (function () {
 	const apdu = Euicc.buildEs10b(1, 'BF2E', '');
 	return [apdu, apdu.length];
-})(), ['80E2910003BF2E0000'.replace('80E2910003', '81E2910003'), 18]);
+})(), ['80E2910003BF2E0000'.replace('80E2910003', '81E2910003').replace(/00$/, ''), 16]);
 eq('buildEs10b 拒绝不在白名单的 tag', (function () {
 	try { Euicc.buildEs10b(1, 'BF99', ''); return 'no-throw'; } catch (e) { return e.code; }
 })(), 'EUICC_BAD_APDU');
@@ -164,7 +167,8 @@ eq('末块 P1=0x91，其余 P1=0x11', chunks.map(function (c) { return c.substr(
 eq('非末块全是 0x11', chunks.slice(0, -1).every(function (c) { return c.substr(4, 2) === '11'; }), true);
 eq('P2 从 0 起递增', chunks.slice(0, 4).map(function (c) { return c.substr(6, 2); }),
 	['00', '01', '02', '03']);
-eq('分片可原样拼回整条 TLV', chunks.map(function (c) { return c.substr(10, c.length - 12); }).join(''),
+/* 无 Le 后，tlv 部分就是从第 10 个字符一直到末尾（旧写法再砍 2 是把 Le 当数据砍掉） */
+eq('分片可原样拼回整条 TLV', chunks.map(function (c) { return c.substr(10); }).join(''),
 	Euicc.tlvHex('BF36', 'AA'.repeat(600)));
 eq('mss 越界回退默认 120', Euicc.buildEs10bChunks(1, 'BF36', 'AA'.repeat(600), 9999).length,
 	chunks.length);
@@ -229,6 +233,9 @@ function makeCard(opts) {
 			if (apdu.indexOf('01A4040C10') === 0) return Promise.resolve({ success: true, data: csimAnswer('9000') });
 			if (apdu === '0070800100') { st.closes++; return Promise.resolve({ success: true, data: csimAnswer('9000') }); }
 			const body = apdu.substr(10, 4);   /* 跳过 CLA INS P1 P2 LC */
+			/* 2026-09-19：withIsdrSession 会先用 GetEID 探活逻辑通道，mock 必须认得它，
+			   否则它落到下面「P1=91 就算 BPP 分片」的兜底分支，把探活误计成一块 BPP。 */
+			if (body === 'BF3E') return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10' + '89004400112233445566778899AABBCCDD' + '9000') });
 			if (body === 'BF2E') return Promise.resolve({ success: true, data: csimAnswer('BF2E0A80 08'.replace(' ', '') + CHALLENGE + '9000') });
 			if (body === 'BF20') return Promise.resolve({ success: true, data: csimAnswer('BF2003' + '010203' + '9000') });
 			if (body === 'BF38') return Promise.resolve({ success: true, data: csimAnswer(opts.authSw || '9000') });

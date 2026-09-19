@@ -5,6 +5,41 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.18] - 2026-09-19
+
+### Fixed — eSIM 读到不信息（真机实测定位）
+页面恒显「读取 eSIM 信息失败，请稍后重试」，真机二分定位后确认
+**唯一根因是 `euicc.js` 的 `storeDataApdu` 固定多拼了 `Le=00`**：带 Le 的 STORE DATA
+（case 4）在 `AT+CSIM` **传输层**就回 `ERROR`，卡根本没收到；去掉 Le 后
+GetEID / GetProfiles / ListNotification 全部 `9000`，EID 正常读出。
+
+- 去掉 `storeDataApdu` 末尾的 `Le`；`getResponseApdu`（case 2，带 Le）保持不动 ——
+  实测 `SELECT` 回 `6121` 后 `GET RESPONSE` 取余正常，这条不能跟着删
+- `sendAndCollect` 补 `transport` 分支：AT 层拒绝 APDU 时明确报「AT 层拒绝了这条 APDU」，
+  不再退化成「无法解析 CSIM 应答」把病因藏起来
+- `esim.js` 主文案带上中文原因（原来诊断码只进 console，页面只有一句「请稍后重试」）
+
+### Added — 逻辑通道撞 6881 自动回退基本通道（防御性）
+GSMA 里确有卡不支持逻辑通道（`6881`/`6A81`）。原实现下这类 SW 会落到兜底判成
+`fatal → EUICC_NO_EUICC`，页面显示「这张卡不是 eUICC」——**把 eUICC 误报成普通卡**。
+现改为：会话先用 GetEID 探活逻辑通道，撞 `6881`/`6A81` 就关掉通道回退基本通道；
+其余错误（如 `6A82`、卡忙、AT 未就绪）照旧上抛，不把真实病因换成一次无效重试。
+代价：每次会话多一条只读 GetEID。**本机卡逻辑通道可用，该路径不会触发。**
+
+### 更正（重要，避免后人被旧结论误导）
+早先的实测结论「本卡不支持逻辑通道」**是错的** —— 那份二分脚本在基本通道 SELECT 后
+直接拿 `CLA=81` 发数据，却从未 `open` 过逻辑通道，卡回 `6881` 是必然结果。
+按正确流程复测（`.workbuddy/tmp/esim-bipartite-v2.py`）：`00 / 80 / 82` 三种 CLA
+**不带 Le 全部 `9000`、带 Le 全部传输层 `ERROR`** —— 变量只有 Le，与通道无关。
+附带发现：open 拿到的通道号是 2 而非 1，说明卡上残留了未关闭的 1 号通道，
+与 `euicc.js` 的「疑似通道泄漏」告警吻合。
+
+### 测试
+新增 `tests/euicc-channel-fallback-contract.test.js`（36 项），
+含 **8 条反向验证**（抹掉任一项修复都必须判红），并守住「GET RESPONSE 的 Le 不许被顺手删掉」。
+同步修正既有断言里钉死旧 APDU 格式的期望（`euicc-contract` / `euicc-download-contract`）。
+全量 38 个测试文件全绿。
+
 ## [2.3.17] - 2026-09-19
 
 ### 全量审计优化（agent-council 完整模式会审，26 项判据逐条处置）

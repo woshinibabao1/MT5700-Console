@@ -80,17 +80,28 @@ eq('① 开逻辑通道', Euicc.openChannelApdu(), '0070000001');
 eq('⑩ 关逻辑通道 ch=1', Euicc.closeChannelApdu(1), '0070800100');
 eq('② SELECT ISD-R ch=1', Euicc.selectIsdrApdu(1), '01A4040C10' + Euicc.ISDR_AID);
 eq('③ GET RESPONSE ch=1 le=0', Euicc.getResponseApdu(1, 0), '81C0000000');
-eq('④ GetEID', Euicc.buildGetEid(1), '81E2910006BF3E035C015A00');
-eq('⑤ GetProfiles 默认 5 tag', Euicc.buildGetProfiles(1), '81E291000BBF2D085C055A4F9F70909100');
-eq('⑤ GetProfiles 自定义 3 tag（9F70 计 2 字节）',
-	Euicc.buildGetProfiles(1, ['5A', '4F', '9F70']), '81E2910009BF2D065C035A4F9F7000');
+/* ★ 2026-09-19 真机实测：STORE DATA 固定 case 3（**无 Le**）。
+   带 Le=00 时本模组透传层直接回 ERROR（CLA=00/80/81 全部失败），卡根本收不到。
+   响应数据由 GET RESPONSE（case 2，带 Le）取回 —— 见下面 ③ 的 getResponseApdu，它有 Le。 */
+eq('④ GetEid（无 Le）', Euicc.buildGetEid(1), '81E2910006BF3E035C015A');
+eq('⑤ GetProfiles 默认 5 tag（无 Le）', Euicc.buildGetProfiles(1), '81E291000BBF2D085C055A4F9F709091');
+eq('⑤ GetProfiles 自定义 3 tag（9F70 计 2 字节，无 Le）',
+	Euicc.buildGetProfiles(1, ['5A', '4F', '9F70']), '81E2910009BF2D065C035A4F9F70');
+/* ★ 反向验证：STORE DATA 绝不能再出现末尾 Le=00。
+   少了这条，有人把 storeDataApdu 改回 '+ "00"' 时上面三条能跟着改、守卫却还是绿的。 */
+ok('★ 反向：STORE DATA 末字节不是 Le（case 3）',
+	/00$/.test(Euicc.buildGetEid(1)) === false,
+	Euicc.buildGetEid(1));
+ok('★ 反向：GET RESPONSE 仍必须带 Le（case 2，取余靠它）',
+	Euicc.getResponseApdu(1, 0) === '81C0000000',
+	Euicc.getResponseApdu(1, 0));
 
 /* ---------- 3. P04 反例：delete 不含 A0 / 81 包裹，enable 反之 ---------- */
 
 const DEL_ICCID = '980193000050577617F1';
 const delApdu = Euicc.buildProfileOperation(1, 'delete', { kind: 'iccid', hex: DEL_ICCID }, false);
 const delCmd = Euicc.csimCommand(delApdu);
-eq('⑧ delete 字节序列', delApdu, '81E291000FBF330C5A0A980193000050577617F100');
+eq('⑧ delete 字节序列（无 Le）', delApdu, '81E291000FBF330C5A0A980193000050577617F1');
 ok('⑧ delete 不含 A0 包裹（排除 5A0A 标识里的巧合子串）', delApdu.replace('5A0A', '').indexOf('A0') < 0, delApdu);
 ok('⑧ delete 不含 8101 refresh', delApdu.indexOf('8101') < 0, delApdu);
 
@@ -150,9 +161,9 @@ eq('R01 nickname=1字节 → BF29 长度=14+1=15', bf29Len(Euicc.buildSetNicknam
 eq('R01 nickname=2字节 → BF29 长度=14+2=16', bf29Len(Euicc.buildSetNickname(1, NICCID, 'AB')), 14 + 2);
 eq('R01 nickname=中文3字节 → BF29 长度=14+3=17', bf29Len(Euicc.buildSetNickname(1, NICCID, '中')), 14 + 3);
 /* 整条 APDU 字节级断言：修复前产出 0C（12），修复后应为 10（16） */
-eq('R01 buildSetNickname(1,ICCID,\'AB\') 完整字节序列',
+eq('R01 buildSetNickname(1,ICCID,\'AB\') 完整字节序列（无 Le）',
 	Euicc.buildSetNickname(1, NICCID, 'AB'),
-	'81E2910013BF29105A0A980193000050577617F19002414200');
+	'81E2910013BF29105A0A980193000050577617F190024142');
 /* R13：iccidHex 必须 20 字符 */
 eq('R13 buildSetNickname iccid 长度 19 → EUICC_BAD_APDU', (function () {
 	try { Euicc.buildSetNickname(1, NICCID.slice(0, 19), 'AB'); return 'no-throw'; }
@@ -261,8 +272,14 @@ asyncTests.push((function () {
 	return Euicc.deleteProfile(send, { kind: 'iccid', hex: DEL_ICCID }).then(function () {
 		const hits = counter.filter(function (c) { return c === delCmd; }).length;
 		eq('delete 业务 APDU 仅下发 1 次（未重试）', hits, 1);
-		/* 写路径：open + select + delete + close = 4 次 send，无额外重发 */
-		eq('delete 总 send 调用数 = 4（开/选/删/关）', counter.length, 4);
+		/* 写路径：open + select + **探活 GetEid** + delete + close = 5 次 send。
+		   ★ 多出来的那一条是探活（2026-09-19）：本卡逻辑通道 open 与 SELECT 都成功、
+		     到 STORE DATA 才回 6881，所以必须在执行写操作**之前**判定通道是否可用，
+		     否则 delete/enable 这类写操作会跑到一半失败再被迫重跑，有重复下发风险。
+		     探活用只读 GetEid，无副作用。 */
+		eq('delete 总 send 调用数 = 5（开/选/探活/删/关）', counter.length, 5);
+		/* ★ 反向：写操作必须只下发一次（探活不得导致 fn 重跑），这是探活方案的核心保障 */
+		eq('★ delete 业务 APDU 仅 1 次（探活未导致重跑）', hits, 1);
 	});
 })());
 

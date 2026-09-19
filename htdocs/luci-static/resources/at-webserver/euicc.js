@@ -249,10 +249,37 @@ var Euicc = (function () {
 		if (sw === '6A88') {
 			return { level: 'error', text: '卡上找不到指定的 tag', hint: '缩减 tag 列表（只留 5A/4F/9F70）重试 1 次' };
 		}
+		/*
+		 * 6881 / 6A81：卡不支持逻辑通道。
+		 * ★ 2026-09-19 真机实测（更正过一次，别再抄旧结论）：
+		 *   本机卡**逻辑通道完全可用**（open→SELECT→GET RESPONSE→GetEID 全 9000），
+		 *   eSIM 读不出来的**唯一根因是 Le**：带 Le=00（case 4）时 AT+CSIM 在传输层
+		 *   直接 ERROR，不带 Le 才 9000 —— 与 CLA 是 00 / 80 / 82 无关（三组对照实测）。
+		 *   早先曾误判成「本卡不支持逻辑通道」，真实原因是我那份二分脚本没先 open
+		 *   通道就拿 CLA=81 发数据，卡当然回 6881。已用正确流程复测推翻。
+		 *   现保留本分支的意义：6881 是 GSMA 里真实存在的状态（确实有卡不支持逻辑通道），
+		 *   有了它，这类卡会由 withIsdrSession 自动回退基本通道，而不是被判成
+		 *   fatal → 页面显示「这张卡不是 eUICC」（把 eUICC 误报成普通卡，比报错更糟）。
+		 */
+		if (sw === '6881' || sw === '6A81') {
+			return {
+				level: 'error',
+				text: '这张卡不支持逻辑通道',
+				hint: '已自动改用基本通道重试'
+			};
+		}
 		if (sw === '6E00' || sw === '6D00') {
 			return { level: 'fatal', text: '卡片不接受该 CLA / 指令', hint: '固件透传能力受限，本页不可用' };
 		}
 		return { level: 'fatal', text: '未知卡片错误 SW=' + sw, hint: '不支持此操作' };
+	};
+
+	/*
+	 * 是否「逻辑通道不被支持」这一类 SW。判定独立成函数，供 withIsdrSession 回退使用。
+	 * 6881 = 逻辑通道不支持；6A81 = 功能不支持（部分卡以这个表达同一件事）。
+	 */
+	api.isChannelUnsupportedSw = function (sw) {
+		return sw === '6881' || sw === '6A81';
 	};
 
 	/* ============ 通道 / STORE DATA APDU（§1.3） ============ */
@@ -271,8 +298,14 @@ var Euicc = (function () {
 
 	/*
 	 * STORE DATA（ES10c 容器）：CLA=0x80|ch, INS=0xE2, P1=0x91(默认，末块),
-	 * P2=0x00, Lc=tlv 字节数, DATA=tlv, Le=00。
+	 * P2=0x00, Lc=tlv 字节数, DATA=tlv。**不带 Le（case 3）**。
 	 * opts.p1 可覆盖 P1（>254 字节分块时倒数第二块之前用 0x11，本页不触发）。
+	 *
+	 * ★ 2026-09-19 真机实测（H5000M）：末尾带 Le=00 时 AT 透传层直接回 ERROR，
+	 *   CLA=00 / 80 / 81 三种**全部**失败 —— 卡根本没收到这条 APDU。不带的同一条
+	 *   命令则正常返回。故这里固定 case 3；响应数据改由 GET RESPONSE 取回
+	 *   （case 2，带 Le，真机实测可用：SELECT 返回 6121 后 01C0000021 → 9000）。
+	 *   即：case 4 不被该模组透传支持，case 2 正常，与 T=0 的常见行为一致。
 	 */
 	api.storeDataApdu = function (ch, tlv, opts) {
 		var p1 = (opts && opts.p1 != null) ? opts.p1 : 0x91;
@@ -281,7 +314,7 @@ var Euicc = (function () {
 		var tlvHex2 = api.bytesToHex(tlv);
 		var lc = hex2(tlv.length);
 		var head = api.bytesToHex(new Uint8Array([0x80 | (ch & 0x0f), 0xE2, p1, p2]));
-		return head + lc + tlvHex2 + '00';
+		return head + lc + tlvHex2;
 	};
 
 	api.getResponseApdu = function (ch, le) {
@@ -555,6 +588,13 @@ var Euicc = (function () {
 			if (fail.kind === 'empty') {
 				throw makeError('EUICC_AT_ERROR', '模组无响应');
 			}
+			/* ★ 2026-09-19 真机实测：AT 透传层拒绝这条 APDU 时会回 ERROR（kind='transport'），
+			   例如本模组不接受 case 4（带 Le 的 STORE DATA）。原先这里没有分支，会一路走到
+			   parseCsimAnswer 匹配不到 +CSIM: → 抛「无法解析 CSIM 应答」，把真实病因
+			   （APDU 格式被拒）藏起来，排查时极易误判成固件不支持 CSIM。 */
+			if (fail.kind === 'transport') {
+				throw makeError('EUICC_AT_ERROR', 'AT 层拒绝了这条 APDU（透传未返回结果，多为 APDU 格式问题）');
+			}
 			var a = api.parseCsimAnswer(res && res.data);
 			if (!a) throw makeError('EUICC_AT_ERROR', '无法解析 CSIM 应答');
 			if (a.hasMore) {
@@ -565,16 +605,24 @@ var Euicc = (function () {
 				return sendAndCollect(send, ch, gr, round + 1, acc + a.data);
 			}
 			var data = acc + a.data;
-			if (a.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
-			var info = api.swInfo(a.sw);
-			if (info.level === 'fatal') throw makeSwError('EUICC_NO_EUICC', a.sw); /* R08 带人话文案 */
-			if (info.level === 'error') throw makeSwError('EUICC_OP_FAILED', a.sw); /* R08 */
-			return { data: data, sw: a.sw };
+		if (a.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
+		var info = api.swInfo(a.sw);
+		/* R08 带人话文案。channelUnsupported 供 withIsdrSession 判定是否回退基本通道 ——
+		   不能靠 err.code 区分，因为 6881 与其它操作失败共用 EUICC_OP_FAILED。 */
+		if (info.level === 'fatal' || info.level === 'error') {
+			var se = makeSwError(info.level === 'fatal' ? 'EUICC_NO_EUICC' : 'EUICC_OP_FAILED', a.sw);
+			se.swInfo = info;
+			if (api.isChannelUnsupportedSw(a.sw)) se.channelUnsupported = true;
+			throw se;
+		}
+		return { data: data, sw: a.sw };
 		});
 	}
 
 	function doClose(send, channel) {
-		if (channel == null) return Promise.resolve();
+		/* ★ 基本通道（channel === 0）不 close：它没有「关闭」的概念，
+		   而 0070800000 会把基本通道一起关掉，可能打断模组 SIM 驱动自己的操作。 */
+		if (channel == null || channel === 0) return Promise.resolve();
 		return send(api.csimCommand(api.closeChannelApdu(channel)))
 			.then(function (res) {
 				var a = api.parseCsimAnswer(res && res.data);
@@ -589,18 +637,46 @@ var Euicc = (function () {
 	}
 
 	/*
-	 * withIsdrSession：开通道 → 校验通道号 → 选 ISD-R → fn(ch, sendApdu) → 强制关通道。
+	 * 在指定通道上 SELECT ISD-R，再发一条**只读** GetEID 探活。ch=0 表示基本通道。
+	 *
+	 * ★ 为什么要探活（2026-09-19 真机实测）：本卡的逻辑通道 open 成功（9000，ch=1）、
+	 *   SELECT ISD-R 也成功（6121 → GET RESPONSE → 9000），**到 STORE DATA 才回 6881**。
+	 *   所以通道是否可用必须在执行 fn 之前判定 —— 否则 fn（可能是 enable / delete 这类
+	 *   写操作）会在跑到一半失败后被迫重跑一次，有重复下发风险。GetEID 只读、
+	 *   无副作用，可以安全地多发一次。
+	 */
+	function selectAndPing(send, ch) {
+		return sendAndCollect(send, ch, api.selectIsdrApdu(ch), 0, '')
+			.then(function (sel) {
+				if (sel.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
+				return sel;
+			})
+			.then(function () {
+				return sendAndCollect(send, ch, api.buildGetEid(ch), 0, '');
+			});
+	}
+
+	/*
+	 * withIsdrSession：开通道 → 校验通道号 → 选 ISD-R → **探活** → fn(ch, sendApdu) → 强制关通道。
 	 * send 注入点：(atCmd) => Promise<{success,data,error}>。
 	 * 异常统一带 err.code；finally 语义用 .catch 兜底 close（P10 不重发、关通道必执行）。
+	 *
+	 * ★ 2026-09-19「探活 + 基本通道回退」的定位（写清楚，免得后人以为是本机故障的修复）：
+	 *   本机 eSIM 读不出来的**唯一根因**是 storeDataApdu 多拼了 Le（见该函数注释），
+	 *   本机卡逻辑通道**可用**，所以这里的探活必然成功、不会触发回退 —— 对现有设备
+	 *   它是一条纯开销（每次会话多一条只读 GetEID，约几十 ms）。
+	 *   保留它的理由：6881/6A81 在 GSMA 里真实存在（确有卡不支持逻辑通道），没有回退时
+	 *   这类卡会被 swInfo 判成 fatal → 页面显示「这张卡不是 eUICC」，把 eUICC 误报成
+	 *   普通卡，比直接报错更糟。回退只在明确拿到 6881/6A81 时触发，其余错误照旧上抛，
+	 *   不会把真实病因换成一次无效重试。
 	 */
 	api.withIsdrSession = function (send, fn) {
 		var channel = null;
 		var result;
 
-		return Promise.resolve()
-			.then(function () {
-				return sendAndCollect(send, 0, api.openChannelApdu(), 0, '');
-			})
+		/* 第一步：尝试逻辑通道。隔离性最好 —— 不占用基本通道的当前选择，
+		   不会打断模组 SIM 驱动自己的操作。 */
+		var opened = sendAndCollect(send, 0, api.openChannelApdu(), 0, '')
 			.then(function (open) {
 				if (open.sw !== '9000') throw makeError('EUICC_NO_CHANNEL', 'open 失败 SW=' + open.sw);
 				var b = api.hexToBytes(open.data);
@@ -613,13 +689,41 @@ var Euicc = (function () {
 					channelLeakNote = '疑似通道泄漏（本次通道号 ' + ch + '，上次 ' + lastChannel + '），建议重启模组';
 				}
 				lastChannel = ch;
-				return sendAndCollect(send, ch, api.selectIsdrApdu(ch), 0, '');
+				return ch;
+			});
+
+		function pingOn(ch) {
+			return selectAndPing(send, ch).catch(function (e) {
+				/* 逻辑通道撞 6881 / 6A81 → 回退基本通道（ch=0）。
+				   除 EUICC_NO_CHANNEL / channelUnsupported 之外的错误（如 6A82 不是 eUICC、
+				   AT 服务未就绪）都**不**回退，直接抛，避免把真实病因换成一次无效重试。 */
+				if (ch !== 0 && e && (e.code === 'EUICC_NO_CHANNEL' || e.channelUnsupported === true)) {
+					return doClose(send, ch).then(function () {
+						channel = 0;
+						channelLeakNote = ''; /* 已放弃逻辑通道，泄漏提示不再有意义 */
+						return selectAndPing(send, 0);
+					}, function () {
+						channel = 0;
+						channelLeakNote = '';
+						return selectAndPing(send, 0);
+					});
+				}
+				throw e;
+			});
+		}
+
+		return opened
+			.then(function (ch) {
+				return pingOn(ch);
+			}, function (e) {
+				/* open 本身就失败 → 直接走基本通道。AT 服务未就绪之类不回退。 */
+				if (e && e.code === 'EUICC_NO_CHANNEL') {
+					channel = 0;
+					return selectAndPing(send, 0);
+				}
+				throw e;
 			})
-			.then(function (sel) {
-				if (sel.sw === '6A82') throw makeError('EUICC_NO_EUICC', 'SELECT ISD-R 返回 6A82');
-				var info = api.swInfo(sel.sw);
-				if (info.level === 'fatal') throw makeSwError('EUICC_NO_EUICC', sel.sw); /* R08 */
-				if (info.level === 'error') throw makeSwError('EUICC_OP_FAILED', sel.sw); /* R08 */
+			.then(function () {
 				return fn(channel, function (apdu) {
 					return sendAndCollect(send, channel, apdu, 0, '');
 				});
