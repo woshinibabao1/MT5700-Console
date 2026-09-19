@@ -172,7 +172,9 @@ return L.view.extend({
 				E('h3', { 'class': 'mt5700-card-title' }, '关于本页')));
 			var eb = E('div', { 'class': 'mt5700-card-body' });
 			eb.appendChild(E('p', { 'class': 'mt5700-hint' },
-				'本页只做卡上已有 Profile 的本地管理。下载并安装新 Profile 需要 lpac 与 HTTPS 后端支持，本设备未提供（见下方说明）。'));
+				'本页管理卡上的 Profile（启用 / 禁用 / 删除 / 重命名）。下载安装新 Profile 走的是自研链路：'
+				+ '卡侧 APDU 经 AT+CGLA（探测不到时回退 AT+CSIM），HTTPS 那一半由路由器代发（ubus mt5700.es9p），'
+				+ '全程不依赖任何第三方二进制。当前这张卡没有 ISD-R，不是 eUICC，因此下载同样不可用。'));
 			explain.appendChild(eb);
 			card._body.appendChild(explain);
 
@@ -258,26 +260,29 @@ return L.view.extend({
 			}).then(function () { cb(); });
 		}
 
-		/*
-		 * lpac（可选后端）可用性，同样只问一次。
+		/* ---------- 卡容量（展示） ----------
 		 *
-		 * ★ 它是**增强项不是必需项**：自研通路（AT+CGLA，探测不到时回退 AT+CSIM）
-		 *   覆盖了读 / 启 / 禁 / 删，lpac 只在「下载要不要多一条成熟实现」上有意义。
-		 *   所以探测失败一律按「没有」处理 —— 不报错、不阻塞、不改变任何可用功能。
+		 * 数据来自 GetEuiccInfo2（BF22）里的 extCardResource，由 Euicc.probe() 带回。
+		 *
+		 * ★ 只展示「剩余」，不编造「总量 / 百分比」：SGP.22 的 ExtCardResource
+		 *   只定义 freeNonVolatileMemory / freeVolatileMemory / installedApplication
+		 *   三项，**没有总容量字段**，卡也不提供已用字节数。硬凑一个分母只会显示假数，
+		 *   所以这里如实给剩余量，并在界面上说明为什么没有百分比。
 		 */
-		var lpacState = { asked: false, available: false, path: '', error: '' };
-		function probeLpac(cb) {
-			if (lpacState.asked) { if (cb) cb(); return; }
-			lpacState.asked = true;
-			AtWs.lpacAvailable().then(function (r) {
-				lpacState.available = !!(r && r.available);
-				lpacState.path = (r && r.path) || '';
-				lpacState.error = (r && r.error) || '';
-			}, function () {
-				lpacState.available = false;
-				lpacState.error = '探测失败';
-			}).then(function () { if (cb) cb(); });
+		function groupDigits(n) {
+			return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 		}
+		function fmtBytes(n) {
+			if (typeof n !== 'number' || !isFinite(n) || n < 0) return '—';
+			if (n < 1024) return groupDigits(n) + ' 字节';
+			var kb = n / 1024;
+			var tail = (kb >= 1024) ? (kb / 1024).toFixed(2) + ' MB' : kb.toFixed(1) + ' KB';
+			return groupDigits(n) + ' 字节（' + tail + '）';
+		}
+		function hasNum(v) { return typeof v === 'number' && isFinite(v); }
+
+		/* 「已装 Profile」那格要等列表读完才填得出来，先占位、后回填。 */
+		var capProfileMetric = null;
 
 		/* ---------- 添加 Profile（二维码 / 激活码 / 手动参数） ----------
 		 *
@@ -1023,17 +1028,32 @@ return L.view.extend({
 					: 'AT+CSIM（单条响应上限 256 字节，下载不可用）')));
 
 			/*
-			 * lpac 是**可选**后端：异步探测后回填，探测失败也不影响任何功能
-			 * （自研通路不依赖它）。页面若已切走则不写 DOM。
+			 * 卡容量：EUICCInfo2 里的 extCardResource（见 Euicc.parseExtCardResource）。
+			 *
+			 * ★「已装 Profile」这格先占位 —— 它得等 Profile 列表读完才有值，
+			 *   由 renderTable 回填；列表失败时保持「—」，不谎报 0。
 			 */
-			var lpacLine = E('div', { 'class': 'mt5700-hint' }, '正在探测 lpac…');
-			headCard._body.appendChild(lpacLine);
-			probeLpac(function () {
-				if (!body.contains(lpacLine)) return;
-				lpacLine.textContent = lpacState.available
-					? 'lpac 后端：可用（' + lpacState.path + '），可作为可选下载通路'
-					: 'lpac 后端：未安装（不影响使用，本页走自研通路）';
-			});
+			capProfileMetric = null;
+			if (p.capacity) {
+				var capRow = E('div', { 'class': 'mt5700-metrics' });
+				if (hasNum(p.capacity.freeNonVolatileMemory)) {
+					capRow.appendChild(Mt5700.metric('剩余非易失存储', fmtBytes(p.capacity.freeNonVolatileMemory)));
+				}
+				if (hasNum(p.capacity.freeVolatileMemory)) {
+					capRow.appendChild(Mt5700.metric('剩余易失存储', fmtBytes(p.capacity.freeVolatileMemory)));
+				}
+				if (hasNum(p.capacity.installedApplication)) {
+					capRow.appendChild(Mt5700.metric('卡内已装程序', String(p.capacity.installedApplication)));
+				}
+				capProfileMetric = Mt5700.metric('已装 Profile', '读取中…');
+				capRow.appendChild(capProfileMetric);
+				headCard._body.appendChild(capRow);
+				headCard._body.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'容量由卡经 GetEuiccInfo2（BF22）上报；SGP.22 只定义「剩余」，不给总容量，故不做百分比。'));
+			} else {
+				headCard._body.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'卡容量：本卡未在 EUICCInfo2 中上报 extCardResource（走 AT+CSIM 通路时也可能因 256 字节上限截断），暂不可读。'));
+			}
 			body.appendChild(headCard);
 
 			var listCard = Mt5700.card('Profile 列表', '启用 / 禁用会触发卡片刷新，期间网络将短暂中断并重注册（约 10~30 秒）');
@@ -1073,6 +1093,10 @@ return L.view.extend({
 		}
 
 		function renderTable(listCard, list) {
+			/* 卡容量那张卡上的「已装 Profile」在这里回填（列表读成功才有准数）。 */
+			if (capProfileMetric) {
+				capProfileMetric.lastChild.textContent = String(list.length);
+			}
 			listCard._body.innerHTML = '';
 			if (!list.length) {
 				listCard._body.appendChild(Mt5700.empty('卡上暂无可管理的 Profile'));

@@ -388,13 +388,17 @@ ok('C1 swInfo(6A80) 文案不再写死「本地 TLV 组装有误」',
 ok('C2 swInfo(6A80) 文案点出「不完整」这个真实可能',
 	/不完整/.test(sw6a80.text || ''), sw6a80.text);
 
-/* ---------- D. B 方案：APDU 通路可切 + lpac 运行时探测（2026-09-20） ----------
+/* ---------- D. APDU 双通路（2026-09-20） ----------
  *
  * 钉的是「两条通路并存时的契约」：
  *   - euicc.js 必须同时具备 csim 与 cgla 两套命令/解析，且能被 setTransport 切换；
- *   - ucode 必须暴露 mt5700.lpac 探测，且**只探测不执行**；
  *   - 前端必须把当前通路显示出来（走 CSIM 时下载不可用，不能让用户瞎重试）。
  * 反向用例：改坏任一条都要判红（静态守卫的老毛病：恒绿的摆设比没有更危险）。
+ *
+ * ★ 2026-09-20 删掉了这一组里原来 5 条 lpac 相关断言（D6~D9/D11）。
+ *   路线已定为全自研：lpac 的 stdio 驱动在本设备不可用（SSH exec 通道 stdin 立刻 EOF）、
+ *   at 后端又因 `=?` 假阴性超时，相关 ubus 方法 / rpc / 前端探测一并删除，
+ *   留下的断言会变成「钉住一段没人用的死代码」，所以跟着删。
  */
 
 function hasApduTransport(src) {
@@ -416,23 +420,53 @@ ok('D4 euicc.js 走 CGLA 时不发 MANAGE CHANNEL（模组自己管通道）',
 ok('D5 反向：CGLA 分支若改回显式 open 必须判红',
 	/Promise\.resolve\(1\)/.test(replaceAll(euiccSrc, 'Promise.resolve(1)', '__NOPE__')) === false);
 
-/* ucode：lpac 探测必须存在，且**不能执行 lpac**（撞串口 / 必然失败） */
+/* ucode：ES9+ 转发必须还在，且不再有任何 lpac 残留（全自研路线） */
 const ucSrc = fs.readFileSync(path.join(__dirname, '..', 'root', 'usr', 'share',
 	'rpcd', 'ucode', 'mt5700.uc'), 'utf8');
-ok('D6 ucode 暴露 mt5700.lpac 探测方法', /lpac:\s*\{/.test(ucSrc));
-ok('D7 ucode 的 lpac 探测只读（command -v，不执行 lpac 本体）',
-	/command -v lpac/.test(ucSrc) && !/popen\('lpac/.test(ucSrc));
-ok('D8 反向：若改成执行 lpac 本体必须判红',
-	/command -v lpac/.test(replaceAll(ucSrc, 'command -v lpac', '__NOPE__')) === false);
+ok('D6 ucode 仍暴露 mt5700.es9p（下载必需的 HTTPS 转发）', /es9p:\s*\{/.test(ucSrc));
+ok('D7 ucode 已无 lpac 残留（全自研，不引入第三方二进制）',
+	!/lpac/i.test(ucSrc) && !/function lpacAvailable/.test(ucSrc));
+/* 反向自检：往源码里塞回一个 lpac 字样，D7 的正则必须能抓到（否则它是恒绿摆设） */
+ok('D8 反向自检：ucode 若重新出现 lpac，D7 的守卫必须判红',
+	!/lpac/i.test(ucSrc) && /lpac/i.test(ucSrc + '\nfunction lpacAvailable() {}'));
 
-/* rpc.js / esim.js：探测结果的承接 */
-ok('D9 rpc.js 有 lpacAvailable 且走 mt5700.lpac',
-	/function lpacAvailable/.test(rpcSrc) && /method: 'lpac'/.test(rpcSrc) &&
-	/lpacAvailable: lpacAvailable/.test(rpcSrc));
+/* rpc.js / esim.js：自研链路的承接 */
+ok('D9 rpc.js 已无 lpac 探测（只留自研的 es9p）',
+	!/lpacAvailable/.test(rpcSrc) && !/method: 'lpac'/.test(rpcSrc));
 ok('D10 esim.js 展示当前 APDU 通路（CSIM 时点明下载不可用）',
 	/APDU 通路：/.test(esimSrc) && /下载不可用/.test(esimSrc));
-ok('D11 esim.js 的 lpac 探测失败不阻塞（只是可选增强）',
-	/probeLpac/.test(esimSrc) && /lpac 后端：未安装/.test(esimSrc));
+ok('D11 esim.js 已无 lpac 探测残留', !/probeLpac/.test(esimSrc));
+
+/* ---------- E. 卡容量展示（2026-09-20） ----------
+ *
+ * 钉的是「容量只能来自 EUICCInfo2，且不许编造总量」：
+ *   - euicc.js 必须发 BF22（BF3C 是 GetEuiccConfiguredAddresses，不是 Info2 —— 踩过）；
+ *   - 必须能解析 84 里的 81/82/83；
+ *   - 前端必须展示剩余量，且**不得**出现「总容量 / 百分比」这类编造出来的分母。
+ */
+ok('E1 euicc.js 的 ES10b tag 白名单含 BF22（EUICCInfo2）',
+	/ES10B_TAGS\s*=\s*\[[^\]]*'BF22'/.test(euiccSrc));
+ok('E2 euicc.js 有 buildGetEuiccInfo2 且发 BF22',
+	/api\.buildGetEuiccInfo2\s*=\s*function[^;]*BF22/.test(euiccSrc));
+ok('E3 反向：把 BF22 换成 BF3C 必须判红（BF3C 是配置地址，不是容量）',
+	/api\.buildGetEuiccInfo2\s*=\s*function[^;]*BF22/
+		.test(replaceAll(euiccSrc, "'BF22'", "'BF3C'")) === false);
+ok('E4 euicc.js 解析 extCardResource（84 容器 + 81/82/83 三个子字段）',
+	/api\.parseExtCardResource\s*=/.test(euiccSrc) &&
+	/pickTagValue\(info2Hex, '84'\)/.test(euiccSrc) &&
+	/pickTagValue\(blob, '81'\)/.test(euiccSrc) &&
+	/pickTagValue\(blob, '82'\)/.test(euiccSrc) &&
+	/pickTagValue\(blob, '83'\)/.test(euiccSrc));
+ok('E5 反向：解析函数若漏掉 82（剩余非易失内存）必须判红',
+	/pickTagValue\(blob, '82'\)/.test(replaceAll(euiccSrc, "pickTagValue(blob, '82')", '__NOPE__')) === false);
+ok('E6 probe 带回 capacity；取不到时降级为 null，绝不让整页报错',
+	/capacity:\s*info\.capacity \|\| null/.test(euiccSrc) &&
+	/capacity: null/.test(euiccSrc));
+ok('E7 esim.js 展示剩余量，并明确「卡不给总容量」（不编造分母/百分比）',
+	/剩余非易失存储/.test(esimSrc) && /剩余易失存储/.test(esimSrc) &&
+	/不给总容量/.test(esimSrc));
+ok('E8 esim.js 在卡未上报容量时给出明确说明（不静默留空）',
+	/未在 EUICCInfo2 中上报 extCardResource/.test(esimSrc));
 
 /* ---------- 汇总 ---------- */
 

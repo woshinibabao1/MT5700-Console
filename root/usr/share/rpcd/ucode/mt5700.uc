@@ -804,43 +804,6 @@ function es9pCaDone(ca) {
 	}
 }
 
-/*
- * ★ lpac 可用性探测（2026-09-20，B 方案「运行时探测」的后端一半）
- *
- * 只回答一个问题：**设备上有没有 lpac 这个二进制**。
- *
- * ★★ 刻意**不执行** lpac —— 这是踩过坑之后的决定：
- *   ① /usr/bin/lpac 是包装脚本，默认后端是 uqmi + /dev/cdc-wdm0；本设备没有
- *      cdc-wdm，执行必然 "Failed to open device"，白白浪费一次超时；
- *   ② 万一后端被配成 at，lpac 会自己去开 AT 串口，而 ttyUSB1 由本服务的
- *      Rust 侧独占 —— 直接撞车（红线：不抢串口）。
- *   ③ 探测的目的是决定「要不要多一条可选下载路径」，不是现在就要跑它。
- *
- * 真正把下载交给 lpac 需要 stdio APDU 桥（APDU 仍由我们经 AT+CGLA 代发），
- * 那是 Rust 侧的另一件事；在此之前这里只提供「有没有」这个事实。
- */
-function lpacAvailable() {
-	let p;
-	try {
-		p = fs.popen('command -v lpac', 'r');
-	} catch (e) {
-		return { available: false, path: '', reason: '无法执行探测命令' };
-	}
-	if (!p) {
-		return { available: false, path: '', reason: '无法执行探测命令' };
-	}
-	let s = p.read('line');
-	p.close();
-	if (s == null || length(trim(s)) == 0) {
-		return {
-			available: false,
-			path: '',
-			reason: '设备上没有 lpac（可 apk add lpac 安装；源里现成有 lpac-2.3.0-r2）'
-		};
-	}
-	return { available: true, path: trim(s), reason: '' };
-}
-
 function es9pToolAvailable() {
 	let p;
 	try {
@@ -1044,25 +1007,6 @@ return {
 					return { success: false, error: '设备上没有 curl，无法访问 SM-DP+ 服务器' };
 				}
 				return es9pPost(host, path, body);
-			}
-		},
-		/*
-		 * lpac 可用性探测（只读，不执行 lpac —— 理由见 lpacAvailable 注释）。
-		 * 返回 { success, available, path, error }。
-		 *
-		 * 前端据此决定要不要展示「可用 lpac 后端」这条信息；
-		 * 没有 lpac 时插件照旧走自研的 AT+CGLA 通路，功能不缺失。
-		 */
-		lpac: {
-			args: { probe: 0 },
-			call: function (req) {
-				let r = lpacAvailable();
-				return {
-					success: true,
-					available: r.available,
-					path: r.path,
-					error: r.reason
-				};
 			}
 		}
 	}

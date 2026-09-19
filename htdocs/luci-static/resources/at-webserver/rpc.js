@@ -84,24 +84,6 @@ var rpcEs9p = L.rpc.declare({
 	expect: {}
 });
 
-/*
- * lpac 可用性探测（B 方案「运行时探测」的前端一半）。
- *
- * 只回答「设备上有没有 lpac 这个二进制」，**不执行它** ——
- * /usr/bin/lpac 是包装脚本，默认后端 uqmi + /dev/cdc-wdm0，本设备没有 cdc-wdm，
- * 执行必然失败；若后端被配成 at，它还会自己去开 AT 串口，与独占 ttyUSB1 的
- * Rust 服务撞车。完整理由见 mt5700.uc 的 lpacAvailable 注释。
- *
- * 老固件的 rpcd 没有 mt5700.lpac 方法，declare 会被直接拒掉 ——
- * 那时一律按「没有 lpac」处理（自研通路照旧可用），不报错、不阻塞。
- */
-var rpcLpac = L.rpc.declare({
-	object: 'mt5700',
-	method: 'lpac',
-	params: ['probe'],
-	expect: {}
-});
-
 function withTimeout(p, ms, msg) {
 	/*
 	 * ★ P11（2026-09-19 会审）：竞速胜出后清掉另一路的定时器。
@@ -1276,30 +1258,12 @@ function es9pAvailable() {
 		});
 }
 
-/*
- * lpac 可用性：只读探测。失败一律降级为「没有 lpac」——
- * 它只是**可选**的增强路径，自研的 CGLA 通路不依赖它。
- */
-function lpacAvailable() {
-	return withTimeout(rpcLpac(1), 10000, 'lpac 探测超时')
-		.then(function (resp) {
-			if (!resp || resp.success === false) {
-				return { available: false, path: '', error: (resp && resp.error) || 'rpcd 没有 mt5700.lpac 方法' };
-			}
-			return { available: !!resp.available, path: resp.path || '', error: resp.error || '' };
-		})
-		.catch(function (err) {
-			return { available: false, path: '', error: (err && err.message) || 'rpcd 没有 mt5700.lpac 方法' };
-		});
-}
-
 var AtWs = {
 	client: atClient(),
 	netRate: fetchNetRate,
 	sysDiag: fetchSysDiag,
 	es9p: es9pPost,
 	es9pAvailable: es9pAvailable,
-	lpacAvailable: lpacAvailable,
 	extractATData: extractATData,
 	extractATDataMultiline: extractATDataMultiline,
 	convertRsrp: convertRsrp,

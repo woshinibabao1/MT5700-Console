@@ -5,6 +5,43 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.23] - 2026-09-20
+
+### Added — eSIM 页面显示卡容量
+
+- **新增 `GetEuiccInfo2`（BF22）**：`buildGetEuiccInfo2`，在 `probe` 里与读 EID
+  **共用同一条 ISD-R 通道**顺手取回，不额外开逻辑通道
+- **新增 `parseExtCardResource`**：解 EUICCInfo2 里的 `extCardResource`，
+  取出剩余非易失存储 / 剩余易失存储 / 卡内已装程序数
+- **页面新增「卡容量」区**：`剩余非易失存储`、`剩余易失存储`、`卡内已装程序`、
+  `已装 Profile`（列表读完后回填）
+- **★ 只给剩余量，不做百分比**：SGP.22 的 `ExtCardResource` 只定义「剩余」，
+  **没有总容量字段**，卡也不给已用字节数 —— 硬凑一个分母只会显示假数，
+  所以如实给剩余量并在界面上写明原因
+- **取不到时明确说明**：卡未上报 `extCardResource`（或 CSIM 通路下响应被 256 字节
+  截断）时给出对应提示，而不是静默留空；**容量取不到一律降级为 `null`，绝不让
+  整页报错**
+
+### Removed — 清掉 lpac 残留（路线已定：全自研）
+
+- 删除 `ubus mt5700.lpac` 探测方法、ucode 的 `lpacAvailable()`
+- 删除 `rpc.js` 的 `rpcLpac` / `lpacAvailable`
+- 删除 `esim.js` 的 `probeLpac` / `lpacState` 与「lpac 后端：可用 / 未安装」显示
+- **理由（两条都是真机实测证伪，不是推测）**：lpac 的 `stdio` 驱动在本设备不可用
+  —— 经 SSH exec 通道起 lpac 时 stdin 立刻 EOF，`afgets` 返 0、解析空 JSON 即退出；
+  它的 `at` 后端又因本模组 `=?` 探测的**假阴性**而超时。两条路都走不通，
+  保留「探测有没有装 lpac」只是在钉一段没人用的死代码
+
+### Fixed — 订正两个把人带偏的错误结论
+
+- ★ **tag 订正**：EUICCInfo2 是 **`BF22`**，不是 `BF3C`。
+  本机卡 `BF3C 00` 返回 `BF3C 17 81 15 "testrootsmds.gsma.com"`，一度被当成
+  「EUICCInfo2 里没有容量字段」—— 其实 `0x81` 是 `RootDsAddress`，整条是
+  **GetEuiccConfiguredAddresses（ES10a，tag 0xBF3C）**，跟容量毫无关系。
+  tag 出处以 pySim `pySim/euicc.py` 的 ASN.1 定义为准（已写进代码注释）
+- 订正「本页只能管理已有 Profile，下载需要 lpac」这句已经过期的说明
+  —— 下载走的是自研链路（卡侧 APDU 经 AT+CGLA + 路由器代发 ES9+），不依赖 lpac
+
 ## [2.3.22] - 2026-09-20
 
 ### Added — APDU 传输层：新增 AT+CGLA 通路（下载能力的关键前提）

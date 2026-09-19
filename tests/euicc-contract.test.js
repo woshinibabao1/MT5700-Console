@@ -537,6 +537,48 @@ function cglaChain() {
 	});
 }
 
+/* ---------- 卡容量（EUICCInfo2 / extCardResource） ----------
+ *
+ * ★ 逐条对照 pySim/euicc.py 的定义，tag 不是拍脑袋来的：
+ *     EuiccInfo2 tag=0xBF22、ExtCardResource tag=0x84（个别实现发构造型 A4）
+ *     84 内：81=installedApplication / 82=freeNonVolatileMemory / 83=freeVolatileMemory
+ *
+ * ★ 本机卡 `BF3C` 只回了 `81 15 "testrootsmds.gsma.com"`，那是
+ *   **GetEuiccConfiguredAddresses**（tag 0xBF3C）的 RootDsAddress，不是容量 ——
+ *   这条用例把「BF3C 形状 → 判为未上报」钉死，防止后人再把两者搞混。
+ */
+
+eq('buildGetEuiccInfo2 发 BF22（不是 BF3C）', Euicc.buildGetEuiccInfo2(1), '81E2910003BF2200');
+
+/* 84 容器：81 01 08 / 82 03 010000 / 83 02 2000 —— 变长大端整数，不是定宽 */
+const INFO2_84 = 'BF220E840C' + '810108' + '8203010000' + '83022000';
+eq('parseExtCardResource：84 容器三项全解（变长大端整数）',
+	Euicc.parseExtCardResource(INFO2_84),
+	{ installedApplication: 8, freeNonVolatileMemory: 65536, freeVolatileMemory: 8192 });
+
+/* 同一份内容按构造型 A4 发，也必须解得出来 */
+eq('parseExtCardResource：A4 变体同样识别',
+	Euicc.parseExtCardResource(INFO2_84.replace('840C', 'A40C')),
+	{ installedApplication: 8, freeNonVolatileMemory: 65536, freeVolatileMemory: 8192 });
+
+/* 1 字节的小数值（SGP.22 允许变长，不能按 3 字节读） */
+eq('parseExtCardResource：1 字节数值不被当成 3 字节',
+	Euicc.parseExtCardResource('BF22088406820140830102'),
+	{ freeNonVolatileMemory: 64, freeVolatileMemory: 2 });
+
+/* 本机卡的真实形状：EUICCInfo2 里只有地址串、没有 84 → 必须判「未上报」（null） */
+eq('parseExtCardResource：无 extCardResource → null（本机卡 BF3C 同形状）',
+	Euicc.parseExtCardResource('BF2217' + '8115' + Buffer.from('testrootsmds.gsma.com').toString('hex').toUpperCase()),
+	null);
+
+eq('parseExtCardResource：84 存在但三个子字段全缺 → null',
+	Euicc.parseExtCardResource('BF22028400'), null);
+eq('parseExtCardResource：非 hex / 空串 → null',
+	[Euicc.parseExtCardResource(''), Euicc.parseExtCardResource('zzzz')], [null, null]);
+eq('parseExtCardResource：只报 82 一项也要给出来（不要求三项齐全）',
+	Euicc.parseExtCardResource('BF220584038201FF'),
+	{ freeNonVolatileMemory: 255 });
+
 /* ---------- 汇总（等所有异步用例完成，R11） ---------- */
 
 Promise.all(asyncTests).then(function () {

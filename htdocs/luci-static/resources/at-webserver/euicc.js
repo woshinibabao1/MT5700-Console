@@ -1038,7 +1038,21 @@ var Euicc = (function () {
 				if (r && r.state) return r;
 				return api.withIsdrSession(send, function (ch, sendApdu) {
 					return sendApdu(api.buildGetEid(ch)).then(function (r2) {
-						return { eid: parseEid(r2.data) };
+						var eid = parseEid(r2.data);
+						/*
+						 * 卡容量（extCardResource）在同一条通道里顺手取：
+						 * 再开一次 withIsdrSession 会多占一条逻辑通道，没那个必要。
+						 *
+						 * ★ 失败一律降级成「未上报」，绝不上抛：容量只是展示项，
+						 *   不能因为它把整页判成错误态。CSIM 通路下 EUICCInfo2 常常
+						 *   超过 256 字节 → 截断守卫抛 EUICC_CSIM_TRUNCATED，那描述的是
+						 *   固件能力上限，不是故障；CGLA 下也可能被卡直接拒（6D00）。
+						 */
+						return sendApdu(api.buildGetEuiccInfo2(ch)).then(function (r3) {
+							return { eid: eid, capacity: api.parseExtCardResource(r3.data) };
+						}, function () {
+							return { eid: eid, capacity: null };
+						});
 					});
 				}).then(function (info) {
 					/* R04：把疑似通道泄漏提示一并带回，交给 esim.js 展示。
@@ -1046,6 +1060,7 @@ var Euicc = (function () {
 					return {
 						state: 'ok',
 						eid: info.eid,
+						capacity: info.capacity || null,
 						channelNote: channelLeakNote,
 						transport: api.getTransport()
 					};
@@ -1330,6 +1345,7 @@ var Euicc = (function () {
 	 * tag 出处：lpac euicc/es10b.c 的 es10b_*_r 定义
 	 *   BF2E GetEuiccChallenge（响应内含 80 = 16 字节挑战值，SGP.22 规定）
 	 *   BF20 GetEuiccInfo1  （响应整体即 EUICCInfo1 的 DER，原样交给 SM-DP+）
+	 *   BF22 GetEuiccInfo2  （响应整体即 EUICCInfo2，内含 84 = extCardResource）
 	 *   BF38 AuthenticateServer
 	 *   BF21 PrepareDownload（内含 0x04 = hashCC，仅确认码必需时带）
 	 *   BF36 LoadBoundProfilePackage（按 BF23 / A0 / A1 / A2 / A3 逐段下发）
@@ -1338,7 +1354,17 @@ var Euicc = (function () {
 	 * 传输层一律是 STORE DATA：CLA=0x80|ch, INS=0xE2。
 	 * 分块时非末块 P1=0x11、末块 P1=0x91，P2 递增（lpac euicc/euicc.c es10x_command_iter）。
 	 */
-	var ES10B_TAGS = ['BF2E', 'BF20', 'BF38', 'BF21', 'BF36', 'BF28', 'BF2B', 'BF30'];
+	/*
+	 * ★★ tag 出处以 pySim 的 ASN.1 定义为准（pySim/euicc.py，逐条对照过）：
+	 *   EuiccInfo2                 tag = 0xBF22
+	 *   EuiccConfiguredAddresses   tag = 0xBF3C   ← 不是 Info2！
+	 *
+	 * 这条区分踩过一次：本机卡 `BF3C 00` 返回 `BF3C 17 81 15 "testrootsmds.gsma.com"`，
+	 * 一度被当成「EUICCInfo2 里没有容量字段」。其实 81 是 RootDsAddress，
+	 * 整条是 **GetEuiccConfiguredAddresses**（SGP.22 ES10a），跟容量毫无关系。
+	 * 真正的 EUICCInfo2 要发 **BF22**。
+	 */
+	var ES10B_TAGS = ['BF2E', 'BF20', 'BF22', 'BF38', 'BF21', 'BF36', 'BF28', 'BF2B', 'BF30'];
 
 	/* 组装一个 BER-TLV（支持 0x81/0x82 长格式） */
 	function tlvHex(tag, valHex) {
@@ -1445,6 +1471,7 @@ api.buildEs10b = function (ch, tag, derHex) {
 
 	api.buildGetEuiccChallenge = function (ch) { return api.buildEs10b(ch, 'BF2E', ''); };
 	api.buildGetEuiccInfo1 = function (ch) { return api.buildEs10b(ch, 'BF20', ''); };
+	api.buildGetEuiccInfo2 = function (ch) { return api.buildEs10b(ch, 'BF22', ''); };
 	api.buildListNotification = function (ch, filterHex) {
 		return api.buildEs10b(ch, 'BF28', filterHex || '');
 	};
@@ -1454,6 +1481,50 @@ api.buildEs10b = function (ch, tag, derHex) {
 	};
 	api.buildRemoveNotificationFromList = function (ch, seqHex) {
 		return api.buildEs10b(ch, 'BF30', tlvHex('80', seqHex || '00'));
+	};
+
+	/*
+	 * 从 EUICCInfo2 里解出 extCardResource —— 界面「卡容量」的数据来源。
+	 *
+	 * 结构与 tag（逐条有出处，不是凭记忆）：
+	 *   EUICCInfo2 (BF22)
+	 *     └─ 84 <len>               extCardResource（pySim/euicc.py：ExtCardResource tag=0x84）
+	 *        ├─ 81 <n> <bytes>      installedApplication  已安装应用数
+	 *        ├─ 82 <n> <bytes>      freeNonVolatileMemory 剩余非易失内存（字节）
+	 *        └─ 83 <n> <bytes>      freeVolatileMemory    剩余易失内存（字节）
+	 *   84 的子字段号取自 ETSI TS 102 226 §8.2.1.7.2（GlobalPlatform GET DATA
+	 *   'FF21' 用的是同一套定义：81=已装应用数 / 82=剩余 NV / 83=剩余 RAM），
+	 *   与 euicc-go/rsp-dump 的解析顺序一致，也与 lpac 输出的字段名一致。
+	 *
+	 * ★ 两个内存数是**变长大端整数**（SGP.22 上限 3 字节），不能按固定宽度读。
+	 * ★ SGP.22 只规定上报**剩余**内存，**没有「总容量」字段** —— 所以这里不伪造
+	 *   「已用 / 总量」，只给剩余量；界面按剩余量展示，别自己脑补分母。
+	 * ★ 84 是个「基本型 tag 装着构造内容」的怪编码（pySim 也只能当 GreedyBytes 收），
+	 *   个别实现会按构造型 A4 发，两种都认。
+	 *
+	 * 84 不存在、或三个子字段一个都没有 → 返回 null，调用方按「本卡未上报容量」处理。
+	 */
+	api.parseExtCardResource = function (info2Hex) {
+		function beInt(hex) {
+			var v = 0, b;
+			for (var i = 0; i < hex.length; i += 2) {
+				b = parseInt(hex.substr(i, 2), 16);
+				if (isNaN(b)) return NaN;
+				v = v * 256 + b;
+			}
+			return v;
+		}
+		var blob = api.pickTagValue(info2Hex, '84') || api.pickTagValue(info2Hex, 'A4');
+		if (!blob) return null;
+		var installed = api.pickTagValue(blob, '81');
+		var freeNv = api.pickTagValue(blob, '82');
+		var freeV = api.pickTagValue(blob, '83');
+		if (!installed && !freeNv && !freeV) return null;
+		var out = {};
+		if (installed) out.installedApplication = beInt(installed);
+		if (freeNv) out.freeNonVolatileMemory = beInt(freeNv);
+		if (freeV) out.freeVolatileMemory = beInt(freeV);
+		return out;
 	};
 
 	/*
