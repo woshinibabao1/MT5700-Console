@@ -236,13 +236,14 @@ ok('★ 流量格式化对空值显示「—」（formatFlow(undefined) 会算�
 /* ---------- 9. 防倒退：这些既有契约不许被本轮改动破坏 ---------- */
 
 ok('「速率与流量」卡片仍在', /Mt5700\.card\('速率与流量'/.test(nsCode));
-/* 2026-09-19：本卡已升级为「断网排查」（三层 33 项），标题随之改变，
-   但"进页面自动跑一次、且与 ADC 串行"这条不变 —— 只更新断言的字符串。 */
+/* 2026-09-19：本卡已升级为「断网排查」（三层 32 项），标题随之改变，
+   但"进页面自动跑一次"这条不变 —— 只更新断言的字符串
+   （ADC 管脚电压已整块下线，排查不再挂在它后面串行）。 */
 ok('「断网排查」卡片仍在（原「连接工具」升级而来）',
 	/Mt5700\.card\('断网排查', '三层体检 · 一键定位'\)/.test(nsCode));
-ok('ADC 与排查仍然进页面自动跑且串行',
-	/readAdcPins\(\)\.then\(runDiagnosis\)/.test(nsCode));
-ok('自检明细仍是固定表格（无折叠开关）',
+ok('排查仍然进页面自动跑一次（ADC 已下线，不再有前置链）',
+	/runDiagnosis\(\)\.catch/.test(nsCode) && !/readAdcPins/.test(nsCode));
+ok('明细折叠状态不进 state.tools.diag（无 t.expanded，无向导式「展开步骤」）',
 	!/t\.expanded/.test(nsCode) && !/展开步骤/.test(nsCode));
 
 console.log('通过 ' + pass + ' 项，失败 ' + fails.length + ' 项');

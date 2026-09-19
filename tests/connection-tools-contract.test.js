@@ -7,9 +7,11 @@
  *     ADC 管脚电压（进页面自动读）/ 诊断快照导出 / 流量统计清零 / 连通性自检。
  *   · 「网络拒绝原因」→ 迁到「网络设置 → 网络拒绝」卡（本测试第 9 节守卫）
  *   · 「服务状态监听」→ 整块下线（^SRVST 解析器一并删除，本测试第 6 节守卫）
+ *   · 2026-09-19「ADC 管脚电压」→ 整块下线（手册不给管脚含义、无法解读，
+ *     还占排查卡一整块；解析器一并删除，本测试第 1 节改成反向钉子）
  *
  * 本测试覆盖：
- *   ① 解析层  parseAdcValue / parseRejInfo
+ *   ① ADC 已下线（反向钉子） / parseRejInfo
  *   ② 自检    checkSteps() 六步判据（用手册格式的应答真跑）
  *   ③ 快照    buildSnapshotText() 真跑，重点钉「默认不写设备标识」
  *   ④ ★ 不占通道底线（2.2.1 事故防回退的源码级契约）最重要
@@ -27,7 +29,7 @@ const PARSE_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources'
 const NS_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'network_status.js');
 /* 「网络拒绝原因」迁移后的归宿页 */
 const SET_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'network_settings.js');
-/* ADC 读数胶囊的样式（竖向堆叠那次事故就出在这里，故一并守卫） */
+/* 读数胶囊的样式（竖向堆叠那次事故就出在这里，故一并守卫） */
 const CSS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at-webserver', 'mt5700.css');
 
 const parseSrc = fs.readFileSync(PARSE_JS, 'utf8');
@@ -65,15 +67,16 @@ function extractFn(s, name) {
 	throw new Error('括号未配平: ' + name);
 }
 
-/* ---------- 1. ^ADCREADEX（手册 11.5，单位 mV） ---------- */
-
-eq('真机 ^ADCREADEX: 1799', Parse.parseAdcValue('^ADCREADEX: 1799\r\nOK'), 1799);
-eq('手册举例 1099', Parse.parseAdcValue('^ADCREADEX: 1099'), 1099);
-eq('负数也能取', Parse.parseAdcValue('^ADCREADEX: -12'), -12);
-eq('ERROR 应答 → null', Parse.parseAdcValue('ERROR'), null);
-eq('空串 → null', Parse.parseAdcValue(''), null);
-eq('null 输入不炸', Parse.parseAdcValue(null), null);
-eq('非数字 → null', Parse.parseAdcValue('^ADCREADEX: abc'), null);
+/* ---------- 1. ADC 管脚电压已整块下线（2026-09-19） ---------- */
+/* 用户决定删掉「ADC 管脚电压」：手册 11.5 只给原始电平、不说明每个管脚接的是什么
+   （真机 3 个管脚都是 1798/1799 mV，无法解读、也不指导任何动作），却要占排查卡
+   一整块、并在进页面时多发 5 条 AT。以下四条是防回退的反向钉子。 */
+ok('★ parse.js 不再提供 parseAdcValue（不留死代码）', typeof Parse.parseAdcValue === 'undefined');
+ok('★ 页面不再下发 AT^ADCREADEX', !/ADCREADEX/.test(nsSrc));
+ok('★ 页面不再有 ADC_PIN_IDS / buildAdcBlock / readAdcPins',
+	!/ADC_PIN_IDS/.test(nsSrc) && !/buildAdcBlock/.test(nsSrc) && !/readAdcPins/.test(nsSrc));
+ok('★ 排查不再挂在 ADC 链之后（进页面直接跑 runDiagnosis）',
+	/runDiagnosis\(\)\.catch/.test(nsSrc) && !/readAdcPins\(\)\.then/.test(nsSrc));
 
 /* ---------- 2. ^REJINFO（手册 13.14，解析器留在 parse.js，UI 在 network_settings.js） ---------- */
 
@@ -235,8 +238,7 @@ ok('★ 本卡没有任何周期上报开关（无 SRV_LISTEN_MS / 无订阅回�
 ok('★ 自检那步指路到「网络设置 → 网络拒绝」',
 	/网络设置 → 网络拒绝/.test(nsSrc));
 
-ok('★ 自检也进页面自动跑一次（不必先点按钮），与 ADC 串行不并发',
-	/readAdcPins\(\)\.then\(runSelfCheck\)/.test(nsSrc));
+ok('★ 排查进页面自动跑一次（不必先点按钮）', /\n\t\t\trunDiagnosis\(\)\.catch/.test(nsSrc));
 ok('★ 排查结论用 badge 进标题行（不用块级 .mt5700-diag-summary，它会把行撑高）',
 	/box\.firstChild\.insertBefore\(Mt5700\.badge\(summaryText,/.test(nsSrc)
 	&& !/mt5700-diag-summary is-' \+ lv/.test(nsSrc));
@@ -261,6 +263,25 @@ ok('★ 默认折叠（核心口径）：diagDetailOpen 初值为 false，未排
 ok('★ 不新增任何独立明细卡片（明细容器挂在 diagCard._body 内）',
 	!/Mt5700\.card\('断网排查明细'/.test(nsSrc)
 	&& /diagCard\._body\.appendChild\(diagDetailBody\)/.test(nsSrc));
+
+/* ★ 2026-09-19 第二轮：排查卡「占地固化」+「右列底边与左列对齐」。
+   两条是一件事的两面：两列拉平（stretch）后，矮的那侧多出来的高度必须
+   有人吃掉，否则就是当初被抱怨的「卡底一片空白」。做法是把富余空间整块
+   给明细区（内部滚动），于是卡片总高只跟左列有关，排查出 4 项还是 17 项
+   都一样高。下面四条各自都能独立把改动钉住，缺一条就能静默回退：
+     ① 卡上有 .mt5700-card-fill（否则没有东西吸收剩余高度 → 空白）
+     ② 两列 stretch（改成 start 立刻对不齐）
+     ③ 明细区是 flex 吸收（写成固定 max-height 就会随内容变矮/变高）
+     ④ 表格区仍可滚动（内容多时不撑开卡片） */
+ok('★ 排查卡带 .mt5700-card-fill（吃掉右列剩余高度，底边才能拉平）',
+	/diagCard\.classList\.add\('mt5700-card-fill'\)/.test(nsSrc));
+ok('★ 双列卡区 align-items: stretch（两列等高；start 会让底边对不齐）',
+	/\.mt5700-cards \{ align-items: stretch; \}/.test(cssSrc));
+ok('★ 明细区用 flex 吸收富余高度（不是写死高度，故不随排查项数变化）',
+	/\.mt5700-diag-detail \{[\s\S]*?flex: 1 1 auto;/.test(cssSrc)
+	&& /\.mt5700-diag-detail > \.mt5700-diag-scroll \{ flex: 1 1 auto; \}/.test(cssSrc));
+ok('★ 表格区仍能滚动（内容多时不把卡片撑高）',
+	/\.mt5700-diag-detail \.mt5700-diag-scroll \{[\s\S]*?overflow-y: auto;/.test(cssSrc));
 ok('★ 四档结论都有对应文案（含新增的 idle 待检查）',
 	/var DIAG_VERDICT = \{ ok: '通过', warn: '存疑', bad: '未通过', idle: '待检查' \}/.test(nsSrc));
 ok('★ 待检查有 CSS 配色（不写会掉成继承色，暗色下和「通过」分不出来）',
@@ -288,13 +309,6 @@ ok('★ 连接工具里不再有独立的清零块（已迁走）',
 	&& !/buildFlowClearBlock/.test(nsSrc));
 ok('★ 卡头「实时监测」的文字没有被 E() 静默丢掉（E 只挂第 3 参）',
 	/var rateLabel = E\('label', \{\}, rateChk\);[\s\S]{0,160}createTextNode\(' 实时监测'\)/.test(nsSrc));
-ok('ADC 用 AT^ADCREADEX=', /sendCommand\('AT\^ADCREADEX=' \+ id\)/.test(nsSrc));
-ok('ADC 管脚数量不写死（逐个试、失败即停）',
-	/var ADC_PIN_IDS = \[/.test(nsSrc) && /if \(v == null\) \{ stopped = true; return; \}/.test(nsSrc));
-ok('★ ADC 进页面自动读一次（连上就调 readAdcPins，不用先点按钮）',
-	/refreshAll\(\);[\s\S]{0,900}readAdcPins\(\)\.then\(runDiagnosis\)/.test(nsSrc));
-ok('★ 排查也进页面自动跑一次，且与 ADC 串行不并发（十几条只读命令别一起挤通道）',
-	/readAdcPins\(\)\.then\(runDiagnosis\)/.test(nsSrc));
 /* 2026-09-19 用户口径变更：允许卡内折叠/分段/滚动（见上方守卫）。
    此处只钉死旧代码里误用的「展开步骤/收起步骤」向导式字眼不得重现
    （旧版曾是「逐步展开/收起」的向导式交互，已被否决）。本卡用「展开明细/收起明细」入口。 */
@@ -303,20 +317,14 @@ ok('自检明细不再用「展开步骤/收起步骤」向导式字眼（旧口
 ok('★ 排查只给建议命令，没有自动修复按钮（续约/重启服务本身就会断网）',
 	/'建议：' \+ i\.fix/.test(nsSrc)
 	&& !/Mt5700\.confirm\([\s\S]{0,120}ifdown/.test(nsSrc));
-ok('ADC 有结果后按钮变「重新读取」',
-	/t\.rows\.length \? '重新读取' : '读取'/.test(nsSrc));
-ok('★ ADC 结果一行铺开（不再用「管脚/电平」表格，省掉表头 + N 行）',
-	/mt5700-readouts/.test(nsSrc)
-	&& !/Mt5700\.table\(\['管脚', '电平'\]/.test(nsSrc));
 /* 2026-09-18 真机反馈：一排读数被挤成竖向堆叠。根因是容器 .mt5700-grow
    （flex:1 1 240px）在窄栏里被压到内容宽度以下，再撞上 .mt5700-mono 的
-   word-break:break-all，「ADC0 1799」就地断行。这三行是防回退的钉子。 */
-ok('★ ADC 胶囊不许被压扁（flex:0 0 auto + nowrap）',
+   word-break:break-all，就地断行。这两条是防回退的钉子（读数胶囊是通用组件，
+   ADC 下线后仍被保留，故断言也保留）。 */
+ok('★ 读数胶囊不许被压扁（flex:0 0 auto + nowrap）',
 	/\.mt5700-readout \{[\s\S]*?flex: 0 0 auto;[\s\S]*?white-space: nowrap;/.test(cssSrc));
-ok('★ ADC 读数容器允许整块换行而不是压扁子项（min-width:0）',
+ok('★ 读数容器允许整块换行而不是压扁子项（min-width:0）',
 	/\.mt5700-readouts \{[\s\S]*?flex-wrap: wrap;[\s\S]*?min-width: 0;/.test(cssSrc));
-ok('★ ADC 不再复用 .mt5700-grow（正是它把一排压成了竖排）',
-	!/mt5700-inline mt5700-grow/.test(nsSrc));
 
 /* ---------- 7. 沿用：PDCP / CGSMS 解析（解析器仍在 parse.js） ---------- */
 
@@ -374,12 +382,17 @@ ok('只剩两个分组标题行', /pushGroup\('连接诊断'/.test(nsSrc));
 ok('地址表不再有 CID 列', !/Mt5700\.table\(\['CID'/.test(nsSrc));
 ok('地址表不再有来源列', !/'来源'/.test(nsSrc));
 
-ok('★ R05 readAdcPins busy 时必须返回 Promise（入口是 .then(runSelfCheck)，返回 undefined 会静默崩）',
+/* R05 原是钉 readAdcPins（ADC 链）必须返回 Promise；ADC 整块下线后，
+   这条语义平移到 runDiagnosis：它是进页面自动跑的那条链，busy 时必须返回
+   Promise，否则调用方 .catch 会拿到 TypeError —— 表现为「排查静默不跑」。 */
+ok('★ R05 runDiagnosis busy 时必须返回 Promise（入口是 .catch(...)，返回 undefined 会静默崩）',
 	/if \(t\.busy\) return Promise\.resolve\(\);/.test(nsSrc));
+/* R04：disposed 标记。ADC 链删掉后，取而代之钉排查链的两处中断点
+   （AT 逐步前、sysDiag 前）与收尾的 if (!disposed) renderTools()。 */
 ok('★ R04 自动链可被页面卸载中断（disposed 标记，反复进出不会多路排队）',
 	/var disposed = false;/.test(nsSrc)
-	&& /if \(stopped \|\| disposed\) return;/.test(nsSrc)
 	&& /if \(disposed\) return;/.test(nsSrc)
+	&& /if \(!disposed\) renderTools\(\);/.test(nsSrc)
 	&& /_dispose[\s\S]{0,300}disposed = true;/.test(nsSrc));
 
 /* IPv6 能力值文案（手册 16.7.3） */

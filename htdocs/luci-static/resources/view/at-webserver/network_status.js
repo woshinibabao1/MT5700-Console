@@ -15,7 +15,7 @@
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量（卡头带「实时监测」开关与「清零」）
  *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
- *   ⑥ 连接工具     ADC 管脚电压 / 连通性自检（都是进页面自动跑一次的只读查询）
+ *   ⑥ 断网排查     三层体检（L1 模组 / L2 系统 / L3 端到端），进页面自动跑一次的只读查询
  * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
  * [连接状态 | 右列（SIM 与设备 → 连接质量）]。
  *
@@ -91,7 +91,9 @@ return L.view.extend({
 		devCard._body.appendChild(devBody);
 
 		/* ⑥ 断网排查：这一页别处全是读数，这里放**能做事的工具**。
-		 *   · 右列这张是「总控」：开始排查按钮 + 一句话结论 + 三层通过计数 + ADC 管脚电压
+		 *   · 右列这张卡同时是「总控 + 明细」：开始排查按钮 + 一句话结论 + 三层通过计数，
+		 *     明细默认折叠成一行入口，展开后在**卡内**分段切换（2026-09-19 用户口径：
+		 *     不许再单独占一个页面区块）
 		 *   · 逐项明细铺在页面底部那张**满宽**卡里（33 项，窄栏挤不下）
 		 * 三层划分的理由：原来那 6 步连通性自检全在模组内部，只能回答「模组自己觉得通不通」，
 		 * 而真机踩过的断网事故有一半根本不在模组里（缺接口 / 没 restart firewall /
@@ -102,6 +104,9 @@ return L.view.extend({
 		 * ★「网络拒绝原因」已迁到「网络设置 → 网络拒绝」，「服务状态监听」已下线
 		 *   —— 理由见下方连接工具区的注释。 */
 		var diagCard = Mt5700.card('断网排查', '三层体检 · 一键定位');
+		/* mt5700-card-fill：让这张卡吃掉右列剩余高度，两列底边齐平。
+		   卡内多出来的空间全给明细区（内部滚动），所以卡片总高不随排查结果多少变化。 */
+		diagCard.classList.add('mt5700-card-fill');
 		var diagBody = E('div');
 		diagCard._body.appendChild(diagBody);
 
@@ -143,7 +148,6 @@ return L.view.extend({
 			monnc: [],
 			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
 			tools: {
-				adc: { rows: [], at: 0, busy: false, err: null },
 				/* 断网排查：atSteps = L1 的 AT 逐步结果，items = L2/L3 由系统事实判定的结果。
 				   facts 是后端 diag-probe.sh 回的 key=value，factsErr 非空说明后端没升级。 */
 				diag: { busy: false, ran: false, at: 0, atSteps: [], items: [], facts: {}, factsErr: '' }
@@ -365,7 +369,7 @@ return L.view.extend({
 		 *   上一版为做「卡不卡」，让页面**进入时自动下发** AT^PDCPDATAINFO=1,5000
 		 *   开周期上报、离开时才关。页面被强杀后上报永久常驻模组，与 1Hz 的 AT
 		 *   轮询争抢同一条 AT 通道，真机事件队列积压 106 帧，只能重启服务才停。
-		 *   因此：**本卡任何功能都不许在模组里留下常驻状态**。ADC / 排查 都是一次性读；
+		 *   因此：**本卡任何功能都不许在模组里留下常驻状态**，排查是一次性读；
 		 *   将来若要再加「开上报 → 等推送」型功能，必须同时满足
 		 *   ① 默认关、只能手动开；② 到点定时器强制关；③ 关不掉就显式报警 + 重试入口
 		 *   —— 悄悄留下一个常驻上报，比测不到严重得多。
@@ -377,11 +381,7 @@ return L.view.extend({
 		 *   守卫：tests/connection-tools-contract.test.js / tests/diag-contract.test.js
 		 */
 
-		/* ADC 管脚 id：手册 11.5 明写「不同产品的 ADC 管脚的数量不同」，
-		   所以逐个试、第一条失败就停，不预设数量。 */
-		var ADC_PIN_IDS = [0, 1, 2, 3, 4];
-
-		/* ★ 页面已卸载标记。进页面自动跑的「ADC → 自检」链一共 11 条只读查询，
+		/* ★ 页面已卸载标记。进页面自动跑的排查链一共十几条只读查询 + 一次系统侧采集，
 		   用户反复进出时，前一次的链还在独占的 AT 通道上排队（2.2.1 事故的形态：
 		   虽是只读、不留下常驻状态，但排队本身会让整页读数变慢）。
 		   _dispose 里置 true，链内每一步开头检查，让已发起的链尽快自然终止。 */
@@ -418,71 +418,7 @@ return L.view.extend({
 			if (!diagBody) return;
 			diagBody.innerHTML = '';
 			diagBody.appendChild(buildDiagBlock());
-			diagBody.appendChild(buildAdcBlock());
 			renderDiagDetail();   /* 卡内明细容器跟着一起重绘 */
-		}
-
-		/* ---------- ① ADC 管脚电压（手册 11.5） ----------
-		 * 进页面自动读一次（见底部初始化），结果一行铺开，不用先点按钮；
-		 * 按钮只是「再读一次」。5 条只读查询，失败即停，不会在模组里留下任何状态。 */
-
-		function buildAdcBlock() {
-			var t = state.tools.adc;
-			var btn = Mt5700.ghostButton(t.busy ? '读取中…' : (t.rows.length ? '重新读取' : '读取'), readAdcPins);
-			var box = toolBlock('ADC 管脚电压', btn);
-
-			if (t.rows.length) {
-				/* 值直接排进标题那一行：原先是「表头 + N 行 + 两行说明」，
-				   3 个管脚要吃掉 6 行高度；现在整块只有 2 行。
-				   管脚一律从 0 连续编号（逐个试、第一条失败即停），
-				   所以「ADC0 ADC1 ADC2」本身就是顺序，表头是重复信息。 */
-				var vals = E('span', { 'class': 'mt5700-readouts' });
-				t.rows.forEach(function (r) {
-					var chip = E('span', { 'class': 'mt5700-readout' });
-					chip.appendChild(E('span', { 'class': 'mt5700-readout-name' }, 'ADC' + r.id));
-					chip.appendChild(E('span', { 'class': 'mt5700-readout-value' }, String(r.value)));
-					vals.appendChild(chip);
-				});
-				vals.appendChild(E('span', { 'class': 'mt5700-readout-unit' }, 'mV'));
-				box.firstChild.insertBefore(vals, btn);
-				box.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-					'手册未说明各管脚接的是什么 —— 只给原始电平，不解读、不设阈值。'));
-			} else if (t.err) {
-				box.appendChild(Mt5700.empty(t.err));
-			} else {
-				box.appendChild(E('p', { 'class': 'mt5700-hint' },
-					t.busy ? '正在读取各 ADC 管脚…' : '进页面自动读取；没出结果时点右侧按钮再读一次。'));
-			}
-			return box;
-		}
-
-		function readAdcPins() {
-			var t = state.tools.adc;
-			/* ★ 必须返回 Promise：入口是 readAdcPins().then(runSelfCheck)，
-			   busy 时 return undefined 会让调用方抛 TypeError，被吞进没人 catch 的
-			   rejected promise —— 表现为「自检静默不跑，页面上没有任何提示」。 */
-			if (t.busy) return Promise.resolve();
-			t.busy = true; t.err = null; t.rows = [];
-			renderTools();
-			var stopped = false;
-			var chain = Promise.resolve();
-			ADC_PIN_IDS.forEach(function (id) {
-				chain = chain.then(function () {
-					if (stopped || disposed) return;
-					return AtWs.client.sendCommand('AT^ADCREADEX=' + id).then(function (res) {
-						var v = (res && res.success) ? Parse.parseAdcValue(String(res.data || '')) : null;
-						/* 第一条取不到就停：说明这个 id 不存在，后面也不用问了 */
-						if (v == null) { stopped = true; return; }
-						t.rows.push({ id: id, value: v });
-					});
-				});
-			});
-			return chain.catch(function (e) { t.err = (e && e.message) || '读取失败'; })
-				.then(function () {
-					t.busy = false; t.at = Date.now();
-					if (!t.rows.length && !t.err) t.err = '模组未返回任何 ADC 管脚值（该型号可能不支持 ^ADCREADEX）';
-					if (!disposed) renderTools();
-				});
 		}
 
 		/* ---------- ② L1：模组与空口（AT 只读命令） ----------
@@ -1039,13 +975,17 @@ return L.view.extend({
 					diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-error' },
 						'系统侧事实没取到（' + t.factsErr + '）：需升级 luci-app-mt5700，模组层 L1 不受影响。'));
 				}
-				var entryLabel = t.ran ? '明细' : '明细 · 未排查';
-				diagDetailBody.appendChild(toolBlock(entryLabel,
-					Mt5700.ghostButton('展开明细', function () {
-						diagDetailOpen = true;
-						renderTools();
-					})));
-				return;
+			var entryLabel = t.ran ? '明细' : '明细 · 未排查';
+			diagDetailBody.appendChild(toolBlock(entryLabel,
+				Mt5700.ghostButton('展开明细', function () {
+					diagDetailOpen = true;
+					renderTools();
+				})));
+			/* 收起态也留一行说明：卡片高度被右列拉平后下方会有富余空间，
+			   有这行字就不是一个突兀的空白（也顺带讲清明细不会另占区块）。 */
+			diagDetailBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+				'共 ' + items.length + ' 项；展开后按 L1 / L2 / L3 分段，明细在本卡内滚动，不再占页面其它位置。'));
+			return;
 			}
 
 			/* 展开态：factsErr 才放大块 empty 提示（R01：大块只在展开态出现） */
@@ -1148,7 +1088,7 @@ return L.view.extend({
 		 */
 		function runDiagnosis() {
 			var t = state.tools.diag;
-			/* ★ 必须返回 Promise：入口是 readAdcPins().then(runDiagnosis)，
+			/* ★ 必须返回 Promise：入口是进页面自动跑的 runDiagnosis()，
 			   busy 时 return undefined 会让调用方抛 TypeError，被吞进没人 catch 的
 			   rejected promise —— 表现为「排查静默不跑，页面上没有任何提示」。 */
 			if (t.busy) return Promise.resolve();
@@ -2601,19 +2541,16 @@ return L.view.extend({
 			}
 		}).then(function () {
 			refreshAll();
-			/* ADC 自动读一次：结果直接铺在排查卡里，不必先点按钮。
-			   5 条只读查询、失败即停，不会在模组里留下任何状态（安全底线的例外批准项）。
-			   ★ 排查排在 ADC 之后**串行**跑，不并发：两者都是只读查询，同时发起会让
-			   十几条命令一起挤在 AT 通道上排队。串行后总体耗时略长，但不会放大排队。
-			   ★ 排查整体也是进页面自动跑一次（与旧版自检一致）—— 用户要的是"打开页面
-			   就知道哪里不通"，不能要求先点按钮才知道。它全程只读、无副作用。 */
-			readAdcPins().then(runDiagnosis).catch(function () { /* 两条链内部都已各自兜错 */ });
+			/* ★ 排查进页面自动跑一次（与旧版自检一致）—— 用户要的是"打开页面就知道哪里不通"，
+			   不能要求先点按钮才知道。全程只读、无副作用，不会在模组里留下任何状态。
+			   （2026-09-19：原先排在它前面的 ADC 管脚电压已整块下线，现在只剩这一条链。） */
+			runDiagnosis().catch(function () { /* runDiagnosis 内部已兜错 */ });
 		});
 
 		self._dispose = function () {
 			/* 离开页面必须清干净：三个定时器 + 可见性监听 + 只读缓存，
 			   否则反复进出会叠加倍轮询。
-			   disposed 同时让已发起的「ADC → 排查」链尽快停下（见其声明处注释）。
+			   disposed 同时让已发起的排查链尽快停下（见其声明处注释）。
 			   （本页已无任何常驻上报开关，不需要再做「关不掉就报警」的收尾） */
 			disposed = true;
 			if (timer) clearInterval(timer);
