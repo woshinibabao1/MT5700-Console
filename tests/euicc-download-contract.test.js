@@ -599,8 +599,13 @@ asyncTests.push(threw('补取遇到 6E00 必须如实抛错（不能当「已写
 		});
 }, null));
 
-/* 12.5 补取自己也一直超时 → 最多两次，之后明确报错 */
-asyncTests.push(Euicc.recoverAfterTimeout(seqSend([null]), 1, 1, function () { })
+/*
+ * 12.5 补取自己也一直超时 → 到上限后明确报错。
+ * ★ 这里显式传很小的 opts：默认策略是「10 次 × 1.2s 等」≈ 32 秒的**真机**等待，
+ *   测试要是按默认跑会白白多花半分钟。真实策略由下面 12.7 的静态断言钉住。
+ */
+asyncTests.push(Euicc.recoverAfterTimeout(seqSend([null]), 1, 1, function () { },
+	{ maxAttempts: 2, waitMs: 10 })
 	.then(function (r) {
 		fails.push('连续超时竟返回成功：' + JSON.stringify(r));
 	}, function (e) {
@@ -612,7 +617,7 @@ asyncTests.push(Euicc.recoverAfterTimeout(seqSend([null]), 1, 1, function () { }
 /* 12.6 静态：写卡分块确实用了续传，且只用在写卡这一步 */
 const writeLoop = src.slice(src.indexOf('var chain = Promise.resolve'), src.indexOf('return chain.then'));
 ok('写卡分块超时后先补取而不是直接作废整包',
-	/sendApdu\(c\)\.catch\(function \(e\) \{[\s\S]{0,200}isAtTimeoutError\(e\)[\s\S]{0,300}recoverAfterTimeout\(send, ch, 1, log\)/.test(writeLoop),
+	/sendApdu\(c\)\.catch\(function \(e\) \{[\s\S]{0,200}isAtTimeoutError\(e\)[\s\S]{0,400}recoverAfterTimeout\(send, ch, 1, log,/.test(writeLoop),
 	'写卡循环里没有补取分支，超时仍会整包作废');
 ok('补取结果在日志里标「补取」（用户能看出这一块不是正常回执）',
 	/r\.recovered \? '（补取）' : ''/.test(writeLoop),
@@ -627,15 +632,79 @@ ok('续传只在写卡分块启用（外部调用点恰好 1 处，鉴权步骤�
 	src.split('recoverAfterTimeout(send, ch, 1,').length - 1 === 1,
 	'外部调用点 ' + (src.split('recoverAfterTimeout(send, ch, 1,').length - 1) + ' 处（期望 1）');
 /* 反向：拆掉补取后，同一检查必须判红（split/join 全局替换，只换第一处会恒绿） */
-const noRecover = src.split('recoverAfterTimeout(send, ch, 1, log)').join('Promise.reject(e)');
+const noRecover = src.split('recoverAfterTimeout(send, ch, 1, log, {').join('Promise.reject(e)');
 ok('反向：把补取换回「直接失败」后，写卡循环里的补取检查必须判红',
-	!/isAtTimeoutError\(e\)[\s\S]{0,300}recoverAfterTimeout\(send, ch, 1, log\)/
+	!/isAtTimeoutError\(e\)[\s\S]{0,400}recoverAfterTimeout\(send, ch, 1, log,/
 		.test(noRecover.slice(noRecover.indexOf('var chain = Promise.resolve'),
 			noRecover.indexOf('return chain.then'))),
 	'拆掉补取后仍判为通过，检查无效');
 ok('反向：拆掉补取后外部调用点计数必须归零（防止有人用注释/字符串绕过计数）',
 	noRecover.split('recoverAfterTimeout(send, ch, 1,').length - 1 === 0,
 	'拆掉后仍有 ' + (noRecover.split('recoverAfterTimeout(send, ch, 1,').length - 1) + ' 处调用');
+
+/* ---------- 12.7 轮询策略（2026-09-20 第二次真机：只试 2 次根本等不到卡） ---------- */
+
+/*
+ * 真机第二次：卡在 A3 段末块上算了几秒，补取只试 2 次 / 每次等 500ms，
+ * 两次都在卡算完之前就发掉了，于是整包照样作废。
+ * 后端 2 秒预算改不动（要重编固件），唯一的活路就是**轮询等卡算完**。
+ */
+ok('★ 默认补取次数够多（≥6，旧值 2 会赶在卡算完之前就放弃）',
+	Euicc.recoverPolicy.maxAttempts >= 6,
+	'实际 ' + Euicc.recoverPolicy.maxAttempts);
+ok('★ 每次补取之间要留出等待（≥800ms）',
+	Euicc.recoverPolicy.waitMs >= 800,
+	'实际 ' + Euicc.recoverPolicy.waitMs);
+/* 反向：把常量改小，policy 必须跟着变 —— 证明上面两条读的是真常量，不是硬编码 */
+ok('反向：把 RECOVER_MAX_ATTEMPTS 改成 1 后 policy 必须跟着变（防止断言恒绿）',
+	(function () {
+		const neg = src.split('RECOVER_MAX_ATTEMPTS = 10').join('RECOVER_MAX_ATTEMPTS = 1');
+		if (neg === src) return false;   /* 替换没打中 → 反向用例本身失效 */
+		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+		return m.recoverPolicy.maxAttempts === 1;
+	})(), '替换未生效或断言恒绿');
+
+function countingSend(answers) {
+	const st = { n: 0 };
+	const s = seqSend(answers);
+	return {
+		state: st,
+		send: function () { st.n++; return s.apply(null, arguments); }
+	};
+}
+
+/* 卡先不应（超时×2），第 3 次才吐回执 → 必须接着敲门，而不是第 2 次就判死 */
+asyncTests.push((function () {
+	const c = countingSend([null, null, '6105', 'AABBCCDDEE9000']);
+	return Euicc.recoverAfterTimeout(c.send, 1, 1, function () { }, { waitMs: 10 })
+		.then(function (r) {
+			eq('★ 卡还在算时持续轮询：第 3 次拿到回执', r.sw, '9000');
+			eq('★ 轮询取回的是这一块真实的数据', r.data.toUpperCase(), 'AABBCCDDEE');
+			eq('确实敲了 3 次（不是 2 次就放弃）', r.attempts, 3);
+			/* 第 3 次拿回的是 61xx，sendAndCollect 还要再发一条取余 → 总共 4 条 */
+			eq('发出的 APDU 条数 = 3 次轮询 + 1 次 61xx 取余', c.state.n, 4);
+		});
+})());
+
+/* 末块（P1=0x91）本该吐回执：第一次 6F00 更可能是「还没算完」，多敲一次再下结论 */
+asyncTests.push((function () {
+	const c = countingSend(['6F00', '6F00']);
+	return Euicc.recoverAfterTimeout(c.send, 1, 1, function () { },
+		{ lastBlock: true, waitMs: 10 })
+		.then(function (r) {
+			eq('末块首次 6F00 会再确认一次', c.state.n, 2);
+			eq('确认后按已写入处理', r.sw, '9000');
+		});
+})());
+asyncTests.push((function () {
+	const c = countingSend(['6F00']);
+	return Euicc.recoverAfterTimeout(c.send, 1, 1, function () { },
+		{ lastBlock: false, waitMs: 10 })
+		.then(function (r) {
+			eq('非末块的 6F00 是常态，一次就收（不浪费一轮等待）', c.state.n, 1);
+			eq('非末块 6F00 同样按已写入处理', r.sw, '9000');
+		});
+})());
 
 /* ---------- 汇总 ---------- */
 

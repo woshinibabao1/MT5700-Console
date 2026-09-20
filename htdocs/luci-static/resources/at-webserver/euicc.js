@@ -963,7 +963,8 @@ var Euicc = (function () {
 	 *   ① 取回数据（61xx → 自动取余 / 9000 带数据）→ 那就是这一块真实的响应；
 	 *   ② 卡回「没有待取数据」（6F00）→ 说明这一块的 9000 已经发出、被我们错过，
 	 *      按「已消费」继续下一块（**并在日志里写明**，绝不假装什么都没发生）；
-	 *   ③ 探路自己也超时 → 最多再来一次，仍不行才真的报错。
+	 *   ③ 探路自己也超时 → 说明**卡还在算上一块**，继续轮询等它（见下面的次数），
+	 *      仍拿不到才真的报错。
 	 *
 	 * ★ 只在**写卡分块**这一步启用：鉴权类步骤（BF38 / BF21）的响应带安全语义，
 	 *   猜错的代价远大于重跑一次，那里一律如实报错、让用户重来。
@@ -983,21 +984,47 @@ var Euicc = (function () {
 	}
 
 	/*
+	 * ★ 轮询参数（2026-09-20 第二次真机：只试 2 次 / 等 500ms 根本不够）
+	 * ------------------------------------------------------------------
+	 * 后端（已装机的旧固件）给 APDU 的应答预算固定 2 秒，改不动；而卡侧算一段
+	 * STORE DATA（尤其一段收尾时要做密钥运算与非易失写入）常常是**秒级到十几秒级**。
+	 * 后端 2 秒就放弃，但**卡并不会停** —— 它算完会把回执挂在响应缓冲里。
+	 * 所以这里一遍遍用**只读**的 GET RESPONSE 去「敲门」，直到它肯吐出来。
+	 *
+	 * 10 次 ×（1.2s 等待 + 后端 2s 放弃）≈ 32 秒：够覆盖十几秒的卡侧运算，
+	 * 又不至于让「卡真死了」变成无限等待。测试可用 opts 覆盖以缩短耗时。
+	 */
+	var RECOVER_MAX_ATTEMPTS = 10;
+	var RECOVER_WAIT_MS = 1200;
+	api.recoverPolicy = { maxAttempts: RECOVER_MAX_ATTEMPTS, waitMs: RECOVER_WAIT_MS };
+
+	/*
 	 * 向卡补取一次响应（GET RESPONSE，只读）。
 	 * 返回 { data, sw, recovered }；recovered 为真表示结果不是原命令给的 ——
 	 * 调用方必须把它记进日志，不能让用户以为一切正常。
+	 *
+	 * opts.lastBlock：超时那一块是不是该段的**末块**（P1=0x91）。末块本该吐回执，
+	 * 第一次就 6F00 更可能是「卡还没算完、数据还没挂上去」，多敲一次再下结论；
+	 * 非末块本来就没有回执，6F00 就是常态。
 	 */
-	function recoverAfterTimeout(send, ch, attempt, log) {
-		if (attempt > 2) {
+	function recoverAfterTimeout(send, ch, attempt, log, opts) {
+		opts = opts || {};
+		var maxAttempts = opts.maxAttempts || RECOVER_MAX_ATTEMPTS;
+		var wait = opts.waitMs != null ? opts.waitMs : RECOVER_WAIT_MS;
+		if (attempt > maxAttempts) {
 			throw makeError('EUICC_AT_ERROR',
-				'连续 ' + attempt + ' 条 APDU 都没收到应答，卡片可能已停止响应');
+				'向卡补取 ' + maxAttempts + ' 次都没拿到应答，卡片可能已停止响应');
 		}
-		return waitMs2(500 * attempt).then(function () {
+		return waitMs2(wait).then(function () {
 			return sendAndCollect(send, ch, api.getResponseApdu(ch, 0), 0, '');
 		}).then(function (r) {
-			return { data: r.data || '', sw: r.sw, recovered: true };
+			if (typeof log === 'function' && attempt > 1) {
+				log('· 第 ' + attempt + ' 次补取拿到 SW=' + r.sw);
+			}
+			return { data: r.data || '', sw: r.sw, recovered: true, attempts: attempt };
 		}, function (e) {
-			if (isAtTimeoutError(e)) return recoverAfterTimeout(send, ch, attempt + 1, log);
+			/* 补取自己也超时＝卡还在算上一块，接着敲门 */
+			if (isAtTimeoutError(e)) return recoverAfterTimeout(send, ch, attempt + 1, log, opts);
 			/*
 			 * 6F00 =「没有精确诊断」，在 GET RESPONSE 语境下就是**卡上没有待取数据**：
 			 * 原命令的 9000 已经发出、只是被我们错过（非末块几乎都是这种）。
@@ -1005,6 +1032,9 @@ var Euicc = (function () {
 			 * 把它们也当成功，就会把「通道 / 参数错了」掩盖成「写卡成功」。
 			 */
 			if (e && e.sw === '6F00') {
+				if (opts.lastBlock && attempt < 2) {
+					return recoverAfterTimeout(send, ch, attempt + 1, log, opts);
+				}
 				if (typeof log === 'function') {
 					log('⚠ 该块未收到应答，卡上也已无待取数据（6F00）——按已写入处理；' +
 						'若最终安装失败，卡侧校验会报错，请整包重下');
@@ -2208,15 +2238,25 @@ api.buildEs10b = function (ch, tag, derHex) {
 								onStep(8, '写入卡片（段 ' + (si + 1) + '/' + segs.length +
 									'，块 ' + (idx + 1) + '/' + chunks.length + '）');
 								/*
-								 * ★ 卡侧处理一段可能要几秒，后端等不到结束码就报
-								 *   「模组无响应」。此时不要立刻作废整包 —— 先补取一次
+								 * ★ 卡侧处理一段可能要几秒到十几秒，后端等不到结束码就报
+								 *   「模组无响应」。此时不要立刻作废整包 —— 卡并不会停，
+								 *   它算完会把回执挂在响应缓冲里，靠轮询补取拿回来
 								 *   （见 recoverAfterTimeout 的注释）。
 								 */
 								return sendApdu(c).catch(function (e) {
 									if (!isAtTimeoutError(e)) throw e;
+									/*
+									 * 原文案整条 AT + APDU 都打进日志（十几 KB 的下载里
+									 * 满屏都是），这里只留冒号前的病因部分。
+									 */
+									var em = String(e.message || '');
+									var cut = em.indexOf(': ');
 									log('⚠ ' + seg.label + ' ' + (idx + 1) + '/' + chunks.length +
-										' 未收到应答（' + (e.message || '') + '），正在向卡补取…');
-									return recoverAfterTimeout(send, ch, 1, log);
+										' 未收到应答（' + (cut > 0 ? em.slice(0, cut) : em) +
+										'）——卡多半还在算，正在轮询补取…');
+									return recoverAfterTimeout(send, ch, 1, log, {
+										lastBlock: c.substr(4, 2) === '91'
+									});
 								});
 							}).then(function (r) {
 								log('卡 ← ' + seg.label + ' ' + (idx + 1) + '/' +
