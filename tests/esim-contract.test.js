@@ -316,6 +316,69 @@ asyncTests.push((function () {
 /* ---------- 8. esim.js 源码分支判据（P01 / P06 / P07） ---------- */
 
 ok('P01 esim.js 源码含回执异常判据（failed 或 total=0）', /nf\.failed\s*\|\|\s*!\(nf\s*&&\s*nf\.total/.test(esimSrc));
+/* ---------- 8b. 本轮 P02–P18 的源码判据（逐条钉死，反例改坏即判红） ---------- */
+
+/* P02：删除前必须先禁用，enabled 直接 delete 必返 ES10 result 2 */
+ok('P02 esim.js 删除回调含「请先禁用该 Profile 再删除」拦截', /请先禁用该 Profile 再删除/.test(esimSrc));
+ok('P02 esim.js 该拦截在 deleteProfile 入口（state === \'enabled\'）', /if \(p\.state === 'enabled'\) \{[\s\S]{0,80}?请先禁用该 Profile 再删除/.test(esimSrc));
+/* P03：弹窗回调二次 busy 校验。★ R03 后共 5 处：toggle / rename / delete / sendAll / remove */
+ok('P03 esim.js 含 ≥5 处「有操作正在进行」二次 busy 拦截', (esimSrc.match(/Mt5700\.error\('有操作正在进行'\)/g) || []).length >= 5);
+ok('R03 sendAllNotifications 回调内也有二次 busy（确认框停留期防重入）',
+	/确定发送全部待发回执[\s\S]{0,200}?if \(busy\) \{ Mt5700\.error\('有操作正在进行'\)/.test(esimSrc));
+ok('R03 removeNotification 回调内也有二次 busy',
+	/移除回执不可逆[\s\S]{0,200}?if \(busy\) \{ Mt5700\.error\('有操作正在进行'\)/.test(esimSrc));
+/*
+ * P03 + P17：三处回调首行各自补 if (busy) + if (!p.iccidRaw)。
+ * ★ R07：**不能用全局计数** —— 计数对「同一个函数里写了两遍」完全不设防
+ *   （删掉任一遍仍 ≥3，恒绿）。这里改成按函数体定位、断言恰好 1 处，
+ *   并额外断言顺序是「先 busy 再 iccidRaw」（反了会把并发误报成「没读到 ICCID」）。
+ */
+function esimFnBody(name) {
+	var m = esimSrc.match(new RegExp('function ' + name + '\\([\\s\\S]*?\\r?\\n\\t\\t\\}'));
+	return m ? m[0] : '';
+}
+['toggleProfile', 'renameProfile', 'deleteProfile'].forEach(function (fn) {
+	var b = esimFnBody(fn);
+	ok('R07 ' + fn + ' 体内 iccidRaw 守卫恰好 1 处（无重复死代码）',
+		b !== '' && (b.match(/if \(!p\.iccidRaw\)/g) || []).length === 1,
+		b === '' ? '未定位到函数体，断言失效' : '实际 ' + (b.match(/if \(!p\.iccidRaw\)/g) || []).length + ' 处');
+	ok('R07 ' + fn + ' 内守卫顺序为「先 busy 再 iccidRaw」',
+		b !== '' && b.indexOf("if (busy) { Mt5700.error('有操作正在进行'); return; }")
+			< b.indexOf('if (!p.iccidRaw)'));
+});
+/* P04：删除成功后串行读回执（loadProfiles(...).then(showPendingReceipts)），且 showPendingReceipts 首行 if (busy) */
+ok('P04 esim.js 删除成功串行读回执（不再并发开两条通道）', /loadProfiles\(listCard\)\.then\(function \(\) \{\s*showPendingReceipts\(\)/.test(esimSrc));
+ok('P04 esim.js showPendingReceipts 首行 if (busy) 守卫', /function showPendingReceipts\(\) \{\s*if \(busy\) return/.test(esimSrc));
+/* P05：下载日志区复用固定高度类（零 CSS 改动） */
+ok('P05 esim.js 日志区用 mt5700-mono mt5700-terminal-log', /mt5700-mono mt5700-terminal-log/.test(esimSrc));
+/* P06：删除确认给出可回答的答案（完整 AID 裸值写入提示） */
+ok('P06 esim.js 删除确认给出完整 AID 末 4 位提示', /请输入该 Profile 的 AID 末 4 位（AID：/.test(esimSrc));
+/* P07：handleErr 优先采用 ES10 中文文案（e.result != null 分支） */
+ok('P07 esim.js handleErr 优先用 es10ResultText（e.result 分支）', /else if \(code === 'EUICC_OP_FAILED' && e\.result != null\)[\s\S]{0,80}?Euicc\.es10ResultText\(e\.result\)/.test(esimSrc));
+/* P12：下载进度条复用 Mt5700.signalBar，且**写入阶段按段推进** */
+ok('P12 esim.js 下载进度用 Mt5700.signalBar(…, 100)', /Mt5700\.signalBar\([^)]*,\s*100\)/.test(esimSrc));
+/*
+ * ★ R01：进度必须按「段 X/Y」细化 —— onStep(8,…) 在**每一块**都会回调（真机 546 块），
+ *   只按步骤号算的话，占 90% 时长的写入阶段会全程停在 80%，等于没做进度条。
+ */
+ok('R01 esim.js 进度按段号细化（解析「段 X/Y」，不是只按步骤号）',
+	/段\\s\*\(\\d\+\)\\s\*\\\/\\s\*\(\\d\+\)/.test(esimSrc) && /stepPct\(n, text\)/.test(esimSrc));
+ok('R01 esim.js 进度条只建一次、后续只改宽度（不每块重建 DOM）',
+	/progFill\.style\.width/.test(esimSrc) && !/progWrap\.innerHTML/.test(esimSrc));
+/* P13：名称取值顺序 profileName || spName || nickname（先取卡上官方名） */
+ok('P13 esim.js 名称取值顺序 profileName||spName||nickname', /var name = p\.profileName \|\| p\.spName \|\| p\.nickname/.test(esimSrc));
+/* P14：ICCID / AID 长裸值包等宽 span */
+ok('P14 esim.js ICCID 单元格包 mt5700-mono span', /E\('span',\s*\{ 'class': 'mt5700-mono' \},\s*p\.iccid/.test(esimSrc));
+/* P15：批量「发送全部」不可逆，必须经二次确认 */
+ok('P15 esim.js 发送全部走 Mt5700.confirm 二次确认', /Mt5700\.confirm\('确定发送全部待发回执/.test(esimSrc));
+/* P16：添加向导只堆积一个 stopScan 闭包（wizardStop 先执行并清掉上一个） */
+ok('P16 esim.js 有 wizardStop 模块级变量', /var wizardStop = null/.test(esimSrc));
+ok('P16 esim.js 打开向导前先执行并清掉上一个 wizardStop', /if \(wizardStop\) \{[\s\S]{0,120}?wizardStop\(\)/.test(esimSrc));
+/* P18：取消下载追加黄色 notice + 「刷新列表」入口 */
+ok('P18 esim.js 取消下载追加黄色 notice（warning）', /mt5700-notice-warning/.test(esimSrc) && /下载已取消/.test(esimSrc));
+ok('P18 esim.js 取消分支提供「刷新列表」入口', /Mt5700\.ghostButton\('刷新列表',\s*function \(\) \{\s*render\(\)/.test(esimSrc));
+/* P09：首屏合并为一次会话读全 Profile 列表 + 待发回执 */
+ok('P09 esim.js 首屏用 listProfilesAndNotifications 合并读', /Euicc\.listProfilesAndNotifications\(send\)\.then/.test(esimSrc));
 ok('P06 esim.js 源码含 result === null 分支', /r\s*&&\s*r\.result\s*===\s*null/.test(esimSrc));
 ok('P07 esim.js 源码含有限轮询封顶（attempt < 3）', /attempt\s*<\s*3/.test(esimSrc));
 /* R06：匹配字面按钮构造而非通用词，避免命中失败提示文案 */

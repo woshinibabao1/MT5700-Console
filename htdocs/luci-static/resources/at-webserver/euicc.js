@@ -95,6 +95,13 @@ var Euicc = (function () {
 	 * 记下疑似泄漏提示，交由上层（probe → esim.js）展示，避免悄然累积到第 20 次后 open 失败。 */
 	var lastChannel = 0;
 	var channelLeakNote = '';
+	/*
+	 * ★ P08 不要在这里缓存探活 EID（初版用的是一个模块级变量，已删除）：
+	 *   模块级可变状态在**并发会话**下会互相覆盖 —— 会话 A 探活取到 EID 后，
+	 *   会话 B 的探活（解析失败）把它写成空串，A 就会误判「没取到」而重发 BF3E；
+	 *   更糟的是换卡场景下会把上一张卡的 EID 带给新卡。
+	 *   正确做法：探活结果按会话传递 —— withIsdrSession 把 {sw, eid} 作为 fn 的第三参传入。
+	 */
 
 	/*
 	 * 异常 code 固定集合（§1.2）。所有抛错必须是带 code 的 Error 实例，
@@ -367,6 +374,14 @@ var Euicc = (function () {
 	/* ============ 卡片 SW 层错误矩阵（§1.5 ①） ============ */
 
 	api.swInfo = function (sw) {
+		/* P01：入参非 4 字符十六进制（含 undefined / null / 截断）一律走兜底，绝不抛 */
+		if (typeof sw !== 'string' || sw.length !== 4) {
+			return {
+				level: 'error',
+				text: '未知卡片错误 SW=' + (sw == null ? '' : String(sw)),
+				hint: '未知状态码，请连同上下文（第几步 / 段号）一并提 issue；可重试'
+			};
+		}
 		if (sw === '9000') return { level: 'ok', text: '', hint: '' };
 		if (sw.charAt(0) === '6' && sw.charAt(1) === '1') {
 			var xx = sw.slice(2);
@@ -484,9 +499,9 @@ var Euicc = (function () {
 		/* 兜底。★ 旧文案写「不支持此操作」是错的 —— 它把「我没识别出这个码」
 		   说成了「卡不支持这个功能」，用户会因此放弃本来能成功的重试。 */
 		return {
-			level: 'fatal',
+			level: 'error',
 			text: '未知卡片错误 SW=' + sw,
-			hint: '这个状态码本页还没收录；请连同上下文（第几步 / 段号）一并提 issue'
+			hint: '这个状态码本页还没收录；请连同上下文（第几步 / 段号）一并提 issue，可重试'
 		};
 	};
 
@@ -772,6 +787,27 @@ var Euicc = (function () {
 		return 'EUICC_OP_FAILED';
 	}
 
+	/*
+	 * P07：ES10 结果码 → 中文人话（esim.js handleErr 优先采用，替代裸串「ES10 result n」）。
+	 * 缺省 → 'ES10 结果码 ' + code（绝不编造未定义码的含义）。
+	 *
+	 * ★ R10：这里**故意不收录 3 和 5**。它们被 es10CodeToErr 翻译成
+	 *   EUICC_POLICY_DENIED / EUICC_BUSY，而 handleErr 里那两个分支排在 P07 分支之前，
+	 *   且文案比本表更具体（「运营商预置 Profile 禁止删除」「约 10 秒后重试」）。
+	 *   把它们写进本表只会制造「已覆盖」的假象 —— 测试断言 es10ResultText(3) 通过了，
+	 *   用户却永远走不到那行代码。
+	 */
+	function es10ResultText(code) {
+		var map = {
+			1: '找不到该 Profile（ICCID/AID 在卡上不存在）',
+			2: '状态不符：删除前必须先禁用、启用前必须处于禁用',
+			127: '卡返回未定义错误'
+		};
+		if (Object.prototype.hasOwnProperty.call(map, code)) return map[code];
+		return 'ES10 结果码 ' + code;
+	}
+	api.es10ResultText = es10ResultText;
+
 	/* 带人话文案的 SW 错误（R08）：把 §1.5① 错误矩阵的 text/hint 挂到 err 上，
 	 * 让上层 handleErr 优先展示，而不是把裸 SW（如 6A80）直接 toast 给用户。 */
 	function makeSwError(code, sw) {
@@ -946,6 +982,11 @@ var Euicc = (function () {
 			})
 			.then(function () {
 				return sendAndCollect(send, ch, api.buildGetEid(ch), 0, '');
+			})
+			.then(function (eidRes) {
+				/* P08：把探活取到的 EID 一并返回，由 withIsdrSession 按会话传给 fn，
+				 * 供 api.probe 复用，避免二次下发 BF3E。 */
+				return { sw: eidRes.sw, eid: parseEid(eidRes.data) };
 			});
 	}
 
@@ -1057,10 +1098,14 @@ var Euicc = (function () {
 				}
 				throw e;
 			})
-			.then(function () {
+			/*
+			 * fn 第三参 pingInfo = 本次会话探活的 { sw, eid }（按会话传递，不是全局变量）。
+			 * 既有回调只吃前两参，完全向后兼容。
+			 */
+			.then(function (pingInfo) {
 				return fn(channel, function (apdu) {
 					return sendAndCollect(send, channel, apdu, 0, '');
-				});
+				}, pingInfo || { sw: '', eid: '' });
 			})
 			.then(function (r) {
 				result = r;
@@ -1143,25 +1188,27 @@ var Euicc = (function () {
 			})
 			.then(function (r) {
 				if (r && r.state) return r;
-				return api.withIsdrSession(send, function (ch, sendApdu) {
-					return sendApdu(api.buildGetEid(ch)).then(function (r2) {
-						var eid = parseEid(r2.data);
-						/*
-						 * 卡容量（extCardResource）在同一条通道里顺手取：
-						 * 再开一次 withIsdrSession 会多占一条逻辑通道，没那个必要。
-						 *
-						 * ★ 失败一律降级成「未上报」，绝不上抛：容量只是展示项，
-						 *   不能因为它把整页判成错误态。CSIM 通路下 EUICCInfo2 常常
-						 *   超过 256 字节 → 截断守卫抛 EUICC_CSIM_TRUNCATED，那描述的是
-						 *   固件能力上限，不是故障；CGLA 下也可能被卡直接拒（6D00）。
-						 */
-						return sendApdu(api.buildGetEuiccInfo2(ch)).then(function (r3) {
-							return { eid: eid, capacity: api.parseExtCardResource(r3.data) };
-						}, function () {
-							return { eid: eid, capacity: null };
-						});
+				return api.withIsdrSession(send, function (ch, sendApdu, pingInfo) {
+				/*
+				 * P08：EID 已由本次会话的探活（selectAndPing）取回并随 pingInfo 传进来，
+				 * 不必再发一次 BF3E。卡容量（extCardResource）在同一条通道里顺手取：
+				 * 失败一律降级成「未上报」，绝不上抛。
+				 *
+				 * ★ R06：复用是「能复用就复用」，不是「必须复用」。探活解析失败
+				 *   （pingInfo.eid 为空串）时退回现发一次 BF3E（旧行为），
+				 *   绝不把空 EID 当成「这台设备没有 EID」交给页面。
+				 */
+				var eidReady = (pingInfo && pingInfo.eid)
+					? Promise.resolve(pingInfo.eid)
+					: sendApdu(api.buildGetEid(ch)).then(function (r) { return parseEid(r.data); });
+				return eidReady.then(function (eid) {
+					return sendApdu(api.buildGetEuiccInfo2(ch)).then(function (r3) {
+						return { eid: eid, capacity: api.parseExtCardResource(r3.data) };
+					}, function () {
+						return { eid: eid, capacity: null };
 					});
-				}).then(function (info) {
+				});
+			}).then(function (info) {
 					/* R04：把疑似通道泄漏提示一并带回，交给 esim.js 展示。
 					   transport 一并回传，供界面说明当前走的是哪条通路。 */
 					return {
@@ -1186,6 +1233,41 @@ var Euicc = (function () {
 		return api.withIsdrSession(send, function (ch, sendApdu) {
 			return sendApdu(api.buildGetProfiles(ch)).then(function (r) {
 				return api.parseGetProfiles(r.data);
+			});
+		});
+	};
+
+	/*
+	 * P09：一次会话内读全「Profile 列表 + 待发回执」两项（先 BF2D 再 BF28），
+	 * 避免首屏各开一条 ISD-R 会话（卡片只有 1~3 条逻辑通道，并发/重复开会被拒）。
+	 * 只读、无副作用；错误码沿用现有 EUICC_*。它不取代 listProfiles / listNotifications
+	 * （其它入口仍各自独立会话），保持对既有导出函数的向后兼容。
+	 */
+	api.listProfilesAndNotifications = function (send) {
+		return api.withIsdrSession(send, function (ch, sendApdu) {
+			return sendApdu(api.buildGetProfiles(ch)).then(function (r1) {
+				var parsed = api.parseGetProfiles(r1.data);
+				return sendApdu(api.buildListNotification(ch)).then(function (r2) {
+					/* P09b：回执 SW≠9000（如 6A88「找不到 tag」）时降级为空列表，
+					   Profile 列表照常返回。 */
+					var items = (r2.sw === '9000')
+						? api.parseNotifications(r2.data || '')
+						: [];
+					return { list: parsed.list || [], items: items };
+				}, function (e) {
+					/*
+					 * ★ R04：只吞「卡上没这一项」这一类（6A88 找不到 tag / 6A82 找不到文件）。
+					 *   AT 断连（EUICC_AT_ERROR）、无卡（EUICC_NO_CARD）、响应截断
+					 *   （EUICC_TLV_TRUNCATED）**一律原样上抛** —— 无差别 catch 会把
+					 *   「读不出来」伪装成「卡上没有待发的回执」，用户据此以为没事，
+					 *   回执就一直挂着。宁可让首屏报出真实错误，也不要假装的空列表。
+					 */
+					var sw = (e && (e.sw || e.message)) || '';
+					if (sw === '6A88' || sw === '6A82') {
+						return { list: parsed.list || [], items: [] };
+					}
+					throw e;
+				});
 			});
 		});
 	};

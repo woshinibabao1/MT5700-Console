@@ -608,6 +608,226 @@ eq('parseExtCardResource：只报 82 一项也要给出来（不要求三项齐�
 	Euicc.parseExtCardResource('BF220584038201FF'),
 	{ freeNonVolatileMemory: 255 });
 
+/* ---------- P01：未知 SW 兜底降级（fatal → error） ---------- */
+
+/* P01 核心验证：未收录的 SW 不再判死「不是 eUICC」（兜底 level 从 fatal 改 error），
+ * 只保留 6A82 / 6E00 / 6D00 为 fatal（卡身份真实判据）。 */
+eq('P01 未知 SW 6A86 → error（不误判成「不是 eUICC」）', Euicc.swInfo('6A86').level, 'error');
+eq('P01 未知 SW 6A87 → error（兜底口径一致）', Euicc.swInfo('6A87').level, 'error');
+ok('P01 6A82 仍是 fatal（基本通道上才是真的不是 eUICC）', Euicc.swInfo('6A82').level === 'fatal', Euicc.swInfo('6A82').level);
+ok('P01 6E00 / 6D00 仍是 fatal（CLA / 指令不被卡接受）',
+	Euicc.swInfo('6E00').level === 'fatal' && Euicc.swInfo('6D00').level === 'fatal');
+/* P01 入参非 4 字符 hex：走兜底，绝不抛（undefined / null / 截断都安全） */
+eq('P01 入参 3 字符 → 兜底 error（不抛）', (function () { try { return Euicc.swInfo('699').level; } catch (e) { return 'throw:' + e.code; } })(), 'error');
+eq('P01 入参 null → 兜底 error（不抛）', (function () { try { return Euicc.swInfo(null).level; } catch (e) { return 'throw'; } })(), 'error');
+eq('P01 入参 undefined → 兜底 error（不抛）', (function () { try { return Euicc.swInfo(undefined).level; } catch (e) { return 'throw'; } })(), 'error');
+/*
+ * ★ P01 反向：**只**把兜底那一处的 level 改回 'fatal'，断言必须判红。
+ * ★ R08：不能全局 split("level: 'error'") —— 6985/6A80/6A88/6881/6A84/6999 等分支
+ *   用的也是 'error'，全局替换后「6A86 不是 error」必然为真，证明不了兜底被钉住。
+ *   这里先用兜底文案定位到那一段，再只改它前面最后一次出现的 level，属于定点替换。
+ */
+ok('★ P01 反向：兜底那一处若改回 fatal 则 6A86 不再是 error',
+	(function () {
+		var anchor = "text: '未知卡片错误 SW=' + sw";
+		var i = src.indexOf(anchor);
+		if (i < 0) return false;                       /* 定位失败 → 反向用例本身失效 */
+		var head = src.slice(0, i);
+		var j = head.lastIndexOf("level: 'error'");
+		if (j < 0) return false;
+		var s = head.slice(0, j) + "level: 'fatal'" + head.slice(j + "level: 'error'".length) + src.slice(i);
+		return eval('(' + s.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')().swInfo('6A86').level !== 'error';
+	})());
+
+/* ---------- P07：ES10 结果码 → 中文人话 ---------- */
+
+ok('P07 es10ResultText(1) 点出「找不到」该 Profile', /找不到/.test(Euicc.es10ResultText(1)));
+ok('P07 es10ResultText(2) 点出「禁用」（状态不符）', /禁用/.test(Euicc.es10ResultText(2)));
+/*
+ * ★ R10：3 / 5 **故意不收录**进 es10ResultText。它们被 es10CodeToErr 翻译成
+ *   EUICC_POLICY_DENIED / EUICC_BUSY，而 handleErr 里那两个分支排在 P07 之前，
+ *   且文案更具体 —— 把 3/5 写进本表只会让「断言通过、用户永远看不到」的假覆盖。
+ *   这里改为钉住「它们确实走缺省回显 + 确实由专用 code 分支接管」。
+ */
+eq('R10 es10ResultText(3) 走缺省回显（实际由 EUICC_POLICY_DENIED 分支接管）', Euicc.es10ResultText(3), 'ES10 结果码 3');
+eq('R10 es10ResultText(5) 走缺省回显（实际由 EUICC_BUSY 分支接管）', Euicc.es10ResultText(5), 'ES10 结果码 5');
+ok('R10 es10CodeToErr 仍把 3/5 映射成专用 code（故本表不收录它们）',
+	/code === 3\) return 'EUICC_POLICY_DENIED'/.test(src)
+	&& /code === 5\) return 'EUICC_BUSY'/.test(src));
+ok('P07 es10ResultText(127) 点出「未定义错误」', /未定义/.test(Euicc.es10ResultText(127)));
+/* 缺省不编造未定义码的含义，直接回显码号 */
+ok('P07 es10ResultText(999) 不编造、直接回显码号', Euicc.es10ResultText(999) === 'ES10 结果码 999', Euicc.es10ResultText(999));
+/* ★ P07 反向：把缺省回显分支删掉（全局 split/join 替换 "ES10 结果码 ' + code"）必须判红 */
+ok('★ P07 反向：删掉缺省回显分支则 es10ResultText(999) 不再含码号',
+	(function () {
+		var s = src.split("'ES10 结果码 ' + code").join("'x'");
+		return eval('(' + s.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')().es10ResultText(999) !== 'ES10 结果码 999';
+	})());
+
+/* ---------- P08：probe 复用探活 EID，BF3E 只下发一次 ---------- */
+
+asyncTests.push((function () {
+	var eid = '89086030202200000026000173326959';
+	var counter = [];
+	var send = mockSend({
+		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },
+		'AT+CSIM=?': { success: true, data: '+CSIM: (4-520),(cmd)' },
+		[Euicc.csimCommand(Euicc.openChannelApdu())]: { success: true, data: csimAnswer('019000') },
+		[Euicc.csimCommand(Euicc.selectIsdrApdu(1))]: { success: true, data: csimAnswer('9000') },
+		[Euicc.csimCommand(Euicc.buildGetEid(1))]: { success: true, data: csimAnswer('BF3E125A10' + eid + '9000') },
+		[Euicc.csimCommand(Euicc.closeChannelApdu(1))]: { success: true, data: csimAnswer('9000') }
+	}, counter);
+	return Euicc.probe(send).then(function (p) {
+		eq('P08 probe 仍返回 ok 且带回 EID', [p.state, p.eid], ['ok', eid]);
+		/* P08：探活已取 EID，正式取 EID 不再重发 —— BF3E 只能出现 1 次（探活那次） */
+		var bf3e = counter.filter(function (c) { return c === Euicc.csimCommand(Euicc.buildGetEid(1)); }).length;
+		eq('P08 probe 全程 BF3E 仅下发 1 次（探活复用，不二次取）', bf3e, 1);
+	}, function (e) {
+		fails.push('P08 probe 复用 EID 用例异常：' + (e && e.code) + ' / ' + (e && e.message));
+	});
+})());
+
+/* ★ P08 反向：把「复用探活 EID」的分支去掉（强制每次现取），BF3E 必须变成 2 次 ——
+ *   证明上面那条 ==1 的断言真在测复用，而不是恒绿。 */
+asyncTests.push((function () {
+	var eid = '89086030202200000026000173326959';
+	var negSrc = src.split('pingInfo && pingInfo.eid').join('false');
+	if (negSrc === src) { fails.push('P08 反向用例未打中源码（替换失效）'); return Promise.resolve(); }
+	var neg = eval('(' + negSrc.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+	var counter = [];
+	var send = mockSend({
+		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },
+		'AT+CSIM=?': { success: true, data: '+CSIM: (4-520),(cmd)' },
+		[neg.csimCommand(neg.openChannelApdu())]: { success: true, data: csimAnswer('019000') },
+		[neg.csimCommand(neg.selectIsdrApdu(1))]: { success: true, data: csimAnswer('9000') },
+		[neg.csimCommand(neg.buildGetEid(1))]: { success: true, data: csimAnswer('BF3E125A10' + eid + '9000') },
+		[neg.csimCommand(neg.closeChannelApdu(1))]: { success: true, data: csimAnswer('9000') }
+	}, counter);
+	return neg.probe(send).then(function () {
+		var bf3e = counter.filter(function (c) { return c === neg.csimCommand(neg.buildGetEid(1)); }).length;
+		eq('★ P08 反向：去掉复用分支后 BF3E 变 2 次（守卫不恒绿）', bf3e, 2);
+	});
+})());
+
+/* ---------- P09：listProfilesAndNotifications 一次会话读全两项 ---------- */
+
+asyncTests.push((function () {
+	var KORE = Euicc.tlvHex('BF2D', Euicc.tlvHex('A0', Euicc.tlvHex('E3',
+		Euicc.tlvHex('5A', '980193000050577617F1') + Euicc.tlvHex('4F', 'A0000005591010FFFFFFFF8900001000') +
+		Euicc.tlvHex('90', '4D794E616D') + Euicc.tlvHex('91', '53704E616D'))));
+	var NOTIF = Euicc.tlvHex('BF28', Euicc.tlvHex('A0', Euicc.tlvHex('BF2F',
+		Euicc.tlvHex('80', '01') + Euicc.tlvHex('81', '00'))));
+	var counter = [];
+	var send = function (cmd) {
+		counter.push(cmd);
+		if (cmd === Euicc.csimCommand(Euicc.openChannelApdu())) return Promise.resolve({ success: true, data: csimAnswer('019000') });
+		if (cmd === Euicc.csimCommand(Euicc.selectIsdrApdu(1))) return Promise.resolve({ success: true, data: csimAnswer('9000') });
+		if (cmd === Euicc.csimCommand(Euicc.buildGetEid(1))) return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10890860302022000000260001733269599000') });
+		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildGetProfiles(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer(KORE + '9000') });
+		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildListNotification(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer(NOTIF + '9000') });
+		if (cmd === Euicc.csimCommand(Euicc.closeChannelApdu(1))) return Promise.resolve({ success: true, data: csimAnswer('9000') });
+		return Promise.resolve({ success: true, data: csimAnswer('9000') });
+	};
+	return Euicc.listProfilesAndNotifications(send).then(function (r) {
+		ok('P09 一次会话返回 {list, items}', Array.isArray(r.list) && Array.isArray(r.items));
+		eq('P09 list 解析出 1 条 Profile', r.list.length, 1);
+		eq('P09 items 解析出 1 条回执', r.items.length, 1);
+		/* 一次会话只开一条 ISD-R 逻辑通道（open 1 次） */
+		var opens = counter.filter(function (c) { return c === Euicc.csimCommand(Euicc.openChannelApdu()); }).length;
+		eq('P09 一次会话只开 1 条 ISD-R 通道（合并读，不两段串行）', opens, 1);
+	}, function (e) {
+		fails.push('P09 listProfilesAndNotifications 用例异常：' + (e && e.code) + ' / ' + (e && e.message));
+	});
+})());
+
+/* ---------- P09b：listProfilesAndNotifications 回执 SW≠9000 时 items 为空 ---------- */
+
+asyncTests.push((function () {
+	var KORE = Euicc.tlvHex('BF2D', Euicc.tlvHex('A0', Euicc.tlvHex('E3',
+		Euicc.tlvHex('5A', '980193000050577617F1') + Euicc.tlvHex('4F', 'A0000005591010FFFFFFFF8900001000'))));
+	var counter = [];
+	var send = function (cmd) {
+		counter.push(cmd);
+		if (cmd === Euicc.csimCommand(Euicc.openChannelApdu())) return Promise.resolve({ success: true, data: csimAnswer('019000') });
+		if (cmd === Euicc.csimCommand(Euicc.selectIsdrApdu(1))) return Promise.resolve({ success: true, data: csimAnswer('9000') });
+		if (cmd === Euicc.csimCommand(Euicc.buildGetEid(1))) return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10890860302022000000260001733269599000') });
+		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildGetProfiles(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer(KORE + '9000') });
+		/* 回执读取失败（SW≠9000）：必须返回空 items，绝不抛、不误读 */
+		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildListNotification(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer('6A88') });
+		if (cmd === Euicc.csimCommand(Euicc.closeChannelApdu(1))) return Promise.resolve({ success: true, data: csimAnswer('9000') });
+		return Promise.resolve({ success: true, data: csimAnswer('9000') });
+	};
+	return Euicc.listProfilesAndNotifications(send).then(function (r) {
+		eq('P09b 回执 SW≠9000 → items 为空（不抛、不误读）', r.items.length, 0);
+		eq('P09b Profile 列表仍正常返回', r.list.length, 1);
+	}, function (e) {
+		fails.push('P09b 回执异常用例不应抛：' + (e && e.code) + ' / ' + (e && e.message));
+	});
+})());
+
+/*
+ * ---------- R04：P09b 的容错**只能**吞「卡上没这一项」，不能无差别吞 ----------
+ * 反例：AT 层断连（EUICC_AT_ERROR）若被降级成 items:[]，页面会显示
+ * 「卡上没有待发的回执」，把「读不出来」伪装成「没有」——回执就一直挂着没人知道。
+ */
+asyncTests.push((function () {
+	var KORE = Euicc.tlvHex('BF2D', Euicc.tlvHex('A0', Euicc.tlvHex('E3',
+		Euicc.tlvHex('5A', '980193000050577617F1') + Euicc.tlvHex('4F', 'A0000005591010FFFFFFFF8900001000'))));
+	var send = function (cmd) {
+		if (cmd === Euicc.csimCommand(Euicc.openChannelApdu())) return Promise.resolve({ success: true, data: csimAnswer('019000') });
+		if (cmd === Euicc.csimCommand(Euicc.selectIsdrApdu(1))) return Promise.resolve({ success: true, data: csimAnswer('9000') });
+		if (cmd === Euicc.csimCommand(Euicc.buildGetEid(1))) return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10890860302022000000260001733269599000') });
+		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildGetProfiles(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer(KORE + '9000') });
+		/* AT 服务未就绪：不是「卡上没有回执」，必须原样上抛 */
+		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildListNotification(1))) === 0) {
+			return Promise.resolve({ success: false, error: 'modem not connected' });
+		}
+		return Promise.resolve({ success: true, data: csimAnswer('9000') });
+	};
+	return Euicc.listProfilesAndNotifications(send).then(function () {
+		fails.push('R04 AT 断连被静默降级成 items:[] —— 会把「读不出来」伪装成「没有回执」');
+	}, function (e) {
+		ok('R04 AT 断连 / 无卡等非「无此项」错误必须上抛（不伪装成空列表）',
+			e && e.code === 'EUICC_AT_ERROR', e && e.code);
+	});
+})());
+ok('R04 源码里 P09b 容错分支带 throw e（只放行 6A88/6A82）',
+	/sw === '6A88' \|\| sw === '6A82'/.test(src) && /throw e;/.test(src));
+
+/*
+ * ---------- R06：探活 EID 必须「按会话传递」，不得用模块级全局缓存 ----------
+ * 初版实现用了一个模块级变量 lastPingEid：并发会话下会互相覆盖（会话 B 探活解析失败
+ * 会把它写成空串 → 会话 A 误判「没取到」而重发 BF3E），换卡时更会把上一张卡的 EID
+ * 带给新卡。现改为 withIsdrSession 把 {sw,eid} 作为 fn 第三参 pingInfo 传入。
+ * 这两条静态断言同时兼任「不许退回全局变量」的守卫。
+ */
+ok('R06 不再有模块级 lastPingEid 缓存（并发会话会互相覆盖）', !/lastPingEid/.test(src));
+ok('R06 探活结果按会话传给 fn 第三参 pingInfo',
+	/fn\(channel, function \(apdu\) \{[\s\S]{0,200}?\}, pingInfo \|\| \{ sw: '', eid: '' \}\)/.test(src));
+ok('R06 probe 侧 pingInfo.eid 为空时退回现发 BF3E（不会把空 EID 当结果）',
+	/var eidReady = \(pingInfo && pingInfo\.eid\)[\s\S]{0,200}?buildGetEid\(ch\)/.test(src));
+
+asyncTests.push((function () {
+	var eid = '89086030202200000026000173326959';
+	var counter = [];
+	var send = mockSend({
+		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },
+		'AT+CSIM=?': { success: true, data: '+CSIM: (4-520),(cmd)' },
+		[Euicc.csimCommand(Euicc.openChannelApdu())]: { success: true, data: csimAnswer('019000') },
+		[Euicc.csimCommand(Euicc.selectIsdrApdu(1))]: { success: true, data: csimAnswer('9000') },
+		/* 探活这次故意回垃圾数据 → parseEid 解析为空 */
+		[Euicc.csimCommand(Euicc.buildGetEid(1))]: { success: true, data: csimAnswer('BF3E025A009000') },
+		[Euicc.csimCommand(Euicc.closeChannelApdu(1))]: { success: true, data: csimAnswer('9000') }
+	}, counter);
+	return Euicc.probe(send).then(function (p) {
+		var bf3e = counter.filter(function (c) { return c === Euicc.csimCommand(Euicc.buildGetEid(1)); }).length;
+		ok('R06 探活解析失败时 probe 仍不崩（state 有值）', !!p.state, p.state);
+		ok('R06 探活 EID 为空 → 退回现取，BF3E 会多发一次（不静默返回空 EID）', bf3e >= 2, bf3e);
+	}, function (e) {
+		fails.push('R06 probe 空 EID 回退用例异常：' + (e && e.code) + ' / ' + (e && e.message));
+	});
+})());
+
 /* ---------- 6999：Applet 选择失败（真机「下载失败：6999」） ---------- */
 const SW6999 = Euicc.swInfo('6999');
 eq('6999 不是 fatal（是「选择态丢失」，可重试）', SW6999.level, 'error');
@@ -615,10 +835,14 @@ ok('6999 说清是 ISD-R 没被选中', /ISD-R/.test(SW6999.text), SW6999.text);
 ok('6999 点出「SIM 被复位」这一层病因（不是卡不支持下载）',
 	/复位/.test(SW6999.hint), SW6999.hint);
 /* ★ 反向：把 6999 分支整段删掉后必须退化成「未知卡片错误」—— 证明上面不是恒绿 */
-eq('★ 反向：删掉 6999 分支 → 退化成未知卡片错误（守卫不恒绿）',
-	eval('(' + src.replace(/if \(sw === '6999'\) \{[\s\S]*?\n\t\t\}\n/, '').match(
-		/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')().swInfo('6999').level,
-	'fatal');
+/* ★ 反向：P01 之后兜底已是 error，6999 分支的独特性体现在「文案」而非 level ——
+ * 删掉该分支后必须退化成通用兜底文案「未知卡片错误 SW=6999」，证明它不是恒绿摆设。 */
+(function () {
+	var stripped = eval('(' + src.replace(/if \(sw === '6999'\) \{[\s\S]*?\n\t\t\}\n/, '').match(
+		/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+	eq('★ 反向：删掉 6999 分支 → 退化成通用兜底文案（守卫不恒绿）',
+		stripped.swInfo('6999').text, '未知卡片错误 SW=6999');
+})();
 
 /* ---------- 汇总（等所有异步用例完成，R11） ---------- */
 
