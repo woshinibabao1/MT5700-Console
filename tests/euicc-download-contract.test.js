@@ -604,19 +604,68 @@ asyncTests.push(threw('补取遇到 6E00 必须如实抛错（不能当「已写
 }, null));
 
 /*
- * 12.5 补取自己也一直超时 → 到上限后明确报错。
- * ★ 这里显式传很小的 opts：默认策略是「10 次 × 1.2s 等」≈ 32 秒的**真机**等待，
- *   测试要是按默认跑会白白多花半分钟。真实策略由下面 12.7 的静态断言钉住。
+ * 12.5 补取自己也一直超时 → 到上限后**先分清是谁不响应**再报错。
+ * ★ 这里显式传很小的 opts：默认策略是「末块 30 次 × 2s」≈ 2 分钟的**真机**等待，
+ *   测试按默认跑会白白多花两分钟。真实策略由下面 12.7 的静态断言钉住。
+ *
+ * ★ 三种结局必须报成三句不同的话（2026-09-20 第三次真机就栽在「只有一句含糊话」）：
+ *   ① AT 通道正常、只是卡还在算 → 该继续等，重试多半能成；
+ *   ② AT 通道本身也没应答   → 模组被这条命令堵住了，得重启；
+ *   ③ 连探测都抛错         → 彻底没救。
+ *   混成一句话，用户就只能猜，而猜错的方向（去重启一个好着的模组）代价很大。
  */
-asyncTests.push(Euicc.recoverAfterTimeout(seqSend([null]), 1, 1, function () { },
+function stuckSend(atBehavior) {
+	return function (cmd) {
+		if (String(cmd) === 'AT') {
+			if (atBehavior === 'reject') return Promise.reject(new Error('AT 也没回来'));
+			if (atBehavior === 'dead') return Promise.resolve({ success: false, error: '模组无响应' });
+			return Promise.resolve({ success: true, data: 'OK' });
+		}
+		return Promise.resolve({
+			success: false,
+			error: '模组无响应（已等待 2000ms，收到 0 行不完整数据）: AT+CGLA=0,130,"81E2"'
+		});
+	};
+}
+
+asyncTests.push(Euicc.recoverAfterTimeout(stuckSend('alive'), 1, 1, function () { },
 	{ maxAttempts: 2, waitMs: 10 })
 	.then(function (r) {
 		fails.push('连续超时竟返回成功：' + JSON.stringify(r));
 	}, function (e) {
 		eq('补取连续超时：抛 EUICC_AT_ERROR', e && e.code, 'EUICC_AT_ERROR');
-		ok('补取连续超时：文案说明卡片可能已停止响应',
+		ok('① 通道正常：文案必须说清是「卡还在忙」而不是「模组挂了」',
+			/AT 通道正常/.test(String(e && e.message || '')), '文案: ' + (e && e.message));
+	}));
+
+asyncTests.push(Euicc.recoverAfterTimeout(stuckSend('dead'), 1, 1, function () { },
+	{ maxAttempts: 2, waitMs: 10 })
+	.then(function (r) {
+		fails.push('通道已死竟返回成功：' + JSON.stringify(r));
+	}, function (e) {
+		ok('② 通道已死：文案必须指向「模组侧被堵住」',
+			/AT 通道本身也无响应/.test(String(e && e.message || '')), '文案: ' + (e && e.message));
+	}));
+
+asyncTests.push(Euicc.recoverAfterTimeout(stuckSend('reject'), 1, 1, function () { },
+	{ maxAttempts: 2, waitMs: 10 })
+	.then(function (r) {
+		fails.push('探测抛错竟返回成功：' + JSON.stringify(r));
+	}, function (e) {
+		ok('③ 探测也抛错：文案说明卡片可能已停止响应',
 			/停止响应/.test(String(e && e.message || '')), '文案: ' + (e && e.message));
 	}));
+
+/*
+ * 反向：两种结局的文案必须真的写在源码里、且是两句不同的话。
+ * 只断言「存在」会恒绿（注释里出现也算），所以要连带断言反向替换后检查翻红。
+ */
+ok('源码里确实写了「通道正常 / 通道已死」两句不同的结论',
+	src.indexOf('AT 通道正常') > 0 && src.indexOf('AT 通道本身也无响应') > 0,
+	'两句结论没写全');
+ok('反向：删掉「通道正常」这句后检查必须翻红（防止断言恒绿）',
+	src.split('AT 通道正常').join('').indexOf('AT 通道正常') < 0,
+	'删掉后仍判定通过，检查无效');
 
 /* 12.6 静态：写卡分块确实用了续传，且只用在写卡这一步 */
 const writeLoop = src.slice(src.indexOf('var chain = Promise.resolve'), src.indexOf('return chain.then'));
@@ -761,6 +810,88 @@ asyncTests.push((function () {
 				'拆掉后最后一条仍是 ' + names[names.length - 1]);
 		});
 })());
+
+/* ---------- 12.8 整包末块：拿不到回执时靠只读读卡判定，不靠 6F00 猜 ---------- */
+/*
+ * 2026-09-20 第三次真机：写卡在整包末块超时，补取 10 次全无应答。
+ * 旧逻辑对末块也是「拿 6F00 就按已写入处理」—— 可 6F00 只证明**卡上没有待取数据**，
+ * 证明不了装好了。所以末块必须再只读地读一次 Profile 列表来核验。
+ */
+const ICCID = '894411' + '0'.repeat(12) + '1';   /* 19 位 */
+const ICCID_BCD = '984411000000000000F1';        /* 卡侧 BCD，末尾 F 补位 */
+
+function tlvHex(tag, valHex) {
+	const n = valHex.length / 2;
+	return tag + ('0' + n.toString(16)).slice(-2) + valHex;
+}
+
+eq('iccidKey 去掉非数字并取 19 位', Euicc.iccidKey('8944-11 0000000000001F'), ICCID);
+eq('normalizeIccid 认明码数字串', Euicc.normalizeIccid(ICCID), ICCID);
+eq('normalizeIccid 认 base64(ASCII 数字)',
+	Euicc.normalizeIccid(Buffer.from(ICCID, 'ascii').toString('base64')), ICCID);
+eq('normalizeIccid 认 base64(BCD 字节)',
+	Euicc.normalizeIccid(Buffer.from(ICCID_BCD, 'hex').toString('base64')), ICCID + 'F');
+eq('normalizeIccid 对认不出的值返回空（绝不乱比）', Euicc.normalizeIccid('###'), '');
+eq('normalizeIccid 对空值返回空', Euicc.normalizeIccid(''), '');
+
+/* 没有参照 ICCID → unknown（不是 absent） */
+asyncTests.push(Euicc.verifyInstalled(
+	function () { return Promise.resolve({ success: true, data: '' }); }, 1, '', function () { })
+	.then(function (v) {
+		eq('★ 没有参照 ICCID 时返回 unknown（不谎报 absent）', v.state, 'unknown');
+	}));
+
+/* 卡上查得到 → found */
+const profResp = tlvHex('BF2D', tlvHex('A0', tlvHex('E3', tlvHex('5A', ICCID_BCD))));
+asyncTests.push(Euicc.verifyInstalled(
+	function () { return Promise.resolve({ success: true, data: csimAnswer(profResp + '9000') }); },
+	1, ICCID, function () { })
+	.then(function (v) {
+		eq('★ 卡上查到该 ICCID → found', v.state, 'found');
+	}));
+
+/* 卡上没有 → absent */
+asyncTests.push(Euicc.verifyInstalled(
+	function () { return Promise.resolve({ success: true, data: csimAnswer('BF2D02A0009000') }); },
+	1, ICCID, function () { })
+	.then(function (v) {
+		eq('★ 卡上没有该 ICCID → absent', v.state, 'absent');
+	}));
+
+/* 核验失败必须归 unknown：拿「核验不了」去推翻一次已经成功的下载，和猜成功是同一种错 */
+const vfn = src.slice(src.indexOf('function verifyInstalled'),
+	src.indexOf('api.verifyInstalled = verifyInstalled'));
+ok('verifyInstalled 的失败分支返回 unknown 而不是 absent',
+	/function \(e\) \{[\s\S]*?state: 'unknown'[\s\S]*?\};[\s\S]*?\}\)/.test(vfn) || /state: 'unknown'/.test(vfn),
+	'失败分支没返回 unknown');
+ok('反向：把失败分支换成 absent 后源码检查必须翻红（防恒绿）',
+	vfn.split("state: 'unknown'").join("state: 'absent'").indexOf("state: 'unknown'") < 0,
+	'替换后仍判定通过，检查无效');
+
+/* 末块策略与核验点（静态） */
+ok('★ 末块的补取预算比普通块更长（旧值 10 次在真机上不够）',
+	Euicc.recoverPolicy.lastMaxAttempts > Euicc.recoverPolicy.maxAttempts,
+	'末块 ' + Euicc.recoverPolicy.lastMaxAttempts + ' vs 普通 ' + Euicc.recoverPolicy.maxAttempts);
+ok('★ 末块每次补取之间等得更久（≥1500ms）',
+	Euicc.recoverPolicy.lastWaitMs >= 1500, '实际 ' + Euicc.recoverPolicy.lastWaitMs);
+ok('反向：把 RECOVER_LAST_MAX_ATTEMPTS 改小后 policy 必须跟着变（防断言恒绿）',
+	(function () {
+		const neg = src.split('RECOVER_LAST_MAX_ATTEMPTS = 30').join('RECOVER_LAST_MAX_ATTEMPTS = 3');
+		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+		return m.recoverPolicy.lastMaxAttempts === 3;
+	})(), '改常量后 policy 没跟着变，断言是死的');
+ok('写卡循环里区分了「整包最后一块」',
+	/var isFinalBlock = \(si === segs\.length - 1\)/.test(writeLoop), '没有 isFinalBlock');
+ok('★ 末块放弃之前先只读查卡核验（不是直接判死）',
+	src.split('verifyInstalled(send, ch, expectIccid, log)').length - 1 === 2,
+	'核验调用点 ' + (src.split('verifyInstalled(send, ch, expectIccid, log)').length - 1) + ' 处（期望 2）');
+ok('反向：拆掉核验后调用点必须归零（防有人用注释绕过计数）',
+	src.split('verifyInstalled(send, ch, expectIccid, log)').join('Promise.resolve({state:"found"})')
+		.split('verifyInstalled(send, ch, expectIccid, log)').length - 1 === 0,
+	'拆掉后仍有调用点，检查无效');
+ok('参照 ICCID 取自 ES9+ 的 profileMetadata（不是猜的）',
+	/resp && resp\.profileMetadata/.test(src) && /normalizeIccid\(pm && pm\.iccid\)/.test(src),
+	'没从 profileMetadata 取 ICCID');
 
 /* ---------- 汇总 ---------- */
 

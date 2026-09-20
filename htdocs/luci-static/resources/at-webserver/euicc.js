@@ -991,12 +991,93 @@ var Euicc = (function () {
 	 * 后端 2 秒就放弃，但**卡并不会停** —— 它算完会把回执挂在响应缓冲里。
 	 * 所以这里一遍遍用**只读**的 GET RESPONSE 去「敲门」，直到它肯吐出来。
 	 *
-	 * 10 次 ×（1.2s 等待 + 后端 2s 放弃）≈ 32 秒：够覆盖十几秒的卡侧运算，
-	 * 又不至于让「卡真死了」变成无限等待。测试可用 opts 覆盖以缩短耗时。
+	 * 普通块：10 次 ×（1.2s 等待 + 后端 2s 放弃）≈ 32 秒。
+	 * 末  块：卡在这一块上要**真正执行**整段（解密 + 非易失写入），
+	 *   2026-09-20 第三次真机实测：A3[7] 末块超时后连补 10 次（≈32 秒）
+	 *   **一次应答都没有**，说明卡还在跑 —— 32 秒根本不够。
+	 *   给到 30 次 ×（2s 等待 + 后端 2s 放弃）≈ 2 分钟。
+	 * 测试可用 opts 覆盖以缩短耗时。
 	 */
 	var RECOVER_MAX_ATTEMPTS = 10;
 	var RECOVER_WAIT_MS = 1200;
-	api.recoverPolicy = { maxAttempts: RECOVER_MAX_ATTEMPTS, waitMs: RECOVER_WAIT_MS };
+	var RECOVER_LAST_MAX_ATTEMPTS = 30;
+	var RECOVER_LAST_WAIT_MS = 2000;
+	api.recoverPolicy = {
+		maxAttempts: RECOVER_MAX_ATTEMPTS,
+		waitMs: RECOVER_WAIT_MS,
+		lastMaxAttempts: RECOVER_LAST_MAX_ATTEMPTS,
+		lastWaitMs: RECOVER_LAST_WAIT_MS
+	};
+
+	/* ICCID 归一：只留数字、取前 19 位（BCD 末尾可能补 F）。 */
+	function iccidKey(s) {
+		return String(s == null ? '' : s).replace(/\D/g, '').slice(0, 19);
+	}
+	api.iccidKey = iccidKey;
+
+	/*
+	 * ES9+ 里 iccid 的编码并不统一：有的是明码数字串，有的是 base64
+	 * （内容还可能是 ASCII 数字或 BCD）。不猜是哪一种 —— 全试一遍，
+	 * 认不出来就返回空，让调用方走「无法核验」的降级路径，绝不乱比。
+	 */
+	function normalizeIccid(v) {
+		var s = String(v == null ? '' : v).trim();
+		if (!s) return '';
+		if (/^\d{18,20}$/.test(s)) return s;
+		var hex = '';
+		try { hex = api.base64ToHex(s) || ''; } catch (e) { hex = ''; }
+		if (!hex || !api.isHex(hex)) return '';
+		var ascii = '';
+		for (var i = 0; i + 1 < hex.length; i += 2) {
+			var b = parseInt(hex.substr(i, 2), 16);
+			if (b < 0x30 || b > 0x39) { ascii = ''; break; }
+			ascii += String.fromCharCode(b);
+		}
+		if (ascii) return ascii;
+		if (hex.length === 20) return api.swapNibbles(hex);
+		return '';
+	}
+	api.normalizeIccid = normalizeIccid;
+
+	/*
+	 * 只读核验「某个 ICCID 是不是已经在卡上了」。
+	 * 用 ES10c GetProfiles，**复用当前会话**、不开新通道（多数卡只给 1~3 条
+	 * 逻辑通道，写卡半途再开一条很容易 6A81）。不写卡、不改任何状态。
+	 *
+	 * 返回 { state: 'found' | 'absent' | 'unknown' }：
+	 *   unknown = 没有参照 ICCID，或连列表本身都没读成功。
+	 *   ★ unknown 绝不能当成 absent —— 拿「核验不了」去推翻一次可能已经成功的
+	 *     下载，和拿 6F00 猜成功是同一种错，只是方向相反。
+	 */
+	function verifyInstalled(send, ch, wantIccid, log, tries) {
+		var want = iccidKey(wantIccid);
+		if (!want) return Promise.resolve({ state: 'unknown' });
+		tries = tries || 0;
+		return sendAndCollect(send, ch, api.buildGetProfiles(ch), 0, '')
+			.then(function (r) {
+				var list = api.parseGetProfiles(r.data || '').list || [];
+				for (var i = 0; i < list.length; i++) {
+					if (iccidKey(list[i].iccid) === want) return { state: 'found' };
+				}
+				if (typeof log === 'function') {
+					log('· 核验：卡上现有 ' + list.length + ' 个 Profile，没有 ' + want +
+						(tries ? '（第 ' + (tries + 1) + ' 次读）' : ''));
+				}
+				return { state: 'absent' };
+			}, function (e) {
+				/* 读列表自己超时＝卡还在忙；给几次机会，别急着判死 */
+				if (isAtTimeoutError(e) && tries < 3) {
+					return waitMs2(3000).then(function () {
+						return verifyInstalled(send, ch, wantIccid, log, tries + 1);
+					});
+				}
+				if (typeof log === 'function') {
+					log('· 核验失败（读 Profile 列表未成功）：' + ((e && e.message) || e));
+				}
+				return { state: 'unknown' };
+			});
+	}
+	api.verifyInstalled = verifyInstalled;
 
 	/*
 	 * 向卡补取一次响应（GET RESPONSE，只读）。
@@ -1009,11 +1090,30 @@ var Euicc = (function () {
 	 */
 	function recoverAfterTimeout(send, ch, attempt, log, opts) {
 		opts = opts || {};
-		var maxAttempts = opts.maxAttempts || RECOVER_MAX_ATTEMPTS;
-		var wait = opts.waitMs != null ? opts.waitMs : RECOVER_WAIT_MS;
+		var lastBlock = !!opts.lastBlock;
+		var maxAttempts = opts.maxAttempts
+			|| (lastBlock ? RECOVER_LAST_MAX_ATTEMPTS : RECOVER_MAX_ATTEMPTS);
+		var wait = opts.waitMs != null ? opts.waitMs
+			: (lastBlock ? RECOVER_LAST_WAIT_MS : RECOVER_WAIT_MS);
 		if (attempt > maxAttempts) {
-			throw makeError('EUICC_AT_ERROR',
-				'向卡补取 ' + maxAttempts + ' 次都没拿到应答，卡片可能已停止响应');
+			/*
+			 * 全都敲不开时，先分清「卡还在忙」还是「AT 通道本身被堵死」——
+			 * 发一条最简单的 AT：它有应答，就说明通道是好的、只是卡还没干完；
+			 * 它也没应答，那就是模组侧被上一条命令卡住了。
+			 * 这两种情况处置完全不同（前者该继续等，后者该重启模组），
+			 * 混成一句话报出来只能靠猜 —— 2026-09-20 第三次真机就卡在这个猜字上。
+			 */
+			return send('AT').then(function (res) {
+				var txt = String((res && res.data) || '');
+				var alive = res && (res.success === true || /\bOK\b/.test(txt));
+				throw makeError('EUICC_AT_ERROR', '向卡补取 ' + maxAttempts +
+					' 次都没拿到应答：' + (alive
+						? 'AT 通道正常，卡仍在忙着处理这条命令（收尾安装常这样，可稍后重试）'
+						: 'AT 通道本身也无响应，模组侧被这条命令堵住了（可能需要重启模组）'));
+			}, function () {
+				throw makeError('EUICC_AT_ERROR', '向卡补取 ' + maxAttempts +
+					' 次都没拿到应答，且探测 AT 通道也失败，卡片可能已停止响应');
+			});
 		}
 		return waitMs2(wait).then(function () {
 			return sendAndCollect(send, ch, api.getResponseApdu(ch, 0), 0, '');
@@ -1024,7 +1124,12 @@ var Euicc = (function () {
 			return { data: r.data || '', sw: r.sw, recovered: true, attempts: attempt };
 		}, function (e) {
 			/* 补取自己也超时＝卡还在算上一块，接着敲门 */
-			if (isAtTimeoutError(e)) return recoverAfterTimeout(send, ch, attempt + 1, log, opts);
+			if (isAtTimeoutError(e)) {
+				if (typeof log === 'function' && attempt % 5 === 0) {
+					log('· 已补取 ' + attempt + ' 次仍无应答（卡多半还在算，继续等）');
+				}
+				return recoverAfterTimeout(send, ch, attempt + 1, log, opts);
+			}
 			/*
 			 * 6F00 =「没有精确诊断」，在 GET RESPONSE 语境下就是**卡上没有待取数据**：
 			 * 原命令的 9000 已经发出、只是被我们错过（非末块几乎都是这种）。
@@ -2074,9 +2179,18 @@ api.buildEs10b = function (ch, tag, derHex) {
 			});
 		}
 
-		var tx = null;
-		var challenge = '';
-		var euiccInfo1 = '';
+	var tx = null;
+	var challenge = '';
+	var euiccInfo1 = '';
+	/*
+	 * 服务器在 ⑤ 里会把这份 Profile 的 ICCID 带回来（ES9+ profileMetadata）。
+	 * 留着它干什么：写卡最后一块一旦超时，我们拿不到卡的回执，
+	 * 就只能靠**只读地再读一次 Profile 列表**来判定「到底装上没有」——
+	 * 没有这个值就只能靠 6F00 猜，而猜错等于把失败报成成功。
+	 */
+	var expectIccid = '';
+
+	/* （iccidKey / normalizeIccid 是模块级函数，见 recoverAfterTimeout 附近） */
 
 		return api.withIsdrSession(send, function (ch, sendApdu) {
 			function apdu(tag, der, label) {
@@ -2189,6 +2303,14 @@ api.buildEs10b = function (ch, tag, derHex) {
 				.then(function (resp) {
 					/* ⑥ 准备下载：确认码哈希只在 ccRequiredFlag 为真时带 */
 					onStep(6, '准备下载');
+					/*
+					 * ES9+ authenticateClient 的回包里带 profileMetadata（含 iccid）。
+					 * 认不出来就留空 —— 后面核验那步会自动降级，不会因此失败。
+					 */
+					var pm = resp && resp.profileMetadata;
+					expectIccid = normalizeIccid(pm && pm.iccid);
+					if (expectIccid) log('本次要装的 ICCID：' + expectIccid);
+					else log('服务器未在 profileMetadata 里给出 ICCID，写卡末块超时后将无法核验');
 					var ccHash = api.hashConfirmationCode(opts.confirmationCode);
 					var der = ''
 						+ (resp.smdpSigned2 ? api.base64ToHex(resp.smdpSigned2) : '')
@@ -2234,14 +2356,28 @@ api.buildEs10b = function (ch, tag, derHex) {
 					segs.forEach(function (seg, si) {
 						var chunks = api.buildEs10bRawChunks(ch, seg.hex, mss);
 						chunks.forEach(function (c, idx) {
+							/*
+							 * 整包最后一块＝触发卡真正执行安装的那一条。
+							 * 声明在循环体这一层：下面 catch / then 两个回调都要用它，
+							 * 放在 then 的回调里后面的 then 就取不到了。
+							 */
+							var isFinalBlock = (si === segs.length - 1)
+								&& (idx === chunks.length - 1);
 							chain = chain.then(function () {
 								onStep(8, '写入卡片（段 ' + (si + 1) + '/' + segs.length +
 									'，块 ' + (idx + 1) + '/' + chunks.length + '）');
 								/*
-								 * ★ 卡侧处理一段可能要几秒到十几秒，后端等不到结束码就报
+								 * ★ 卡侧处理一段可能要几秒到几十秒，后端等不到结束码就报
 								 *   「模组无响应」。此时不要立刻作废整包 —— 卡并不会停，
 								 *   它算完会把回执挂在响应缓冲里，靠轮询补取拿回来
 								 *   （见 recoverAfterTimeout 的注释）。
+								 *
+								 * ★★ 整包最后一块（isFinalBlock）另说：
+								 *   它是触发卡真正执行安装的那一条 —— 2026-09-20 第三次真机
+								 *   就死在这里（连补 10 次、约 32 秒一次应答都没有）。
+								 *   而且末块拿到的 6F00 只能证明「卡上没有待取数据」，
+								 *   **证明不了装好了**。所以整包末块一律再用只读的
+								 *   GetProfiles 查一次卡，查得到那个 ICCID 才算成功。
 								 */
 								return sendApdu(c).catch(function (e) {
 									if (!isAtTimeoutError(e)) throw e;
@@ -2256,12 +2392,47 @@ api.buildEs10b = function (ch, tag, derHex) {
 										'）——卡多半还在算，正在轮询补取…');
 									return recoverAfterTimeout(send, ch, 1, log, {
 										lastBlock: c.substr(4, 2) === '91'
+									}).catch(function (re) {
+										/* 补取也放弃了：整包末块先查卡，别直接判死 */
+										if (!isFinalBlock) throw re;
+										return verifyInstalled(send, ch, expectIccid, log)
+											.then(function (v) {
+												if (v.state !== 'found') throw re;
+												return {
+													data: '', sw: '9000',
+													recovered: true, verified: true
+												};
+											});
 									});
 								});
 							}).then(function (r) {
 								log('卡 ← ' + seg.label + ' ' + (idx + 1) + '/' +
 									chunks.length + ' SW=' + r.sw +
 									(r.recovered ? '（补取）' : ''));
+								/*
+								 * 整包末块、且结果是补取得来的（多半是拿 6F00 猜的）
+								 * → 必须查卡。非末块不必：后面还有块要写，
+								 *   真没装成迟早会在后面暴露。
+								 */
+								if (isFinalBlock && r && r.recovered && !r.verified) {
+									return verifyInstalled(send, ch, expectIccid, log)
+										.then(function (v) {
+											if (v.state === 'found') {
+												log('· 核验：卡上已查到 ' + iccidKey(expectIccid) +
+													'，安装确实完成（末块回执虽未收到）');
+												return r;
+											}
+											if (v.state === 'unknown') {
+												log('⚠ 末块按已写入处理，但拿不到参照 ICCID，无法核验');
+												return r;
+											}
+											throw makeError('EUICC_AT_ERROR',
+												'末块未收到卡的应答，重新读取 Profile 列表后卡上查不到 '
+												+ iccidKey(expectIccid) + ' —— 安装确实没有完成');
+										});
+								}
+								return r;
+							}).then(function (r) {
 								if (r.sw !== '9000' && r.sw !== '9100') {
 									var se = makeSwError('EUICC_OP_FAILED', r.sw);
 									/* 定位到「第几段」—— 一整包几十块时，只报块号等于没报 */

@@ -124,7 +124,19 @@ return L.view.extend({
 				 *   写入，单条跳到秒级是常态）。把它一律说成「AT 服务未就绪」会误导
 				 *   用户去查服务，而实际上服务一直是好的、只是卡慢。这里拆开说。
 				 */
-				if (Euicc.isAtTimeoutError && Euicc.isAtTimeoutError(e)) {
+				var em = String((e && e.message) || '');
+				if (em.indexOf('查不到') >= 0) {
+					/* 末块超时 + 核验时卡上确实没有这个 Profile → 是真的没装上 */
+					msg = '安装没有完成：卡在处理最后一块时超时，之后重新读取 Profile 列表，'
+						+ '卡上查不到这份 Profile。请整包重下；若反复失败，'
+						+ '多半是这份 Profile 比卡的处理上限大（可试试重启模组后再下）。';
+				} else if (em.indexOf('AT 通道正常') >= 0) {
+					msg = '卡一直在忙、始终没吐回结果（补取也已用尽），但 AT 通道本身是好的。'
+						+ '收尾安装阶段偶发，等几分钟让卡彻底空闲后整包重下即可。';
+				} else if (em.indexOf('AT 通道本身也无响应') >= 0) {
+					msg = '模组侧被上一条指令堵住了：连最简单的 AT 都收不到应答。'
+						+ '这与 AT 服务无关（服务一直在跑），需要重启模组或整机断电一次才能恢复。';
+				} else if (Euicc.isAtTimeoutError && Euicc.isAtTimeoutError(e)) {
 					msg = '卡片没有在预期时间内回话。写卡时卡侧要做密钥运算与非易失写入，'
 						+ '偶尔会比预期慢（已尝试向卡补取结果）。'
 						+ '若反复出现，请确认下载期间没有重拨 / 动接口，然后整包重下。';
