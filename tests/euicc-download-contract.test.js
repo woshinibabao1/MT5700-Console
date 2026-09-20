@@ -525,25 +525,29 @@ asyncTests.push((function () {
 ok('新增的 EUICC_NO_ES9P / EUICC_ES9P_FAILED 已在 ERR_CODES 里',
 	Euicc.ERR_CODES.indexOf('EUICC_NO_ES9P') >= 0 && Euicc.ERR_CODES.indexOf('EUICC_ES9P_FAILED') >= 0);
 
-/* ---------- 12. 写卡中途「模组无响应」的续传（2026-09-20 真机 bug） ---------- */
+/* ---------- 12. 写卡中途超时的「静默接回」（2026-09-20 真机 bug） ---------- */
 
 /*
  * 真机现象：进度条一路在动，走到某一块突然
- *   「下载失败：AT 服务未就绪：模组无响应（已等待 2000ms，收到 4 行不完整数据）」。
+ *   「下载失败：AT 服务未就绪：模组无响应（已等待 2000ms，收到 0 行不完整数据）」。
  *
  * 根因是 APDU 透传命令的耗时由**卡片**决定（写卡时卡侧做密钥运算与非易失写入），
- * 后端却一律按普通命令的 2 秒预算等；超时后 pending 被清空，卡迟到的回执被当成
- * 主动上报丢掉，整包就此作废 —— 而卡其实多半已经把那一块吃下去了。
+ * 后端却一律按普通命令的 2 秒预算等；超时后 pending 被清空，卡迟到的回执会被
+ * 当成主动上报推给前端、不留给下一条命令。
  *
- * 两条防线：
- *   ① 后端给 APDU 类命令独立的应答预算（Rust APDU_TIMEOUT，见 atclient）；
- *   ② 万一还是超时，前端发一条**只读** GET RESPONSE 把回执补回来（recoverAfterTimeout）。
+ * ★★ 2026-09-20 三次真机对照实验定案：
+ *   ① 超时那一刻**模组是活的**（紧接着发普通 AT，350ms / 151ms 正常回）；
+ *   ② 向卡发 GET RESPONSE「敲门」会被模组拒成 `+CME ERROR: Incorrect parameters`，
+ *      库没有这个分支 → 当致命错误抛出 → **整包作废**（39147 字节只写到 30%）；
+ *   ③ 只连发普通 AT、什么都不碰 → 迟到约 0.4 秒的 `+CGLA: 4,"9000" | OK`
+ *      被原样带回，349 块一路写完，Profile 真的装上。
+ *   lpac 的 at_expect 用 poll(fd, 1, -1)（**永不超时**）正是同一个道理。
  *
- * 本节钉死第 ② 条。注意它只认 6F00（「卡上没有待取数据」）为「已消费」，
- * 6E00 / 6A86 这类真错误必须照旧上抛 —— 把错误当成功比直接失败更糟。
+ * 所以本节钉死的是：超时后**只发普通 AT** 把模组迟到的回包接回来，期间**绝不**
+ * 向卡发任何 APDU。任何把 GET RESPONSE 敲门加回来的改动都必须在这里判红。
  */
 
-/* 按顺序应答的 mock send；null 表示「模组无响应」超时 */
+/* 按顺序应答的 mock send；null 表示「模组无响应」超时（后端 2 秒墙） */
 function seqSend(answers) {
 	let i = 0;
 	return function () {
@@ -552,212 +556,316 @@ function seqSend(answers) {
 		if (a === null) {
 			return Promise.resolve({
 				success: false,
-				error: '模组无响应（已等待 2000ms，收到 4 行不完整数据）: AT+CSIM=20,"80C0000000"'
+				error: '模组无响应（已等待 2000ms，收到 0 行不完整数据）: AT+CGLA=0,130,"81E2"'
 			});
 		}
 		return Promise.resolve({ success: true, data: csimAnswer(a) });
 	};
 }
 
+/*
+ * 「静默接回」的 mock：前 delay 条普通 AT 什么都不带（模组还没吐回包），
+ * 之后某一条 AT 的应答里带上模组迟到的 `+CSIM: ...`。
+ * state.at = 真正问到串口的普通 AT 条数；给非 AT 命令一律回 9000（取余用）。
+ *
+ * ★★ 这里**模拟 rpc.js 的只读缓存**（真机踩过的坑）：
+ *   isRetryableRead('AT') === true → `AT` 进 2.5 秒只读缓存，
+ *   **不带 { fresh: true } 时第二条起直接吃缓存、根本到不了串口**，
+ *   模组迟到的回包也就永远接不回来。
+ *   真机冒烟脚本走 SSH 桥绕过了 rpc.js，所以只有在这里建模才拦得住。
+ */
+function lateSend(delay, lateHex) {
+	const st = { at: 0, other: 0, cached: 0 };
+	let cache = null;   /* 只读缓存的第一个成功结果（rpc.js READ_CACHE_TTL 2500ms） */
+	return {
+		state: st,
+		send: function (cmd, opts) {
+			if (String(cmd) !== 'AT') {
+				st.other++;
+				return Promise.resolve({ success: true, data: csimAnswer('AABBCCDDEE9000') });
+			}
+			if (!(opts && opts.fresh === true) && cache) {
+				st.cached++;
+				return Promise.resolve(cache);        /* 命中缓存：没到串口，看不到迟到行 */
+			}
+			st.at++;
+			const res = {
+				success: true,
+				data: st.at > delay ? csimAnswer(lateHex) : 'OK'
+			};
+			if (!cache) cache = res;
+			return Promise.resolve(res);
+		}
+	};
+}
+
 Euicc.setTransport('csim');
 
-/* 12.1 超时判定：只有「没等到结束码」这一类才续传 */
+/* 12.1 超时判定：只有「没等到结束码」这一类才接回 */
 ok('isAtTimeoutError 认「模组无响应（已等待 Nms，收到 M 行不完整数据）」',
 	Euicc.isAtTimeoutError({
 		code: 'EUICC_AT_ERROR',
 		message: 'AT 服务未就绪：模组无响应（已等待 2000ms，收到 4 行不完整数据）: AT+CGLA=1,20,"81E2"'
 	}) === true);
-ok('isAtTimeoutError 不认「未连接到调制解调器」（那是另一回事，续传会盖住病因）',
+ok('isAtTimeoutError 不认「未连接到调制解调器」（那是另一回事，接回会盖住病因）',
 	Euicc.isAtTimeoutError({ code: 'EUICC_AT_ERROR', message: 'AT 服务未就绪：未连接到调制解调器' }) === false);
 ok('isAtTimeoutError 不认非 EUICC_AT_ERROR（卡片状态码不能被当成超时）',
 	Euicc.isAtTimeoutError({ code: 'EUICC_OP_FAILED', message: '模组无响应' }) === false);
 ok('isAtTimeoutError 对空值不抛异常', Euicc.isAtTimeoutError(null) === false);
 
-/* 12.2 卡上已无待取数据（6F00）→ 按已写入处理，但必须写进日志 */
+/* 12.2 迟到的应答只在第 3 条 AT 才出现 → 必须继续等，不能第 2 次就判死 */
 asyncTests.push((function () {
-	const logs = [];
-	return Euicc.recoverAfterTimeout(seqSend(['6F00']), 1, 1, function (s) { logs.push(s); })
+	const c = lateSend(2, '9000');
+	return Euicc.recoverAfterTimeout(c.send, 1, 1, function () { }, { maxAttempts: 6, burst: 1 })
 		.then(function (r) {
-			eq('补取 6F00：按已写入处理（sw 归一为 9000）', r.sw, '9000');
-			eq('补取 6F00：结果标记为 recovered', r.recovered, true);
-			ok('补取 6F00：必须把「未收到应答」写进日志（不许假装什么都没发生）',
-				logs.length > 0 && String(logs[0]).indexOf('6F00') >= 0,
-				'日志实际: ' + JSON.stringify(logs));
+			eq('★ 接回模组迟到的 9000', r.sw, '9000');
+			eq('★ 结果标记为 recovered（调用方必须写进日志）', r.recovered, true);
+			eq('★ 第 3 条 AT 才拿到（不是第 2 条就放弃）', r.latePolls, 3);
+			eq('接回过程只发普通 AT（一条 APDU 都没发）', c.state.other, 0);
+			eq('★ 轮询的 AT 全部走 fresh（没有一条被 rpc.js 只读缓存吃掉）',
+				c.state.cached, 0);
+		}, function (e) {
+			/* 接不回来时必须判红而不是让整个套件崩掉（崩掉会掩盖真正的病因） */
+			ok('★ 接回模组迟到的 9000（接不回来要判红，不许崩掉套件）', false,
+				(e && e.message) + '；cached=' + c.state.cached + ' at=' + c.state.at);
 		});
 })());
 
-/* 12.3 卡上还有数据 → 自动取余，返回的就是这一块真实的响应 */
+/* 12.3 迟到的应答是 61xx（数据未取完）→ 接回后必须再取余，不能拿残片当完整回执 */
 asyncTests.push((function () {
-	return Euicc.recoverAfterTimeout(seqSend(['6105', 'AABBCCDDEE9000']), 1, 1, function () { })
+	const st = { at: 0 };
+	const send = function (cmd) {
+		if (String(cmd) !== 'AT') {
+			return Promise.resolve({ success: true, data: csimAnswer('C0FFEE9000') });
+		}
+		st.at++;
+		return Promise.resolve({ success: true, data: st.at === 1 ? csimAnswer('6105') : 'OK' });
+	};
+	return Euicc.recoverAfterTimeout(send, 1, 1, function () { }, { maxAttempts: 6, burst: 1 })
 		.then(function (r) {
-			eq('补取 61xx：自动取余后返回完整数据', r.data.toUpperCase(), 'AABBCCDDEE');
-			eq('补取 61xx：最终 SW', r.sw, '9000');
+			eq('★ 61xx：接回后自动取余，拼出完整数据', r.data.toUpperCase(), 'C0FFEE');
+			eq('★ 61xx：最终 SW', r.sw, '9000');
+		}, function (e) {
+			ok('★ 61xx 接回后取余（失败要判红，不许崩掉套件）', false,
+				(e && e.message) + ' at=' + st.at);
 		});
 })());
 
-/* 12.4 卡回真错误（6E00：CLA 不被接受）→ 照旧上抛，绝不当成功 */
-asyncTests.push(threw('补取遇到 6E00 必须如实抛错（不能当「已写入」）', function () {
-	return Euicc.recoverAfterTimeout(seqSend(['6E00']), 1, 1, function () { })
+/* 12.4 一直等不到（模组始终不吐回包）→ 如实抛错，绝不谎报成功 */
+asyncTests.push(threw('一直等不到迟到回包必须如实抛错（不许当成功）', function () {
+	return Euicc.recoverAfterTimeout(function () {
+		return Promise.resolve({ success: true, data: 'OK' });
+	}, 1, 1, function () { }, { maxAttempts: 2, burst: 1 })
 		.then(function (r) {
 			throw new Error('不该走到这里，实际返回 ' + JSON.stringify(r));
 		});
 }, null));
 
 /*
- * 12.5 补取自己也一直超时 → 到上限后**先分清是谁不响应**再报错。
- * ★ 这里显式传很小的 opts：默认策略是「末块 30 次 × 2s」≈ 2 分钟的**真机**等待，
- *   测试按默认跑会白白多花两分钟。真实策略由下面 12.7 的静态断言钉住。
- *
- * ★ 三种结局必须报成三句不同的话（2026-09-20 第三次真机就栽在「只有一句含糊话」）：
- *   ① AT 通道正常、只是卡还在算 → 该继续等，重试多半能成；
- *   ② AT 通道本身也没应答   → 模组被这条命令堵住了，得重启；
- *   ③ 连探测都抛错         → 彻底没救。
- *   混成一句话，用户就只能猜，而猜错的方向（去重启一个好着的模组）代价很大。
+ * 12.5 ★★ 反向钉死：恢复路径里**绝不允许**出现「向卡发 APDU」的敲门动作。
+ * 真机实测：敲门会被模组拒成 +CME ERROR → 库把它当致命错误 → 整包作废
+ * （39147 字节的包只写到 30%）。只断言「没有 getResponseApdu」容易恒绿，
+ * 所以连带验证「把 AT 轮询换成 GET RESPONSE 之后，同一条检查必须判假」。
  */
-function stuckSend(atBehavior) {
-	return function (cmd) {
-		if (String(cmd) === 'AT') {
-			if (atBehavior === 'reject') return Promise.reject(new Error('AT 也没回来'));
-			if (atBehavior === 'dead') return Promise.resolve({ success: false, error: '模组无响应' });
-			return Promise.resolve({ success: true, data: 'OK' });
-		}
-		return Promise.resolve({
-			success: false,
-			error: '模组无响应（已等待 2000ms，收到 0 行不完整数据）: AT+CGLA=0,130,"81E2"'
-		});
-	};
-}
-
-asyncTests.push(Euicc.recoverAfterTimeout(stuckSend('alive'), 1, 1, function () { },
-	{ maxAttempts: 2, waitMs: 10 })
-	.then(function (r) {
-		fails.push('连续超时竟返回成功：' + JSON.stringify(r));
-	}, function (e) {
-		eq('补取连续超时：抛 EUICC_AT_ERROR', e && e.code, 'EUICC_AT_ERROR');
-		ok('① 通道正常：文案必须说清是「卡还在忙」而不是「模组挂了」',
-			/AT 通道正常/.test(String(e && e.message || '')), '文案: ' + (e && e.message));
-	}));
-
-asyncTests.push(Euicc.recoverAfterTimeout(stuckSend('dead'), 1, 1, function () { },
-	{ maxAttempts: 2, waitMs: 10 })
-	.then(function (r) {
-		fails.push('通道已死竟返回成功：' + JSON.stringify(r));
-	}, function (e) {
-		ok('② 通道已死：文案必须指向「模组侧被堵住」',
-			/AT 通道本身也无响应/.test(String(e && e.message || '')), '文案: ' + (e && e.message));
-	}));
-
-asyncTests.push(Euicc.recoverAfterTimeout(stuckSend('reject'), 1, 1, function () { },
-	{ maxAttempts: 2, waitMs: 10 })
-	.then(function (r) {
-		fails.push('探测抛错竟返回成功：' + JSON.stringify(r));
-	}, function (e) {
-		ok('③ 探测也抛错：文案说明卡片可能已停止响应',
-			/停止响应/.test(String(e && e.message || '')), '文案: ' + (e && e.message));
-	}));
-
+const recFn = src.slice(src.indexOf('function recoverAfterTimeout'),
+	src.indexOf('api.recoverAfterTimeout = recoverAfterTimeout'));
+const knockedSrc = src.split("send('AT', { fresh: true })").join(
+	"sendAndCollect(send, ch, api.getResponseApdu(ch, 0), 0, '')");
 /*
- * 反向：两种结局的文案必须真的写在源码里、且是两句不同的话。
- * 只断言「存在」会恒绿（注释里出现也算），所以要连带断言反向替换后检查翻红。
+ * 「不发卡侧 APDU」的精确含义是：**拿到模组迟到的回包之前**一条都不许发。
+ * 61xx 之后去取余是合法的 —— 那时卡已经回过话、模组也空闲了，取余只是把
+ * 没取完的数据补全（不取反而会把残片当完整回执）。
+ * 所以不能一刀切禁 `getResponseApdu`：那会把合法路径一起禁掉，断言只剩形式。
  */
-ok('源码里确实写了「通道正常 / 通道已死」两句不同的结论',
-	src.indexOf('AT 通道正常') > 0 && src.indexOf('AT 通道本身也无响应') > 0,
-	'两句结论没写全');
-ok('反向：删掉「通道正常」这句后检查必须翻红（防止断言恒绿）',
-	src.split('AT 通道正常').join('').indexOf('AT 通道正常') < 0,
-	'删掉后仍判定通过，检查无效');
+function recNoKnock(s) {
+	const f = s.slice(s.indexOf('function recoverAfterTimeout'),
+		s.indexOf('api.recoverAfterTimeout = recoverAfterTimeout'));
+	/* 锚在 `send('AT'` 上（不带右括号），这样加了 opts 也不会让守卫莫名其妙失效 */
+	if (f.indexOf("send('AT'") < 0) return false;         /* 连轮询都没有 → 不是接回 */
+	const parse = f.indexOf('lateAnswerOf(');
+	if (parse < 0) return false;                          /* 没有接回的解析判定 */
+	const a1 = f.indexOf('getResponseApdu');
+	const a2 = f.indexOf('sendApdu(');
+	const first = Math.min(a1 < 0 ? 1e9 : a1, a2 < 0 ? 1e9 : a2);
+	return first > parse;                                 /* 所有 APDU 一律排在解析之后 */
+}
+ok('★ 拿到迟到回包之前，接回过程不发任何卡侧 APDU（只有普通 AT）', recNoKnock(src),
+	'接回函数在解析迟到回包之前就去敲卡了');
+ok('★ 61xx 接回后必须取余补全（残片当完整回执＝把自己的 bug 报成固件上限）',
+	recFn.indexOf('a.hasMore') >= 0
+		&& recFn.indexOf('getResponseApdu') > recFn.indexOf('lateAnswerOf('),
+	'hasMore 分支没有取余');
+ok('★ 接回用并发 burst（后端空闲期收到的行会被当主动上报丢掉，burst 压这个窗口）',
+	/Promise\.all/.test(recFn) && /burst/.test(recFn), '没有 burst / Promise.all');
+ok('★ 迟到回包靠「重发普通 AT」把模组的行带回来（有解析判定）',
+	recFn.indexOf('lateAnswerOf') >= 0, '没有接回的解析判定');
+ok('反向：把 AT 轮询换成 GET RESPONSE 敲门后，recNoKnock 必须判假（防断言恒绿）',
+	knockedSrc !== src && recNoKnock(knockedSrc) === false,
+	'替换没打中，或这条检查抓不到敲门');
 
-/* 12.6 静态：写卡分块确实用了续传，且只用在写卡这一步 */
-const writeLoop = src.slice(src.indexOf('var chain = Promise.resolve'), src.indexOf('return chain.then'));
-ok('写卡分块超时后先补取而不是直接作废整包',
-	/sendApdu\(c\)\.catch\(function \(e\) \{[\s\S]{0,200}isAtTimeoutError\(e\)[\s\S]{0,400}recoverAfterTimeout\(send, ch, 1, log,/.test(writeLoop),
-	'写卡循环里没有补取分支，超时仍会整包作废');
-ok('补取结果在日志里标「补取」（用户能看出这一块不是正常回执）',
-	/r\.recovered \? '（补取）' : ''/.test(writeLoop),
-	'补取回来的结果和普通结果长得一样，排查时无法区分');
-ok('makeSwError 挂了 e.sw（6F00 判定靠它，靠字符串匹配 message 太脆）',
+/* 12.6 静态：写卡分块确实用了接回，且只用在写卡这一步 */
+/* 写卡循环的唯一起点：`var lastData` 只在这里出现。
+   （`var chain = Promise.resolve` 前面还有别的 helper，用它会多切一大段无关代码。） */
+const writeLoop = src.slice(src.indexOf("var lastData = ''"), src.indexOf('return chain.then'));
+/* 从「认出超时」到「交给接回」之间的那一段 —— 这里才是最危险的窗口 */
+function timeoutSpan(w) {
+	const k = w.indexOf('isAtTimeoutError(e)');
+	if (k < 0) return '';
+	const r = w.indexOf('recoverAfterTimeout(send, ch, 1, log,', k);
+	return r < 0 ? '' : w.slice(k, r);
+}
+ok('写卡分块超时后先接回而不是直接作废整包',
+	timeoutSpan(writeLoop).length > 0,
+	'写卡循环里没有接回分支，超时仍会整包作废');
+ok('★ 从判定超时到交给接回之间，不许出现任何卡侧 APDU（敲门就是在这里踩的雷）',
+	(function () {
+		const sp = timeoutSpan(writeLoop);
+		/* 上界用来防止匹配跨到无关代码上而恒绿 */
+		return sp.length > 0 && sp.length < 800
+			&& !/getResponseApdu|sendApdu\(|sendAndCollect/.test(sp);
+	})(), '超时后直接向卡发 APDU：真机被 +CME ERROR 拒成致命错误，整包作废');
+ok('接回结果在日志里标出来（用户能看出这一块不是正常回执）',
+	/r\.recovered \? '（接回模组迟到的应答）' : ''/.test(writeLoop),
+	'接回来的结果和普通结果长得一样，排查时无法区分');
+ok('写卡超时后的日志必须说清「改为只发普通 AT 等回包（不碰卡）」',
+	writeLoop.indexOf('改为只发普通 AT 等模组吐回包（不碰卡）') > 0,
+	'日志还在暗示会去敲卡，排查时会被带偏');
+ok('makeSwError 挂了 e.sw（错误分流靠它，靠字符串匹配 message 太脆）',
 	/e\.sw = sw;/.test(src), 'makeSwError 没挂 e.sw');
 /*
  * 「只用在写卡这一步」：外部调用点恰好 1 处。
  * 函数体内还有一次递归（attempt+1），所以不能数函数名出现的总次数。
  */
-ok('续传只在写卡分块启用（外部调用点恰好 1 处，鉴权步骤不得猜）',
+ok('接回只在写卡分块启用（外部调用点恰好 1 处，鉴权步骤不得猜）',
 	src.split('recoverAfterTimeout(send, ch, 1,').length - 1 === 1,
 	'外部调用点 ' + (src.split('recoverAfterTimeout(send, ch, 1,').length - 1) + ' 处（期望 1）');
-/* 反向：拆掉补取后，同一检查必须判红（split/join 全局替换，只换第一处会恒绿） */
-const noRecover = src.split('recoverAfterTimeout(send, ch, 1, log, {').join('Promise.reject(e)');
-ok('反向：把补取换回「直接失败」后，写卡循环里的补取检查必须判红',
-	!/isAtTimeoutError\(e\)[\s\S]{0,400}recoverAfterTimeout\(send, ch, 1, log,/
-		.test(noRecover.slice(noRecover.indexOf('var chain = Promise.resolve'),
-			noRecover.indexOf('return chain.then'))),
-	'拆掉补取后仍判为通过，检查无效');
-ok('反向：拆掉补取后外部调用点计数必须归零（防止有人用注释/字符串绕过计数）',
+/* 反向：拆掉接回后，同一检查必须判红（split/join 全局替换，只换第一处会恒绿） */
+/* 反向：拆掉接回（正则替换整个调用，连带后面的 opts 对象）后，同一检查必须判红 */
+const noRecover = src.replace(
+	/recoverAfterTimeout\(send, ch, 1, log,[\s\S]{0,160}?\)/g, 'Promise.reject(e)');
+ok('反向：把接回换回「直接失败」后，写卡循环里的检查必须判红',
+	noRecover !== src
+		&& timeoutSpan(noRecover.slice(noRecover.indexOf("var lastData = ''"),
+			noRecover.indexOf('return chain.then'))).length === 0,
+	'拆掉接回后仍判为通过（或替换没打中），检查无效');
+ok('反向：拆掉接回后外部调用点计数必须归零（防止有人用注释/字符串绕过计数）',
 	noRecover.split('recoverAfterTimeout(send, ch, 1,').length - 1 === 0,
 	'拆掉后仍有 ' + (noRecover.split('recoverAfterTimeout(send, ch, 1,').length - 1) + ' 处调用');
 
-/* ---------- 12.7 轮询策略（2026-09-20 第二次真机：只试 2 次根本等不到卡） ---------- */
+/* ---------- 12.7 「静默接回」的预算（真机：迟到约 0.4 秒，但必须留足冗余） ---------- */
 
 /*
- * 真机第二次：卡在 A3 段末块上算了几秒，补取只试 2 次 / 每次等 500ms，
- * 两次都在卡算完之前就发掉了，于是整包照样作废。
- * 后端 2 秒预算改不动（要重编固件），唯一的活路就是**轮询等卡算完**。
+ * 真机第三次：卡在 A3[7] 那一块上算到约 2.4 秒才回（后端 2 秒墙先放弃），
+ * 迟到的 9000 在 0.4 秒后被普通 AT 带回。次数给少了会在卡算完前就放弃
+ * （第二次真机就是这样）；但也不能无限等 —— 页面会一直停在"写卡中"，
+ * 所以窗口定在约 30 秒。
  */
-ok('★ 默认补取次数够多（≥6，旧值 2 会赶在卡算完之前就放弃）',
-	Euicc.recoverPolicy.maxAttempts >= 6,
-	'实际 ' + Euicc.recoverPolicy.maxAttempts);
-ok('★ 每次补取之间要留出等待（≥800ms）',
-	Euicc.recoverPolicy.waitMs >= 800,
-	'实际 ' + Euicc.recoverPolicy.waitMs);
+ok('★ 默认轮数够多（≥100 轮，只作兜底）',
+	Euicc.lateCapturePolicy.maxPolls >= 100,
+	'实际 ' + Euicc.lateCapturePolicy.maxPolls);
+ok('★ 一轮并发 ≥2 条 AT（把后端「有命令在等」的覆盖时间拉长）',
+	Euicc.lateCapturePolicy.burst >= 2,
+	'实际 ' + Euicc.lateCapturePolicy.burst);
+/*
+ * 决定"等多久"的必须是**毫秒**，不能是轮数 —— 轮数换算成时长依赖每轮
+ * 并发条数 × 单条 AT 的实测延时，换环境就变。末块还要单独给长窗。
+ */
+ok('★ 时间窗是显式的毫秒常量（普通 ≥10 秒，末块 ≥ 普通）',
+	Euicc.lateCapturePolicy.windowMs >= 10000
+		&& Euicc.lateCapturePolicy.finalWindowMs >= Euicc.lateCapturePolicy.windowMs,
+	'windowMs=' + Euicc.lateCapturePolicy.windowMs +
+	' finalWindowMs=' + Euicc.lateCapturePolicy.finalWindowMs);
 /* 反向：把常量改小，policy 必须跟着变 —— 证明上面两条读的是真常量，不是硬编码 */
-ok('反向：把 RECOVER_MAX_ATTEMPTS 改成 1 后 policy 必须跟着变（防止断言恒绿）',
+ok('反向：把 LATE_MAX_POLLS 改成 1 后 policy 必须跟着变（防止断言恒绿）',
 	(function () {
-		const neg = src.split('RECOVER_MAX_ATTEMPTS = 10').join('RECOVER_MAX_ATTEMPTS = 1');
+		const neg = src.split('LATE_MAX_POLLS = 400').join('LATE_MAX_POLLS = 1');
 		if (neg === src) return false;   /* 替换没打中 → 反向用例本身失效 */
 		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
-		return m.recoverPolicy.maxAttempts === 1;
+		return m.lateCapturePolicy.maxPolls === 1;
+	})(), '替换未生效或断言恒绿');
+ok('反向：把 LATE_WINDOW_MS 改成 1 后 policy.windowMs 必须跟着变（防止断言恒绿）',
+	(function () {
+		const neg = src.split('LATE_WINDOW_MS = 30000').join('LATE_WINDOW_MS = 1');
+		if (neg === src) return false;
+		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+		return m.lateCapturePolicy.windowMs === 1;
 	})(), '替换未生效或断言恒绿');
 
-function countingSend(answers) {
-	const st = { n: 0 };
-	const s = seqSend(answers);
-	return {
-		state: st,
-		send: function () { st.n++; return s.apply(null, arguments); }
+/* 时间窗已过期（windowMs<=0）→ 立刻如实抛错，一条 AT 都不许再发（不许空转）
+   ★ 注意必须是 IIFE：asyncTests 里存的是 Promise，push 一个函数进去会被
+     Promise.all 当普通值直接放行 —— 断言一次都不会执行（恒绿的假守卫）。 */
+asyncTests.push((function () {
+	let ats = 0;
+	return Euicc.recoverAfterTimeout(function () {
+		ats++;
+		return Promise.resolve({ success: true, data: 'OK' });
+	}, 1, 1, function () { }, { windowMs: -1, maxAttempts: 100, burst: 1 })
+		.then(function (r) {
+			ok('★ 时间窗已过期却仍返回了「接回成功」', false,
+				'返回 ' + JSON.stringify(r) + '，发了 ' + ats + ' 条 AT');
+		}, function (e) {
+			ok('★ 时间窗过期后立刻抛错，不再空转 AT（也不许谎报成功）',
+				!!e && ats === 0, '发了 ' + ats + ' 条 AT；e=' + (e && e.message));
+			/*
+			 * 接回耗尽后的错误**不能**再被 isAtTimeoutError 认成超时 ——
+			 * 否则任何外层重试逻辑都可能反复重入接回，变成无限轮询。
+			 */
+			ok('★ 接回耗尽后的错误不再算「超时」（否则外层重试会反复重入接回）',
+				Euicc.isAtTimeoutError(e) === false,
+				'它被当成了超时，存在无限重入风险');
+		});
+})());
+
+/* 一轮里的 N 条都在**同一轮被派发**（不是等一条回一条），覆盖窗口才是连续的 */
+asyncTests.push((function () {
+	let calls = 0;
+	const send = function () {
+		calls++;
+		return Promise.resolve({
+			success: true,
+			data: calls >= 4 ? csimAnswer('9000') : 'OK'
+		});
 	};
-}
-
-/* 卡先不应（超时×2），第 3 次才吐回执 → 必须接着敲门，而不是第 2 次就判死 */
-asyncTests.push((function () {
-	const c = countingSend([null, null, '6105', 'AABBCCDDEE9000']);
-	return Euicc.recoverAfterTimeout(c.send, 1, 1, function () { }, { waitMs: 10 })
+	return Euicc.recoverAfterTimeout(send, 1, 1, function () { }, { maxAttempts: 3, burst: 4 })
 		.then(function (r) {
-			eq('★ 卡还在算时持续轮询：第 3 次拿到回执', r.sw, '9000');
-			eq('★ 轮询取回的是这一块真实的数据', r.data.toUpperCase(), 'AABBCCDDEE');
-			eq('确实敲了 3 次（不是 2 次就放弃）', r.attempts, 3);
-			/* 第 3 次拿回的是 61xx，sendAndCollect 还要再发一条取余 → 总共 4 条 */
-			eq('发出的 APDU 条数 = 3 次轮询 + 1 次 61xx 取余', c.state.n, 4);
+			eq('★ 一轮 4 条 AT 里抓到了迟到回包', r.sw, '9000');
+			eq('★ 只用了一轮（4 条），没白跑第二轮', calls, 4);
+		}, function (e) {
+			ok('★ 一轮 4 条里抓到迟到回包（失败要判红，不许崩掉套件）', false,
+				(e && e.message) + ' calls=' + calls);
 		});
 })());
 
-/* 末块（P1=0x91）本该吐回执：第一次 6F00 更可能是「还没算完」，多敲一次再下结论 */
+/*
+ * ★★ 反向（行为级）：不带 fresh 的轮询会被 rpc.js 的只读缓存吃掉 ——
+ *   第 2 条起 AT 直接返回缓存结果、**根本到不了串口**，模组迟到的回包永远看不到，
+ *   接回必然失败。这条用例证明 fresh 不是装饰，而是接回能成立的前提。
+ *   （真机冒烟脚本走 SSH 桥绕过了 rpc.js，静态断言也看不出来，只有建模缓存才拦得住。）
+ */
 asyncTests.push((function () {
-	const c = countingSend(['6F00', '6F00']);
-	return Euicc.recoverAfterTimeout(c.send, 1, 1, function () { },
-		{ lastBlock: true, waitMs: 10 })
-		.then(function (r) {
-			eq('末块首次 6F00 会再确认一次', c.state.n, 2);
-			eq('确认后按已写入处理', r.sw, '9000');
-		});
+	const st = { at: 0, cached: 0 };
+	let cache = null;
+	const send = function (cmd, opts) {
+		void opts;   /* 故意无视 fresh：等价于 euicc.js 漏传 fresh */
+		if (cache) { st.cached++; return Promise.resolve(cache); }
+		st.at++;
+		const res = { success: true, data: st.at > 2 ? csimAnswer('9000') : 'OK' };
+		cache = res;   /* 第一条成功结果进缓存，此后永远吃缓存 */
+		return Promise.resolve(res);
+	};
+	return Euicc.recoverAfterTimeout(send, 1, 1, function () { }, {
+		maxAttempts: 6, burst: 2, windowMs: 60000
+	}).then(function (r) {
+		ok('★ 不走 fresh 时本该接不回来，却返回了成功', false, JSON.stringify(r));
+	}, function (e) {
+		ok('★ 不带 fresh 的轮询被只读缓存吃掉 → 接不回来（所以 fresh 是必需的）',
+			!!e && st.cached > 0 && st.at === 1,
+			'cached=' + st.cached + ' at=' + st.at + ' e=' + (e && e.message));
+	});
 })());
-asyncTests.push((function () {
-	const c = countingSend(['6F00']);
-	return Euicc.recoverAfterTimeout(c.send, 1, 1, function () { },
-		{ lastBlock: false, waitMs: 10 })
-		.then(function (r) {
-			eq('非末块的 6F00 是常态，一次就收（不浪费一轮等待）', c.state.n, 1);
-			eq('非末块 6F00 同样按已写入处理', r.sw, '9000');
-		});
-})());
+ok('★ 静态：轮询必须显式带 { fresh: true }',
+	/send\('AT', \{ fresh: true \}\)/.test(recFn),
+	'轮询没带 fresh，真机上会被只读缓存吃掉');
 
 /* ---------- 13. 失败收尾：必须撤掉服务器会话（2026-09-20 真机） ---------- */
 
@@ -869,31 +977,62 @@ ok('反向：把失败分支换成 absent 后源码检查必须翻红（防恒�
 	'替换后仍判定通过，检查无效');
 
 /* 末块策略与核验点（静态） */
-ok('★ 末块的补取预算比普通块更长（旧值 10 次在真机上不够）',
-	Euicc.recoverPolicy.lastMaxAttempts > Euicc.recoverPolicy.maxAttempts,
-	'末块 ' + Euicc.recoverPolicy.lastMaxAttempts + ' vs 普通 ' + Euicc.recoverPolicy.maxAttempts);
-ok('★ 末块每次补取之间等得更久（≥1500ms）',
-	Euicc.recoverPolicy.lastWaitMs >= 1500, '实际 ' + Euicc.recoverPolicy.lastWaitMs);
-ok('反向：把 RECOVER_LAST_MAX_ATTEMPTS 改小后 policy 必须跟着变（防断言恒绿）',
-	(function () {
-		const neg = src.split('RECOVER_LAST_MAX_ATTEMPTS = 30').join('RECOVER_LAST_MAX_ATTEMPTS = 3');
-		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
-		return m.recoverPolicy.lastMaxAttempts === 3;
-	})(), '改常量后 policy 没跟着变，断言是死的');
 ok('写卡循环里区分了「整包最后一块」',
 	/var isFinalBlock = \(si === segs\.length - 1\)/.test(writeLoop), '没有 isFinalBlock');
-ok('★ 末块放弃之前先只读查卡核验（不是直接判死）',
+ok('★ 末块接不回来时先只读查卡核验（不是直接判死）',
 	src.split('verifyInstalled(send, ch, expectIccid, log)').length - 1 === 2,
 	'核验调用点 ' + (src.split('verifyInstalled(send, ch, expectIccid, log)').length - 1) + ' 处（期望 2）');
 ok('反向：拆掉核验后调用点必须归零（防有人用注释绕过计数）',
 	src.split('verifyInstalled(send, ch, expectIccid, log)').join('Promise.resolve({state:"found"})')
 		.split('verifyInstalled(send, ch, expectIccid, log)').length - 1 === 0,
 	'拆掉后仍有调用点，检查无效');
-ok('参照 ICCID 取自 ES9+ 的 profileMetadata（不是猜的）',
-	/resp && resp\.profileMetadata/.test(src) && /normalizeIccid\(pm && pm\.iccid\)/.test(src),
-	'没从 profileMetadata 取 ICCID');
+ok('参照 ICCID 走 iccidFromProfileMetadata（profileMetadata 是 base64 的 BER-TLV，不是 JSON 字段）',
+	/resp && resp\.profileMetadata/.test(src) && /iccidFromProfileMetadata\(pm\)/.test(src),
+	'没从 profileMetadata 解 TLV 取 ICCID');
+
+/*
+ * ★ 2026-09-20 真机：本机 SM-DP+ 回的 profileMetadata 是 base64 的
+ *   StoreMetadataRequest，ICCID 在 tag 5A 里（GSM BCD，末位可能补 F）。
+ *   原代码只看 JSON 字段 `pm.iccid` → 永远取不到 → 「末块核验」每次都降级成
+ *   「无法核验」。真机日志里那句「服务器未在 profileMetadata 里给出 ICCID」
+ *   就是它 —— 于是核验形同虚设，只能回头靠 6F00 猜。
+ */
+const PM_BCD = '5A0A' + ICCID_BCD;
+const PM_B64 = Buffer.from(PM_BCD, 'hex').toString('base64');
+eq('★ 从 base64 的 profileMetadata 里解出 ICCID（tag 5A / GSM BCD）',
+	Euicc.iccidFromProfileMetadata(PM_B64), ICCID);
+eq('ICCID 在更外层 SEQUENCE 里也能找到（深度优先）',
+	Euicc.iccidFromProfileMetadata(
+		Buffer.from('30' + ('0' + (PM_BCD.length / 2).toString(16)).slice(-2) + PM_BCD, 'hex')
+			.toString('base64')), ICCID);
+eq('认不出（没有 5A）返回空，不瞎猜', Euicc.iccidFromProfileMetadata('3003020101'), '');
+eq('非 base64 的杂串返回空', Euicc.iccidFromProfileMetadata('###'), '');
+eq('JS 对象形态仍走 normalizeIccid（向后兼容）',
+	Euicc.iccidFromProfileMetadata({ iccid: ICCID }), ICCID);
+eq('空值返回空', Euicc.iccidFromProfileMetadata(null), '');
+ok('反向：把查找的 tag 从 5A 换掉后，上面的 ICCID 提取必须失效（防恒绿）',
+	(function () {
+		const neg = src.split("tlvFindHex(hex, '5A', 0)").join("tlvFindHex(hex, '99', 0)");
+		if (neg === src) return false;   /* 替换没打中 → 反向用例本身失效 */
+		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+		return m.iccidFromProfileMetadata(PM_B64) === '';
+	})(), '换 tag 后仍取到值，说明这条断言没在读 tag');
+ok('tlvFindHex 对截断的 TLV 返回空（绝不拿残片当值）',
+	Euicc.tlvFindHex('5A0A984411', '5A') === '', '截断输入竟然返回值');
 
 /* ---------- 汇总 ---------- */
+
+/*
+ * ★★ 元守卫：本文件的 asyncTests 由 Promise.all 消费 —— 每一项**必须是 Promise**。
+ *   误 push 一个裸函数进去时，Promise.all 会把它当普通值直接放行，
+ *   里面的 ok()/eq() 一次都不会执行 → 检查恒绿（本文件真发生过一次）。
+ *   ⚠ 别照抄到 euicc-channel-fallback-contract.test.js：那边是
+ *     asyncTests.reduce(chain.then) 约定，存函数才是对的。同名不同义。
+ */
+ok('★ asyncTests 每一项都是 Promise（裸函数会被 Promise.all 当普通值放行＝假守卫）',
+	asyncTests.every(function (t) { return t && typeof t.then === 'function'; }),
+	'有 ' + asyncTests.filter(function (t) { return !t || typeof t.then !== 'function'; }).length +
+	' 项不是 Promise');
 
 Promise.all(asyncTests).then(function () {
 	console.log('通过 ' + pass + ' 项，失败 ' + fails.length + ' 项');

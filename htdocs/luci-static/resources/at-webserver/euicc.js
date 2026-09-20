@@ -952,19 +952,24 @@ var Euicc = (function () {
 	}
 
 	/*
-	 * ★ 写卡阶段的「超时续传」（2026-09-20 真机：eSIM 下载到一半被「模组无响应」掐断）
+	 * ★ 写卡阶段的「静默接回」（2026-09-20 真机：eSIM 下载到一半被「模组无响应」掐断）
 	 * ---------------------------------------------------------------------------
-	 * 背景：AT 透传命令的应答时间由**卡片**决定。后端没等到结束码就返回
-	 * 「模组无响应（已等待 Nms，收到 M 行不完整数据）」，但**卡片多半已经把这一块
-	 * 吃下去了** —— 我们只是没拿到它的回执（超时后 pending 被清空，迟到的
-	 * `+CGLA:` / `OK` 会被当成主动上报丢掉）。此时直接判失败，整次下载在半途作废。
+	 * 背景：AT 透传命令的应答时间由**卡片**决定。后端给**所有**命令一律 2 秒预算
+	 * （COMMAND_TIMEOUT，编译期常量，装机二进制改不动），而卡侧算完一段 STORE DATA
+	 * 常要 2~3 秒。后端超时后清空 pending，卡迟到的那行 `+CGLA:` 被 read_loop
+	 * 当**主动上报**推给前端（`if !has_pending` 分支），**不会留给下一条命令**。
 	 *
-	 * 这里做一次**只读**兜底：发 GET RESPONSE（case 2，不写卡）把卡侧回执取回来。
-	 *   ① 取回数据（61xx → 自动取余 / 9000 带数据）→ 那就是这一块真实的响应；
-	 *   ② 卡回「没有待取数据」（6F00）→ 说明这一块的 9000 已经发出、被我们错过，
-	 *      按「已消费」继续下一块（**并在日志里写明**，绝不假装什么都没发生）；
-	 *   ③ 探路自己也超时 → 说明**卡还在算上一块**，继续轮询等它（见下面的次数），
-	 *      仍拿不到才真的报错。
+	 * ★ 这里**绝不能向卡再发任何 APDU**（含只读的 GET RESPONSE）：
+	 *   真机实测，卡还在算的时候敲门会被模组拒成 `+CME ERROR: Incorrect parameters`，
+	 *   而库没有这个分支 → 当致命错误抛出 → **整包作废**（39147 字节的包只写到 30%）。
+	 *   这条「敲门补取」曾是我们的实现，正是它把「丢一个回执」升级成了「整包失败」。
+	 *
+	 * 正确做法＝连发**普通 AT**（不碰卡），让后端重新处于「有命令在等」的状态，
+	 * 把模组迟到的那行回包原样带回来（真机：迟到约 0.4 秒的 `+CGLA: 4,"9000" | OK`）。
+	 * 拿到 61xx 才去取余 —— 那时卡已回话、模组已空闲，取余是安全的。
+	 *
+	 * 时间窗（不是拍脑袋的轮数）：普通块 30 秒，**末块 90 秒** ——
+	 *   末块触发卡做密钥运算与非易失写入，最慢，且一旦判死就没法续。
 	 *
 	 * ★ 只在**写卡分块**这一步启用：鉴权类步骤（BF38 / BF21）的响应带安全语义，
 	 *   猜错的代价远大于重跑一次，那里一律如实报错、让用户重来。
@@ -984,29 +989,35 @@ var Euicc = (function () {
 	}
 
 	/*
-	 * ★ 轮询参数（2026-09-20 第二次真机：只试 2 次 / 等 500ms 根本不够）
+	 * ★★★ 超时之后的静默接回参数（2026-09-20 真机第三次对照实验后重定）
 	 * ------------------------------------------------------------------
-	 * 后端（已装机的旧固件）给 APDU 的应答预算固定 2 秒，改不动；而卡侧算一段
-	 * STORE DATA（尤其一段收尾时要做密钥运算与非易失写入）常常是**秒级到十几秒级**。
-	 * 后端 2 秒就放弃，但**卡并不会停** —— 它算完会把回执挂在响应缓冲里。
-	 * 所以这里一遍遍用**只读**的 GET RESPONSE 去「敲门」，直到它肯吐出来。
+	 * 后端（已装机的旧固件）给 APDU 的应答预算固定 2 秒，改不动；而卡侧算完一段
+	 * STORE DATA 常常要 2~3 秒（收尾那段还要做密钥运算与非易失写入）。
 	 *
-	 * 普通块：10 次 ×（1.2s 等待 + 后端 2s 放弃）≈ 32 秒。
-	 * 末  块：卡在这一块上要**真正执行**整段（解密 + 非易失写入），
-	 *   2026-09-20 第三次真机实测：A3[7] 末块超时后连补 10 次（≈32 秒）
-	 *   **一次应答都没有**，说明卡还在跑 —— 32 秒根本不够。
-	 *   给到 30 次 ×（2s 等待 + 后端 2s 放弃）≈ 2 分钟。
-	 * 测试可用 opts 覆盖以缩短耗时。
+	 * 关键事实（真机实测，同一激活码三次对照）：
+	 *   ① 超时那一刻**模组是活的** —— 紧接着发普通 AT，350ms / 151ms 正常回；
+	 *   ② 再发 CGLA「敲门」会被模组拒（+CME ERROR: Incorrect parameters），
+	 *      库没有这个分支 → 当致命错误抛出 → **整包作废**；
+	 *   ③ 只连发普通 AT、什么都不碰 → 迟到约 0.4 秒的 `+CGLA: 4,"9000" | OK`
+	 *      被原样带回，整包 349 块一路写完，Profile 真的装上。
+	 *
+	 * 所以这里做的**不是敲门**，而是「用普通 AT 把模组迟到的回包接回来」。
+	 * nextPolls / burst 可用 opts 覆盖以缩短测试耗时。
 	 */
-	var RECOVER_MAX_ATTEMPTS = 10;
-	var RECOVER_WAIT_MS = 1200;
-	var RECOVER_LAST_MAX_ATTEMPTS = 30;
-	var RECOVER_LAST_WAIT_MS = 2000;
-	api.recoverPolicy = {
-		maxAttempts: RECOVER_MAX_ATTEMPTS,
-		waitMs: RECOVER_WAIT_MS,
-		lastMaxAttempts: RECOVER_LAST_MAX_ATTEMPTS,
-		lastWaitMs: RECOVER_LAST_WAIT_MS
+	var LATE_MAX_POLLS = 400;      /* 轮数硬上限（兜底防死循环；正常几轮就命中） */
+	var LATE_BURST = 4;            /* 每轮并发条数：让后端几乎一直"有命令在等" */
+	var LATE_WINDOW_MS = 30000;    /* 普通块：页面最多在「写卡中」停 30 秒 */
+	/*
+	 * ★ 末块单独给长窗：它触发卡做密钥运算与非易失写入，是最慢的一块，
+	 *   而且一旦判死就没法续（前面已写进去的块不会回滚）。轮数上限只是
+	 *   兜底，真正决定"等多久"的是这两个毫秒常量 —— 别用轮数去估时长。
+	 */
+	var LATE_FINAL_WINDOW_MS = 90000;
+	api.lateCapturePolicy = {
+		maxPolls: LATE_MAX_POLLS,
+		burst: LATE_BURST,
+		windowMs: LATE_WINDOW_MS,
+		finalWindowMs: LATE_FINAL_WINDOW_MS
 	};
 
 	/* ICCID 归一：只留数字、取前 19 位（BCD 末尾可能补 F）。 */
@@ -1038,6 +1049,73 @@ var Euicc = (function () {
 		return '';
 	}
 	api.normalizeIccid = normalizeIccid;
+
+	/*
+	 * 在一个 BER-TLV（hex）里深度优先找某个 tag 的**值**（hex）。
+	 * tag 1 或 2 字节（低位 5 位全 1 则两字节），长度支持短格式与 0x81/0x82。
+	 * 解析不一致（截断 / 非法 hex / 超过 4 层）一律返回空串 —— 宁可不认，不乱认。
+	 */
+	function tlvFindHex(hex, wantTag, depth) {
+		var h = String(hex == null ? '' : hex);
+		if (!api.isHex(h) || h.length < 4) return '';
+		depth = depth || 0;
+		if (depth > 4) return '';
+		var i = 0;
+		while (i + 4 <= h.length) {
+			var b0 = parseInt(h.substr(i, 2), 16);
+			var tagLen = ((b0 & 0x1f) === 0x1f) ? 4 : 2;
+			if (i + tagLen + 2 > h.length) return '';
+			var tag = h.substr(i, tagLen).toUpperCase();
+			var li = i + tagLen;
+			var l8 = parseInt(h.substr(li, 2), 16);
+			li += 2;
+			var vlen;
+			if ((l8 & 0x80) === 0) {
+				vlen = l8;
+			} else {
+				var n = l8 & 0x7f;
+				if (n < 1 || n > 2 || li + n * 2 > h.length) return '';
+				vlen = parseInt(h.substr(li, n * 2), 16);
+				li += n * 2;
+			}
+			var vhex = h.substr(li, vlen * 2);
+			if (vhex.length < vlen * 2) return '';   /* 截断：绝不拿残片当值 */
+			if (tag === wantTag) return vhex;
+			if ((b0 & 0x20) !== 0) {
+				var sub = tlvFindHex(vhex, wantTag, depth + 1);
+				if (sub) return sub;
+			}
+			i = li + vlen * 2;
+		}
+		return '';
+	}
+	api.tlvFindHex = tlvFindHex;
+
+	/*
+	 * 从 ES9+ authenticateClient 回包的 profileMetadata 里取出 ICCID。
+	 * ------------------------------------------------------------------
+	 * ★ 2026-09-20 真机：本机 SM-DP+ 回的是 **base64 的 StoreMetadataRequest**
+	 *   （BER-TLV），ICCID 在 tag `5A` 里、GSM BCD 编码。而原代码只看
+	 *   `pm.iccid` 这个 JSON 字段 —— 永远取不到，于是「末块核验」每次都降级成
+	 *   「无法核验」，只能靠猜。真机日志里那句
+	 *   「服务器未在 profileMetadata 里给出 ICCID」就是它。
+	 *
+	 *   三种编码形态都认：明码数字串 / base64 里的 ASCII 数字 / BCD（交换半字节）。
+	 *   认不出来返回空串，让调用方走降级路径 —— 绝不乱比。
+	 */
+	function iccidFromProfileMetadata(pm) {
+		if (!pm) return '';
+		if (typeof pm === 'object') return normalizeIccid(pm.iccid);
+		var hex = '';
+		try { hex = api.base64ToHex(String(pm)) || ''; } catch (e) { hex = ''; }
+		if (!hex) return '';
+		var v = tlvFindHex(hex, '5A', 0);
+		if (!v) return '';
+		var s = api.swapNibbles(v).replace(/[^0-9]/g, '');
+		if (s.length < 18) return '';
+		return s.slice(0, 20);
+	}
+	api.iccidFromProfileMetadata = iccidFromProfileMetadata;
 
 	/*
 	 * 只读核验「某个 ICCID 是不是已经在卡上了」。
@@ -1080,73 +1158,84 @@ var Euicc = (function () {
 	api.verifyInstalled = verifyInstalled;
 
 	/*
-	 * 向卡补取一次响应（GET RESPONSE，只读）。
-	 * 返回 { data, sw, recovered }；recovered 为真表示结果不是原命令给的 ——
-	 * 调用方必须把它记进日志，不能让用户以为一切正常。
+	 * ★★★ 命令超时之后的正确做法：**等模组，绝不碰卡**。
+	 * ------------------------------------------------------------------
+	 * 这里不向卡发任何 APDU（尤其不发 GET RESPONSE「敲门」）—— 真机实测证明
+	 * 敲门会被模组以 `+CME ERROR: Incorrect parameters` 拒掉，而库里没有这个
+	 * 分支，它被当成致命错误抛出，**整包就此作废**（39147 字节的包只写到 30%）。
 	 *
-	 * opts.lastBlock：超时那一块是不是该段的**末块**（P1=0x91）。末块本该吐回执，
-	 * 第一次就 6F00 更可能是「卡还没算完、数据还没挂上去」，多敲一次再下结论；
-	 * 非末块本来就没有回执，6F00 就是常态。
+	 * 做法：连发最普通的 `AT`（模组在等卡的空档里照样应答，实测 150~350ms），
+	 * 模组一旦拿到卡的回包就会把它吐在串口上，落在某条 AT 的应答里被带回来。
+	 *
+	 * ★ 为什么要「连发」：atclient 在**空闲期**收到的行按主动上报推给前端、
+	 *   不会留给下一条命令 —— 只有后端正好有命令在等时才会被带回来。
+	 *   一轮排 burst 条 AT（rpc.js 的 commandQueue 是全局单链，所以实际是
+	 *   首尾相接地下发，不是真并发），把"串口一直有命令在等"的覆盖时间拉长；
+	 *   再把时间窗设得足够长，丢包窗口就压到很小。
+	 *   ★ 这些 AT **必须带 { fresh: true }** —— 否则会命中 rpc.js 的只读缓存
+	 *   （`AT` 被判成可重试的只读命令），压根到不了串口（见下面的注释）。
+	 *
+	 * 返回 { data, sw, recovered, latePolls }；recovered 为真表示这条结果不是原
+	 * 命令给的，调用方必须写进日志，不能让用户以为一切正常。
+	 * opts：{ maxAttempts, burst, windowMs }，测试用极小值以免白等 30 秒。
 	 */
+	var LATE_SW_RE = /[+]C(GLA|SIM):/;
+
+	function lateAnswerOf(text) {
+		var t = String(text == null ? '' : text);
+		if (!LATE_SW_RE.test(t)) return null;
+		var a = parseApduAnswer(t);
+		return (a && a.sw) ? a : null;
+	}
+	api.lateAnswerOf = lateAnswerOf;
+
 	function recoverAfterTimeout(send, ch, attempt, log, opts) {
 		opts = opts || {};
-		var lastBlock = !!opts.lastBlock;
-		var maxAttempts = opts.maxAttempts
-			|| (lastBlock ? RECOVER_LAST_MAX_ATTEMPTS : RECOVER_MAX_ATTEMPTS);
-		var wait = opts.waitMs != null ? opts.waitMs
-			: (lastBlock ? RECOVER_LAST_WAIT_MS : RECOVER_WAIT_MS);
-		if (attempt > maxAttempts) {
-			/*
-			 * 全都敲不开时，先分清「卡还在忙」还是「AT 通道本身被堵死」——
-			 * 发一条最简单的 AT：它有应答，就说明通道是好的、只是卡还没干完；
-			 * 它也没应答，那就是模组侧被上一条命令卡住了。
-			 * 这两种情况处置完全不同（前者该继续等，后者该重启模组），
-			 * 混成一句话报出来只能靠猜 —— 2026-09-20 第三次真机就卡在这个猜字上。
-			 */
-			return send('AT').then(function (res) {
-				var txt = String((res && res.data) || '');
-				var alive = res && (res.success === true || /\bOK\b/.test(txt));
-				throw makeError('EUICC_AT_ERROR', '向卡补取 ' + maxAttempts +
-					' 次都没拿到应答：' + (alive
-						? 'AT 通道正常，卡仍在忙着处理这条命令（收尾安装常这样，可稍后重试）'
-						: 'AT 通道本身也无响应，模组侧被这条命令堵住了（可能需要重启模组）'));
-			}, function () {
-				throw makeError('EUICC_AT_ERROR', '向卡补取 ' + maxAttempts +
-					' 次都没拿到应答，且探测 AT 通道也失败，卡片可能已停止响应');
-			});
+		var maxPolls = opts.maxAttempts || LATE_MAX_POLLS;
+		var burst = opts.burst || LATE_BURST;
+		var windowMs = opts.windowMs || LATE_WINDOW_MS;
+		/* 时间窗在**第一次进入**时锁定，递归时不再刷新（否则等于永不超时） */
+		if (!opts.deadline) opts.deadline = Date.now() + windowMs;
+		if (attempt > maxPolls || Date.now() >= opts.deadline) {
+			return Promise.reject(makeError('EUICC_AT_ERROR',
+				'这条 AT+CGLA 既没在后端 2 秒预算内回话，之后连发 ' + (attempt - 1) * burst +
+				' 条普通 AT（约 ' + Math.round(windowMs / 1000) + ' 秒）也没等到模组把它吐出来。' +
+				'卡多半已经执行完了，只是回包丢了 —— 请重新下载整包（若卡上其实已装上，会提示 6985）'));
 		}
-		return waitMs2(wait).then(function () {
-			return sendAndCollect(send, ch, api.getResponseApdu(ch, 0), 0, '');
-		}).then(function (r) {
-			if (typeof log === 'function' && attempt > 1) {
-				log('· 第 ' + attempt + ' 次补取拿到 SW=' + r.sw);
-			}
-			return { data: r.data || '', sw: r.sw, recovered: true, attempts: attempt };
-		}, function (e) {
-			/* 补取自己也超时＝卡还在算上一块，接着敲门 */
-			if (isAtTimeoutError(e)) {
-				if (typeof log === 'function' && attempt % 5 === 0) {
-					log('· 已补取 ' + attempt + ' 次仍无应答（卡多半还在算，继续等）');
-				}
-				return recoverAfterTimeout(send, ch, attempt + 1, log, opts);
-			}
+		var ps = [];
+		for (var i = 0; i < burst; i++) {
 			/*
-			 * 6F00 =「没有精确诊断」，在 GET RESPONSE 语境下就是**卡上没有待取数据**：
-			 * 原命令的 9000 已经发出、只是被我们错过（非末块几乎都是这种）。
-			 * 只认这一个码：6E00（CLA 不被接受）、6A86（P1P2 错）等都是真错误，
-			 * 把它们也当成功，就会把「通道 / 参数错了」掩盖成「写卡成功」。
+			 * ★★ 必须带 { fresh: true }：rpc.js 把 `AT` 当「可重试的只读命令」
+			 *   （isRetryableRead：cmd === 'AT' 直接返回 true），于是它进 2.5 秒
+			 *   只读缓存 —— 不带 fresh 的话，本轮第 2 条起、以及 2.5 秒内的后续轮次
+			 *   全部命中缓存**根本到不了串口**，模组迟到的回包永远接不回来。
+			 *   （真机冒烟脚本走 SSH 桥，绕过了 rpc.js，所以那里看不出这个问题。）
+			 *   带 fresh 后 cacheable=false，走写命令分支，顺带不会污染只读缓存。
 			 */
-			if (e && e.sw === '6F00') {
-				if (opts.lastBlock && attempt < 2) {
-					return recoverAfterTimeout(send, ch, attempt + 1, log, opts);
-				}
+			ps.push(send('AT', { fresh: true }).then(function (res) { return res; },
+				function () { return null; }));
+		}
+		return Promise.all(ps).then(function (rs) {
+			for (var j = 0; j < rs.length; j++) {
+				var a = lateAnswerOf(rs[j] && rs[j].data);
+				if (!a) continue;
 				if (typeof log === 'function') {
-					log('⚠ 该块未收到应答，卡上也已无待取数据（6F00）——按已写入处理；' +
-						'若最终安装失败，卡侧校验会报错，请整包重下');
+					log('· 接回模组迟到的应答（第 ' + attempt + ' 轮 AT 轮询，SW=' + a.sw +
+						(a.hasMore ? '，数据未取完，继续取余' : '') + '）');
 				}
-				return { data: '', sw: '9000', recovered: true, recoveredBy: '6F00' };
+				if (a.hasMore) {
+					/* 模组已经空闲了，这里走正常取余路径是安全的 */
+					return sendAndCollect(send, ch, api.getResponseApdu(ch, a.le), 1, a.data)
+						.then(function (r) {
+							return { data: r.data, sw: r.sw, recovered: true, latePolls: attempt };
+						});
+				}
+				return { data: a.data || '', sw: a.sw, recovered: true, latePolls: attempt };
 			}
-			throw e;
+			if (typeof log === 'function' && attempt % 5 === 0) {
+				log('· 已连发 ' + (attempt * burst) + ' 条普通 AT，模组还没吐回包（卡仍在算，继续等）');
+			}
+			return recoverAfterTimeout(send, ch, attempt + 1, log, opts);
 		});
 	}
 	api.recoverAfterTimeout = recoverAfterTimeout;
@@ -2305,12 +2394,14 @@ api.buildEs10b = function (ch, tag, derHex) {
 					onStep(6, '准备下载');
 					/*
 					 * ES9+ authenticateClient 的回包里带 profileMetadata（含 iccid）。
-					 * 认不出来就留空 —— 后面核验那步会自动降级，不会因此失败。
+					 * ★ 2026-09-20：它多半是 base64 的 StoreMetadataRequest，不是 JSON
+					 *   字段 —— 必须走 iccidFromProfileMetadata 解 TLV（见其注释）。
+					 * 认不出来就留空，后面核验那步自动降级，不会因此失败。
 					 */
 					var pm = resp && resp.profileMetadata;
-					expectIccid = normalizeIccid(pm && pm.iccid);
+					expectIccid = iccidFromProfileMetadata(pm);
 					if (expectIccid) log('本次要装的 ICCID：' + expectIccid);
-					else log('服务器未在 profileMetadata 里给出 ICCID，写卡末块超时后将无法核验');
+					else log('服务器未在 profileMetadata 里给出 ICCID，写卡超时后将无法核验');
 					var ccHash = api.hashConfirmationCode(opts.confirmationCode);
 					var der = ''
 						+ (resp.smdpSigned2 ? api.base64ToHex(resp.smdpSigned2) : '')
@@ -2367,17 +2458,17 @@ api.buildEs10b = function (ch, tag, derHex) {
 								onStep(8, '写入卡片（段 ' + (si + 1) + '/' + segs.length +
 									'，块 ' + (idx + 1) + '/' + chunks.length + '）');
 								/*
-								 * ★ 卡侧处理一段可能要几秒到几十秒，后端等不到结束码就报
-								 *   「模组无响应」。此时不要立刻作废整包 —— 卡并不会停，
-								 *   它算完会把回执挂在响应缓冲里，靠轮询补取拿回来
+								 * ★ 卡侧处理一段常要 2~3 秒（收尾那段还要做密钥运算与
+								 *   非易失写入），而后端给所有命令一律 2 秒预算、改不动。
+								 *   超时**不能作废整包** —— 但更不能向卡再发任何 APDU：
+								 *   真机实测，敲门会被模组拒成 `+CME ERROR`，而库里没有
+								 *   这个分支，它被当致命错误抛出，反而把整包打死。
+								 *   正确做法＝连发普通 AT，把模组迟到的回包接回来
 								 *   （见 recoverAfterTimeout 的注释）。
 								 *
-								 * ★★ 整包最后一块（isFinalBlock）另说：
-								 *   它是触发卡真正执行安装的那一条 —— 2026-09-20 第三次真机
-								 *   就死在这里（连补 10 次、约 32 秒一次应答都没有）。
-								 *   而且末块拿到的 6F00 只能证明「卡上没有待取数据」，
-								 *   **证明不了装好了**。所以整包末块一律再用只读的
-								 *   GetProfiles 查一次卡，查得到那个 ICCID 才算成功。
+								 * ★★ 顺序提醒：超时**不限于**最后一块 —— 2026-09-20 真机那份
+								 *   包 A3 有 38 个元素、349 块，第一次超时发生在 A3[7]
+								 *   （才写到 30%）。所以恢复对每一块都必须一样能用。
 								 */
 								return sendApdu(c).catch(function (e) {
 									if (!isAtTimeoutError(e)) throw e;
@@ -2388,31 +2479,34 @@ api.buildEs10b = function (ch, tag, derHex) {
 									var em = String(e.message || '');
 									var cut = em.indexOf(': ');
 									log('⚠ ' + seg.label + ' ' + (idx + 1) + '/' + chunks.length +
-										' 未收到应答（' + (cut > 0 ? em.slice(0, cut) : em) +
-										'）——卡多半还在算，正在轮询补取…');
+										' 未在后端 2 秒预算内回话（' +
+										(cut > 0 ? em.slice(0, cut) : em) +
+										'）——卡还在算，改为只发普通 AT 等模组吐回包（不碰卡）…');
 									return recoverAfterTimeout(send, ch, 1, log, {
-										lastBlock: c.substr(4, 2) === '91'
-									}).catch(function (re) {
-										/* 补取也放弃了：整包末块先查卡，别直接判死 */
-										if (!isFinalBlock) throw re;
-										return verifyInstalled(send, ch, expectIccid, log)
-											.then(function (v) {
-												if (v.state !== 'found') throw re;
-												return {
-													data: '', sw: '9000',
-													recovered: true, verified: true
-												};
-											});
-									});
+										/* 末块最慢，给它更长的等待窗（见 LATE_FINAL_WINDOW_MS） */
+										windowMs: isFinalBlock
+											? LATE_FINAL_WINDOW_MS : LATE_WINDOW_MS
+									})
+										.catch(function (re) {
+											/* 接不回来：整包末块先查卡，别直接判死 */
+											if (!isFinalBlock) throw re;
+											return verifyInstalled(send, ch, expectIccid, log)
+												.then(function (v) {
+													if (v.state !== 'found') throw re;
+													return {
+														data: '', sw: '9000',
+														recovered: true, verified: true
+													};
+												});
+										});
 								});
 							}).then(function (r) {
 								log('卡 ← ' + seg.label + ' ' + (idx + 1) + '/' +
 									chunks.length + ' SW=' + r.sw +
-									(r.recovered ? '（补取）' : ''));
+									(r.recovered ? '（接回模组迟到的应答）' : ''));
 								/*
-								 * 整包末块、且结果是补取得来的（多半是拿 6F00 猜的）
-								 * → 必须查卡。非末块不必：后面还有块要写，
-								 *   真没装成迟早会在后面暴露。
+								 * 整包末块、且结果不是原命令直接给的 → 必须查卡。
+								 * 非末块不必：后面还有块要写，真没装成迟早会暴露。
 								 */
 								if (isFinalBlock && r && r.recovered && !r.verified) {
 									return verifyInstalled(send, ch, expectIccid, log)
@@ -2423,11 +2517,12 @@ api.buildEs10b = function (ch, tag, derHex) {
 												return r;
 											}
 											if (v.state === 'unknown') {
-												log('⚠ 末块按已写入处理，但拿不到参照 ICCID，无法核验');
+												log('⚠ 末块应答是接回来的，但拿不到参照 ICCID，' +
+													'无法核验 —— 请在 Profile 列表里确认');
 												return r;
 											}
 											throw makeError('EUICC_AT_ERROR',
-												'末块未收到卡的应答，重新读取 Profile 列表后卡上查不到 '
+												'末块没等到卡的应答，重新读取 Profile 列表后卡上查不到 '
 												+ iccidKey(expectIccid) + ' —— 安装确实没有完成');
 										});
 								}

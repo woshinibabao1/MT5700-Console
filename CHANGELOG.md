@@ -5,6 +5,69 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.33] - 2026-09-20
+
+### Fixed — 写卡超时那个真凶：**旧「敲门补取」自己把整包打死**（真机三次对照实验定案）
+
+用户换了一张全新激活码（`hfy.prod.ondemandconnectivity.com`，与 2.3.29~2.3.32
+三次报障**不是**同一份 Profile），仍在 `A3[7] tag=86 9/9` 处中断。
+这也直接**推翻了 2.3.31 的「ICCID 冲突」结论** —— 与新卡无关。
+
+真机三次对照实验（`.workbuddy/tmp/esim_dl_silent.js`）把因果钉死了：
+
+| 实验 | 超时后做什么 | 结果 |
+| --- | --- | --- |
+| ① 探针 | 补发普通 AT 探模组死活 | 模组**活着**（350ms / 151ms 正常回） |
+| ② 敲门补取（旧实现） | 向卡发 GET RESPONSE | 被模组拒成 `+CME ERROR: Incorrect parameters`，库无此分支 → **当致命错误抛出 → 整包作废**（39147 字节只写到 30%） |
+| ③ 静默接回 | 只连发普通 AT，不碰卡 | 迟到约 0.4 秒的 `+CGLA: 4,"9000" \| OK` 被原样带回，**349 块一路写完，Profile 真装上** |
+
+- **`euicc.js`：删掉「敲门补取」，改为「静默接回」** ——
+  超时后**绝不向卡发任何 APDU**（含只读的 GET RESPONSE），只连发普通 `AT`，
+  把模组迟到的回包原样接回来；拿到 61xx 才去取余（那时卡已回话、模组已空闲）。
+  **这才是 2.3.29~2.3.32 一直没解决的原因**：那三轮都以为「补取」是解药，
+  实际它才是把「丢一个回执」升级成「整包失败」的那一步。
+- **★ 轮询的 AT 必须带 `{ fresh: true }`**：`rpc.js` 把 `AT` 判成可重试的只读命令
+  （`isRetryableRead` 里 `cmd === 'AT'` 直接返回 true）→ 进 2.5 秒只读缓存 →
+  不带 fresh 时第 2 条起**根本到不了串口**，迟到回包永远接不回来。
+  （真机冒烟脚本走 SSH 桥，绕过了 `rpc.js`，所以那里看不出这个问题。）
+- **等待时间改成显式毫秒窗**（轮数只作兜底）：普通块 **30 秒**，末块 **90 秒**
+  —— 末块触发卡做密钥运算与非易失写入，最慢且判死就没法续。
+- **「末块特殊处理」定位错误，已纠正**：实测 A3 有 **38 个元素 / 349 块**，
+  第一次超时发生在 A3[7]（才 30%），所以恢复对**每一块**都必须一样能用，
+  调用点不再区分末块是否特殊。
+- **ICCID 参照值原先永远取不到**：ES9+ 的 `profileMetadata` 是 **base64 的
+  StoreMetadataRequest（BER-TLV）**，不是 JSON 字段 —— 旧代码读 `pm.iccid`
+  必然为空，末块核验因此恒降级成「无法核验」。新增 `iccidFromProfileMetadata`
+  （base64→hex→深度优先找 tag `5A`→GSM BCD 半字节交换）才能真正拿到。
+
+**与 lpac 的对照**（只作思路参考，不引依赖）：lpac `driver/apdu/at_cmd_unix.c`
+的 `at_expect` 用 `poll(fd, 1, -1)` —— **永不超时**，所以它能装上。
+本机后端 2 秒预算是编译进固件的常量，刷新固件后 `uci set
+at-webserver.config.apdu_timeout=20` 才能加码；在那之前靠本次的静默接回兜住。
+
+测试：`euicc-download` **157 项**（2.3.32 为 148），12.x 节整体重写为
+「静默接回」契约，并新增两件工具（见下）。
+
+### Added — 守卫可信度工具（这轮排查暴露出「守卫写了 ≠ 守卫有效」）
+
+- `tools/verify-guards.py`：对 `euicc.js` / 契约测试施加**故意违反**的变异，
+  断言测试必须判红，逐条打印「检出 / 被放过」，末尾逐字节还原并复核。
+  当前 8 条变异全部被检出。**新增守卫时在这里补一条违反样例。**
+- `tests/line-endings-contract.test.js`：工作区文本必须保持 **LF**。
+
+> 这一轮真实踩到的两个「假守卫」（都不是代码 bug，而是**测试自己失效**）：
+>
+> 1. 一条异步断言被写成 `asyncTests.push(function () {…})`，而该文件的运行器是
+>    `Promise.all(asyncTests)` —— 裸函数被当普通值直接放行，断言**一次都没执行**。
+>    已改为 IIFE，并加**元守卫**：断言 `asyncTests` 每一项都是 Promise。
+>    （⚠ `euicc-channel-fallback-contract.test.js` 用的是 `reduce(chain.then)` 约定，
+>    那边存函数才对；两个文件同名不同义，别互抄。）
+> 2. `euicc.js` 被写成 **CRLF**（整文件 2802 行），而 `euicc-contract.test.js`
+>    里切 6999 分支的正则是 `/…\n\t\t\}\n/` —— CRLF 下**永远匹配不上**，
+>    那条反向断言从「证明守卫有效」直接变成稳定失败。`core.autocrlf=input`
+>    让 `git diff` 完全看不出来。根因是 Python 在 Windows 上 `write_text()`
+>    默认把 `\n` 翻成 `\r\n`（写脚本时踩的），已用 `newline=''` 修掉并加 LF 契约测试。
+
 ## [2.3.32] - 2026-09-20
 
 ### Fixed — 整包末块：给足耐心 + 用只读读卡核验，不再靠 6F00 猜「已装上」
