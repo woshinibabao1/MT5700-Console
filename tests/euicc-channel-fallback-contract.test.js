@@ -284,16 +284,20 @@ ok('★ 反向3-a 删掉 6881 分支（回到旧实现）必须判红',
  */
 const ESIM_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'esim.js');
 const esimSrc = fs.readFileSync(ESIM_JS, 'utf8');
+/* ★ 2026-09-20 审计后锚点更新：主文案现在是 (detail || hint || '请稍后重试。')
+   —— detail 是 probe 带回的 SW 矩阵人话（优先），hint 是按 code 查的 ERR_HINT，
+   两者都在才算「把原因带进主文案」。 */
 function hasReasonText(s) {
 	return /ERR_HINT\s*=/.test(s)
 		&& /EUICC_NO_EUICC\s*:/.test(s)
-		&& /hint \? \('读取 eSIM 信息失败：' \+ hint\)/.test(s);
+		&& /'读取 eSIM 信息失败：' \+ \(detail \|\| hint \|\| '请稍后重试。'\)/.test(s);
 }
 ok('★ 反向4 esim.js 把诊断码翻成中文并进主文案', hasReasonText(esimSrc));
 ok('★ 反向4-a 退化成固定一句「请稍后重试」时必须判红',
-	hasReasonText("card._body.appendChild(Mt5700.errorState('读取 eSIM 信息失败，请稍后重试。'));") === false);
+	hasReasonText("var ERR_HINT = { EUICC_NO_EUICC: '这张卡上没有 ISD-R' };\n" +
+		"card._body.appendChild(Mt5700.errorState('读取 eSIM 信息失败，请稍后重试。'));") === false);
 ok('★ 反向4-b 只有映射但主文案不带原因时也必须判红',
-	hasReasonText(esimSrc.replace("hint ? ('读取 eSIM 信息失败：' + hint)", "'读取 eSIM 信息失败，请稍后重试。'")) === false);
+	hasReasonText(esimSrc.replace("detail || hint || '请稍后重试。'", "'请稍后重试。'")) === false);
 
 /* ---------- 收尾 ---------- */
 

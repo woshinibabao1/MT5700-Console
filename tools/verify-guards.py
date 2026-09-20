@@ -227,6 +227,49 @@ MUTATIONS = [
         "var why = (false)",
         "按 SW 分文案",
     ),
+    # ---------- 2026-09-20 全面审计：操作码按位映射 / error 态人话 / 资源与并发 ----------
+    (
+        "操作码按位映射被废（真实安装回执 81=80 又显示成「操作 128」）",
+        "js2",
+        "if (opNum & PMO_BITS[bi][0]) opNames.push(PMO_BITS[bi][1]);",
+        "if (false) opNames.push(PMO_BITS[bi][1]);",
+        "操作码 80",
+    ),
+    (
+        "probe 的 error 态丢掉 SW 矩阵人话（页面又只剩一句「卡片返回了失败状态字」）",
+        "js2",
+        "sw: e.sw || '', swText: e.swText || '', swHint: e.swHint || ''",
+        "sw: '', swText: '', swHint: ''",
+        "X1 error.swText",
+    ),
+    (
+        "renderError 丢掉 detail 优先级（swText 到了页面却不展示）",
+        "esimjs",
+        "'读取 eSIM 信息失败：' + (detail || hint || '请稍后重试。'),",
+        "'读取 eSIM 信息失败：' + (hint || '请稍后重试。'),",
+        "X2 renderError",
+    ),
+    (
+        "首屏列表 catch 不再识别卡级阻断（阻断时显示裸状态码）",
+        "esimjs",
+        "走与首屏一致的 blocked 面板（含下一步动作）。 */\n\t\t\t\tif (Euicc.isCardBlockedSw(e && e.sw, e && e.ch)) { renderBlocked({ sw: e.sw }); return; }",
+        "走与首屏一致的 blocked 面板（含下一步动作）。 */\n\t\t\t\tif (false) { renderBlocked({ sw: e.sw }); return; }",
+        "X3 两处列表读取 catch",
+    ),
+    (
+        "下载日志行数不再封顶（上千行常驻内存）",
+        "esimjs",
+        "if (lines.length > 160) lines.splice(0, lines.length - 160);",
+        "/* no cap */",
+        "X4 下载日志行数封顶",
+    ),
+    (
+        "showPendingReceipts 读取期间不置 busy（可与写操作并发开第二条 ISD-R 通道）",
+        "esimjs",
+        "卡只有 1~3 条，6A81）。 */\n\t\t\tbusy = true;\n\t\t\tEuicc.listNotifications(send).then(function (r) {",
+        "卡只有 1~3 条，6A81）。 */\n\t\t\tEuicc.listNotifications(send).then(function (r) {",
+        "X5 showPendingReceipts",
+    ),
 ]
 
 

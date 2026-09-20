@@ -144,6 +144,34 @@ eq('P04 parseNotifications 发往地址来自卡上 0C', (function () {
 	return n.length && n[0].address;
 })(), 'smdp.example.com');
 
+/*
+ * ★ 2026-09-20 审计：操作码是 BIT STRING 的命名位（pySim/euicc.py 的
+ *   ProfileMgmtOperation：install=0x80 / enable=0x40 / disable=0x20 / delete=0x10），
+ *   不是 1~4 的小整数。旧映射 { '01':'安装', … } 从未对上过真实回执 ——
+ *   真实安装回执（81=80）在旧映射下显示「操作 128」。
+ *   下面第一条 eq 本身就是反向验证：换回旧映射时它必须判红。
+ */
+const notifPmoInstall = Euicc.tlvHex('BF28', Euicc.tlvHex('A0', Euicc.tlvHex('BF2F',
+	Euicc.tlvHex('80', '05') + Euicc.tlvHex('81', '80') + Euicc.tlvHex('5A', '9821138000717510'))));
+const notifPmoCombo = Euicc.tlvHex('BF28', Euicc.tlvHex('A0', Euicc.tlvHex('BF2F',
+	Euicc.tlvHex('80', '06') + Euicc.tlvHex('81', 'C0') + Euicc.tlvHex('0C', toHex('rsp.example.com')))));
+const notifPmoDelete = Euicc.tlvHex('BF28', Euicc.tlvHex('A0', Euicc.tlvHex('BF2F',
+	Euicc.tlvHex('80', '07') + Euicc.tlvHex('81', '10'))));
+eq('P04 操作码 80（规范 install 位）→「安装」', (function () {
+	const n = Euicc.parseNotifications(notifPmoInstall);
+	return n.length && n[0].opLabel;
+})(), '安装');
+eq('P04 操作码 C0（install+enable 同置）→「安装+启用」（BIT STRING 可组合）', (function () {
+	const n = Euicc.parseNotifications(notifPmoCombo);
+	return n.length && n[0].opLabel;
+})(), '安装+启用');
+eq('P04 操作码 10（delete 位）→「删除」', (function () {
+	const n = Euicc.parseNotifications(notifPmoDelete);
+	return n.length && n[0].opLabel;
+})(), '删除');
+ok('P04 反向：euicc.js 里不再有 01=安装 的旧小整数映射',
+	/'01'\s*:\s*'安装'/.test(euiccSrc) === false);
+
 /* ---------- 3. P04：removeNotification 入参校验 ---------- */
 
 asyncTests.push(threw('P04 removeNotification(seqHex=\'XYZ\') 非法 → EUICC_BAD_APDU', function () {
@@ -817,6 +845,48 @@ ok('W3 阻断面板按 SW 分文案（6999 路径没碰过基本通道，不能�
 	/var why = \(sw === '6999'\)/.test(esimSrc) && /SW=6999/.test(esimSrc));
 ok('W3 反向：把分支写死成 6985 那句必须判红',
 	/var why = \(sw === '6999'\)/.test(replaceAll(esimSrc, "sw === '6999'", "sw === '__X__'")) === false);
+
+/* ---------- X. 2026-09-20 全面审计：error 态人话 / 列表阻断识别 / 资源与并发 ---------- */
+
+/*
+ * X1  probe 的 error 态必须带出 SW 矩阵的人话（行为级：mock 走真 probe）。
+ *     基本通道回未知 SW（6A86）→ swInfo 兜底文案 + makeSwError 挂 swText/sw；
+ *     旧实现只回 e.code，页面只剩「卡片返回了失败状态字」一句（用户实测抱怨过）。
+ *     mock 沿用 V 系的 makeBlockedSend：逻辑通道 6A82（回退），基本通道按入参给 6A86。
+ */
+asyncTests.push((function () {
+	const mock = makeBlockedSend('6A86');
+	return Euicc.probe(mock.send).then(function (p) {
+		eq('X1 probe error 态（未知 SW 6A86）仍是 error（不被 blocked 抢走）', p && p.state, 'error');
+		ok('X1 error.swText 带出人话且含 SW 原值（旧实现为空）',
+			!!(p && p.swText) && p.swText.indexOf('6A86') >= 0,
+			'实际 swText=' + (p && p.swText));
+		ok('X1 error.sw 原值带回（对账）', p && p.sw === '6A86');
+	});
+})());
+ok('X2 renderError 优先展示 p.swText（SW 矩阵人话），无才退回 ERR_HINT',
+	/p\.swText/.test(esimSrc) && /detail \|\| hint/.test(esimSrc));
+ok('X2 反向：丢掉 detail 优先级后必须判红',
+	/detail \|\| hint/.test(replaceAll(esimSrc, 'detail || hint', 'hint')) === false);
+const x3Count = esimSrc.split('Euicc.isCardBlockedSw(e && e.sw, e && e.ch)').length - 1;
+ok('X3 两处列表读取 catch 都识别卡级阻断（isCardBlockedSw → renderBlocked）',
+	x3Count === 2, '实际 ' + x3Count + ' 处');
+ok('X3 反向：把两处判定都改掉后，X3 的计数必然 !== 2（判红）',
+	(replaceAll(esimSrc, 'Euicc.isCardBlockedSw(e && e.sw, e && e.ch)', 'false')
+		.split('Euicc.isCardBlockedSw(e && e.sw, e && e.ch)').length - 1) !== 2);
+ok('X4 下载日志行数封顶（splice），不随块数无限增长',
+	/lines\.splice\(0, lines\.length - 160\)/.test(esimSrc));
+ok('X4 反向：删掉封顶后必须判红',
+	/lines\.splice\(0, lines\.length - 160\)/.test(
+		replaceAll(esimSrc, 'if (lines.length > 160) lines.splice(0, lines.length - 160);', '')) === false);
+const sprBody = esimSrc.slice(esimSrc.indexOf('function showPendingReceipts('),
+	esimSrc.indexOf('function loadNotifications('));
+ok('X5 showPendingReceipts 读取期间置位 busy（防并发开第二条 ISD-R 通道）',
+	sprBody.length > 0 && sprBody.indexOf('busy = true') >= 0 && sprBody.indexOf('busy = false') >= 0,
+	'片段长度 ' + sprBody.length);
+ok('X5 反向：注释掉置位后上面必须判红',
+	sprBody.length > 0 &&
+	/busy = true/.test(replaceAll(sprBody, 'busy = true;', '')) === false);
 
 /* ---------- 汇总 ---------- */
 

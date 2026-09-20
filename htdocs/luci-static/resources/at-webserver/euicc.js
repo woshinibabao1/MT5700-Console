@@ -1581,8 +1581,18 @@ var Euicc = (function () {
 					 *   用户（和我）看不出是卡被锁、固件不行、还是卡卡住了。
 					 *   判据见 api.isCardBlockedSw 的注释（本机实际命中的是 CGLA 6999 那条）。
 					 */
-					if (api.isCardBlockedSw(e.sw, e.ch)) return { state: 'blocked', sw: e.sw };
-					return { state: 'error', error: e.code };
+				if (api.isCardBlockedSw(e.sw, e.ch)) return { state: 'blocked', sw: e.sw };
+				/*
+				 * ★ error 态必须把 SW 矩阵的人话带出去（2026-09-20 用户实测抱怨）：
+				 *   只回 e.code 的话，EUICC_OP_FAILED 在页面上恒为一句
+				 *   「卡片返回了失败状态字」—— 同一个 code 背后可能是十几种 SW。
+				 *   swText / swHint 来自 swInfo 错误矩阵（makeSwError 挂上），
+				 *   sw 原值一并带回（对账用，先例见 esim.js 的 downloadFailText F2）。
+				 */
+				return {
+					state: 'error', error: e.code,
+					sw: e.sw || '', swText: e.swText || '', swHint: e.swHint || ''
+				};
 				});
 			});
 	};
@@ -2765,11 +2775,27 @@ api.buildEs10b = function (ch, tag, derHex) {
 			var seq = api.pickTagValue(item, '80');
 			var op = api.pickTagValue(item, '81');
 			if (seq) {
-				/* 操作类型映射（SGP.22 Notification 序号）。数值未核对，未知
-				 * 一律显示「操作 <十进制序号>」，绝不编造名称（P04）。 */
-				var OP_LABELS = { '01': '安装', '02': '启用', '03': '禁用', '04': '删除' };
+				/*
+				 * ★ 操作类型是 BIT STRING 的命名位，不是 1~4 的小整数枚举（2026-09-20 逐字核对
+				 *   pySim/euicc.py 的 ProfileMgmtOperation）：
+				 *     pmo = FlagsEnum(Byte, install=0x80, enable=0x40, disable=0x20, delete=0x10)
+				 *   旧表把 01~04 当作 安装/启用/禁用/删除，从未核对过、规范里也不存在 ——
+				 *   真实安装回执（81=80）在旧表下显示成「操作 128」。多位可同时置位
+				 *   （如 0xC0=安装+启用），按位拆开用 + 拼。一个已知位都没有 →
+				 *   保持「操作 <十进制>」，绝不编造（P04）。
+				 */
+				var PMO_BITS = [
+					[0x80, '安装'], [0x40, '启用'], [0x20, '禁用'], [0x10, '删除']
+				];
 				var opNum = parseInt(op, 16);
-				var opLabel = OP_LABELS[op] || ('操作 ' + (isNaN(opNum) ? '?' : opNum));
+				var opNames = [];
+				if (!isNaN(opNum)) {
+					for (var bi = 0; bi < PMO_BITS.length; bi++) {
+						if (opNum & PMO_BITS[bi][0]) opNames.push(PMO_BITS[bi][1]);
+					}
+				}
+				var opLabel = opNames.length ? opNames.join('+')
+					: ('操作 ' + (isNaN(opNum) ? '?' : opNum));
 				var iccidHex = api.pickTagValue(item, '5A');
 				out.push({
 					seqHex: seq,

@@ -5,6 +5,41 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.37] - 2026-09-20
+
+### Fixed — eSIM 模块全面审计（5 项落地，依据 pySim ASN.1 逐字核对）
+
+- **回执操作码映射是错的**（`euicc.js`）：旧表把 01~04 当作
+  安装/启用/禁用/删除，注释自承「数值未核对」。pySim `pySim/euicc.py` 的
+  `ProfileMgmtOperation` 权威定义是 **BIT STRING 命名位**
+  （install=0x80 / enable=0x40 / disable=0x20 / delete=0x10）—— 真实安装回执
+  （81=80）在旧表下显示成「操作 128」。改为按位解码，多位组合（如 0xC0）显示
+  「安装+启用」，无已知位仍走「操作 N」兜底。
+- **probe 的 error 态丢掉 SW 矩阵人话**（`euicc.js` + `esim.js`）：旧实现只回
+  `e.code`，EUICC_OP_FAILED 在页面恒为「卡片返回了失败状态字」。现在 error 态
+  带回 `sw/swText/swHint`，renderError 优先展示（SW 原值保留便于对账）。
+- **读列表失败不识别卡级阻断**（`esim.js`）：首屏与手动刷新的 catch 只认
+  NO_EUICC，阻断时显示「读取 Profile 列表失败：6985」裸码。现在先判
+  `isCardBlockedSw` 走 blocked 面板，普通失败也优先用 swText。
+- **下载日志行数无上限**（`esim.js`）：真机 546 块堆上千行常驻内存（界面只显示
+  尾部 40 行），现封顶 160 行。
+- **showPendingReceipts 不置 busy**（`esim.js`）：与写操作可并发开第二条
+  ISD-R 通道（卡只有 1~3 条，6A81）。现在读取期间置位。
+
+### Tests
+
+- `esim-contract.test.js`：124 → **139 项**（P04 操作码按位映射 ×4 含反向；
+  X1 行为级 mock 验证 error 态带人话；X2–X5 静态 + 反向）。
+- `euicc-channel-fallback-contract.test.js`：反向4 锚点同步
+  `detail || hint` 新形态（断言语义不变：诊断码必须进主文案）。
+- `tools/verify-guards.py`：变异 25 → **31 条**，全部检出、逐字节还原。
+
+### 不改清单（审计结论，防后人重提）
+
+- detectTransport 多发一条 SELECT ISD-R（省 1 条 APDU vs 探测/会话耦合，不值）；
+- 9F70 profileState 只认 0x01（真机端到端验证过）；renderNoEuicc 的 ICCID 读
+  不置 busy（纯只读）；es9pState 页面级缓存（生命周期内合理）。
+
 ## [2.3.36] - 2026-09-20
 
 ### Fixed — 2.3.35 的阻断判据在本机上**一条都不会触发**，改用真机实测路径重写

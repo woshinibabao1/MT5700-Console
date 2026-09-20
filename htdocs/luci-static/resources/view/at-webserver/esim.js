@@ -266,10 +266,20 @@ return L.view.extend({
 			/* ★ 2026-09-19：主文案必须带原因。旧版恒为「读取 eSIM 信息失败，请稍后重试。」
 			   而真正的诊断码只进 console —— 用户（和我排查时）根本无从判断是卡的问题、
 			   固件不支持 CSIM、还是 AT 服务没起来。现在把中文原因直接放主文案。 */
-			var hint = ERR_HINT[code];
-			card._body.appendChild(Mt5700.errorState(
-				hint ? ('读取 eSIM 信息失败：' + hint) : '读取 eSIM 信息失败，请稍后重试。',
-				function () { render(); }));
+		var hint = ERR_HINT[code];
+		/*
+		 * ★ 2026-09-20：probe 的 error 态现在会带回 swText / swHint（euicc.js 的
+		 *   SW 错误矩阵），比按 code 查的通用文案具体得多 —— 同一个 EUICC_OP_FAILED
+		 *   背后可能是十几种 SW。有就优先用，SW 原值保留便于对账（同 downloadFailText F2）。
+		 */
+		var detail = '';
+		if (p && p.swText) {
+			detail = p.swText + (p.swHint ? '；' + p.swHint : '') +
+				(p.sw ? '（SW=' + p.sw + '）' : '');
+		}
+		card._body.appendChild(Mt5700.errorState(
+			'读取 eSIM 信息失败：' + (detail || hint || '请稍后重试。'),
+			function () { render(); }));
 			body.appendChild(card);
 			if (code && typeof console !== 'undefined' && console.warn) {
 				console.warn('[esim] 探测错误 code=' + code);
@@ -922,11 +932,13 @@ return L.view.extend({
 				var pre = E('div', { 'class': 'mt5700-mono mt5700-terminal-log' });
 				logBox.appendChild(pre);
 				var lines = [];
-				function log(s) {
-					if (aborted) throw abortError();
-					lines.push(String(s));
-					pre.textContent = lines.slice(-40).join('\n');
-				}
+			function log(s) {
+				if (aborted) throw abortError();
+				lines.push(String(s));
+				/* 大包（真机 546 块）会堆上千行；界面只显示尾部 40 行，全部保留纯属白占内存 */
+				if (lines.length > 160) lines.splice(0, lines.length - 160);
+				pre.textContent = lines.slice(-40).join('\n');
+			}
 				/* P08：取消下载时由取消按钮置位；onStep / log 每块前检查，抛 EUICC_OP_FAILED 中止链路。 */
 				function setProgress(pct) {
 					if (!progFill) return;
@@ -1059,7 +1071,11 @@ return L.view.extend({
 		 */
 		function showPendingReceipts() {
 			if (busy) return;
+			/* ★ 与其它读操作一致置 busy：它也是一条独立 ISD-R 会话，异步期间不锁的话，
+			   用户此刻点「启用 / 删除」会并发开第二条通道（卡只有 1~3 条，6A81）。 */
+			busy = true;
 			Euicc.listNotifications(send).then(function (r) {
+				busy = false;
 				var items = r.items || [];
 				if (!items.length) return;
 				var banner = E('div', { 'class': 'mt5700-notice-warning' },
@@ -1071,7 +1087,9 @@ return L.view.extend({
 				later(function () {
 					if (banner.parentNode) banner.parentNode.removeChild(banner);
 				}, 15000);
-			}).catch(function () { /* 列出失败只静默，不掩盖主操作的成功提示 */ });
+			}).catch(function () {
+				busy = false; /* 列出失败只静默，不掩盖主操作的成功提示 */
+			});
 		}
 
 		/* ---------- 待发回执管理（P04 + P09） ----------
@@ -1256,8 +1274,12 @@ return L.view.extend({
 			}).catch(function (e) {
 				busy = false;
 				if (e && e.code === 'EUICC_NO_EUICC') { renderNoEuicc(); return; }
+				/* ★ 卡级阻断（暂态）：probe 时是好的、读列表时卡锁了 —— 别只报一个裸
+				 *   状态码，走与首屏一致的 blocked 面板（含下一步动作）。 */
+				if (Euicc.isCardBlockedSw(e && e.sw, e && e.ch)) { renderBlocked({ sw: e.sw }); return; }
 				listCard._body.innerHTML = '';
-				listCard._body.appendChild(Mt5700.errorState('读取 Profile 列表失败：' + ((e && e.message) || ''),
+				listCard._body.appendChild(Mt5700.errorState('读取 Profile 列表失败：' +
+					(e.swText ? e.swText + '（SW=' + e.sw + '）' : ((e && e.message) || '')),
 					function () { loadProfiles(listCard); }));
 			});
 		}
@@ -1265,16 +1287,19 @@ return L.view.extend({
 		function loadProfiles(listCard) {
 			if (busy) return Promise.resolve();
 			busy = true;
-			return Euicc.listProfiles(send).then(function (res) {
-				busy = false;
-				renderTable(listCard, res.list || []);
-			}).catch(function (e) {
-				busy = false;
-				if (e && e.code === 'EUICC_NO_EUICC') { renderNoEuicc(); return; }
-				listCard._body.innerHTML = '';
-				listCard._body.appendChild(Mt5700.errorState('读取 Profile 列表失败：' + ((e && e.message) || ''),
-					function () { loadProfiles(listCard); }));
-			});
+		return Euicc.listProfiles(send).then(function (res) {
+			busy = false;
+			renderTable(listCard, res.list || []);
+		}).catch(function (e) {
+			busy = false;
+			if (e && e.code === 'EUICC_NO_EUICC') { renderNoEuicc(); return; }
+			/* ★ 同首屏 catch：卡级阻断走 blocked 面板，SW 矩阵人话优先于裸 message */
+			if (Euicc.isCardBlockedSw(e && e.sw, e && e.ch)) { renderBlocked({ sw: e.sw }); return; }
+			listCard._body.innerHTML = '';
+			listCard._body.appendChild(Mt5700.errorState('读取 Profile 列表失败：' +
+				(e.swText ? e.swText + '（SW=' + e.sw + '）' : ((e && e.message) || '')),
+				function () { loadProfiles(listCard); }));
+		});
 		}
 
 		function renderTable(listCard, list) {
