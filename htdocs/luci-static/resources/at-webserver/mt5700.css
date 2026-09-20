@@ -3019,3 +3019,161 @@
      窄屏单列（无拉平需求）仍保留封顶。 */
   .mt5700-diag-detail .mt5700-diag-scroll { max-height: none; }
 }
+
+/* ==========================================================================
+   eSIM 管理页（2026-09-20 重排）
+   --------------------------------------------------------------------------
+   只重排**信息层级**，不改设计语言：配色 / 圆角 / 阴影 / 间距 / 字体全部取自
+   上面的变量，与本站其它卡片同属一套。三处调整各有具体理由：
+
+     ① EID 从 .mt5700-metric（value 是 22px 粗体大数字）改为等宽文本块。
+        它是**标识符**不是数量：32 位十六进制在大字号下窄屏折三行、字距被拉开，
+        反而读不出一个整体；等宽字体 + 适中字号才能逐位核对（用户要拿它跟
+        工单/手机端对账）。user-select:all 让一次点击选中整串，便于复制。
+
+     ② Profile 由 5 列表格改为行卡。这一行**有哪些操作取决于行自身状态**
+        （已启用 → 只能禁用、且必须先禁用才能删除；未启用 → 才能启用），
+        表格按列摊平会把这层关系打散，操作列再塞三个按钮，窄屏必然横向溢出。
+        行卡把「状态 → 主操作」绑在一起，左侧 4px 色条让扫视时先看颜色再读文字。
+
+     ③ 卡内信息分组（身份 / 卡内存储 / 列表），取代原先一条 hint 串到底
+        —— 原先把「APDU 通路能否下载」这种决定性信息与容量说明混在灰字里。
+   ========================================================================== */
+
+/* ---------- 身份块（EID） ---------- */
+.mt5700-esim-idbox {
+  padding: var(--mt5700-space-md);
+  background: var(--mt5700-glass-bg);
+  backdrop-filter: var(--mt5700-glass);
+  -webkit-backdrop-filter: var(--mt5700-glass);
+  border: 1px solid var(--mt5700-border);
+  border-radius: var(--mt5700-radius-md);
+  box-shadow: var(--mt5700-sh-1), var(--mt5700-sh-inset);
+}
+
+.mt5700-esim-idlabel {
+  font-size: var(--mt5700-font-size-xs);
+  color: var(--mt5700-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mt5700-esim-idvalue {
+  margin-top: 2px;
+  font-family: var(--mt5700-font-mono);
+  font-size: var(--mt5700-font-size-base);
+  font-weight: 600;
+  color: var(--mt5700-text);
+  line-height: 1.5;
+  word-break: break-all;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+/* 徽章行：状态与通路并排，窄屏自动折行（原先 badge 被塞进 .mt5700-metrics
+   网格当「第二格」，会被网格拉伸成与 EID 等宽的方块） */
+.mt5700-esim-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mt5700-space-sm);
+  margin-top: var(--mt5700-space-md);
+}
+
+/* ---------- 卡内分区标题 ---------- */
+.mt5700-esim-sectitle {
+  display: flex;
+  align-items: center;
+  gap: var(--mt5700-space-sm);
+  margin: var(--mt5700-space-lg) 0 var(--mt5700-space-sm);
+  font-size: var(--mt5700-font-size-sm);
+  font-weight: 600;
+  color: var(--mt5700-text-secondary);
+}
+
+/* 标题右侧细线：画出「这一组从哪开始」，不额外加边框 */
+.mt5700-esim-sectitle::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--mt5700-divider);
+}
+
+.mt5700-esim-sectitle:first-child { margin-top: 0; }
+
+/* ---------- Profile 行卡 ---------- */
+.mt5700-esim-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mt5700-space-sm);
+}
+
+.mt5700-esim-row {
+  position: relative;
+  padding: var(--mt5700-space-md);
+  padding-left: calc(var(--mt5700-space-md) + 6px);
+  background: var(--mt5700-glass-bg);
+  border: 1px solid var(--mt5700-border);
+  border-radius: var(--mt5700-radius-md);
+  box-shadow: var(--mt5700-sh-1);
+  transition: box-shadow var(--mt5700-transition-base), background var(--mt5700-transition-base);
+}
+
+.mt5700-esim-row:hover {
+  background: var(--mt5700-card-bg-hover);
+  box-shadow: var(--mt5700-sh-2);
+}
+
+/* 左侧状态条：颜色即状态（未启用用中性灰，不抢视线） */
+.mt5700-esim-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  border-radius: var(--mt5700-radius-md) 0 0 var(--mt5700-radius-md);
+  background: var(--mt5700-text-muted);
+}
+
+.mt5700-esim-row.is-on::before { background: var(--mt5700-success); }
+
+/* 首行：ICCID 在左、状态徽章在右 */
+.mt5700-esim-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mt5700-space-sm);
+  flex-wrap: wrap;
+}
+
+.mt5700-esim-row-iccid {
+  font-family: var(--mt5700-font-mono);
+  font-size: var(--mt5700-font-size-sm);
+  font-weight: 600;
+  color: var(--mt5700-text);
+  word-break: break-all;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+/* 次行：运营商 / 名称 / 昵称，一行读完 */
+.mt5700-esim-row-name {
+  margin-top: 4px;
+  font-size: var(--mt5700-font-size-base);
+  color: var(--mt5700-text-secondary);
+  word-break: break-word;
+}
+
+.mt5700-esim-row-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mt5700-space-sm);
+  margin-top: var(--mt5700-space-md);
+}
+
+/* 窄屏：三个按钮平分整行，避免各自只占半截、点不准 */
+@media (max-width: 640px) {
+  .mt5700-esim-row-acts > .mt5700-btn { flex: 1 1 auto; justify-content: center; }
+}

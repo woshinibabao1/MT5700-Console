@@ -40,8 +40,11 @@ const js = fs.readFileSync(JSP, 'utf8');
  * 改了 mt5700.css 就一定会红 —— 这是有意的：
  *   ① bump mt5700.js 的 MT5700_CSS_VERSION；
  *   ② 把本常量改成新指纹（用本测试失败时打印出的实际值）。
+ *
+ * 变更日志：
+ *   2026-09-20  eSIM 管理页重排（EID 等宽块 / Profile 行卡 / 卡内分区标题）→ 5.5.20
  */
-const CSS_FINGERPRINT = '0a26bf40f51433ce';
+const CSS_FINGERPRINT = '391758ec9d00d6a2';
 
 let pass = 0;
 const fails = [];

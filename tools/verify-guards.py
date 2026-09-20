@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """守卫有效性验证（红线 16：写了守卫 ≠ 有了守卫）。
 
-做法：对 euicc.js / 契约测试文件施加**故意违反契约**的变异（全部保持语法合法，
-避免"语法错误导致崩溃"被误当成"守卫检出了"），跑契约测试并断言判红；
+做法：对源码 / 契约测试文件施加**故意违反契约**的变异（全部保持语法合法，
+避免"语法错误导致崩溃"被误当成"守卫检出了"），跑对应契约测试并断言判红；
 随后从备份逐字节还原并复核。
 
 用法：python tools/verify-guards.py
@@ -13,11 +13,24 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+ATWB = ROOT / "htdocs" / "luci-static" / "resources" / "at-webserver"
+ESIM = ROOT / "htdocs" / "luci-static" / "resources" / "view" / "at-webserver" / "esim.js"
+
 TARGETS = {
-    "js": ROOT / "htdocs" / "luci-static" / "resources" / "at-webserver" / "euicc.js",
+    "js": ATWB / "euicc.js",
+    "esimjs": ESIM,
+    "esimcss": ATWB / "mt5700.css",
     "test": ROOT / "tests" / "euicc-download-contract.test.js",
 }
-TEST = ROOT / "tests" / "euicc-download-contract.test.js"
+
+# 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
+TARGET_TEST = {
+    "js": ROOT / "tests" / "euicc-download-contract.test.js",
+    "test": ROOT / "tests" / "euicc-download-contract.test.js",
+    "esimjs": ROOT / "tests" / "esim-contract.test.js",
+    "esimcss": ROOT / "tests" / "esim-contract.test.js",
+}
+
 NODE = r"C:\Users\Ajmd007\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"
 
 ORIG = {k: v.read_bytes() for k, v in TARGETS.items()}
@@ -84,13 +97,81 @@ MUTATIONS = [
         "/* ---------- 汇总 ---------- */",
         "每一项都是 Promise",
     ),
+    # ---------- 2026-09-20 eSIM 页 UI 重排的形态守卫 ----------
+    (
+        "EID 退回成 metric 大数字格（32 位标识符被大字号折行、无法逐位核对）",
+        "esimjs",
+        "E('div', { 'class': 'mt5700-esim-idvalue' }, p.eid",
+        "E('div', { 'class': 'mt5700-mono' }, p.eid",
+        "EID 用等宽标识块",
+    ),
+    (
+        "EID 块在 CSS 里丢掉等宽字体（只留类名，界面悄悄退回比例字体）",
+        "esimcss",
+        ".mt5700-esim-idvalue {\n  margin-top: 2px;\n  font-family: var(--mt5700-font-mono);",
+        ".mt5700-esim-idvalue {\n  margin-top: 2px;\n  font-family: var(--mt5700-font-sans);",
+        "在 CSS 里确实是等宽",
+    ),
+    (
+        "ICCID 丢掉行卡等宽类（长卡号变回比例字体）",
+        "esimjs",
+        "E('span', { 'class': 'mt5700-esim-row-iccid' }",
+        "E('span', { 'class': 'mt5700-mono' }",
+        "ICCID 用行卡等宽类展示",
+    ),
+    (
+        "昵称顶替官方名（同一张卡在不同地方叫法不一致）",
+        "esimjs",
+        "var name = p.profileName || p.spName || ''",
+        "var name = p.profileName || p.spName || p.nickname",
+        "昵称不顶替官方名",
+    ),
+    (
+        "通路徽章不再由 p.transport 决定（固定报「正常」，下载失败时误导）",
+        "esimjs",
+        "p.transport === 'cgla' ? '下载通路正常' : '下载通路受限'",
+        "'下载通路正常'",
+        "通路徽章由 p.transport 决定",
+    ),
+    (
+        "行卡「已启用」色条类名被改掉（CSS 侧应当场判红）",
+        "esimcss",
+        ".mt5700-esim-row.is-on::before",
+        ".mt5700-esim-row.is-enabled::before",
+        "行卡与「已启用」色条",
+    ),
 ]
 
 
-def run_test():
-    p = subprocess.run([NODE, str(TEST)], capture_output=True, text=True,
+def run_test(tgt):
+    test = TARGET_TEST[tgt]
+    p = subprocess.run([NODE, str(test)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def syntax_ok(path):
+    """语法预检：确认变异本身没把文件写坏，否则"判红"可能只是崩了。
+
+    两种文件需要两条路，别混用：
+      · tests/ 下的契约测试是 CommonJS（首行还有 #! shebang）→ node --check 直接可用；
+      · LuCI 的 view / require 模块顶层常是 `return L.view.extend({...})`，在 CommonJS
+        里属非法 return，--check 必然报错 → 包一层 new Function()（函数体内 return 合法，
+        仍能抓出真的语法错误）。
+        ★ 注意 new Function 不认 shebang，所以测试文件不能走这条路。
+      · CSS 不做预检（改的是属性值 / 选择器，不会产生解析错误）。
+    """
+    if path.suffix == ".css":
+        return True
+    if "tests" in path.parts:
+        args = [NODE, "--check", str(path)]
+    else:
+        args = [NODE, "-e",
+                "new Function(require('fs').readFileSync(process.argv[1],'utf8'));",
+                str(path)]
+    p = subprocess.run(args, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    return p.returncode == 0
 
 
 def restore_all():
@@ -99,11 +180,12 @@ def restore_all():
 
 
 def main():
-    rc0, out0 = run_test()
-    print("基线:", "绿色（0 失败）" if rc0 == 0 else "红！先修基线再验证守卫")
-    if rc0 != 0:
-        print(out0)
-        return 1
+    for tgt in ("js", "esimjs"):
+        rc0, out0 = run_test(tgt)
+        print("基线[%s]:" % tgt, "绿色（0 失败）" if rc0 == 0 else "红！先修基线再验证守卫")
+        if rc0 != 0:
+            print(out0)
+            return 1
 
     bad = 0
     for i, (name, tgt, old, new, key) in enumerate(MUTATIONS, 1):
@@ -119,13 +201,12 @@ def main():
         #   一旦变 CRLF，那种正则静默匹配不上、反向守卫直接失效
         #   （2026-09-20 真踩过，见 tests/line-endings-contract.test.js）。
         # 先确认变异本身语法合法 —— 否则"判红"可能只是崩了
-        chk = subprocess.run([NODE, "--check", str(path)], capture_output=True, text=True)
-        if chk.returncode != 0:
+        if not syntax_ok(path):
             print(f"[{i}] ✗ 变异后语法非法，无法归因：{name}")
             restore_all()
             bad += 1
             continue
-        rc, out = run_test()
+        rc, out = run_test(tgt)
         hit = key in out
         if rc != 0 and hit and "异步用例异常" not in out:
             print(f"[{i}] ✓ 变异被断言检出：{name}（判红 {out.count(chr(10) + '  ✗')} 处）")
@@ -136,7 +217,7 @@ def main():
 
     same = all(TARGETS[k].read_bytes() == ORIG[k] for k in TARGETS)
     print("还原复核:", "逐字节一致" if same else "*** 不一致！***")
-    rc, _ = run_test()
+    rc, _ = run_test("esimjs")
     print("还原后基线:", "绿色" if rc == 0 else "红！")
     return 1 if (bad or rc != 0 or not same) else 0
 

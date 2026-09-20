@@ -29,6 +29,10 @@ const euiccSrc = fs.readFileSync(EUICC_JS, 'utf8');
 const esimSrc = fs.readFileSync(ESIM_JS, 'utf8');
 const rpcSrc = fs.readFileSync(path.join(__dirname, '..', 'htdocs', 'luci-static',
 	'resources', 'at-webserver', 'rpc.js'), 'utf8');
+/* mt5700.css 也读一份：P14 要检验「ICCID 用的那个类名**确实是等宽**」。
+   统一换行后再比对，避免 CRLF/LF 差异导致跨环境误报。 */
+const cssSrc = fs.readFileSync(path.join(__dirname, '..', 'htdocs', 'luci-static',
+	'resources', 'at-webserver', 'mt5700.css'), 'utf8').replace(/\r\n/g, '\n');
 
 /* 同款正则 eval 加载 euicc.js（与 euicc-download-contract.test.js:23 一致） */
 const m = euiccSrc.match(/var Euicc = \((function[\s\S]*?)\)\(\);/);
@@ -365,10 +369,34 @@ ok('R01 esim.js 进度按段号细化（解析「段 X/Y」，不是只按步骤
 	/段\\s\*\(\\d\+\)\\s\*\\\/\\s\*\(\\d\+\)/.test(esimSrc) && /stepPct\(n, text\)/.test(esimSrc));
 ok('R01 esim.js 进度条只建一次、后续只改宽度（不每块重建 DOM）',
 	/progFill\.style\.width/.test(esimSrc) && !/progWrap\.innerHTML/.test(esimSrc));
-/* P13：名称取值顺序 profileName || spName || nickname（先取卡上官方名） */
-ok('P13 esim.js 名称取值顺序 profileName||spName||nickname', /var name = p\.profileName \|\| p\.spName \|\| p\.nickname/.test(esimSrc));
-/* P14：ICCID / AID 长裸值包等宽 span */
-ok('P14 esim.js ICCID 单元格包 mt5700-mono span', /E\('span',\s*\{ 'class': 'mt5700-mono' \},\s*p\.iccid/.test(esimSrc));
+/*
+ * P13：名称优先取卡上官方名（profileName → spName）。
+ * ★ 2026-09-20 UI 重排：昵称不再作为 name 的兜底项，而是**附加别名**
+ *   （渲染改成 [name, alias].filter(Boolean).join(' · ')）。原断言锚在
+ *   `var name = p.profileName || p.spName || p.nickname` 上，重排后必然失配。
+ *   这里把它拆成两条，并钉住真正要守的东西：**name 的取值链里不许出现 nickname**
+ *   —— 昵称是用户随手写的，顶替官方名会让同一张卡在不同地方叫法不一致。
+ */
+ok('P13 esim.js 名称优先取卡上官方名（profileName → spName）',
+	/var name = p\.profileName \|\| p\.spName/.test(esimSrc));
+ok('P13 esim.js 昵称不顶替官方名（name 取值链里没有 nickname）',
+	!/var name = [^\n]*p\.nickname/.test(esimSrc));
+/* 反向：把 nickname 塞回 name 链后，上面那条必须能判红（否则是恒绿断言） */
+ok('P13 反向：把 nickname 塞回 name 链后上面的检查必须判红',
+	/var name = [^\n]*p\.nickname/.test(
+		esimSrc.split("var name = p.profileName || p.spName || ''")
+			.join("var name = p.profileName || p.spName || p.nickname")),
+	'替换未生效，或该检查根本识别不出 nickname 顶替');
+/*
+ * P14：ICCID 用等宽字体展示。
+ * ★ 重排后类名由 .mt5700-mono 改为 .mt5700-esim-row-iccid（行卡的 ICCID 行），
+ *   所以这里连着 CSS 一起校验 —— 否则「只换 JS 里的类名」就能骗过这条断言，
+ *   而界面上字体会悄悄退回比例字体，长 ICCID 又变得无法逐位核对。
+ */
+ok('P14 esim.js ICCID 用行卡等宽类展示',
+	/E\('span', \{ 'class': 'mt5700-esim-row-iccid' \}/.test(esimSrc));
+ok('P14 .mt5700-esim-row-iccid 在 CSS 里确实是等宽（否则只是换了个类名）',
+	/\.mt5700-esim-row-iccid\s*\{[^}]*font-family:\s*var\(--mt5700-font-mono\)/.test(cssSrc));
 /* P15：批量「发送全部」不可逆，必须经二次确认 */
 ok('P15 esim.js 发送全部走 Mt5700.confirm 二次确认', /Mt5700\.confirm\('确定发送全部待发回执/.test(esimSrc));
 /* P16：添加向导只堆积一个 stopScan 闭包（wizardStop 先执行并清掉上一个） */
@@ -496,9 +524,40 @@ ok('D8 反向自检：ucode 若重新出现 lpac，D7 的守卫必须判红',
 /* rpc.js / esim.js：自研链路的承接 */
 ok('D9 rpc.js 已无 lpac 探测（只留自研的 es9p）',
 	!/lpacAvailable/.test(rpcSrc) && !/method: 'lpac'/.test(rpcSrc));
-ok('D10 esim.js 展示当前 APDU 通路（CSIM 时点明下载不可用）',
-	/APDU 通路：/.test(esimSrc) && /下载不可用/.test(esimSrc));
+/*
+ * D10：展示当前 APDU 通路，且 CSIM 时必须点明「下载不可用」。
+ * ★ 2026-09-20 重排后，通路信息由一行灰字提升为「徽章 + 一句说明」：
+ *   文案从「APDU 通路：AT+CSIM（…下载不可用）」改为
+ *   「下载通路受限」徽章 +「无法下载新 Profile」。断言随之更新，
+ *   但仍钉住两件实质：① 分支确实由 p.transport 决定；② 不可用时必须明说。
+ */
+ok('D10 esim.js 通路徽章由 p.transport 决定',
+	/p\.transport === 'cgla' \? '下载通路正常' : '下载通路受限'/.test(esimSrc));
+ok('D10 esim.js CSIM 时点明「无法下载新 Profile」',
+	/无法下载新 Profile/.test(esimSrc));
 ok('D11 esim.js 已无 lpac 探测残留', !/probeLpac/.test(esimSrc));
+
+/* ---------- U. eSIM 页 UI 重排后的形态守卫（2026-09-20） ----------
+ *
+ * 这一节钉的是「重排后的形态没有被改回去」，每条都能被违反（见 tools/verify-guards.py）：
+ *   U1  EID 必须是等宽标识块，且 CSS 里真的是等宽 —— 若退回 .mt5700-metric，
+ *       22px 粗体大数字会把 32 位十六进制在窄屏折成三行、无法逐位核对；
+ *   U2  Profile 必须是行卡（状态与操作绑在一起），不能退回 5 列表格 ——
+ *       这一行有哪些操作取决于行自身状态，表格按列摊平会打散这层关系。
+ */
+ok('U1 esim.js EID 用等宽标识块（不回退成 .mt5700-metric 大数字）',
+	/E\('div', \{ 'class': 'mt5700-esim-idvalue' \}, p\.eid/.test(esimSrc) &&
+	!/Mt5700\.metric\('EID'/.test(esimSrc));
+ok('U1 .mt5700-esim-idvalue 在 CSS 里确实是等宽（否则只是换了个类名）',
+	/\.mt5700-esim-idvalue\s*\{[^}]*font-family:\s*var\(--mt5700-font-mono\)/.test(cssSrc));
+ok('U2 esim.js Profile 用行卡而非表格（状态驱动的操作绑在行上）',
+	/mt5700-esim-rows/.test(esimSrc) && /mt5700-esim-row-iccid/.test(esimSrc) &&
+	!/var headers = \['ICCID', '运营商 \/ 名称', '状态', '昵称', '操作'\]/.test(esimSrc));
+ok('U2 CSS 里有行卡与「已启用」色条规则',
+	/\.mt5700-esim-row\s*\{/.test(cssSrc) && /\.mt5700-esim-row\.is-on::before/.test(cssSrc));
+/* 反向：把 is-on 类名换掉后，U2 的 CSS 检查必须判红（防恒绿） */
+ok('U2 反向：色条类名若被改掉，上面的 CSS 检查必须判红',
+	/\.mt5700-esim-row\.is-on::before/.test(replaceAll(cssSrc, 'esim-row.is-on', 'esim-row.is-enabled')) === false);
 
 /* ---------- E. 卡容量展示（2026-09-20） ----------
  *

@@ -343,8 +343,14 @@ return L.view.extend({
 		 *   手动填写   —— 运营商只给了 SM-DP+ 与匹配码（没有二维码）时的兜底。
 		 */
 		function buildAddZone() {
-			var zone = E('div', { 'class': 'mt5700-mt-md' });
-			zone.appendChild(E('div', { 'class': 'mt5700-danger-zone-title' }, '添加 Profile'));
+			/*
+			 * ★ 原来这里用 .mt5700-danger-zone-title 当标题 —— 那是**危险操作区**的
+			 *   样式（红字），而「添加 Profile」是完全正常的功能。红标题出现在正常
+			 *   区域既误导（看着像有风险），又孤立（它的母容器并没有 .mt5700-danger-zone
+			 *   的红框）。改用与卡内其它分区一致的 .mt5700-esim-sectitle。
+			 */
+			var zone = E('div', { 'class': 'mt5700-mt-lg' });
+			zone.appendChild(E('div', { 'class': 'mt5700-esim-sectitle' }, '添加 Profile'));
 
 			if (!es9pState.available) {
 				zone.appendChild(E('p', { 'class': 'mt5700-hint' },
@@ -353,29 +359,32 @@ return L.view.extend({
 					+ '。请确认插件已升级到含该方法的版本、且设备上存在 curl。'));
 				var off = Mt5700.button('添加 Profile', function () { }, 'primary');
 				off.disabled = true;
-				zone.appendChild(off);
+				var offRow = E('div', { 'class': 'mt5700-inline mt5700-mt-sm' });
+				offRow.appendChild(off);
 				/* P02：列出 / 补发待发回执是纯 APDU，不需要 ES9+，故即便下载不可用也保留入口，
 				 *      避免用户在没有 curl 的设备上连「卡上有没有待发回执」的知情权都没有。 */
-				zone.appendChild(Mt5700.ghostButton('处理待发回执', function () { processNotifications(); }));
+				offRow.appendChild(Mt5700.ghostButton('处理待发回执', function () { processNotifications(); }));
+				zone.appendChild(offRow);
 				return zone;
 			}
 
 			zone.appendChild(E('p', { 'class': 'mt5700-hint' },
 				'用运营商给的二维码或激活码下载并写入新 Profile。'
 				+ '下载过程要与运营商服务器通信，期间请保持网络畅通、不要断电。'));
-			var host = E('div', { 'class': 'mt5700-mt-sm' });
-			zone.appendChild(host);
+
 			/* ★ E(tag, attrs, child) 只挂载第 3 个参数、第 4 个起被**静默丢弃**。
-			   原来这里一次传了 5 个参数，结果「处理待发回执」按钮从来没被挂上去
-			   —— 只有「添加 Profile」可见。必须逐个 appendChild。 */
-			var actRow = E('div', { 'class': 'mt5700-mt-sm' });
+			   原来在这里三个节点一次传进去，结果「处理待发回执」按钮从来没被挂上
+			   —— 只有「添加 Profile」可见。必须逐个 appendChild。
+			   host 先声明、后挂载（放按钮下方），按钮回调靠闭包延迟取值。 */
+			var host = E('div', { 'class': 'mt5700-mt-sm' });
+			var actRow = E('div', { 'class': 'mt5700-inline mt5700-mt-sm' });
 			actRow.appendChild(Mt5700.button('添加 Profile', function () { openAddWizard(host); }, 'primary'));
-			actRow.appendChild(document.createTextNode(' '));
 			actRow.appendChild(Mt5700.ghostButton('处理待发回执', function () { processNotifications(); }));
 			zone.appendChild(actRow);
 			zone.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
 				'「处理待发回执」用于补发卡上没发出去的安装结果：'
 				+ '装完 Profile 后卡会生成一条回执，服务器收不到就会一直挂着未确认。'));
+			zone.appendChild(host);
 			return zone;
 		}
 
@@ -1108,24 +1117,41 @@ return L.view.extend({
 			body.appendChild(connBar);
 
 			var headCard = Mt5700.card('eSIM 状态');
-			var metrics = E('div', { 'class': 'mt5700-metrics' });
-			metrics.appendChild(Mt5700.metric('EID', p.eid || '—'));
-			metrics.appendChild(Mt5700.badge('eUICC 已就绪', 'success'));
-			headCard._body.appendChild(metrics);
-			/* R04：展示疑似通道泄漏提示（若 probe 探测到） */
-			if (p.channelNote) {
-				headCard._body.appendChild(E('div', { 'class': 'mt5700-notice-warning' }, p.channelNote));
-			}
 
 			/*
-			 * APDU 通路：由 Euicc.probe() 运行时探测得到（能 CGLA 就 CGLA，否则 CSIM）。
-			 * 写清楚它，是因为**只有 CGLA 能取全大响应** —— 走 CSIM 时下载必然
-			 * 卡在 AuthenticateServer，与其让用户重试，不如一开始就说清楚。
+			 * EID 用等宽文本块，**不**用 .mt5700-metric。
+			 * metric 的 value 是 22px 粗体大数字 —— 那是给「数量」用的；EID 是
+			 * 32 位十六进制**标识符**，大字号在窄屏折三行、字距被拉开，反而读不出
+			 * 一个整体，也没法逐位核对。等宽 + user-select:all（见 CSS）刚好对症。
 			 */
+			var idBox = E('div', { 'class': 'mt5700-esim-idbox' });
+			idBox.appendChild(E('div', { 'class': 'mt5700-esim-idlabel' }, 'EID（eUICC 标识符）'));
+			idBox.appendChild(E('div', { 'class': 'mt5700-esim-idvalue' }, p.eid || '—'));
+			headCard._body.appendChild(idBox);
+
+			/*
+			 * APDU 通路由 Euicc.probe() 运行时探测得到（能 CGLA 就 CGLA，否则 CSIM）。
+			 *
+			 * ★ 它**决定能不能下载** —— 走 CSIM 时必然卡在 AuthenticateServer。
+			 *   原先这只是一行卡片底部的小灰字，用户会直接跳过；这里提成徽章 + 一句
+			 *   说明，让「这台设备现在能不能装新 Profile」在第一屏就有答案。
+			 */
+			var badges = E('div', { 'class': 'mt5700-esim-badges' });
+			badges.appendChild(Mt5700.badge('eUICC 已就绪', 'success'));
+			badges.appendChild(Mt5700.badge(
+				p.transport === 'cgla' ? '下载通路正常' : '下载通路受限',
+				p.transport === 'cgla' ? 'info' : 'warning'));
+			headCard._body.appendChild(badges);
 			headCard._body.appendChild(E('div', { 'class': 'mt5700-hint' },
-				'APDU 通路：' + (p.transport === 'cgla'
-					? 'AT+CGLA（响应分多轮取全，下载可用）'
-					: 'AT+CSIM（单条响应上限 256 字节，下载不可用）')));
+				p.transport === 'cgla'
+					? 'APDU 经 AT+CGLA 透传，响应可分多轮取全，可下载安装新 Profile。'
+					: 'APDU 经 AT+CSIM 透传，单条响应上限 256 字节，无法下载新 Profile'
+						+ '（读取列表、启用 / 禁用 / 删除不受影响）。'));
+
+			/* R04：展示疑似通道泄漏提示（若 probe 探测到） */
+			if (p.channelNote) {
+				headCard._body.appendChild(E('div', { 'class': 'mt5700-notice-warning mt5700-mt-md' }, p.channelNote));
+			}
 
 			/*
 			 * 卡容量：EUICCInfo2 里的 extCardResource（见 Euicc.parseExtCardResource）。
@@ -1133,6 +1159,7 @@ return L.view.extend({
 			 * ★「已装 Profile」这格先占位 —— 它得等 Profile 列表读完才有值，
 			 *   由 renderTable 回填；列表失败时保持「—」，不谎报 0。
 			 */
+			headCard._body.appendChild(E('div', { 'class': 'mt5700-esim-sectitle' }, '卡内存储'));
 			capProfileMetric = null;
 			if (p.capacity) {
 				var capRow = E('div', { 'class': 'mt5700-metrics' });
@@ -1148,11 +1175,11 @@ return L.view.extend({
 				capProfileMetric = Mt5700.metric('已装 Profile', '读取中…');
 				capRow.appendChild(capProfileMetric);
 				headCard._body.appendChild(capRow);
-				headCard._body.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'容量由卡经 GetEuiccInfo2（BF22）上报；SGP.22 只定义「剩余」，不给总容量，故不做百分比。'));
+				headCard._body.appendChild(E('div', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'由卡经 GetEuiccInfo2（BF22）上报。SGP.22 只定义「剩余」，不给总容量，故不做百分比。'));
 			} else {
 				headCard._body.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'卡容量：本卡未在 EUICCInfo2 中上报 extCardResource（走 AT+CSIM 通路时也可能因 256 字节上限截断），暂不可读。'));
+					'本卡未在 EUICCInfo2 中上报 extCardResource（走 AT+CSIM 通路时也可能因 256 字节上限截断），暂不可读。'));
 			}
 			body.appendChild(headCard);
 
@@ -1213,28 +1240,47 @@ return L.view.extend({
 			}
 			listCard._body.innerHTML = '';
 			if (!list.length) {
-				listCard._body.appendChild(Mt5700.empty('卡上暂无可管理的 Profile'));
+				/* 空态是行动的邀请，不是一句结论：直接告诉用户下一步做什么 */
+				listCard._body.appendChild(Mt5700.empty('卡上还没有 Profile。用下面的「添加 Profile」扫码或粘贴激活码安装一个。'));
 				listCard._body.appendChild(buildAddZone());
 				return;
 			}
-			var headers = ['ICCID', '运营商 / 名称', '状态', '昵称', '操作'];
-			var rows = list.map(function (p) {
-				var name = p.profileName || p.spName || p.nickname || '—';
-				var stateCell = p.state === 'enabled'
+			/*
+			 * Profile 用行卡而不是表格（说明见 mt5700.css 的 eSIM 段顶部）。
+			 * 要点：这一行**有哪些操作取决于行自己的状态** ——
+			 *   已启用 → 只能「禁用」，且必须先禁用才能删除（deleteProfile 会拦）；
+			 *   未启用 → 才能「启用」。
+			 * 表格按列摊平会把这层关系打散，行卡把它绑在一起。
+			 */
+			var rows = E('div', { 'class': 'mt5700-esim-rows' });
+			list.forEach(function (p) {
+				var on = (p.state === 'enabled');
+				var row = E('div', { 'class': 'mt5700-esim-row' + (on ? ' is-on' : '') });
+
+				var top = E('div', { 'class': 'mt5700-esim-row-top' });
+				top.appendChild(E('span', { 'class': 'mt5700-esim-row-iccid' },
+					p.iccid || '（未读到 ICCID）'));
+				top.appendChild(on
 					? Mt5700.badge('已启用', 'success')
-					: Mt5700.badge('已禁用', 'neutral');
-				var actions = E('div');
-				actions.appendChild(Mt5700.button(
-					p.state === 'enabled' ? '禁用' : '启用',
-					function () { toggleProfile(p, p.state !== 'enabled'); }, 'primary'));
-				actions.appendChild(Mt5700.button('重命名', function () { renameProfile(p); }, 'ghost'));
-				actions.appendChild(Mt5700.dangerButton('删除', function () { deleteProfile(p); }));
-				return [
-					E('span', { 'class': 'mt5700-mono' }, p.iccid || '—'),
-					name, stateCell, p.nickname || '—', actions
-				];
+					: Mt5700.badge('已禁用', 'neutral'));
+				row.appendChild(top);
+
+				/* 运营商名与昵称合并成一行 —— 原先各占一列，两列都常常是「—」 */
+				var name = p.profileName || p.spName || '';
+				var alias = (p.nickname && p.nickname !== name) ? p.nickname : '';
+				row.appendChild(E('div', { 'class': 'mt5700-esim-row-name' },
+					[name, alias].filter(Boolean).join(' · ') || '未命名 Profile'));
+
+				var acts = E('div', { 'class': 'mt5700-esim-row-acts' });
+				acts.appendChild(Mt5700.button(on ? '禁用' : '启用',
+					function () { toggleProfile(p, !on); }, 'primary'));
+				acts.appendChild(Mt5700.button('重命名', function () { renameProfile(p); }, 'ghost'));
+				acts.appendChild(Mt5700.dangerButton('删除', function () { deleteProfile(p); }));
+				row.appendChild(acts);
+
+				rows.appendChild(row);
 			});
-			listCard._body.appendChild(Mt5700.table(headers, rows));
+			listCard._body.appendChild(rows);
 			listCard._body.appendChild(buildAddZone());
 			/* P07：手动刷新入口（切换 Profile 后卡片正在重注册，自动刷新可能失败，
 			 *      给用户一个兜底按钮，避免「列表卡在旧状态」又无处下手）。 */
