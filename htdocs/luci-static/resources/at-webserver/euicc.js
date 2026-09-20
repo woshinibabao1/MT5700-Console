@@ -2291,11 +2291,42 @@ api.buildEs10b = function (ch, tag, derHex) {
 							return { sent: 0, failed: true, error: (e && e.message) || String(e) };
 						});
 				})
-				.then(function (notif) {
-					onStep(10, '完成');
-					return { transactionId: tx, notification: notif || null };
+			.then(function (notif) {
+				onStep(10, '完成');
+				return { transactionId: tx, notification: notif || null };
+			})
+			.catch(function (e) {
+				/*
+				 * ★ 失败收尾（2026-09-20 真机）：写卡中断之后**两边都没撤** ——
+				 *   服务器会话挂着、卡侧停在半截会话里。后果是下一轮下载会莫名其妙
+				 *   在第 5 段就被 6985 拒掉（探针实测），让人以为卡坏了。
+				 *   这里至少把服务器那半边撤干净（ES9+ cancelSession）。
+				 *   卡侧 ES10b CancelSession 的 tag 没核对过，猜错会把本来就半死的
+				 *   会话搞得更糟，**不下发**（见 api.cancelSession 的注释）。
+				 */
+				if (e && e.sw === '6985') {
+					e.swHint = '下载被拒（6985）最常见的原因是「这个 Profile 卡上已经有了」'
+						+ '（ICCID 冲突）——请先删除再下载；若卡上确实没有，'
+						+ '多为上一次中断留下的会话没清干净，稍等或重启模组再试';
+				}
+				if (!tx) throw e;
+				var p;
+				try {
+					p = api.cancelSession(es9p, smdp, tx);
+				} catch (ce) {
+					log('取消会话失败（不影响上面的报错）：' + ((ce && ce.message) || ce));
+					throw e;
+				}
+				return p.then(function (r) {
+					log((r && r.ok ? '已' : '未能') + '向服务器取消本次会话'
+						+ (r && r.status != null ? '（HTTP ' + r.status + '）' : ''));
+				}, function (ce) {
+					log('取消会话失败（不影响上面的报错）：' + ((ce && ce.message) || ce));
+				}).then(function () {
+					throw e;   /* 收尾归收尾，原始错误原样上抛 */
 				});
-		});
+			});
+	});
 	};
 
 	/*

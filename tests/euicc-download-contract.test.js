@@ -421,6 +421,10 @@ asyncTests.push((function () {
 		ok('步骤推进到「完成」', steps[steps.length - 1].indexOf('10:') === 0,
 			steps.join(' | '));
 		eq('无待发回执时 sent=0', r.notification.sent, 0);
+		eq('★ 成功时不发 cancelSession（收尾只在失败时走，别把装好的单子撤了）',
+			srv.state.calls.filter(function (c) {
+				return String(c.path).indexOf('cancelSession') >= 0;
+			}).length, 0);
 	});
 })());
 
@@ -703,6 +707,58 @@ asyncTests.push((function () {
 		.then(function (r) {
 			eq('非末块的 6F00 是常态，一次就收（不浪费一轮等待）', c.state.n, 1);
 			eq('非末块 6F00 同样按已写入处理', r.sw, '9000');
+		});
+})());
+
+/* ---------- 13. 失败收尾：必须撤掉服务器会话（2026-09-20 真机） ---------- */
+
+/*
+ * 真机：写卡中断之后**两边都没撤** —— 服务器会话挂着、卡侧停在半截会话里。
+ * 结果下一轮下载在第 5 段就被 6985 拒掉（探针实测），看上去像卡坏了。
+ * 下载失败必须把 SM-DP+ 那半边撤干净；同时**绝不能**拿收尾盖掉原始错误。
+ */
+asyncTests.push((function () {
+	const card = makeCard({ prepareSw: '6985' });
+	const srv = makeServer();
+	let err = null;
+	return Euicc.downloadProfile(card.send, srv.es9p, {
+		activation: { smdp: 'rsp.example.com' }
+	}).then(function () {
+		fails.push('下载失败却返回成功');
+	}, function (e) {
+		err = e;
+	}).then(function () {
+		eq('失败照旧抛 EUICC_OP_FAILED（收尾不许吞掉原始错误）', err && err.code, 'EUICC_OP_FAILED');
+		eq('失败照旧带原始 SW', err && err.sw, '6985');
+		const names = srv.state.calls.map(function (c) { return String(c.path).split('/').pop(); });
+		eq('★ 失败后必须向服务器 cancelSession（脏会话会让下一轮被 6985 拒）',
+			names[names.length - 1], 'cancelSession');
+		ok('6985 的提示要点出「卡上已经有了 / 会话没清干净」',
+			/卡上已经有了/.test(String((err && err.swHint) || '')),
+			'hint: ' + (err && err.swHint));
+		eq('收尾失败也不影响通道关闭', card.state.closes, 1);
+	});
+})());
+
+/* 反向：把收尾换成「什么也不做」，上面的 cancelSession 断言必须翻红 */
+asyncTests.push((function () {
+	const noCleanup = src
+		.split('p = api.cancelSession(es9p, smdp, tx);')
+		.join('p = Promise.resolve({ ok: true });');
+	if (noCleanup === src) {
+		fails.push('反向用例没打中源码（收尾那行可能被改名了），检查已失效');
+		return Promise.resolve();
+	}
+	const Neg = eval('(' + noCleanup.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+	const card = makeCard({ prepareSw: '6985' });
+	const srv = makeServer();
+	return Neg.downloadProfile(card.send, srv.es9p, { activation: { smdp: 'rsp.example.com' } })
+		.catch(function () { /* 报错与否不重要，只看有没有发 cancelSession */ })
+		.then(function () {
+			const names = srv.state.calls.map(function (c) { return String(c.path).split('/').pop(); });
+			ok('★ 反向：拆掉收尾后 cancelSession 必须消失（断言不恒绿）',
+				names[names.length - 1] !== 'cancelSession',
+				'拆掉后最后一条仍是 ' + names[names.length - 1]);
 		});
 })());
 
