@@ -281,31 +281,39 @@ return L.view.extend({
 		 * ---------------------------------------------------------------------------
 		 * 与 renderError 分开渲染的理由：这**不是**一句「读取失败」能说清的，用户需要
 		 * 知道①不是页面/固件的锅 ②多做几次没有意义 ③下一步该做什么。
-		 * 事实依据（五轮只读探针，见 .workbuddy/memory/MEMORY.md 的 eSIM 章）：
-		 *   · 基本通道上**每一条**命令都回 6985（SELECT MF / ISD-R / GET EID / READ BINARY；
-		 *     换 GSM 类字节 0xA0 也一样；模组自己的 AT+CRSM=242 同样 6985；CGLA 回 6999）；
-		 *   · 同一张卡在**逻辑通道**上 SELECT MF 回 9000 —— 文件系统是好的；
-		 *   · 卡侧成因：上一次写卡 / 选卡被中断后卡侧没有收尾（SGP.22 的安装会话没收干净），
-		 *     只能靠**复位卡片**（重启模组 / 整机断电重上电）恢复。
-		 *   · 6985 与「M2M 卡 / 厂家锁卡」没有证据链，别在这里写回去。
-		 * 保留一个按钮：重启模组后用户不必刷新页面就能重新探测；文案里点明它不解决当下问题。
+		 *
+		 * ★ 落屏依据必须按 SW 分开说（第一版把它们混成一句，等于替 6999 那条路径
+		 *   编造了没发生过的事实）。真 probe 打真设备（.workbuddy/tmp/probe_real.js）：
+		 *   probe 先 detectTransport → `AT+CGLA=0,...` 回 `+CGLA: 4,"6999"` → transport
+		 *   判成 cgla → 名义通道 1、不 open、无基本通道回退 → SELECT ISD-R 拿 6999。
+		 *   也就是**根本没碰过基本通道**，此时说「基本通道上所有命令都 6985」是假话。
+		 *   两条证据（判据见 euicc.js 的 api.isCardBlockedSw）：
+		 *     · sw=6999（CGLA）：JavaCard SW_APPLET_SELECT_FAILED，ISD-R 选不上；
+		 *     · sw=6985（CSIM 基本通道 ch=0）：卡对最后一条可用通道也拒。
+		 *   同源成因：上一次写卡 / 选卡被中断后卡侧没有收尾，只能靠复位卡片
+		 *   （重启模组 / 整机断电重上电）恢复，软件侧没有可用的复位入口。
+		 *   · 6985 / 6999 与「M2M 卡 / 厂家锁卡」都没有证据链，别在这里写回去。
+		 *
+		 * 正文是 errorState 的**纯文本**子节点（不认 Markdown），不许出现 ** 星号。
 		 */
-		function renderBlocked() {
+		function renderBlocked(p) {
+			var sw = (p && p.sw) || '';
+			var why = (sw === '6999')
+				? '卡片当前选不上 ISD-R 应用（SW=6999，应用选择失败）。'
+				: '卡片对基本通道上的每一条命令都回 6985（SW=6985，使用条件不满足）。';
 			body.innerHTML = '';
 			body.appendChild(connBar);
 			var card = Mt5700.card('eSIM 管理');
-			/* ★ errorState 的正文是**纯文本**子节点，不认 Markdown —— 别在这里写 **粗体**，
-			   会原样显示成星号（踩过）。 */
 			card._body.appendChild(Mt5700.errorState(
-				'读取 eSIM 信息失败：卡片处于暂态阻断。卡片对基本通道上的每一条命令都回 '
-				+ '6985（使用条件不满足），而同一张卡在逻辑通道上仍能正常读写文件 —— '
-				+ '这是上一次写卡 / 选卡过程被中断后卡侧没有收尾留下的状态，不是页面或固件的故障。'
-				+ '反复操作不会改变结果，需要重启模组（或整机断电重上电）后恢复。',
+				'读取 eSIM 信息失败：卡片处于暂态阻断。' + why
+				+ '这是上一次写卡 / 选卡过程被中断后卡侧没有收尾留下的状态，'
+				+ '不是页面或固件的故障。反复操作不会改变结果，'
+				+ '需要重启模组（或整机断电重上电）后恢复。',
 				function () { render(); },
 				'重新探测'));
 			body.appendChild(card);
 			if (typeof console !== 'undefined' && console.warn) {
-				console.warn('[esim] 卡级阻断：基本通道全部 6985，需复位卡片');
+				console.warn('[esim] 卡级阻断（SW=' + sw + '）：卡片需复位，反复探测不会改变结果');
 			}
 		}
 
@@ -1495,7 +1503,7 @@ return L.view.extend({
 					if (p.state === 'no_card') renderNoCard();
 					else if (p.state === 'no_csim') renderNoCsim(p);
 					else if (p.state === 'no_euicc') renderNoEuicc();
-					else if (p.state === 'blocked') renderBlocked();
+					else if (p.state === 'blocked') renderBlocked(p);
 					else if (p.state === 'error') renderError(p);
 					else renderOk(p);
 				});

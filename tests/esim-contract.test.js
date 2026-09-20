@@ -728,6 +728,57 @@ ok('V4 阻断面板文案给出下一步（重启模组 / 整机断电重上电�
 ok('V4 反向：若把分流条件改掉，V3 必须判红',
 	/p\.state === 'blocked'/.test(replaceAll(esimSrc, "p.state === 'blocked'", "p.state === 'error'")) === false);
 
+/* ---------- V5. CGLA 通路 6999 —— **本机实际命中**的那条路径（2026-09-20 真机复现） ----------
+ *
+ * ★ 为什么必须单独钉这条：第一版判据只认「基本通道 6985」，而真 probe 打真设备
+ *   （.workbuddy/tmp/probe_real.js）显示本机**根本走不到基本通道** ——
+ *     probe → detectTransport：`AT+CGLA=0,42,"01A4040C10…"` 回 `+CGLA: 4,"6999"`
+ *     （AT 层 success=true 且可解析）→ transport 判成 cgla → withIsdrSession 名义通道 1、
+ *     不 open、**没有基本通道回退** → SELECT ISD-R 直接拿 6999。
+ *   于是页面照旧掉进 EUICC_OP_FAILED，显示那句没用的「卡片返回了失败状态字」——
+ *   正是用户报的原文。加 6999 这一半之后，同一条真机路径返回
+ *   {"state":"blocked","sw":"6999"}（已实测）。
+ *
+ * 6999 = JavaCard SW_APPLET_SELECT_FAILED：卡上若真没有 ISD-R，SELECT 回的是 6A82
+ * 而不是 6999；它也**不是**通道能力问题（与 6881/6A81 无关）。
+ *
+ * ★ 这条用例必须用**独立实例**（EuiccCgla）。TRANSPORT 是模块级全局，而这些异步
+ *   用例是并发跑的（Promise.all）：若与其它用例共用同一个 Euicc，V5 把通路切成
+ *   cgla 后，并发的 CSIM 用例会被串到 cgla 上，报出
+ *   「异步用例异常：Error: 无法解析 CGLA 应答」—— 用例间互相污染，与用例本身
+ *   要验的东西毫无关系，而且只在新增本用例之后才出现（很隐蔽，2026-09-20 踩过）。
+ *   从同一份源码再 eval 一次即可拿到互不干扰的实例。
+ */
+const EuiccCgla = eval('(' + m[1] + ')')();
+
+function makeCglaBlockedSend() {
+	const log = [];
+	const send = function (cmd) {
+		log.push(cmd);
+		if (cmd === 'AT^SIMSQ?') return Promise.resolve({ success: true, data: '^SIMSQ: 1,12\r\n\r\nOK' });
+		if (cmd === 'AT+CSIM=?') return Promise.resolve({ success: true, data: '+CSIM: (4-520)\r\n\r\nOK' });
+		/* 真机：CGLA 上 SELECT ISD-R 回 6999（AT 层是成功的，SW 在应答里） */
+		if (/^AT\+CGLA=/.test(cmd)) return Promise.resolve({ success: true, data: '+CGLA: 4,"6999"\r\n\r\nOK' });
+		return Promise.resolve({ success: false, error: '未预期的命令: ' + cmd });
+	};
+	return { send: send, log: log };
+}
+
+asyncTests.push((function () {
+	const mock = makeCglaBlockedSend();
+	return EuiccCgla.probe(mock.send).then(function (p) {
+		eq('V5 CGLA 通路 6999（本机实际形态）→ state=blocked', p && p.state, 'blocked');
+		eq('V5 blocked 带上原始 SW（6999），页面据此选对应文案', p && p.sw, '6999');
+		eq('V5 CGLA 实例的通路被识别为 cgla（真机上 detectTransport 就是认的 cgla）',
+			EuiccCgla.getTransport(), 'cgla');
+		ok('V5 确实发出了 CGLA 命令（不是退回 CSIM）',
+			mock.log.filter(function (c) { return /^AT\+CGLA=/.test(c); }).length >= 2,
+			'CGLA 命令数 ' + mock.log.filter(function (c) { return /^AT\+CGLA=/.test(c); }).length);
+		ok('V5 CGLA 下不发 MANAGE CHANNEL OPEN（sessionid=0 时通道由模组自管）',
+			mock.log.filter(function (c) { return /^AT\+CSIM=\d+,"0070000001"/.test(c); }).length === 0);
+	});
+})());
+
 /* ---------- W. 阻断面板的文案与按钮形态（2026-09-20，本轮真踩过两次） ----------
  *
  * W1  errorState 的正文是**纯文本子节点**（E('div', cls, text)），不认 Markdown。
@@ -755,6 +806,17 @@ ok('W2 mt5700.js errorState 收下可选 retryText，且默认仍是「重新尝
 	/retryText \|\| '重新尝试'/.test(mtSrc) && /function \(text, onRetry, retryText\)/.test(mtSrc));
 ok('W2 反向：若把默认值改成别处，上面那条必须判红',
 	/retryText \|\| '重新尝试'/.test(replaceAll(mtSrc, "retryText || '重新尝试'", "retryText || '再来一次'")) === false);
+/*
+ * W3  阻断面板必须按 SW 分文案。
+ *     第一版把两条路径混成一句「卡片对基本通道上的所有命令都回 6985」——
+ *     而 6999 那条路径（本机实际命中的）**根本没碰过基本通道**（探测在 CGLA 上就结束了），
+ *     等于对用户陈述了一件没发生过的事。这类「文案比事实更肯定」的错法不会报错、
+ *     也不会让别的断言变红，只能静态钉住。
+ */
+ok('W3 阻断面板按 SW 分文案（6999 路径没碰过基本通道，不能说成「基本通道都 6985」）',
+	/var why = \(sw === '6999'\)/.test(esimSrc) && /SW=6999/.test(esimSrc));
+ok('W3 反向：把分支写死成 6985 那句必须判红',
+	/var why = \(sw === '6999'\)/.test(replaceAll(esimSrc, "sw === '6999'", "sw === '__X__'")) === false);
 
 /* ---------- 汇总 ---------- */
 

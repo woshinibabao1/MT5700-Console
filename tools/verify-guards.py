@@ -150,9 +150,9 @@ MUTATIONS = [
     ),
     # ---------- 2026-09-20 卡级阻断（基本通道全 6985）的状态分流守卫 ----------
     (
-        "卡级阻断不再单独报（6985 混回 EUICC_OP_FAILED，页面又变成一句「读取失败」）",
+        "卡级阻断不再单独报（SW 混回 EUICC_OP_FAILED，页面又变成一句「读取失败」）",
         "js2",
-        "if (e.sw === '6985' && e.ch === 0) return { state: 'blocked', sw: e.sw };",
+        "if (api.isCardBlockedSw(e.sw, e.ch)) return { state: 'blocked', sw: e.sw };",
         "if (false) return { state: 'blocked', sw: e.sw };",
         "基本通道 6985 → state=blocked",
     ),
@@ -166,9 +166,16 @@ MUTATIONS = [
     (
         "阻断判据丢掉「基本通道」这一半（逻辑通道 6985 也误报成阻断）",
         "js2",
-        "if (e.sw === '6985' && e.ch === 0) return { state: 'blocked', sw: e.sw };",
-        "if (e.sw === '6985') return { state: 'blocked', sw: e.sw };",
+        "\t\treturn sw === '6985' && ch === 0;",
+        "\t\treturn sw === '6985';",
         "阻断判据必须限定基本通道",
+    ),
+    (
+        "阻断判据丢掉 6999 这一半（本机实际命中的那条路径 → 又退回「读取失败」）",
+        "js2",
+        "\t\tif (sw === '6999') return true;",
+        "\t\tif (false) return true;",
+        "CGLA 通路 6999",
     ),
     (
         "把被推翻的「M2M eUICC / 厂家锁卡」结论写回 6985 文案",
@@ -180,14 +187,14 @@ MUTATIONS = [
     (
         "阻断面板不再被状态分流调用（新增状态直接掉进兜底分支）",
         "esimjs",
-        "p.state === 'blocked') renderBlocked();",
-        "false) renderBlocked();",
+        "p.state === 'blocked') renderBlocked(p);",
+        "false) renderBlocked(p);",
         "renderBlocked 且被状态分流调用",
     ),
     (
         "阻断面板文案丢掉下一步动作（只说失败，用户不知道要重启模组）",
         "esimjs",
-        "反复操作不会改变结果，需要重启模组",
+        "反复操作不会改变结果",
         "请稍后重新进入本页",
         "给出下一步",
     ),
@@ -212,6 +219,13 @@ MUTATIONS = [
         "api.primaryButton(retryText || '重新尝试', onRetry)",
         "api.primaryButton(retryText || '再来一次', onRetry)",
         "默认仍是「重新尝试」",
+    ),
+    (
+        "阻断面板按 6985 一句写死（6999 路径下等于陈述没发生过的事实）",
+        "esimjs",
+        "var why = (sw === '6999')",
+        "var why = (false)",
+        "按 SW 分文案",
     ),
 ]
 

@@ -530,6 +530,31 @@ var Euicc = (function () {
 		return sw === '6881' || sw === '6A81';
 	};
 
+	/*
+	 * 是否「卡级阻断（暂态）」这类 SW —— 2026-09-20 真机定稿。
+	 *
+	 * 走真 probe 打真设备（.workbuddy/tmp/probe_real.js）拿到的事实：本机在阻断态下
+	 * **根本不会**走到基本通道 —— probe 先做 detectTransport，`AT+CGLA=0,...` 回
+	 * `+CGLA: 4,"6999"`（AT 层接受且可解析）→ transport 判成 **cgla** → 名义通道 1、
+	 * 不 open、**也没有基本通道回退** → SELECT ISD-R 直接拿 6999。
+	 * 所以只认「基本通道 6985」的判据在本机上一条都命中不了，页面照旧掉进
+	 * EUICC_OP_FAILED，显示那句没用的「卡片返回了失败状态字」。
+	 *
+	 * 两条等价证据，任一条成立即为卡级阻断：
+	 *   ① 6999 = JavaCard SW_APPLET_SELECT_FAILED（ISD-R 选不上）。CGLA 通路下
+	 *      AT 层不报错、只回这个 SW，且它与「这条通道够不着」无关 —— 卡上若真没有
+	 *      ISD-R，SELECT 回的是 6A82 而不是 6999。按既有记录，它只在
+	 *      「ISD-R 选择态丢失（写卡 / 选卡途中被打断）」时出现。
+	 *   ② CSIM 基本通道（ch=0）上 6985 = 卡对最后一条可用通道也拒，而同一张卡的
+	 *      逻辑通道仍可能好使 —— 卡侧没收尾的典型形态。
+	 *      ★ 必须限定 ch === 0：逻辑通道上的 6985 只说明那条通道够不着
+	 *      （见 pingOn 的回退条件），与卡片自身的阻断状态无关。
+	 */
+	api.isCardBlockedSw = function (sw, ch) {
+		if (sw === '6999') return true;
+		return sw === '6985' && ch === 0;
+	};
+
 	/* ============ 通道 / STORE DATA APDU（§1.3） ============ */
 
 	api.openChannelApdu = function () {
@@ -1333,9 +1358,16 @@ var Euicc = (function () {
 		 * 第一步：拿到可用的通道号。
 		 *
 		 * CGLA 通路：**不发 MANAGE CHANNEL**。sessionid=0 下逻辑通道由模组自己管，
-		 *   真机实测 TE 再插手会被拒（6A81）。这里只取一个**名义通道号 1** 用来拼
-		 *   CLA=0x81 —— 与 lpac 一致（它同样用 CLA = 0x80 | channel），且真机
-		 *   下载链路全程以 CLA=0x81 经 CGLA 下发，步骤 4~8 全部通过。
+		 *   真机实测 TE 再插手会被拒（6A81）。这里只取一个**名义通道号 1**，它唯一的
+		 *   作用就是决定 CLA 的通道位（思路与 lpac 一致：下载主体命令带上 0x80）。
+		 *
+		 *   ★ 本文件里**两条 APDU 的 CLA 不是同一个值**，要改请先看清调的是哪个函数：
+		 *     · SELECT ISD-R（selectIsdrApdu）→ CLA 直接把 ch 当一个字节拼上去，
+		 *       ch=1 时是 **0x01**（不带 0x80 位）；
+		 *     · ES10b / ES10c（storeDataApdu / getResponseApdu，下载链路主体）→
+		 *       CLA 是 0x80 按位或上通道号，ch=1 时是 **0x81**。
+		 *   两者都经真机验证可用（2.3.26 端到端：66 段 / 546 块全 9000，卡装成并启用）。
+		 *   所以**保持现状**：想「顺手统一」或改动任何一边的 CLA，都必须重新真机验证整条链路。
 		 *
 		 * CSIM 通路：照旧显式 open，隔离性最好 —— 不占用基本通道的当前选择，
 		 *   不会打断模组 SIM 驱动自己的操作。
@@ -1547,14 +1579,9 @@ var Euicc = (function () {
 					 * ★ 2026-09-20 真机：卡级阻断（暂态）不能和普通 EUICC_OP_FAILED 混成一句
 					 *   「卡片返回了失败状态字，本页无法完成该操作」—— 那句话对排查毫无用处，
 					 *   用户（和我）看不出是卡被锁、固件不行、还是卡卡住了。
-					 *
-					 *   判据：**基本通道**（回退后的 ch=0）上 SELECT ISD-R 拿 6985。
-					 *   为什么这个组合就够：正常/其它故障下 ch=0 的 SELECT 会是 6121/9000
-					 *   （选上了）或 6A82/6D00（真是没有 ISD-R），唯独「卡侧没收尾」才会
-					 *   用 6985 拒掉**每一条**命令，且逻辑通道仍然好使（见 swInfo('6985') 注释）。
-					 *   逻辑通道上的 6985 不在此列 —— 那只是这条通道够不着。
+					 *   判据见 api.isCardBlockedSw 的注释（本机实际命中的是 CGLA 6999 那条）。
 					 */
-					if (e.sw === '6985' && e.ch === 0) return { state: 'blocked', sw: e.sw };
+					if (api.isCardBlockedSw(e.sw, e.ch)) return { state: 'blocked', sw: e.sw };
 					return { state: 'error', error: e.code };
 				});
 			});

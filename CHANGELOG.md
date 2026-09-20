@@ -5,6 +5,60 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.36] - 2026-09-20
+
+### Fixed — 2.3.35 的阻断判据在本机上**一条都不会触发**，改用真机实测路径重写
+
+2.3.35 发的判据是「基本通道（ch=0）SELECT ISD-R 拿 6985」。
+推上去之后拿**真** `euicc.js` 的 `probe` 打**真**设备（不是手写探针，走的
+`detectTransport` → `withIsdrSession` 原路），实际发出的命令只有 4 条：
+
+| 步骤 | 命令 | 回执 |
+| --- | --- | --- |
+| 卡状态 | `AT^SIMSQ?` | `^SIMSQ: 1,12`（模组以为卡就绪） |
+| 能力探测 | `AT+CSIM=?` | `+CSIM: (4-520),(cmd)` |
+| 通路探测 | `AT+CGLA=0,42,"01A4040C10…"` | `+CGLA: 4,"6999"` → transport 判成 **cgla** |
+| 选 ISD-R | `AT+CGLA=0,42,"01A4040C10…"` | `6999` |
+
+即：**CGLA 通路下既不 open 逻辑通道，也没有基本通道回退** —— `probe` 从头到尾
+没碰过 `ch=0`。于是 `e.sw === '6985' && e.ch === 0` 恒不成立，页面照旧掉进
+`EUICC_OP_FAILED`，显示那句没用的「卡片返回了失败状态字」。修完实测
+`probe → {"state":"blocked","sw":"6999"}`。
+
+### Changed
+
+- `euicc.js`：新增 `api.isCardBlockedSw(sw, ch)`，把判据收在一处并写清出处：
+  - `sw === '6999'`（JavaCard `SW_APPLET_SELECT_FAILED`）→ 卡级阻断。
+    CGLA 下 AT 层不报错、只回这个 SW；它不是通道能力问题（卡上真没有 ISD-R 时
+    SELECT 回的是 `6A82`，不是 `6999`）。
+  - `sw === '6985' && ch === 0` → 卡级阻断（CSIM 通路下的等价形态）。
+    ★ 必须限定 `ch === 0`：逻辑通道上的 6985 只说明那条通道够不着。
+- `esim.js`：`renderBlocked()` 改为**按 SW 分文案**。一稿把两条路径混成一句
+  「卡片对基本通道上的**所有**命令都回 6985」—— 而本机命中的 6999 路径
+  **根本没碰过基本通道**，等于对用户陈述了一件没发生过的事。
+- `esim.js`：`renderBlocked(p)` 收下 probe 结果，控制台告警带上实际 SW。
+- `euicc.js` 注释更正（**纯注释，行为未改**）：`withIsdrSession` 里「拼 CLA=0x81」
+  的说法不准 —— SELECT ISD-R 走 `selectIsdrApdu`，CLA 直接把通道号当一个字节
+  （ch=1 → `0x01`）；只有 ES10b/ES10c 的 `storeDataApdu`/`getResponseApdu` 才是
+  `0x80 | 通道号`（ch=1 → `0x81`）。两者都经真机验证可用，故保持现状，
+  但注释原样留着会诱导后人「顺手统一」两处 CLA，这是必须写清的坑。
+
+### Changed — 测试与守卫
+
+- `tests/esim-contract.test.js`：**117 → 124 项**
+  - 新增 **V5**：用真 mock 复现**本机实际命中**的 CGLA 6999 路径，钉住
+    `state=blocked`、`sw=6999`、transport 确实是 cgla、且 CGLA 下不发 `MANAGE CHANNEL OPEN`。
+  - 新增 **W3**：阻断面板必须按 SW 分文案（防止再出现「文案比事实更肯定」）。
+  - ★ 异步用例改为**串行**执行，每条前把通路复位成 `csim`。原因：`Euicc` 的
+    `TRANSPORT` 是模块级全局，而用例原本 `Promise.all` 并发跑；V5 把通路切成
+    cgla 后，并发的 CSIM 用例被串到 cgla 上，报出
+    「无法解析 CGLA 应答」—— 那是用例间互相污染，与用例要验的东西毫无关系，
+    且只在新增本用例后才出现（很隐蔽）。V5 另用**独立实例**，不去动全局通路。
+- `tools/verify-guards.py`：变异 **20 → 25 条**，新增 6999 这一半、阻断面板按 SW
+  分文案、`isCardBlockedSw` 两半各自被丢掉等；25/25 全部检出，逐字节还原一致。
+  ★ 其中「丢掉 `ch === 0`」的变异第一版没被检出（当时的用例走的是
+  `EUICC_NO_EUICC` 分支，根本没碰那个判据）—— 补了对照用例才真的钉住。
+
 ## [2.3.35] - 2026-09-20
 
 ### Fixed — 卡侧暂态阻断不再被报成「一般失败」，6985 文案清掉被推翻的旧结论
