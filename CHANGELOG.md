@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.28] - 2026-09-20
+
+### Changed — 重写 README + 重截全套真机截图
+
+- README 全文重写：补 eSIM 专章（能力边界写清楚——SGP.22 无导出接口，
+  故不做备份/导出）、补「与手机工程模式对齐」的 ARFCN 取值说明、
+  页面表按现有 12 个页面重列、安装示例与版本号同步到当前版本
+- 12 张截图全部重截（含新增的 eSIM 管理页），并按当前视觉统一为全页截图；
+  旧的 6 张错位命名图删除
+- **敏感值已打码**：IMEI / IMSI / ICCID / EID / 公网 IP / 小区标识与 TAC
+  在截图前以脚本替换成掩码，页面本身不改动
+
 ## [2.3.27] - 2026-09-20
 
 ### Changed — eSIM 模块全面排查：UI 美化 + 逻辑/性能/健壮性优化

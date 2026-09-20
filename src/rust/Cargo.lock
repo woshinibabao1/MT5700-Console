@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "at-webserver"
-version = "2.3.27"
+version = "2.3.28"
 dependencies = [
  "async-trait",
  "chrono",
