@@ -815,6 +815,12 @@ var Euicc = (function () {
 		var e = makeError(code, sw);
 		e.swText = info.text;
 		e.swHint = info.hint;
+		/*
+		 * ★ e.sw（2026-09-20）：上层需要按状态码分流，而 e.message 里还可能带
+		 *   别的信息（如「open 失败 SW=xxxx」），靠字符串匹配既脆又容易误判。
+		 *   这里显式挂上原始状态码，调用方一律读 e.sw。
+		 */
+		e.sw = sw;
 		return e;
 	}
 
@@ -944,6 +950,71 @@ var Euicc = (function () {
 			})
 			.catch(function () { /* 关闭失败不影响上层结果 */ });
 	}
+
+	/*
+	 * ★ 写卡阶段的「超时续传」（2026-09-20 真机：eSIM 下载到一半被「模组无响应」掐断）
+	 * ---------------------------------------------------------------------------
+	 * 背景：AT 透传命令的应答时间由**卡片**决定。后端没等到结束码就返回
+	 * 「模组无响应（已等待 Nms，收到 M 行不完整数据）」，但**卡片多半已经把这一块
+	 * 吃下去了** —— 我们只是没拿到它的回执（超时后 pending 被清空，迟到的
+	 * `+CGLA:` / `OK` 会被当成主动上报丢掉）。此时直接判失败，整次下载在半途作废。
+	 *
+	 * 这里做一次**只读**兜底：发 GET RESPONSE（case 2，不写卡）把卡侧回执取回来。
+	 *   ① 取回数据（61xx → 自动取余 / 9000 带数据）→ 那就是这一块真实的响应；
+	 *   ② 卡回「没有待取数据」（6F00）→ 说明这一块的 9000 已经发出、被我们错过，
+	 *      按「已消费」继续下一块（**并在日志里写明**，绝不假装什么都没发生）；
+	 *   ③ 探路自己也超时 → 最多再来一次，仍不行才真的报错。
+	 *
+	 * ★ 只在**写卡分块**这一步启用：鉴权类步骤（BF38 / BF21）的响应带安全语义，
+	 *   猜错的代价远大于重跑一次，那里一律如实报错、让用户重来。
+	 */
+
+	/* 只有「模组还没回结束码」这一类超时才值得续传；
+	   「AT 服务未就绪 / 未连接到调制解调器」是另一回事，续传只会把病因盖住。 */
+	function isAtTimeoutError(e) {
+		if (!e || e.code !== 'EUICC_AT_ERROR') return false;
+		var m = String(e.message || '');
+		return m.indexOf('模组无响应') >= 0 || m.indexOf('不完整数据') >= 0;
+	}
+	api.isAtTimeoutError = isAtTimeoutError;
+
+	function waitMs2(ms) {
+		return new Promise(function (resolve) { setTimeout(resolve, ms); });
+	}
+
+	/*
+	 * 向卡补取一次响应（GET RESPONSE，只读）。
+	 * 返回 { data, sw, recovered }；recovered 为真表示结果不是原命令给的 ——
+	 * 调用方必须把它记进日志，不能让用户以为一切正常。
+	 */
+	function recoverAfterTimeout(send, ch, attempt, log) {
+		if (attempt > 2) {
+			throw makeError('EUICC_AT_ERROR',
+				'连续 ' + attempt + ' 条 APDU 都没收到应答，卡片可能已停止响应');
+		}
+		return waitMs2(500 * attempt).then(function () {
+			return sendAndCollect(send, ch, api.getResponseApdu(ch, 0), 0, '');
+		}).then(function (r) {
+			return { data: r.data || '', sw: r.sw, recovered: true };
+		}, function (e) {
+			if (isAtTimeoutError(e)) return recoverAfterTimeout(send, ch, attempt + 1, log);
+			/*
+			 * 6F00 =「没有精确诊断」，在 GET RESPONSE 语境下就是**卡上没有待取数据**：
+			 * 原命令的 9000 已经发出、只是被我们错过（非末块几乎都是这种）。
+			 * 只认这一个码：6E00（CLA 不被接受）、6A86（P1P2 错）等都是真错误，
+			 * 把它们也当成功，就会把「通道 / 参数错了」掩盖成「写卡成功」。
+			 */
+			if (e && e.sw === '6F00') {
+				if (typeof log === 'function') {
+					log('⚠ 该块未收到应答，卡上也已无待取数据（6F00）——按已写入处理；' +
+						'若最终安装失败，卡侧校验会报错，请整包重下');
+				}
+				return { data: '', sw: '9000', recovered: true, recoveredBy: '6F00' };
+			}
+			throw e;
+		});
+	}
+	api.recoverAfterTimeout = recoverAfterTimeout;
 
 	/*
 	 * 在指定通道上 SELECT ISD-R，再发一条**只读** GetEID 探活。ch=0 表示基本通道。
@@ -2136,10 +2207,21 @@ api.buildEs10b = function (ch, tag, derHex) {
 							chain = chain.then(function () {
 								onStep(8, '写入卡片（段 ' + (si + 1) + '/' + segs.length +
 									'，块 ' + (idx + 1) + '/' + chunks.length + '）');
-								return sendApdu(c);
+								/*
+								 * ★ 卡侧处理一段可能要几秒，后端等不到结束码就报
+								 *   「模组无响应」。此时不要立刻作废整包 —— 先补取一次
+								 *   （见 recoverAfterTimeout 的注释）。
+								 */
+								return sendApdu(c).catch(function (e) {
+									if (!isAtTimeoutError(e)) throw e;
+									log('⚠ ' + seg.label + ' ' + (idx + 1) + '/' + chunks.length +
+										' 未收到应答（' + (e.message || '') + '），正在向卡补取…');
+									return recoverAfterTimeout(send, ch, 1, log);
+								});
 							}).then(function (r) {
 								log('卡 ← ' + seg.label + ' ' + (idx + 1) + '/' +
-									chunks.length + ' SW=' + r.sw);
+									chunks.length + ' SW=' + r.sw +
+									(r.recovered ? '（补取）' : ''));
 								if (r.sw !== '9000' && r.sw !== '9100') {
 									var se = makeSwError('EUICC_OP_FAILED', r.sw);
 									/* 定位到「第几段」—— 一整包几十块时，只报块号等于没报 */

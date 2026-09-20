@@ -140,6 +140,9 @@ async fn run(verbose: bool) -> Result<(), String> {
     let scheduler = Scheduler::new(cfg.schedule.clone(), client.clone(), notifier.clone(), ctx_rx.clone());
     let mut rpc = RpcServer::new(client.clone(), cfg.websocket.auth_key.clone(), scheduler.clone(), ctx_rx.clone());
     rpc.set_scan_timeout(cfg.websocket.scan_timeout);
+    // APDU 透传类命令的应答预算（eSIM 写卡靠它不被 2 秒掐断），UCI 可配。
+    atclient::set_apdu_timeout(cfg.at.apdu_timeout);
+    log_info!("APDU 应答超时 {}s（UCI apdu_timeout）", cfg.at.apdu_timeout.as_secs());
     let rpc = Arc::new(rpc);
 
     // 上报分发：Broadcast 走事件总线，前端轮询 events(since) 拉取。

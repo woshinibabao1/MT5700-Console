@@ -408,14 +408,25 @@ impl RpcServer {
 
         let command = normalize_syscfgex(command);
 
-        // 外层超时 = 排队预算 + 应答预算 + 余量。
-        // 排队预算单独给足，避免初始化/重连期间用户的终端命令被外层提前掐断，
-        // 从而出现「模组无响应」的假失败（终端页只有 ATI 有回复的根因）。
+        /*
+         * 应答预算按命令类型分档（2026-09-20：eSIM 下载到一半被掐断）。
+         *
+         * APDU 透传类（AT+CSIM / AT+CGLA / 逻辑通道管理）的耗时由**卡片**决定，
+         * 模组只是搬运工 —— 卡做密钥运算或非易失写入时，单条跳到秒级是常态，
+         * 套用普通命令的 2 秒预算就会在下载中途报「模组无响应」。
+         * 详见 atclient::DEFAULT_APDU_TIMEOUT 的注释。
+         *
+         * 外层 = 排队预算 + 应答预算 + 余量，两者必须同步放大，
+         * 否则外层会先于 atclient 放弃，把一场正常的慢应答掐成「命令执行超时」。
+         */
+        let answer = if crate::atclient::is_apdu_command(&command) {
+            crate::atclient::apdu_timeout()
+        } else {
+            crate::atclient::COMMAND_TIMEOUT
+        };
         let result = tokio::time::timeout(
-            crate::atclient::QUEUE_WAIT_TIMEOUT
-                + crate::atclient::COMMAND_TIMEOUT
-                + Duration::from_secs(3),
-            self.client.send_command(&self.ctx, &command, crate::atclient::COMMAND_TIMEOUT, None),
+            crate::atclient::QUEUE_WAIT_TIMEOUT + answer + Duration::from_secs(3),
+            self.client.send_command(&self.ctx, &command, answer, None),
         )
         .await;
 

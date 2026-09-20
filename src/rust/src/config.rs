@@ -45,6 +45,9 @@ pub struct AtConfig {
     pub autodial_enable: bool,
     /// 自动拨号方式：1=USB网络接口，2=转网口模式
     pub autodial_mode: i64,
+    /// APDU 透传类命令（AT+CSIM / AT+CGLA / 逻辑通道管理）的应答超时。
+    /// 这类命令的耗时由卡片决定，见 atclient::DEFAULT_APDU_TIMEOUT 的注释。
+    pub apdu_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +140,7 @@ pub fn default_config() -> Config {
             // 自动拨号默认开启：模组不拨号则 USB 网口不会有 DHCP，接口拿不到 IP
             autodial_enable: true,
             autodial_mode: 1,
+            apdu_timeout: crate::atclient::DEFAULT_APDU_TIMEOUT,
         },
         notification: NotificationConfig {
             wechat_webhook: String::new(),
@@ -302,6 +306,16 @@ pub async fn load_config() -> Config {
     // 直到 open_serial 才失败。非支持档位的兜底回退在 serial_linux::open_serial 内。
     cfg.at.serial.baudrate = values.int("serial_baudrate", 115200).clamp(9600, 4000000) as u32;
     cfg.at.serial.timeout = values.seconds("serial_timeout", cfg.at.serial.timeout, Duration::from_secs(1));
+    /*
+     * APDU 应答超时：eSIM 下载/写卡时卡侧可能耗时数秒（见 atclient 的注释）。
+     * 下限取 2 秒（与 COMMAND_TIMEOUT 对齐）—— 防止把「写卡必然超时」配出来；
+     * 上限不限：卡片越慢，用户越需要给足时间。
+     */
+    cfg.at.apdu_timeout = values.seconds(
+        "apdu_timeout",
+        cfg.at.apdu_timeout,
+        crate::atclient::COMMAND_TIMEOUT,
+    );
 
     // 自动拨号：默认开启。模组不拨号则不会给 USB 网口下发 DHCP，接口拿不到 IP。
     cfg.at.autodial_enable = values.bool("autodial_enable", true);

@@ -17,6 +17,52 @@ use tokio::sync::{mpsc, Mutex, Notify};
 
 const COMMAND_GAP: Duration = Duration::from_millis(100);
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// APDU 透传类命令（`AT+CSIM` / `AT+CGLA` / 逻辑通道管理）的应答超时。
+///
+/// ★ 为什么不能共用 COMMAND_TIMEOUT(2s)
+/// （2026-09-20 真机：eSIM 下载到一半「模组无响应（已等待 2000ms，收到 4 行不完整数据）」）：
+/// 普通 AT 命令的应答在 200ms 量级（本机实测 AT+CSQ ≈ 130~205ms），2 秒绰绰有余；
+/// 但 APDU 透传命令的耗时由**卡片**决定 —— 模组只负责搬运，卡什么时候吐出结束码
+/// 取决于它自己。eSIM 写卡时每一段 STORE DATA 都可能触发卡侧的密钥运算与非易失
+/// 写入，含加密 Profile 数据的 A3 段尤其明显，单条跳到秒级是常态。
+/// 共用 2 秒预算的表现就是：进度条一路在动，走到某一段突然被掐断。
+///
+/// 取 12 秒：远大于卡片单次写入的合理上界，同时让「一条命令最坏耗时」留在 ubus
+/// 默认的 30 秒以内（排队 8s + 本值 12s + 余量 ≈ 23s），不至于被上层先掐断。
+/// 可由 UCI `at-webserver.config.apdu_timeout` 覆盖 —— 调这个值不必重新编译。
+pub const DEFAULT_APDU_TIMEOUT: Duration = Duration::from_secs(12);
+
+static APDU_TIMEOUT: OnceLock<Duration> = OnceLock::new();
+
+/// 由 main 读完 UCI 后调用。未调用（或测试里直接构造 client）时取默认值。
+pub fn set_apdu_timeout(d: Duration) {
+    let _ = APDU_TIMEOUT.set(d);
+}
+
+pub fn apdu_timeout() -> Duration {
+    *APDU_TIMEOUT.get().unwrap_or(&DEFAULT_APDU_TIMEOUT)
+}
+
+/// 判定一条 AT 命令是不是「APDU 透传」类 —— 这类命令的应答时间由卡片而非模组决定。
+///
+/// 只认命令名、不认参数：`AT+CSIM=10,"80E2…"` 与 `AT+CSIM=?` 同属一类
+/// （能力探测本来返回就快，走长超时没有副作用）。
+pub fn is_apdu_command(command: &str) -> bool {
+    // 用 get(..7) 而不是 &c[..7]：后者在字节边界上会 panic，
+    // 而本 crate 的 release 是 panic = "abort"，一次越界就是进程退出。
+    match command.trim().get(..7) {
+        Some(head) => {
+            head.eq_ignore_ascii_case("AT+CSIM")
+                || head.eq_ignore_ascii_case("AT+CGLA")
+                || head.eq_ignore_ascii_case("AT+CCHO")
+                || head.eq_ignore_ascii_case("AT+CCHC")
+                || head.eq_ignore_ascii_case("AT+CCHP")
+        }
+        None => false,
+    }
+}
+
 /// 等待命令锁的独立预算。
 ///
 /// 背景（AT 终端「只有 ATI 有回复」的根因）：
@@ -629,12 +675,30 @@ impl AtClient {
          * 它本就不代表命令完成，见 consume() 内注释）。
          */
         if !answered {
-            return Err(format!(
+            let msg = format!(
                 "模组无响应（已等待 {}ms，收到 {} 行不完整数据）: {}",
                 timeout.as_millis(),
                 lines.len(),
                 command.trim()
-            ));
+            );
+            /*
+             * ★ 末行摘要（2026-09-20）：「收到 N 行」只说明没等到结束码，说明不了
+             *   卡/模组当时在干什么。把最后两行的**前 12 个字符**记进日志，就能一眼
+             *   区分「卡还没吐数据」与「吐了一半」（例如 `+CGLA: 4,"90`）。
+             *   只取前缀：完整响应里可能含 ICCID / EID 之类的卡数据，不该落进日志。
+             */
+            let tail: Vec<String> = lines
+                .iter()
+                .rev()
+                .take(2)
+                .map(|l| {
+                    let t = l.trim();
+                    let head: String = t.chars().take(12).collect();
+                    if t.chars().count() > 12 { head + "…" } else { head }
+                })
+                .collect();
+            log_warn!("{}；末行: {:?}", msg, tail);
+            return Err(msg);
         }
         if lines.is_empty() {
             // 收到过结束码但没攒到任何内容（例如模组只回一个空结束码）。
@@ -914,6 +978,51 @@ mod tests {
         // 应答里混有其它行时，只认 ^SETAUTODIAL
         let mixed = "^HCSQ: \"NR\",72,201,30\r\n^SETAUTODIAL: 1,2\r\nOK";
         assert_eq!(parse_autodial_enable(mixed), Some(true));
+    }
+
+    /* ---------- APDU 透传的独立应答预算 ---------- */
+
+    /// APDU 透传类命令必须拿到比普通命令宽的预算；普通命令必须维持 2 秒。
+    ///
+    /// 反例（2026-09-20 真机）：eSIM 下载到一半「模组无响应（已等待 2000ms，
+    /// 收到 4 行不完整数据）」—— 写卡时卡侧做密钥运算与非易失写入，单条跳到
+    /// 秒级是常态，而普通 AT 命令实测只有 130~205ms。反过来，若把普通命令也
+    /// 放宽到 12 秒，一次「模组真的死了」就要空等 12 秒 —— 两边都不能越界。
+    #[test]
+    fn apdu_commands_get_their_own_budget() {
+        for c in [
+            "AT+CSIM=10,\"80E2000005\"",
+            "AT+CGLA=1,20,\"81E2910006\"",
+            "AT+CCHO=\"A0000005591010FFFFFFFF8900000100\"",
+            "AT+CCHC=1",
+            "AT+CCHP=1",
+            "at+csim=?",          // 大小写与「测试命令」形态同样算
+            "  AT+CSIM=10,\"80\"", // 前导空白
+        ] {
+            assert!(is_apdu_command(c), "{c} 应判为 APDU 透传类");
+        }
+        for c in ["AT", "AT+CSQ", "AT+CEREG?", "AT+CPIN?", "AT+CMGS=20", "AT+CFUN=1"] {
+            assert!(!is_apdu_command(c), "{c} 不应判为 APDU 透传类");
+        }
+    }
+
+    /// 短字符串 / 空串不能 panic —— 本 crate 的 release 是 `panic = "abort"`，
+    /// 一次切片越界就是进程退出（这里原本就是 `&c[..7]` 的高危写法）。
+    #[test]
+    fn apdu_command_check_survives_short_input() {
+        for c in ["", "A", "AT", "AT+", "AT+C", "AT+CS"] {
+            assert!(!is_apdu_command(c), "{c:?} 不应判为 APDU 透传类");
+        }
+    }
+
+    #[test]
+    fn apdu_timeout_is_longer_than_generic_command_timeout() {
+        assert!(
+            apdu_timeout() > COMMAND_TIMEOUT,
+            "APDU 预算 {}s 必须大于普通命令的 {}s",
+            apdu_timeout().as_secs(),
+            COMMAND_TIMEOUT.as_secs()
+        );
     }
 
     /* ---------- 排队超时与应答超时分离（对应「终端只有 ATI 有回复」修复） ---------- */

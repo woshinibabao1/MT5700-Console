@@ -521,6 +521,122 @@ asyncTests.push((function () {
 ok('新增的 EUICC_NO_ES9P / EUICC_ES9P_FAILED 已在 ERR_CODES 里',
 	Euicc.ERR_CODES.indexOf('EUICC_NO_ES9P') >= 0 && Euicc.ERR_CODES.indexOf('EUICC_ES9P_FAILED') >= 0);
 
+/* ---------- 12. 写卡中途「模组无响应」的续传（2026-09-20 真机 bug） ---------- */
+
+/*
+ * 真机现象：进度条一路在动，走到某一块突然
+ *   「下载失败：AT 服务未就绪：模组无响应（已等待 2000ms，收到 4 行不完整数据）」。
+ *
+ * 根因是 APDU 透传命令的耗时由**卡片**决定（写卡时卡侧做密钥运算与非易失写入），
+ * 后端却一律按普通命令的 2 秒预算等；超时后 pending 被清空，卡迟到的回执被当成
+ * 主动上报丢掉，整包就此作废 —— 而卡其实多半已经把那一块吃下去了。
+ *
+ * 两条防线：
+ *   ① 后端给 APDU 类命令独立的应答预算（Rust APDU_TIMEOUT，见 atclient）；
+ *   ② 万一还是超时，前端发一条**只读** GET RESPONSE 把回执补回来（recoverAfterTimeout）。
+ *
+ * 本节钉死第 ② 条。注意它只认 6F00（「卡上没有待取数据」）为「已消费」，
+ * 6E00 / 6A86 这类真错误必须照旧上抛 —— 把错误当成功比直接失败更糟。
+ */
+
+/* 按顺序应答的 mock send；null 表示「模组无响应」超时 */
+function seqSend(answers) {
+	let i = 0;
+	return function () {
+		const a = answers[Math.min(i, answers.length - 1)];
+		i++;
+		if (a === null) {
+			return Promise.resolve({
+				success: false,
+				error: '模组无响应（已等待 2000ms，收到 4 行不完整数据）: AT+CSIM=20,"80C0000000"'
+			});
+		}
+		return Promise.resolve({ success: true, data: csimAnswer(a) });
+	};
+}
+
+Euicc.setTransport('csim');
+
+/* 12.1 超时判定：只有「没等到结束码」这一类才续传 */
+ok('isAtTimeoutError 认「模组无响应（已等待 Nms，收到 M 行不完整数据）」',
+	Euicc.isAtTimeoutError({
+		code: 'EUICC_AT_ERROR',
+		message: 'AT 服务未就绪：模组无响应（已等待 2000ms，收到 4 行不完整数据）: AT+CGLA=1,20,"81E2"'
+	}) === true);
+ok('isAtTimeoutError 不认「未连接到调制解调器」（那是另一回事，续传会盖住病因）',
+	Euicc.isAtTimeoutError({ code: 'EUICC_AT_ERROR', message: 'AT 服务未就绪：未连接到调制解调器' }) === false);
+ok('isAtTimeoutError 不认非 EUICC_AT_ERROR（卡片状态码不能被当成超时）',
+	Euicc.isAtTimeoutError({ code: 'EUICC_OP_FAILED', message: '模组无响应' }) === false);
+ok('isAtTimeoutError 对空值不抛异常', Euicc.isAtTimeoutError(null) === false);
+
+/* 12.2 卡上已无待取数据（6F00）→ 按已写入处理，但必须写进日志 */
+asyncTests.push((function () {
+	const logs = [];
+	return Euicc.recoverAfterTimeout(seqSend(['6F00']), 1, 1, function (s) { logs.push(s); })
+		.then(function (r) {
+			eq('补取 6F00：按已写入处理（sw 归一为 9000）', r.sw, '9000');
+			eq('补取 6F00：结果标记为 recovered', r.recovered, true);
+			ok('补取 6F00：必须把「未收到应答」写进日志（不许假装什么都没发生）',
+				logs.length > 0 && String(logs[0]).indexOf('6F00') >= 0,
+				'日志实际: ' + JSON.stringify(logs));
+		});
+})());
+
+/* 12.3 卡上还有数据 → 自动取余，返回的就是这一块真实的响应 */
+asyncTests.push((function () {
+	return Euicc.recoverAfterTimeout(seqSend(['6105', 'AABBCCDDEE9000']), 1, 1, function () { })
+		.then(function (r) {
+			eq('补取 61xx：自动取余后返回完整数据', r.data.toUpperCase(), 'AABBCCDDEE');
+			eq('补取 61xx：最终 SW', r.sw, '9000');
+		});
+})());
+
+/* 12.4 卡回真错误（6E00：CLA 不被接受）→ 照旧上抛，绝不当成功 */
+asyncTests.push(threw('补取遇到 6E00 必须如实抛错（不能当「已写入」）', function () {
+	return Euicc.recoverAfterTimeout(seqSend(['6E00']), 1, 1, function () { })
+		.then(function (r) {
+			throw new Error('不该走到这里，实际返回 ' + JSON.stringify(r));
+		});
+}, null));
+
+/* 12.5 补取自己也一直超时 → 最多两次，之后明确报错 */
+asyncTests.push(Euicc.recoverAfterTimeout(seqSend([null]), 1, 1, function () { })
+	.then(function (r) {
+		fails.push('连续超时竟返回成功：' + JSON.stringify(r));
+	}, function (e) {
+		eq('补取连续超时：抛 EUICC_AT_ERROR', e && e.code, 'EUICC_AT_ERROR');
+		ok('补取连续超时：文案说明卡片可能已停止响应',
+			/停止响应/.test(String(e && e.message || '')), '文案: ' + (e && e.message));
+	}));
+
+/* 12.6 静态：写卡分块确实用了续传，且只用在写卡这一步 */
+const writeLoop = src.slice(src.indexOf('var chain = Promise.resolve'), src.indexOf('return chain.then'));
+ok('写卡分块超时后先补取而不是直接作废整包',
+	/sendApdu\(c\)\.catch\(function \(e\) \{[\s\S]{0,200}isAtTimeoutError\(e\)[\s\S]{0,300}recoverAfterTimeout\(send, ch, 1, log\)/.test(writeLoop),
+	'写卡循环里没有补取分支，超时仍会整包作废');
+ok('补取结果在日志里标「补取」（用户能看出这一块不是正常回执）',
+	/r\.recovered \? '（补取）' : ''/.test(writeLoop),
+	'补取回来的结果和普通结果长得一样，排查时无法区分');
+ok('makeSwError 挂了 e.sw（6F00 判定靠它，靠字符串匹配 message 太脆）',
+	/e\.sw = sw;/.test(src), 'makeSwError 没挂 e.sw');
+/*
+ * 「只用在写卡这一步」：外部调用点恰好 1 处。
+ * 函数体内还有一次递归（attempt+1），所以不能数函数名出现的总次数。
+ */
+ok('续传只在写卡分块启用（外部调用点恰好 1 处，鉴权步骤不得猜）',
+	src.split('recoverAfterTimeout(send, ch, 1,').length - 1 === 1,
+	'外部调用点 ' + (src.split('recoverAfterTimeout(send, ch, 1,').length - 1) + ' 处（期望 1）');
+/* 反向：拆掉补取后，同一检查必须判红（split/join 全局替换，只换第一处会恒绿） */
+const noRecover = src.split('recoverAfterTimeout(send, ch, 1, log)').join('Promise.reject(e)');
+ok('反向：把补取换回「直接失败」后，写卡循环里的补取检查必须判红',
+	!/isAtTimeoutError\(e\)[\s\S]{0,300}recoverAfterTimeout\(send, ch, 1, log\)/
+		.test(noRecover.slice(noRecover.indexOf('var chain = Promise.resolve'),
+			noRecover.indexOf('return chain.then'))),
+	'拆掉补取后仍判为通过，检查无效');
+ok('反向：拆掉补取后外部调用点计数必须归零（防止有人用注释/字符串绕过计数）',
+	noRecover.split('recoverAfterTimeout(send, ch, 1,').length - 1 === 0,
+	'拆掉后仍有 ' + (noRecover.split('recoverAfterTimeout(send, ch, 1,').length - 1) + ' 处调用');
+
 /* ---------- 汇总 ---------- */
 
 Promise.all(asyncTests).then(function () {

@@ -108,6 +108,10 @@ function ATClient() {
 	this.authenticated = true;       // RPC 模式：登录态由 LuCI/rpcd 会话保证
 	this.requireAuth = false;
 	this.authKey = '';
+	/*
+	 * 单条命令的前端等待上限。后端最坏 13s（atclient 2s 应答 + 8s 排队 + 3s 写入），
+	 * 这里给 14s 留 1s 余量。APDU 透传类命令另有更宽的预算，见 isApduCommand。
+	 */
 	this.commandTimeout = 14000;
 	this.subscribers = [];            // 推送订阅者
 	this.stateCallbacks = [];
@@ -307,6 +311,27 @@ function isRetryableRead(command) {
 }
 
 /*
+ * APDU 透传类命令（AT+CSIM / AT+CGLA / 逻辑通道管理）。
+ *
+ * ★ 它们的等待预算必须比普通命令宽（2026-09-20 真机：eSIM 下载到一半突然中断，
+ *   报「模组无响应（已等待 2000ms，收到 4 行不完整数据）」）。
+ *   原因：这类命令的耗时由**卡片**决定，模组只是搬运 —— eSIM 写卡时卡侧做密钥
+ *   运算与非易失写入，单条跳到秒级是常态，而普通 AT 命令实测只有 130~205ms。
+ *   后端对这类命令的应答预算是 APDU_TIMEOUT（默认 12s，UCI apdu_timeout），
+ *   若前端还按普通命令的 14s/20s 等，就会在后端仍在等卡的时候先放弃。
+ *
+ * 预算与后端对齐：wait 30s（> 排队 8s + 应答 12s + 余量）、budget 45s（对齐 ucode
+ * 的 `timeout 45 nc`）。两者都只放宽「上限」，不改变任何命令的语义。
+ */
+var APDU_WAIT_MS = 30000;
+var APDU_BUDGET_MS = 45000;
+
+function isApduCommand(command) {
+	var c = String(command == null ? '' : command).trim();
+	return /^AT\+(CSIM|CGLA|CCHO|CCHC|CCHP)\b/i.test(c);
+}
+
+/*
  * 模组把错误当普通文本返回时的判定（ERROR / +CME ERROR / +CMS ERROR）
  *
  * ★ 必须**行锚定**且**不带 /i**。早期写法
@@ -480,12 +505,15 @@ ATClient.prototype.sendCommand = function (command, opts) {
 		: (isRetryableRead(command) ? 3 : 1);
 	/*
 	 * ★ P04（2026-09-19 会审）：给单条命令加总预算。
-	 * 后端最坏 13s（atclient 2s 应答 + 8s 排队 + 3s 写入）、ucode 侧 `timeout 20 nc` 兜底；
+	 * 后端最坏 13s（atclient 2s 应答 + 8s 排队 + 3s 写入）、ucode 侧 `timeout 45 nc` 兜底；
 	 * 而前端原本 3 次重试 × 14s ≈ 42.6s —— 其中约 29s 是后端早已放弃之后的纯空等，
 	 * 并且 commandQueue 是全局单链，这段时间本页快/慢档、其它页面、用户手动刷新
-	 * 的全部 AT 都排在它后面。默认 20000 与 ucode 对齐；调用方可传 opt.budgetMs 覆盖。
+	 * 的全部 AT 都排在它后面。默认 20000；调用方可传 opt.budgetMs 覆盖。
+	 * APDU 透传类命令走更宽的 APDU_BUDGET_MS（见 isApduCommand 的注释）。
 	 */
-	var budget = opt.budgetMs != null ? opt.budgetMs : 20000;
+	var apdu = isApduCommand(command);
+	var budget = opt.budgetMs != null ? opt.budgetMs : (apdu ? APDU_BUDGET_MS : 20000);
+	var waitCap = apdu ? APDU_WAIT_MS : self.commandTimeout;
 	var t0 = Date.now();
 
 	this.commandQueue = this.commandQueue.then(function () {
@@ -498,7 +526,7 @@ ATClient.prototype.sendCommand = function (command, opts) {
 				return { success: false, error: '命令总预算已用尽（' + budget + 'ms）' };
 			}
 			var waitMs = Math.max(1000,
-				Math.min(self.commandTimeout, budget - (Date.now() - t0)));
+				Math.min(waitCap, budget - (Date.now() - t0)));
 			return withTimeout(rpcAt(command), waitMs,
 				'命令执行超时（模组可能正忙或正在重连，请稍后重试）').then(function (resp) {
 				resp = resp || {};

@@ -324,14 +324,19 @@ function rpcCall(method, params) {
 	 * 注意：本固件的 busybox nc 是精简版，**不认 -w 选项**（传 -w 只会打印
 	 * usage 并立刻退出，会让所有 RPC 全部失败），限时只能靠外部的 timeout。
 	 *
-	 * 上限取 20 秒而不是更短：后端最坏耗时是有上界的 ——
+	 * 上限取 45 秒：后端最坏耗时是有上界的 ——
 	 * 普通命令 QUEUE_WAIT(8s) + WRITE(3s) + COMMAND_TIMEOUT(2s) = 13s，
-	 * 短信后台任务 QUEUE_WAIT(8s) + WRITE(3s) + SMS_SEND_TIMEOUT(6s) = 17s。
-	 * 20s 留了余量，只会兜住「真的不回包」，不会把正常的慢响应掐掉。
-	 * （后端后来给写入也加了 3s 超时，预算按加过之后的最坏值核过，仍然够。）
+	 * 短信后台任务 QUEUE_WAIT(8s) + WRITE(3s) + SMS_SEND_TIMEOUT(6s) = 17s，
+	 * APDU 透传（AT+CSIM / AT+CGLA，eSIM 读写卡）QUEUE_WAIT(8s) + WRITE(3s)
+	 * + APDU_TIMEOUT(12s) = 23s。
+	 * 45s 留了余量：只会兜住「真的不回包」，不会把正常的慢响应掐掉。
+	 *
+	 * ★ 为什么必须跟着 APDU 一起放宽（2026-09-20 真机：eSIM 下载到一半中断）：
+	 *   卡侧处理一段 STORE DATA 可能要几秒，后端等得起而这里等不起的话，
+	 *   一次正常的慢应答会被本层掐成「Rust 后端无应答」，病因完全对不上。
 	 */
 	try {
-		p = fs.popen('timeout 20 nc 127.0.0.1 ' + port + ' < ' + tmp, 'r');
+		p = fs.popen('timeout 45 nc 127.0.0.1 ' + port + ' < ' + tmp, 'r');
 	} catch (e) {
 		rpcTmpUnlink(tmp);
 		return { success: false, error: '无法连接 Rust 后端' };
@@ -351,7 +356,7 @@ function rpcCall(method, params) {
 	rpcTmpUnlink(tmp);
 
 	if (!line) {
-		return { success: false, error: 'Rust 后端无应答（已限时 20 秒）' };
+		return { success: false, error: 'Rust 后端无应答（已限时 45 秒）' };
 	}
 
 	try {
