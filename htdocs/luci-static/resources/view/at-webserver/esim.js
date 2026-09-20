@@ -244,7 +244,10 @@ return L.view.extend({
 			EUICC_CHANNEL_LEAK: '疑似逻辑通道泄漏，建议重启模组后再试。',
 			EUICC_NO_EUICC: '这张卡上没有 ISD-R（通常是普通 USIM，不是 eUICC）。',
 			EUICC_BUSY: '卡片正忙，约 10 秒后重试。',
-			EUICC_POLICY_DENIED: '卡片拒绝了该操作（可能是 M2M 卡或厂家锁卡，再试通常也不会变）。',
+			/* ★ 2026-09-20：原文案「可能是 M2M 卡或厂家锁卡」已被真机推翻（见 euicc.js
+			   swInfo('6985') 注释），且 ES10 result 3 与「卡被锁」并没有因果证据；
+			   保持可读即可，不再往「M2M / 锁卡」上引。 */
+			EUICC_POLICY_DENIED: '卡片当前不允许该操作（Profile 状态不符，或卡侧策略拒绝）。',
 			EUICC_OP_FAILED: '卡片返回了失败状态字，本页无法完成该操作。',
 			EUICC_TLV_TRUNCATED: '卡片返回的数据过长，分次取余超过了上限。',
 			EUICC_UNSUPPORTED_TAG: '卡片返回了本页不认识的数据字段。',
@@ -270,6 +273,39 @@ return L.view.extend({
 			body.appendChild(card);
 			if (code && typeof console !== 'undefined' && console.warn) {
 				console.warn('[esim] 探测错误 code=' + code);
+			}
+		}
+
+		/*
+		 * 卡级阻断（暂态）——2026-09-20 真机新增。
+		 * ---------------------------------------------------------------------------
+		 * 与 renderError 分开渲染的理由：这**不是**一句「读取失败」能说清的，用户需要
+		 * 知道①不是页面/固件的锅 ②多做几次没有意义 ③下一步该做什么。
+		 * 事实依据（五轮只读探针，见 .workbuddy/memory/MEMORY.md 的 eSIM 章）：
+		 *   · 基本通道上**每一条**命令都回 6985（SELECT MF / ISD-R / GET EID / READ BINARY；
+		 *     换 GSM 类字节 0xA0 也一样；模组自己的 AT+CRSM=242 同样 6985；CGLA 回 6999）；
+		 *   · 同一张卡在**逻辑通道**上 SELECT MF 回 9000 —— 文件系统是好的；
+		 *   · 卡侧成因：上一次写卡 / 选卡被中断后卡侧没有收尾（SGP.22 的安装会话没收干净），
+		 *     只能靠**复位卡片**（重启模组 / 整机断电重上电）恢复。
+		 *   · 6985 与「M2M 卡 / 厂家锁卡」没有证据链，别在这里写回去。
+		 * 保留一个按钮：重启模组后用户不必刷新页面就能重新探测；文案里点明它不解决当下问题。
+		 */
+		function renderBlocked() {
+			body.innerHTML = '';
+			body.appendChild(connBar);
+			var card = Mt5700.card('eSIM 管理');
+			/* ★ errorState 的正文是**纯文本**子节点，不认 Markdown —— 别在这里写 **粗体**，
+			   会原样显示成星号（踩过）。 */
+			card._body.appendChild(Mt5700.errorState(
+				'读取 eSIM 信息失败：卡片处于暂态阻断。卡片对基本通道上的每一条命令都回 '
+				+ '6985（使用条件不满足），而同一张卡在逻辑通道上仍能正常读写文件 —— '
+				+ '这是上一次写卡 / 选卡过程被中断后卡侧没有收尾留下的状态，不是页面或固件的故障。'
+				+ '反复操作不会改变结果，需要重启模组（或整机断电重上电）后恢复。',
+				function () { render(); },
+				'重新探测'));
+			body.appendChild(card);
+			if (typeof console !== 'undefined' && console.warn) {
+				console.warn('[esim] 卡级阻断：基本通道全部 6985，需复位卡片');
 			}
 		}
 
@@ -1459,6 +1495,7 @@ return L.view.extend({
 					if (p.state === 'no_card') renderNoCard();
 					else if (p.state === 'no_csim') renderNoCsim(p);
 					else if (p.state === 'no_euicc') renderNoEuicc();
+					else if (p.state === 'blocked') renderBlocked();
 					else if (p.state === 'error') renderError(p);
 					else renderOk(p);
 				});

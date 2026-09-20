@@ -33,6 +33,10 @@ const rpcSrc = fs.readFileSync(path.join(__dirname, '..', 'htdocs', 'luci-static
    统一换行后再比对，避免 CRLF/LF 差异导致跨环境误报。 */
 const cssSrc = fs.readFileSync(path.join(__dirname, '..', 'htdocs', 'luci-static',
 	'resources', 'at-webserver', 'mt5700.css'), 'utf8').replace(/\r\n/g, '\n');
+/* mt5700.js 也读一份：V6 要检验 errorState 真的收下可选的第 3 参数（按钮文案），
+   且默认值没被改坏 —— 它是**全站共用**组件，默认值一改，所有页面的按钮都跟着变。 */
+const mtSrc = fs.readFileSync(path.join(__dirname, '..', 'htdocs', 'luci-static',
+	'resources', 'at-webserver', 'mt5700.js'), 'utf8').replace(/\r\n/g, '\n');
 
 /* 同款正则 eval 加载 euicc.js（与 euicc-download-contract.test.js:23 一致） */
 const m = euiccSrc.match(/var Euicc = \((function[\s\S]*?)\)\(\);/);
@@ -165,11 +169,37 @@ asyncTests.push((function () {
 	});
 })());
 
-/* ---------- 4. P05：swInfo('6985').hint 不含「重试」 ---------- */
+/* ---------- 4. P05：swInfo('6985') 的文案 ----------
+ *
+ * ★ 2026-09-20 改判：旧断言是 `text 指向 M2M / 锁卡`，钉住的其实是一个**已被真机推翻的
+ *   结论**（旧 text 写死「这张是 M2M eUICC（SGP.02）或被厂家锁卡」）。五轮只读探针拿到
+ *   的事实是：基本通道上**每一条**命令都回 6985（SELECT MF / ISD-R / GET EID / READ
+ *   BINARY，换 GSM 类字节 0xA0 一样，连模组自己的 AT+CRSM=242 也 6985），而同一张卡在
+ *   逻辑通道上 SELECT MF 仍回 9000 —— 是卡侧没收尾的**暂态阻断**，与「卡被锁」无关。
+ *   把这条断言留着，等于给一个错误结论上了守卫（见 tools/verify-guards.py 的用意）。
+ */
 
 ok('P05 swInfo(6985).hint 不含「重试」', (Euicc.swInfo('6985').hint || '').indexOf('重试') < 0,
 	'实际: ' + (Euicc.swInfo('6985').hint || ''));
-ok('P05 swInfo(6985).text 指向 M2M / 锁卡', /M2M|锁卡|SM-SR/.test(Euicc.swInfo('6985').text || ''));
+/* 与旧断言等价的反向守卫：正则本身确实能命中旧文案（否则下面那条恒绿）。 */
+const M2M_CLAIM = /M2M\s*eUICC|厂家锁卡|SM-SR/;
+ok('P05 反向：M2M 正则在旧文案上确实命中（防下面那条恒绿）',
+	M2M_CLAIM.test('卡片拒绝该操作：可能这张是 M2M eUICC（SGP.02，只能由 SM-SR 远程管理）或被厂家锁卡'));
+/*
+ * 只查**代码**（注释先剥掉）：注释里解释「为什么把这个被推翻的结论删掉」是应该留的，
+ * 不能被这条守卫连坐。剥注释用最朴素的两种形态，避免误吃字符串里的 `//`（如 https://）。
+ */
+function stripComments(src) {
+	return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+}
+ok('P05 euicc.js 的代码里不再把 6985 的成因写成 M2M / 厂家锁卡（真机已推翻）',
+	M2M_CLAIM.test(stripComments(euiccSrc)) === false, '代码里仍有「M2M/锁卡」');
+ok('P05 esim.js 的代码里不再把成因写成 M2M / 厂家锁卡',
+	M2M_CLAIM.test(stripComments(esimSrc)) === false, 'esim.js 代码里仍有「M2M/锁卡」');
+ok('P05 swInfo(6985).text 点出 6985 本身就是状态字（便于对账）',
+	/6985/.test(Euicc.swInfo('6985').text || ''));
+ok('P05 swInfo(6985).hint 同时给出「读取阶段暂态阻断」与「下载中途 ICCID 冲突」两种成因',
+	/读取/.test(Euicc.swInfo('6985').hint || '') && /下载/.test(Euicc.swInfo('6985').hint || ''));
 
 /* ---------- 5. P06：es10Result('BF3100') === null（标识不识别当成功） ---------- */
 
@@ -605,6 +635,126 @@ ok('F4 反向：若改回直接贴 e.message 必须判红',
 	/'下载失败：'\s*\+\s*downloadFailText\(e\)/
 		.test(replaceAll(esimSrc, "'下载失败：' + downloadFailText(e)",
 			"'下载失败：' + ((e && e.message) || '未知错误')")) === false);
+
+/* ---------- V. 卡级阻断（基本通道全 6985）必须单独报，不能混成一句「读取失败」（2026-09-20） ----------
+ *
+ * 真机故障：新装的 eSIM 写卡被中断后，卡片进入「基本通道对**所有**命令都回 6985」的暂态
+ * （逻辑通道仍可读写文件）。页面当时只说「读取 eSIM 信息失败：卡片返回了失败状态字，
+ * 本页无法完成该操作」—— 用户看不出是卡卡住了、还是页面/固件的锅，更没有下一步。
+ * 这里用真 mock 跑一遍 Euicc.probe，把状态分流钉死（判据见 euicc.js 的 blocked 分支注释）。
+ */
+
+/*
+ * 真机的 APDU 帧形态（照 euicc.js 的构造函数来，别凭印象写）：
+ *   MANAGE CHANNEL OPEN   → 0070000001，成功应答 "+CSIM: 6,\"029000\""（数据 02 + SW 9000）
+ *   SELECT ISD-R          → selectIsdrApdu(ch) = hex2(ch) + 'A4040C10' + AID
+ *                           即逻辑通道是 **02A4…**（不是 82A4…，CLA 只有一字节由 hex2(ch) 给），
+ *                           基本通道是 00A4…；ES10 那几条才用 0x80|ch（storeDataApdu）。
+ *   CLOSE CHANNEL 2       → 0070800200
+ * 按真实帧写 mock，否则测的是我自己想象的协议（第一版就栽在这里）。
+ */
+function makeBlockedSend(ch0Sw, ch2Sw) {
+	const log = [];
+	const send = function (cmd) {
+		log.push(cmd);
+		if (cmd === 'AT^SIMSQ?') return Promise.resolve({ success: true, data: '^SIMSQ: 1,12\r\n\r\nOK' });
+		if (cmd === 'AT+CSIM=?') return Promise.resolve({ success: true, data: '+CSIM: (4-520)\r\n\r\nOK' });
+		/* CGLA 探测失败 → 留在 AT+CSIM 通路（真机 CGLA 在阻断态回 6999） */
+		if (/^AT\+CGLA=/.test(cmd)) return Promise.resolve({ success: false, error: 'ERROR' });
+		const m = /^AT\+CSIM=\d+,"([0-9A-Fa-f]+)"$/.exec(cmd);
+		if (!m) return Promise.resolve({ success: false, error: '未预期的命令: ' + cmd });
+		const apdu = m[1].toUpperCase();
+		if (apdu === '0070000001') return Promise.resolve({ success: true, data: '+CSIM: 6,"029000"' });
+		if (apdu === '0070800200') return Promise.resolve({ success: true, data: '+CSIM: 4,"9000"' });
+		if (apdu.indexOf('A4040C10') > 0) {
+			/* selectIsdrApdu(ch)：CLA=0x00 是基本通道，其余是逻辑通道（本机卡给 0x02） */
+			return Promise.resolve({
+				success: true,
+				data: '+CSIM: 4,"'
+					+ (apdu.slice(0, 2) === '00' ? ch0Sw : (ch2Sw || '6A82')) + '"'
+			});
+		}
+		return Promise.resolve({ success: false, error: '未预期的 APDU: ' + apdu });
+	};
+	return { send: send, log: log };
+}
+
+asyncTests.push((function () {
+	const mock = makeBlockedSend('6985');
+	return Euicc.probe(mock.send).then(function (p) {
+		eq('V1 基本通道 6985 → state=blocked（不混进 error / EUICC_OP_FAILED）', p && p.state, 'blocked');
+		eq('V1 blocked 带上原始 SW（便于对账）', p && p.sw, '6985');
+		const ch2 = mock.log.filter(function (c) {
+			return /^AT\+CSIM=\d+,"02A4040C10/.test(c);
+		}).length;
+		const ch0 = mock.log.filter(function (c) {
+			return /^AT\+CSIM=\d+,"00A4040C10/.test(c);
+		}).length;
+		ok('V1 逻辑通道选失败后确实回退了基本通道（两条 SELECT 都发过）', ch2 >= 1 && ch0 >= 1,
+			'ch2=' + ch2 + ' ch0=' + ch0);
+	});
+})());
+
+/* 对照：基本通道回 6A82 才是「真的不是 eUICC」，不许被 blocked 抢走 */
+asyncTests.push((function () {
+	const mock = makeBlockedSend('6A82');
+	return Euicc.probe(mock.send).then(function (p) {
+		eq('V2 基本通道 6A82 仍判 no_euicc（blocked 不许越权抢单）', p && p.state, 'no_euicc');
+	});
+})());
+
+/*
+ * 对照：**逻辑通道**上的 6985 不算卡级阻断。
+ * 这一条是判据里「ch === 0」那一半的反例 —— 少了它，把条件放宽成 `e.sw === '6985'`
+ * 也照样全绿（tools/verify-guards.py 的变异 [17] 就是这么被抓住的）。
+ * 逻辑通道选不上只说明这条通道够不着，与卡片自身的阻断状态无关；
+ * 两条通道都 6985 时会走 error（真实病因由 swInfo 的人话解释兜住）。
+ */
+asyncTests.push((function () {
+	const mock = makeBlockedSend('6985', '6985');
+	return Euicc.probe(mock.send).then(function (p) {
+		eq('V2b 逻辑通道上的 6985 不得报成 blocked（阻断判据必须限定基本通道）',
+			p && p.state, 'error');
+		ok('V2b 确实只在逻辑通道上试（没有回退到基本通道 —— 6985 不是通道能力问题）',
+			mock.log.filter(function (c) { return /^AT\+CSIM=\d+,"00A4040C10/.test(c); }).length === 0);
+	});
+})());
+
+/* 源码侧：页面必须真的有一个「暂态阻断」面板，且文案给出下一步动作 */
+ok('V3 esim.js 有 renderBlocked 且被状态分流调用',
+	/function renderBlocked\(/.test(esimSrc) && /p\.state === 'blocked'/.test(esimSrc));
+ok('V4 阻断面板文案给出下一步（重启模组 / 整机断电重上电），并说明反复操作无意义',
+	/重启模组/.test(esimSrc) && /反复操作不会改变结果/.test(esimSrc));
+ok('V4 反向：若把分流条件改掉，V3 必须判红',
+	/p\.state === 'blocked'/.test(replaceAll(esimSrc, "p.state === 'blocked'", "p.state === 'error'")) === false);
+
+/* ---------- W. 阻断面板的文案与按钮形态（2026-09-20，本轮真踩过两次） ----------
+ *
+ * W1  errorState 的正文是**纯文本子节点**（E('div', cls, text)），不认 Markdown。
+ *     阻断面板一开始写成「基本通道上的**所有**命令」，落屏后原样显示成星号。
+ *     这类坑不会报错、测试也全绿，只能靠静态断言钉住。
+ * W2  正文说「反复操作不会改变结果」，按钮却还是默认的「重新尝试」＝自相矛盾。
+ *     errorState 因此新增可选的第 3 参数 retryText（默认值不动 → 老调用点行为不变）。
+ */
+const blockedBody = esimSrc.slice(esimSrc.indexOf('function renderBlocked('),
+	esimSrc.indexOf("p.state === 'blocked'"));
+/* ★ 先剥掉注释再查：函数体内的**注释**里为了讲清这个坑，本来就会写「**」示例；
+   要查的是**落进 DOM 的字符串字面量**。不剥注释的话这条断言查的是注释、恒判红。 */
+function stripJsComments(s) {
+	return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+const blockedCode = stripJsComments(blockedBody);
+ok('W1 阻断面板正文不含 Markdown 星号（errorState 只渲染纯文本，「**」会原样显示）',
+	blockedCode.length > 0 && blockedCode.indexOf('**') < 0,
+	'去注释后长度 ' + blockedCode.length);
+ok('W1 反向：把「**」写回正文确实会被 W1 判红（防 W1 恒绿）',
+	stripJsComments(blockedBody + "'**所有**'").indexOf('**') >= 0);
+ok('W2 阻断面板的按钮文案是「重新探测」（正文说反复操作无意义，按钮不能自相矛盾）',
+	/'重新探测'/.test(blockedBody));
+ok('W2 mt5700.js errorState 收下可选 retryText，且默认仍是「重新尝试」',
+	/retryText \|\| '重新尝试'/.test(mtSrc) && /function \(text, onRetry, retryText\)/.test(mtSrc));
+ok('W2 反向：若把默认值改成别处，上面那条必须判红',
+	/retryText \|\| '重新尝试'/.test(replaceAll(mtSrc, "retryText || '重新尝试'", "retryText || '再来一次'")) === false);
 
 /* ---------- 汇总 ---------- */
 

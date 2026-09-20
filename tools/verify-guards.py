@@ -21,6 +21,12 @@ TARGETS = {
     "esimjs": ESIM,
     "esimcss": ATWB / "mt5700.css",
     "test": ROOT / "tests" / "euicc-download-contract.test.js",
+    # euicc.js 的**同一份文件**再挂一个键：卡级阻断那组守卫在 esim-contract 里，
+    # 而 "js" 键固定跑下载契约测试。一份文件两条测试通道，别把守卫挂错测试上。
+    "js2": ATWB / "euicc.js",
+    # mt5700.js 是**全站共用**组件（errorState 的按钮文案默认值就在这里），
+    # 也要能被变异、被还原 —— 单独挂键，别和 euicc.js 混。
+    "mt5700js": ATWB / "mt5700.js",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -29,6 +35,8 @@ TARGET_TEST = {
     "test": ROOT / "tests" / "euicc-download-contract.test.js",
     "esimjs": ROOT / "tests" / "esim-contract.test.js",
     "esimcss": ROOT / "tests" / "esim-contract.test.js",
+    "js2": ROOT / "tests" / "esim-contract.test.js",
+    "mt5700js": ROOT / "tests" / "esim-contract.test.js",
 }
 
 NODE = r"C:\Users\Ajmd007\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"
@@ -140,6 +148,71 @@ MUTATIONS = [
         ".mt5700-esim-row.is-enabled::before",
         "行卡与「已启用」色条",
     ),
+    # ---------- 2026-09-20 卡级阻断（基本通道全 6985）的状态分流守卫 ----------
+    (
+        "卡级阻断不再单独报（6985 混回 EUICC_OP_FAILED，页面又变成一句「读取失败」）",
+        "js2",
+        "if (e.sw === '6985' && e.ch === 0) return { state: 'blocked', sw: e.sw };",
+        "if (false) return { state: 'blocked', sw: e.sw };",
+        "基本通道 6985 → state=blocked",
+    ),
+    (
+        "异常不再带 SW / 通道号（判定失去依据，阻断态判不出来）",
+        "js2",
+        "se.sw = a.sw;\n\t\t\tse.ch = ch;",
+        "se.sw = '';\n\t\t\tse.ch = null;",
+        "基本通道 6985 → state=blocked",
+    ),
+    (
+        "阻断判据丢掉「基本通道」这一半（逻辑通道 6985 也误报成阻断）",
+        "js2",
+        "if (e.sw === '6985' && e.ch === 0) return { state: 'blocked', sw: e.sw };",
+        "if (e.sw === '6985') return { state: 'blocked', sw: e.sw };",
+        "阻断判据必须限定基本通道",
+    ),
+    (
+        "把被推翻的「M2M eUICC / 厂家锁卡」结论写回 6985 文案",
+        "js2",
+        "text: '卡片拒绝了该操作（6985：使用条件不满足）',",
+        "text: '这张是 M2M eUICC（SGP.02）或被厂家锁卡',",
+        "不再把 6985 的成因写成 M2M",
+    ),
+    (
+        "阻断面板不再被状态分流调用（新增状态直接掉进兜底分支）",
+        "esimjs",
+        "p.state === 'blocked') renderBlocked();",
+        "false) renderBlocked();",
+        "renderBlocked 且被状态分流调用",
+    ),
+    (
+        "阻断面板文案丢掉下一步动作（只说失败，用户不知道要重启模组）",
+        "esimjs",
+        "反复操作不会改变结果，需要重启模组",
+        "请稍后重新进入本页",
+        "给出下一步",
+    ),
+    # ---------- 2026-09-20 阻断面板的文案 / 按钮形态（本轮真踩过的两个坑） ----------
+    (
+        "阻断面板正文写进 Markdown 星号（errorState 只渲染纯文本 → 界面原样显示星号）",
+        "esimjs",
+        "卡片对基本通道上的每一条命令都回 ",
+        "卡片对基本通道上的**所有**命令都回 ",
+        "不含 Markdown 星号",
+    ),
+    (
+        "阻断面板按钮退回默认「重新尝试」（正文说反复操作无意义，按钮自相矛盾）",
+        "esimjs",
+        "function () { render(); },\n\t\t\t\t'重新探测'));",
+        "function () { render(); },\n\t\t\t\t'重新尝试'));",
+        "按钮文案是「重新探测」",
+    ),
+    (
+        "errorState 的默认按钮文案被改（全站共用组件，一改所有页面跟着变）",
+        "mt5700js",
+        "api.primaryButton(retryText || '重新尝试', onRetry)",
+        "api.primaryButton(retryText || '再来一次', onRetry)",
+        "默认仍是「重新尝试」",
+    ),
 ]
 
 
@@ -180,7 +253,7 @@ def restore_all():
 
 
 def main():
-    for tgt in ("js", "esimjs"):
+    for tgt in ("js", "esimjs", "js2", "mt5700js"):
         rc0, out0 = run_test(tgt)
         print("基线[%s]:" % tgt, "绿色（0 失败）" if rc0 == 0 else "红！先修基线再验证守卫")
         if rc0 != 0:

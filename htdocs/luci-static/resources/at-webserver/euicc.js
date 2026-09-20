@@ -402,10 +402,27 @@ var Euicc = (function () {
 			};
 		}
 		if (sw === '6985') {
+			/*
+			 * ★ 2026-09-20 真机更正：旧文案写死「这张是 M2M eUICC（SGP.02）或被厂家锁卡」，
+			 *   已作废、别再写回去 —— 它会把排查直接带进死胡同。真机五轮只读探针的事实：
+			 *     · 基本通道（CLA=00）上**所有**命令都是 6985：SELECT MF(3F00) / SELECT ISD-R /
+			 *       GET EID / READ BINARY；换 GSM 类字节（CLA=0xA0，绕过「当前选中的 applet」）
+			 *       的 SELECT / READ / STATUS 同样 6985；连模组**自己**的读卡通路
+			 *       `AT+CRSM=242`(=STATUS) 也回 6985；CGLA 则回 6999。
+			 *     · 同一张卡在**逻辑通道**上 `SELECT MF` 照样回 9000（文件系统是好的）。
+			 *   —— 这是「卡侧上一次写卡 / 选卡被中断后没收尾」的**暂态阻断**，不是卡被锁，
+			 *   所以文案不能再往「M2M / 锁卡」上引。
+			 *   ★ 下载语境下 6985 另有含义（「这个 Profile 卡上已经有了」，ICCID 冲突），
+			 *   那条由下载链路的 e.swHint 兜住（见 api.downloadProfile 的 handleErr）。
+			 *   ★ hint 里不许出现「重试」：P05 守卫钉的就是这个 —— 上述两种成因都不是
+			 *   多试几次能变的。
+			 */
 			return {
 				level: 'error',
-				text: '卡片拒绝该操作：可能这张是 M2M eUICC（SGP.02，只能由 SM-SR 远程管理）或被厂家锁卡，本页无法管理',
-				hint: '请勿反复尝试，这类拒绝通常与卡商 / SIM 管理平台绑定，再试也不会改变结果'
+				text: '卡片拒绝了该操作（6985：使用条件不满足）',
+				hint: '出现在读取阶段（选 ISD-R / 读 EID）时，多是卡侧暂态阻断 —— ' +
+					'上一次写卡 / 选卡被中断后卡侧没有收尾，逻辑通道仍可读写而基本通道全被拒，' +
+					'需重启模组才恢复；出现在下载中途时，通常是「这个 Profile 卡上已经有了」'
 			};
 		}
 		if (sw === '6A80') {
@@ -912,6 +929,15 @@ var Euicc = (function () {
 		if (info.level === 'fatal' || info.level === 'error') {
 			var se = makeSwError(info.level === 'fatal' ? 'EUICC_NO_EUICC' : 'EUICC_OP_FAILED', a.sw);
 			se.swInfo = info;
+			/*
+			 * ★ 2026-09-20 真机：把**原始 SW** 与**通道号**一并挂到异常上。
+			 *   上层要判一个卡级特征：「基本通道（ch=0）上 6985」＝ 卡侧暂态阻断，
+			 *   与「这张卡就是拒绝管理」是两回事（见 api.probe 的 blocked 分支）。
+			 *   swInfo 的返回结构是给文案用的（level/text/hint），不含 sw 与通道，
+			 *   不适合承载这个判定；makeSwError 只把 SW 写进了 message，也拿不到通道。
+			 */
+			se.sw = a.sw;
+			se.ch = ch;
 			if (api.isChannelUnsupportedSw(a.sw)) se.channelUnsupported = true;
 			/*
 			 * ★ 逻辑通道上的 6A82 先回退基本通道复核（2026-09-20 真机实测）。
@@ -1517,6 +1543,18 @@ var Euicc = (function () {
 					if (e.code === 'EUICC_NO_EUICC') return { state: 'no_euicc' };
 					if (e.code === 'EUICC_NO_CHANNEL') return { state: 'no_csim', channelNote: 'open 通道失败' };
 					if (e.code === 'EUICC_NO_CARD') return { state: 'no_card' };
+					/*
+					 * ★ 2026-09-20 真机：卡级阻断（暂态）不能和普通 EUICC_OP_FAILED 混成一句
+					 *   「卡片返回了失败状态字，本页无法完成该操作」—— 那句话对排查毫无用处，
+					 *   用户（和我）看不出是卡被锁、固件不行、还是卡卡住了。
+					 *
+					 *   判据：**基本通道**（回退后的 ch=0）上 SELECT ISD-R 拿 6985。
+					 *   为什么这个组合就够：正常/其它故障下 ch=0 的 SELECT 会是 6121/9000
+					 *   （选上了）或 6A82/6D00（真是没有 ISD-R），唯独「卡侧没收尾」才会
+					 *   用 6985 拒掉**每一条**命令，且逻辑通道仍然好使（见 swInfo('6985') 注释）。
+					 *   逻辑通道上的 6985 不在此列 —— 那只是这条通道够不着。
+					 */
+					if (e.sw === '6985' && e.ch === 0) return { state: 'blocked', sw: e.sw };
 					return { state: 'error', error: e.code };
 				});
 			});

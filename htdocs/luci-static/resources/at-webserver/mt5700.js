@@ -584,11 +584,13 @@ var Mt5700 = (function () {
 		return el;
 	};
 
-	api.errorState = function (text, onRetry) {
+	/* retryText 是可选的（默认「重新尝试」）——给「重试本身没意义、要重启模组」那种
+	 * 场景用，按钮写「重新探测」才不跟正文打架。新增参数在末尾且带默认值，老调用点不动。 */
+	api.errorState = function (text, onRetry, retryText) {
 		var el = E('div', { 'class': 'mt5700-error-state' });
 		el.appendChild(E('div', { 'class': 'mt5700-error-text' }, text || '获取数据失败'));
 		if (onRetry) {
-			el.appendChild(api.primaryButton('重新尝试', onRetry));
+			el.appendChild(api.primaryButton(retryText || '重新尝试', onRetry));
 		}
 		return el;
 	};
