@@ -5,6 +5,50 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.39] - 2026-09-22
+
+### Fixed — 复核 2.3.38 新增功能时发现的缺陷
+
+- **服务被禁用时，开机自启自愈仍会把 `/etc/rc.d/S99at-webserver` 补回来**：
+  `ensure_enabled` 原来在 `enabled` 检查**之前**调用，于是在「用户明确禁用
+  （UCI `enabled=0`）」的机器上执行一次 start，日志会先打「已自动补建
+  S99at-webserver」、紧接着又打「服务已禁用，退出启动」。
+  危害不是服务被拉起（禁用本身仍然生效），而是**界面与行为互相矛盾**：
+  LuCI 服务页与断网排查页判的都是 `/etc/rc.d` 链接存不存在，于是显示「已启用」，
+  可开机时 `start_service` 又会因 `enabled=0` 直接退出 —— 排查时最容易被这条带偏。
+  改为在 `enabled` 检查之后才调用；用户之后重新启用时，rc.common 的 `enable`
+  会把链接建回来，不会丢。
+  真机验证：禁用状态下 start 后 `rc.d` 仍为空、日志无补建记录；恢复启用后 start
+  立刻补回 S99/K10 并正常拉起服务。
+
+### Docs
+
+- `ensure_enabled` 补写**能力边界**：它只修得了「链接缺失」这一种。若
+  `/etc/init.d/at-webserver` 自己丢了执行位，`start` 会被 shell 直接拒掉
+  （`ash: Permission denied`，exit 126），函数**根本没机会执行** ——
+  「跑不起来」正是问题本身。这条链只能靠三道防线：① git 保持 100755；
+  ② Makefile 打包期 chmod 0755；③ uci-defaults 安装期 chmod 0755。
+
+### Tests
+
+- `tests/initd-contract.test.js` 增至 33 项断言：新增「`ensure_enabled` 必须在
+  `enabled` 检查之后调用」（位置比较）、「能力边界必须写在函数头注释里」；
+  并首次引入 `headComment()` —— 能力边界这类说明写在函数**上方**，
+  用函数体取不到，否则断言会恒假。反向断言增至 4 条（新增「把 `ensure_enabled`
+  挪到检查之前」），全部用注入方式确认能检出。
+
+### Verified — 复核结论（未改动项）
+
+- 前端「重载服务」按钮走 `ubus service.delete + service.set`，procd 实例里
+  **没有 `env.TZ`**。实测**未**造成时间偏移：Rust 侧
+  `main.rs::ensure_local_timezone()` 会自己读 `/etc/TZ` 兜底（init.d 注入是第一层、
+  这是第二层），日志时间与系统时间逐秒一致。
+- `procd_add_reload_trigger` 的 config.change 触发器正常：广播
+  `config.change` 事件后服务被自动 reload（PID 换新）。
+- `ensure_interfaces` 零副作用以「PID + `/proc/<pid>/stat` starttime」双判据复核，
+  同一进程未换；就绪判据在 6 种边界（空数组、仅 v4、仅 v6、无字段、紧凑格式、
+  空数组换行）下判定全部正确；wan 区补登记幂等（第二次不再写日志）。
+
 ## [2.3.38] - 2026-09-22
 
 ### Fixed — 服务管理的三个真 bug（真机逐条复现并验证）

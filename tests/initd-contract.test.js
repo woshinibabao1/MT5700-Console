@@ -101,6 +101,22 @@ ok('ensure_enabled 在 start_service 里被调用（开机自启自愈）',
 	startCode !== null && /ensure_enabled/.test(startCode));
 ok('ensure_enabled 先补执行位再 enable（丢 +x 是实机故障）',
 	ensureEnabledBody !== null && /chmod 0755/.test(ensureEnabledBody) && /enable/.test(ensureEnabledBody));
+/* ★ 调用位置：必须在 enabled 检查之后。否则用户禁用状态下 start 会把 S99 补回来，
+   界面显示「已启用」而开机又因 enabled=0 退出 —— 两个结论互相矛盾。 */
+ok('★ ensure_enabled 只在 enabled 检查之后调用（禁用时不补自启链接）',
+	startCode !== null &&
+	startCode.indexOf('config_get_bool enabled') >= 0 &&
+	startCode.indexOf('ensure_enabled') > startCode.indexOf('config_get_bool enabled'));
+/* 取函数定义**上方**的注释块（能力边界这类说明写在函数头，不在函数体内） */
+function headComment(s, name) {
+	const re = new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\(\\) \\{', 'm');
+	const m = s.match(re);
+	if (!m) return '';
+	return s.slice(0, m.index).split('\n').slice(-30).join('\n');
+}
+ok('ensure_enabled 注释里写明了能力边界（执行位丢失时它救不了）',
+	/边界/.test(headComment(SRC, 'ensure_enabled')) &&
+	/跑不起来|没机会跑/.test(headComment(SRC, 'ensure_enabled')));
 
 const ifaceAddrBody = bodyCode(SRC, 'iface_has_address');
 ok('iface_has_address 已定义', ifaceAddrBody !== null);
@@ -163,6 +179,19 @@ ok('★ 反向：注入 ubus call service delete 到 reload_service 必须被检
 		'\tubus call service delete \'{"name":"at-webserver"}\'\n\tstart "$@"')) === true);
 ok('★ 反向：body() 对不存在的函数返回 null（否则上面定位断言会恒真）',
 	body(SRC, 'no_such_function_here') === null && body(SRC, 'start_service') !== null);
+
+function ensureEnabledBeforeCheck(s) {
+	const b = stripComments(body(s, 'start_service') || '');
+	const iEn = b.indexOf('ensure_enabled');
+	const iChk = b.indexOf('config_get_bool enabled');
+	return iEn >= 0 && iChk >= 0 && iEn < iChk;
+}
+ok('★ 反向：把 ensure_enabled 挪到 enabled 检查之前必须被检出',
+	ensureEnabledBeforeCheck(SRC) === false &&
+	ensureEnabledBeforeCheck(SRC
+		.replace('\tensure_enabled\n', '')
+		.replace('\tlogger -t at-webserver "开始启动服务..."',
+			'\tlogger -t at-webserver "开始启动服务..."\n\tensure_enabled')) === true);
 
 /* ---------- 汇总 ---------- */
 if (fails.length) {

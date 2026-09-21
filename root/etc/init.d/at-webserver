@@ -34,6 +34,17 @@ FW_RULE_NAMES="at_webserver_wan_block at_webserver_wan_allow at_module_restrict 
 #       故障会一直带到之后的每一次升级。
 # 处理：每次 start 查一次，缺了就先补执行位再 enable。幂等，成本一次 test -e，
 #       只要有人执行过一次 start（开机、点「重载服务」都算），注册就被永久修好。
+#
+# ★ 能力边界（别指望它救所有情况）：它只修得了「链接缺失」这一种。
+#   如果 /etc/init.d/at-webserver 自己丢了执行位，`/etc/init.d/at-webserver start`
+#   会直接被 shell 拒掉（ash: Permission denied，exit 126），**本函数根本没机会跑**
+#   —— 要跑脚本才能自愈，而「跑不起来」正是问题本身（2026-09-22 实测确认）。
+#   这条链只能靠另外三道防线：① git 里保持 100755；② Makefile 打包期 chmod 0755；
+#   ③ uci-defaults 安装期 chmod 0755。真遇到时先手动
+#   `chmod 0755 /etc/init.d/at-webserver`（断网排查页的 initd_exec 项也会给这条提示）。
+#
+# 调用时机：只在服务「判定为启用」之后调用（见 start_service），
+# 用户明确禁用时不补链接 —— 否则界面显示「已启用」而服务起不来，自相矛盾。
 ensure_enabled() {
 	[ -e "/etc/rc.d/S${START}at-webserver" ] && return 0
 
@@ -67,8 +78,6 @@ start_service() {
 
 	logger -t at-webserver "开始启动服务..."
 
-	ensure_enabled
-
 	uci -q commit at-webserver
 
 	config_load at-webserver
@@ -79,6 +88,15 @@ start_service() {
 		echo "AT WebServer is disabled in configuration"
 		return 1
 	fi
+
+	# ★ 开机自启自愈必须放在 enabled 检查**之后**。
+	# 用户明确禁用（enabled=0）时绝不能补 S99 —— 补了会让 LuCI 的服务页和断网排查页
+	# 都显示「已启用」（它们判的是 /etc/rc.d 链接存不存在），可开机时 start_service
+	# 又会因 enabled=0 直接退出：界面说启用了、服务却起不来，两个结论互相矛盾，
+	# 排查时最容易被带偏。（2026-09-22 实测复现：禁用状态下执行 start，
+	# 日志先打「已自动补建 S99at-webserver」再打「服务已禁用，退出启动」。）
+	# 用户之后若在 LuCI 里重新启用，rc.common 的 enable 会把链接建回来，不会丢。
+	ensure_enabled
 
 	if [ ! -x "$PROG" ]; then
 		logger -t at-webserver "错误：找不到可执行文件 $PROG"
