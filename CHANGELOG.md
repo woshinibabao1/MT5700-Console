@@ -5,6 +5,69 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.38] - 2026-09-22
+
+### Fixed — 服务管理的三个真 bug（真机逐条复现并验证）
+
+- **`ubus -q call` 是无效写法（P0）**：busybox 的 ubus 没有 `-q` 选项（实测报
+  `unrecognized option: q`、退出码 1），于是 init.d 里两个判断**恒为假**：
+  ①「已在运行 → 跳过重复启动」；②「已注册但未运行（procd 崩溃-重试耗尽）→ 先摘注册再重新登记」。
+  后者是服务陷入「放弃态」后唯一的自救路径，等于从来没有生效过 ——
+  真机上服务一旦进入该状态，只能手动 `ubus call service delete` 或整机重启。
+  现改为标准 `ubus call`，running 判据写成宽松格式（pretty 与 `-S` 紧凑输出都能命中）。
+  真机验证：删掉 `S99`/`K10` 链接后再 `start`，两条自愈路径都成功执行并拉起服务。
+
+- **`start` 里不能有「已在运行则跳过」的早退**：rc.common 对 procd 服务的 start 是
+  `rc_procd start_service` → `procd_open_service` →
+  `ubus call service set {... "instances": {} ...}`，这个调用会**清空实例表**，
+  procd 随即对运行中的实例发 SIGTERM（term_timeout 到期再 SIGKILL）。
+  把上面 ① 修好、早退真正生效之后，行为反而变成「旧实例被杀 + 没有新实例注册」=
+  **服务直接消失**（真机 start 后 5~6 秒必现，日志特征
+  `procd: Instance at-webserver::instance1 pid N not stopped on SIGTERM, sending SIGKILL instead`）。
+  结论：对 procd 托管的服务，`start` 天然等于「重新注册 + 重启实例」，没有「幂等跳过」这条路。
+  start 里的早退与 pidfile 兜底已移除，原因写进注释留档；想不碰后端只补接口时用下面的
+  `ensure_interfaces`。
+
+- **`reload` 会把服务打挂**：原来用 `ubus call service delete` 停旧实例，删掉的是
+  **整个服务对象**，紧接着 `procd_open_instance` 就变成往一个正在被删除的对象上注册实例，
+  服务收尾时把新实例一并清掉 —— reload 返回 0、日志打满「配置重新加载完成」，
+  进程列表里却一个后端都没有。现改为直接走 rc.common 的标准 start 路径。
+  真机验证：连续两次 reload，服务均正常存活（PID 正常换新）。
+
+### Added
+
+- **`ensure_interfaces` 手动自愈入口**（`/etc/init.d/at-webserver ensure_interfaces`）：
+  只对齐模组接口与防火墙 wan 区、补一次 ifup，**完全不碰后端进程** ——
+  不打断进行中的 AT 作业（eSIM 写卡、短信、锁频），不清空内存环形日志，
+  排查「有信号却上不了网」时的首选命令。
+- **开机自启自愈（`ensure_enabled`）**：每次 start 检查 `/etc/rc.d/S99at-webserver`
+  是否存在，缺失就先补执行位再 `enable`。修的是「安装期 enable 失败之后永远没人再补」——
+  而 sysupgrade 保配置升级不会重跑 uci-defaults，故障会一路带到之后的每一次升级。
+- **每次启动核对防火墙 wan 区登记**：原来只在「接口不存在 → 新建」那条路径登记，
+  于是「接口早就存在、只是没进 wan 区」（有 IP 却上不了网最常见的成因）永远补不上。
+- **uci-defaults 安装期先 `ensure_interfaces` 再 `start`**（后台执行，不拖住包管理器），
+  并补一次 `rpcd reload`，让 LuCI 菜单立即认得本包的 rpcd 对象。
+
+### Fixed — 接口就绪判据与冷启动等待
+
+- `ensure_modem_interface` 原来用 `ifstatus | grep '"up": true'` 判「已就绪」：
+  DHCP 请求进行中 `up` 就已经是 true，于是会打出「已就绪（等待 0s 后拿到地址）」的
+  假成功日志并提前放弃等待。现改为判 `ipv4-address` / `ipv6-address` **数组里有元素**
+  （IPv6-only 同样算就绪），并且匹配「数组括号后紧跟 `{`」而不是关键字本身 ——
+  空数组会打印成 `"ipv4-address": []`，只 grep 关键字照样命中。
+- 冷启动等待改为有限次重试（最多 6 轮 × 10s，跑在 post_start 的后台），覆盖实测
+  30~60s 的「模组拨号 → NCM 建链 → DHCP」链路；接口已 up 只是 DHCP 没回来时
+  不再反复 `ifup`，避免把进行中的 DHCP 打回起点。
+
+### Tests
+
+- 新增 `tests/initd-contract.test.js`（30 项断言），把上面三条结论钉在源码文本上：
+  代码里不得再出现 `ubus -q`、`start_service` 里不得有「跳过重复启动」的早退、
+  `reload_service` 不得调 `ubus call service delete`、`ensure_interfaces` 不得含
+  `killall`/`restart`、就绪判据不得退回 `"up": true`。比较代码前先剥掉注释行
+  （注释里会举例提到这些「恰恰不能出现在代码里」的写法），并保留三条反向断言
+  （用注入方式验证守卫不是恒绿，已逐条确认能检出）。
+
 ## [2.3.37] - 2026-09-20
 
 ### Fixed — eSIM 模块全面审计（5 项落地，依据 pySim ASN.1 逐字核对）

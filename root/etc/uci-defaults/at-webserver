@@ -44,8 +44,25 @@ else
 fi
 
 # 安装场景（opkg/apk 直接装包）没有 rc 序列，这里显式拉起一次。
-# 开机场景由 S99 负责；start_service 内部有「已在运行则跳过」保护，
-# 两条路径撞上也不会起第二个实例。延迟 5s 是为了避开 boot 早期的串口枚举。
-( sleep 5; [ -x /etc/init.d/at-webserver ] && /etc/init.d/at-webserver start ) >/dev/null 2>&1 &
+# 开机场景由 S99 负责；安装场景下服务通常还没起来，这里补一次即可。
+# 注意：对 procd 托管的服务，start 天然是「重新注册 + 重启实例」，
+# 不存在「已在运行则跳过」这条路（rc.common 会先把实例表清空），
+# 所以两条路径同时触发时会看到一次正常的实例切换，属于预期行为。
+# 延迟 5s 是为了避开 boot 早期的串口枚举。
+#
+# 先 ensure_interfaces 再 start：
+#   ensure_interfaces 只对齐模组接口与防火墙 wan 区（幂等、不碰后端进程），
+#   修的正是存量设备最常见的那种「接口早就存在、只是没进 wan 区 → 有信号却上不了网」。
+#   放到后台跑，避免 ifup 等待把包管理器拖住（apk/opkg 会一直卡在 postinst）。
+(
+	sleep 5
+	[ -x /etc/init.d/at-webserver ] || exit 0
+	/etc/init.d/at-webserver ensure_interfaces
+	/etc/init.d/at-webserver start
+) >/dev/null 2>&1 &
+
+# 让 LuCI 菜单/服务列表立刻认得这个新包的 rpcd 对象，省掉一次重新登录。
+# rpcd reload 只重载 rpcd 自身，不会动到后端进程与串口。
+/etc/init.d/rpcd reload >/dev/null 2>&1 || true
 
 exit 0

@@ -3,6 +3,12 @@
 START=99
 STOP=10
 
+# 手动维护入口（`/etc/init.d/at-webserver ensure_interfaces`）。
+# 刻意只做「对齐」，不动后端进程：restart 会打断进行中的 AT 作业（eSIM 写卡、
+# 短信、锁频）并清空内存环形日志，排查「有信号却上不了网」时不该付出这个代价。
+EXTRA_COMMANDS="ensure_interfaces"
+EXTRA_HELP="	ensure_interfaces	补建/补登记模组接口并尝试拉起（排查「有信号却上不了网」）"
+
 USE_PROCD=1
 PROG=/usr/bin/at-webserver-rust
 PROG_NAME="at-webserver-rust"
@@ -17,10 +23,51 @@ FW_RULE_NAMES="at_webserver_wan_block at_webserver_wan_allow at_module_restrict 
 # 加载 UCI 函数库
 . /lib/functions.sh
 
+# 开机自启注册自愈。
+#
+# 症状：手动 `/etc/init.d/at-webserver start` 能起来，路由器重启后服务又不见了，
+#       LuCI 提示「未注册 / 进程未运行」。
+# 根因：/etc/rc.d/S99at-webserver 软链接不存在，也就是服务从来没 enable 成功过。
+#       enable 只在安装那一刻执行一次（uci-defaults），那一次若因 init.d 丢执行位
+#       而失败（真机 2026-09-15 故障，见 uci-defaults 注释），之后没人再补；
+#       更麻烦的是 sysupgrade 保配置升级不会重跑 uci-defaults ——
+#       故障会一直带到之后的每一次升级。
+# 处理：每次 start 查一次，缺了就先补执行位再 enable。幂等，成本一次 test -e，
+#       只要有人执行过一次 start（开机、点「重载服务」都算），注册就被永久修好。
+ensure_enabled() {
+	[ -e "/etc/rc.d/S${START}at-webserver" ] && return 0
+
+	# 执行位可能在打包/刷机过程中再次丢失，先补权限再 enable
+	[ -x /etc/init.d/at-webserver ] || chmod 0755 /etc/init.d/at-webserver 2>/dev/null
+	/etc/init.d/at-webserver enable 2>/dev/null
+
+	if [ -e "/etc/rc.d/S${START}at-webserver" ]; then
+		logger -t at-webserver "检测到未注册开机自启，已自动补建 S${START}at-webserver"
+	else
+		logger -t at-webserver "警告：开机自启补建失败，重启后需手动 start"
+	fi
+	return 0
+}
+
+# 接口是否真的拿到了地址。
+#
+# 不能用 ifstatus 里的 "up": true 判断就绪 —— DHCP 请求进行中 up 就已经是 true，
+# 于是会打出「已就绪（等待 0s 后拿到地址）」这种假成功日志，并提前放弃等待，
+# 后面的补拉也就不会再走。判据必须是 ipv4/ipv6-address 数组里有元素
+# （IPv6-only 也算就绪，两种只要有一种有地址即视为通）。
+# 可靠写法是匹配数组括号后紧跟一个 '{'，而不是 grep 关键字本身 ——
+# 空数组打印成 "ipv4-address": []，关键字照样命中。
+iface_has_address() {
+	ifstatus "$1" 2>/dev/null | tr -d '\n' \
+		| grep -qE '"(ipv4-address|ipv6-address)"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{'
+}
+
 start_service() {
 	local enabled
 
 	logger -t at-webserver "开始启动服务..."
+
+	ensure_enabled
 
 	uci -q commit at-webserver
 
@@ -54,20 +101,43 @@ start_service() {
 	# 旧实例一律交给 procd 处理（见下方实例状态自愈）。
 	killall -q at-server.py 2>/dev/null
 
-	# procd 实例自愈：
-	#   已在运行       → 直接返回，避免重复拉起与竞态
-	#   已注册但未运行 → 说明处于崩溃循环的「放弃态」，先摘掉注册再重新登记，
-	#                    否则 start 只更新注册信息、进程永远不会被拉起
-	if ubus -q call service list '{"name":"at-webserver"}' >/dev/null 2>&1; then
-		if ubus -q call service list '{"name":"at-webserver"}' 2>/dev/null | grep -q '"running": true'; then
-			logger -t at-webserver "服务已在运行，跳过重复启动"
-			echo "AT WebServer is already running"
-			return 0
-		fi
+	# ⚠ 这里**不能**写成「发现已在运行就 return」—— 2026-09-21 真机实测踩过这个坑。
+	#
+	# 原因在 rc.common：它对 procd 服务的 start 是
+	#   rc_procd start_service → procd_open_service → `ubus call service set {... "instances": {} ...}`
+	# 这个调用会把本服务的实例表**清空**，procd 随即对运行中的实例发 SIGTERM
+	# （term_timeout 5s 到期再 SIGKILL）。也就是说：走到 start_service 这一刻，
+	# 旧实例已经在被杀的路上了。此时若判定「已在运行 → 跳过」，
+	# 结果就是旧实例被杀掉、又没有新实例注册，**服务直接消失**。
+	# 实测日志特征（4 次复现，start 后 5~6 秒必现）：
+	#   procd: Instance at-webserver::instance1 pid N not stopped on SIGTERM, sending SIGKILL instead
+	# 结论：对 procd 托管的服务，`start` 天然等于「重新注册 + 重新启动」，
+	# 不存在「幂等跳过」这条路。要只补接口、补防火墙区域而完全不碰后端进程，
+	# 用 `ensure_interfaces` 子命令（走的是另一条路，不经过 rc.common 的 start）。
+	#
+	# 这里只保留一种自愈：实例已注册、进程却没在跑（procd 崩溃重试次数用尽后的
+	# 「放弃态」）。此时必须先摘注册再重新登记，否则 start 只更新注册信息，
+	# 进程永远不会被拉起。
+	#
+	# 另一条教训一并留档：ubus 判断**绝不能写成 `ubus -q call`** —— busybox 的 ubus
+	# 没有 -q 选项（实测报 "unrecognized option: q"、退出码 1），那样写会让整个条件
+	# 恒为假：既跳过不了重复启动，也让下面这段崩溃循环自愈**永远不执行**，服务一旦
+	# 进入放弃态就只能靠手动 `ubus call service delete` 或整机重启救回来。
+	if ubus call service list '{"name":"at-webserver"}' >/dev/null 2>&1 \
+		&& ! ubus call service list '{"name":"at-webserver"}' 2>/dev/null \
+			| grep -qE '"running"[[:space:]]*:[[:space:]]*true'; then
 		logger -t at-webserver "发现已注册但未运行的 procd 实例（崩溃循环放弃态），先清除注册状态"
 		ubus call service delete '{"name":"at-webserver"}' >/dev/null 2>&1 || true
 		sleep 1
 	fi
+
+	# 这里刻意**不**「等旧实例退出」。
+	# 试过：加一个 ps 轮询等旧进程消失再注册新实例，结果更糟 ——
+	# procd 停止旧实例是异步的（实测从 service set 到进程真正消失约 15s，期间
+	# procd 自己还在处理实例状态），轮询期间新实例被 procd 连带收走，
+	# 等满上限后注册出来的实例反而活不下来，服务出现空窗。
+	# 交给 procd 做它自己的新旧交替即可：我们只注册实例，procd 负责停旧起新。
+	# 万一有短暂的串口争抢，后端本来就有 5s/10s/15s 退避重连，会自己接回来。
 
 	logger -t at-webserver "配置 procd 实例..."
 
@@ -307,6 +377,13 @@ ensure_modem_interface() {
 			uci -q set "network.$i.auto=1"
 			need_commit=1
 		fi
+
+		# 每次启动都核对一次 wan 区登记。原来只在「接口不存在→新建」那条路径登记，
+		# 于是「接口早就建好了、只是没进 wan 区」这种情况永远补不上 ——
+		# 那正是「有 IP、有信号，但内网全断」最常见的成因：
+		# srcnat 链只匹配在 wan 区里的接口，漏登记的包出去就回不来。
+		# ensure_wan_zone 本身幂等，列表里已有就什么都不做、也不会重载防火墙。
+		ensure_wan_zone "$i"
 	done
 
 	[ "$need_commit" -eq 1 ] && {
@@ -314,8 +391,8 @@ ensure_modem_interface() {
 		logger -t at-webserver "已将 $ifname_4g/$ifname_6g 设置为开机自启（auto=1）"
 	}
 
-	# 已经在跑就不用重复 ifup
-	if ifstatus "$ifname_4g" 2>/dev/null | grep -q '"up": true'; then
+	# 已经拿到地址就不用再动（判据为什么不能用 "up": true，见 iface_has_address）
+	if iface_has_address "$ifname_4g"; then
 		return 0
 	fi
 
@@ -328,21 +405,32 @@ ensure_modem_interface() {
 		waited=$((waited + 1))
 	done
 
-	ifup "$ifname_4g" >/dev/null 2>&1 || true
-	ifup "$ifname_6g" >/dev/null 2>&1 || true
-
-	# 等 DHCP 拿到地址，最多再等 20s
-	waited=0
-	while [ "$waited" -lt 20 ]; do
-		if ifstatus "$ifname_4g" 2>/dev/null | grep -q '"up": true'; then
-			logger -t at-webserver "$ifname_4g 已就绪（等待 ${waited}s 后拿到地址）"
-			return 0
+	# 冷启动链路实测要 30~60s：模组自动拨号 → NCM 建链 → 网口 carrier → DHCP。
+	# 只 ifup 一轮覆盖不全，这里带间隔重试；本函数跑在 post_start 的后台，
+	# 不会把 start 拖住（最坏 6×10s＝60s，接口 up 后每轮还会提前返回）。
+	#
+	# 只在接口 netifd 侧尚未 up 时才 ifup：已经 up 只是 DHCP 没回来时反复 ifup，
+	# 每次都把进行中的 DHCP 打回起点，反而更慢。
+	local retry=0
+	while [ "$retry" -lt 6 ]; do
+		if ! ifstatus "$ifname_4g" 2>/dev/null | grep -q '"up": true'; then
+			ifup "$ifname_4g" >/dev/null 2>&1 || true
+			ifup "$ifname_6g" >/dev/null 2>&1 || true
 		fi
-		sleep 2
-		waited=$((waited + 2))
+
+		waited=0
+		while [ "$waited" -lt 10 ]; do
+			if iface_has_address "$ifname_4g"; then
+				logger -t at-webserver "$ifname_4g 已拿到地址（第 $((retry + 1)) 轮 ifup，等待 ${waited}s）"
+				return 0
+			fi
+			sleep 2
+			waited=$((waited + 2))
+		done
+		retry=$((retry + 1))
 	done
 
-	logger -t at-webserver "警告：$ifname_4g 仍未 up，模组网口或自动拨号可能未就绪（详见 logread -e at-webserver）"
+	logger -t at-webserver "警告：$ifname_4g 仍未拿到地址，模组网口或自动拨号可能未就绪（详见 logread -e at-webserver）"
 	return 0
 }
 
@@ -377,19 +465,34 @@ reload_service() {
 
 	uci -q commit at-webserver
 
-	# 通过 procd 重启实例，避免 killall 与 respawn 竞态导致双实例
-	if ubus -q call service list '{"name":"at-webserver"}' >/dev/null 2>&1; then
-		ubus call service delete '{"name":"at-webserver"}' >/dev/null 2>&1 || true
-		sleep 1
-	fi
-	# 不 killall：先摘掉 procd 注册，旧进程的退出就不会被记成「崩溃」，
-	# 也不会因为已处于崩溃循环放弃态而永远起不来。
-	rm -f /var/run/at-webserver-rust.pid
-	sleep 1
-
-	start_service
+	# 直接走 rc.common 的标准 start 路径（procd_open_service → start_service）。
+	#
+	# 为什么不能自己 `ubus call service delete` 去停旧实例：那个调用删掉的是
+	# **整个服务对象**，紧接着 start_service 里的 procd_open_instance 就变成
+	# 往一个正在被删除的对象上注册实例，procd 收尾时会把新实例一并清掉 ——
+	# 2026-09-21 实测：reload 返回 0、日志打满「配置重新加载完成」，
+	# 但进程列表里一个后端都没有（连一条 Rust 启动日志都没打出来）。
+	#
+	# 标准 start 的顺序正好是我们需要的：先 procd_open_service 重新声明服务
+	# （实例表置空，旧实例随之被 procd 正常停止并回收串口），
+	# 再由 start_service 注册并拉起新实例；服务对象与实例都是完整的。
+	start "$@"
 
 	logger -t at-webserver "配置重新加载完成"
+}
+
+# 手动自愈入口：/etc/init.d/at-webserver ensure_interfaces
+#
+# 用途：排查「模组在线、LuCI 有信号，但接口没 IP 或内网全断」时，只补接口、
+#       补 wan 区登记、补一次拉起，**完全不碰后端进程**。restart 代价比这大得多：
+#       打断进行中的 AT 作业（eSIM 写卡、短信、锁频）、清空内存环形日志，
+#       还会在排查过程中把现场冲掉。
+# 走的仍是 ensure_modem_interface 这一份逻辑，与开机/启动时完全同源，幂等可重复。
+ensure_interfaces() {
+	logger -t at-webserver "手动执行 ensure_interfaces：对齐模组接口与防火墙 wan 区"
+	ensure_modem_interface
+	logger -t at-webserver "ensure_interfaces 执行完毕"
+	return 0
 }
 
 service_triggers() {
