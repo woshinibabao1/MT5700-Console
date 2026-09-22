@@ -388,6 +388,7 @@ return L.view.extend({
 					var parsed = Parse.parseScheduleResponse(res.data);
 					if (parsed) { cfg = parsed; render(); }
 				}
+				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
 			}).catch(function () {});
 		}, 15000);
 

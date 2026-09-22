@@ -100,17 +100,13 @@ var Mt5700 = (function () {
 		node._onDispose = function (fn) {
 			if (typeof fn === 'function') cleanups.push(fn);
 		};
-		var ownerDoc = node.ownerDocument || document;
-		var wasInDoc = false;
-		var watchdog = setInterval(function () {
-			if (ownerDoc.contains(node)) { wasInDoc = true; return; }
-			if (!wasInDoc) return;
-			clearInterval(watchdog);
+		/* 卸载走统一的 detach 巡检（见「定时器管理」段），不再每个页面各起一个 1s 定时器 */
+		api.onDetach(node, function () {
 			for (var ci = 0; ci < cleanups.length; ci++) {
 				try { cleanups[ci](); } catch (e) { /* 清理失败不能影响其余 */ }
 			}
 			cleanups.length = 0;
-		}, 1000);
+		});
 		return node;
 	};
 
@@ -192,17 +188,21 @@ var Mt5700 = (function () {
 
 	/* ================= 信号强度（RSRP → 条） ================= */
 
-	/* -120dBm=0%、-70dBm=100%，≥60 绿 / ≥40 黄 / 否则红（与载波表同一套判据） */
+	/*
+	 * 量程与等级的**唯一真源在 Parse**（见 parse.js「信号语义」段）。
+	 * 此前这里自算 `2*(rsrp+120)`（-120~-70），而 rpc.js 用 -110~-70，
+	 * 同一信号在两个页面两个百分比；这里只保留薄适配。
+	 */
 	api.signalPercent = function (rsrp) {
-		if (rsrp == null) return null;
-		return Math.max(0, Math.min(100, Math.round(2 * (Number(rsrp) + 120))));
+		return Parse.signalPercent(rsrp);
 	};
 
 	api.rsrpBar = function (rsrp) {
-		if (rsrp == null) return document.createTextNode('—');
 		var pct = api.signalPercent(rsrp);
-		var color = pct >= 60 ? 'var(--mt5700-success)'
-			: pct >= 40 ? 'var(--mt5700-warning)' : 'var(--mt5700-danger)';
+		if (pct == null) return document.createTextNode('—');
+		var level = Parse.percentLevel(pct);
+		var color = (level === 'exc' || level === 'good') ? 'var(--mt5700-success)'
+			: level === 'fair' ? 'var(--mt5700-warning)' : 'var(--mt5700-danger)';
 		return E('div', { 'class': 'mt5700-signal-bar' },
 			E('div', { 'class': 'mt5700-signal-bar-fill',
 				'style': 'width:' + pct + '%;background:' + color }));
@@ -247,11 +247,10 @@ var Mt5700 = (function () {
 	 * 量程仅用于弧长百分比映射（视觉刻度），等级判定只看阈值。
 	 */
 	var SIGNAL_SPECS = {
+		/* RSRP 的等级判定与百分比共用 Parse.signalLevel（阈值 -80/-90/-100/-110） */
 		rsrp: {
 			min: -120, max: -70,
-			level: function (v) {
-				return v >= -80 ? 'exc' : v >= -90 ? 'good' : v >= -100 ? 'fair' : v >= -110 ? 'poor' : 'bad';
-			}
+			level: function (v) { return Parse.signalLevel(v); }
 		},
 		rsrq: {
 			min: -20, max: -3,
@@ -265,12 +264,15 @@ var Mt5700 = (function () {
 				return v >= 20 ? 'exc' : v >= 13 ? 'good' : v >= 5 ? 'fair' : 'bad';
 			}
 		},
-		/* 信号百分比（0-100）：阈值与 RSRP 分级对齐（-80→75 / -90→50 / -100→25） */
+		/*
+		 * 百分比（0-100）的阈值必须**按上面那套量程**推出来才对得上：
+		 * -120~-70 → -80 是 80%、-90 是 60%、-100 是 40%。
+		 * 原先写 75/50/25，那是按 rpc.js 已废弃的 -110~-70 量程算的，
+		 * 与本文件自己的公式差了一档，仪表会判错档。
+		 */
 		pct: {
 			min: 0, max: 100,
-			level: function (v) {
-				return v >= 75 ? 'exc' : v >= 50 ? 'good' : v >= 25 ? 'fair' : 'bad';
-			}
+			level: function (v) { return Parse.percentLevel(v); }
 		}
 	};
 
@@ -439,17 +441,19 @@ var Mt5700 = (function () {
 				return;
 			}
 			cl.sendCommand('AT^SIMSQ?').then(function (res) {
-				var txt = res && res.success && res.data
-					? (String(res.data).match(/\^SIMSQ:\s*(\d+)\s*,\s*(\d+)/) || null)
-					: null;
-				if (!txt) {
+				/*
+				 * 状态解析走 Parse.parseSimsq（全插件唯一真源），不要在这里另写一份正则：
+				 * 此前这里自己 match 取 m[2]，与 parse.js 的正则分家，将来改任一侧
+				 * （比如应答多带一个字段）另一边都会悄悄失配。
+				 */
+				var sim = res && res.success ? Parse.parseSimsq(res.data) : null;
+				if (!sim) {
 					simValue.textContent = '未知';
 					simBox.classList.remove('is-warn');
 					return;
 				}
-				var st = parseInt(txt[2], 10);
-				simValue.textContent = Parse.simShort(st);
-				simBox.classList.toggle('is-warn', Parse.simIsWarn(st));
+				simValue.textContent = sim.shortLabel;
+				simBox.classList.toggle('is-warn', sim.warn);
 			}).catch(function () {
 				simValue.textContent = '未知';
 				simBox.classList.remove('is-warn');
@@ -595,39 +599,12 @@ var Mt5700 = (function () {
 		return el;
 	};
 
-	/* ================= 自动刷新 ================= */
-
-	api.autoRefresh = function (onChange) {
-		var wrap = E('div', { 'class': 'mt5700-autorefresh' });
-		var enabled = true;
-		var interval = 5;
-		var chk = document.createElement('input');
-		chk.type = 'checkbox';
-		chk.checked = true;
-		chk.addEventListener('change', function () {
-			enabled = chk.checked;
-			if (onChange) onChange(enabled, interval);
-		});
-		var label = E('label', {}, '自动刷新 ');
-		label.insertBefore(chk, label.firstChild);
-		var sel = document.createElement('select');
-		[3, 5, 10, 15, 30, 60].forEach(function (s) {
-			var opt = E('option', { value: String(s) }, s + ' 秒');
-			if (s === interval) opt.selected = true;
-			sel.appendChild(opt);
-		});
-		sel.addEventListener('change', function () {
-			interval = parseInt(sel.value, 10);
-			if (onChange) onChange(enabled, interval);
-		});
-		label.appendChild(sel);
-		wrap.appendChild(label);
-		return {
-			el: wrap,
-			enabled: function () { return enabled; },
-			interval: function () { return interval; }
-		};
-	};
+	/* ================= 自动刷新 =================
+	 *
+	 * ★ 自动刷新控件**只在 Ui.autoRefresh**（ui.js）里，这里原先还有一份
+	 *   `api.autoRefresh`，但全仓库零调用点（页面都 require 了 ui 并直接用 Ui.*）。
+	 *   两份并存时改了一处样式另一处不动，是典型的「看着有、其实没用」的代码，已删。
+	 */
 
 	/* ================= 定时器管理 ================= */
 
@@ -685,24 +662,45 @@ var Mt5700 = (function () {
 	 * 而不是「现在不在文档里」—— 节点刚构建、尚未插入文档的那一瞬本来就不在，
 	 * 只认转换才不会把刚建好的页面误清掉。
 	 */
+	/*
+	 * ★ 全站只有**一个** 1 秒巡检定时器。
+	 *
+	 * 原先 api.page 与 api.onDetach 各自 `setInterval(..., 1000)` 盯自己的节点：
+	 * 一个页面 = 1 个 page 定时器 + 若干个 onDetach 定时器，多标签页/多次切页
+	 * 后是几十个 1s 定时器在后台空转，每秒各做一次 `document.contains` 遍历。
+	 * 这些回调本身极轻，但**定时器数量**是纯浪费（且每个都攥着本页 DOM 闭包，
+	 * 阻碍回收）。改成一张注册表 + 一个全局巡检：没有待观察节点时定时器直接停掉。
+	 */
+	var _detachWatchers = [];
+	var _sweeperId = null;
+
+	function sweepDetach() {
+		for (var i = _detachWatchers.length - 1; i >= 0; i--) {
+			var w = _detachWatchers[i];
+			var live = w.doc.contains(w.el);
+			if (live) { w.wasInDoc = true; continue; }
+			if (!w.wasInDoc) continue;          /* 还没插入过文档，不算脱离 */
+			_detachWatchers.splice(i, 1);
+			try { w.fn(); } catch (e) { /* 清理失败不能影响其余 */ }
+		}
+		if (!_detachWatchers.length && _sweeperId !== null) {
+			clearInterval(_sweeperId);
+			_sweeperId = null;
+		}
+	}
+
 	api.onDetach = function (el, fn) {
 		if (!el || typeof fn !== 'function') return function () {};
-		var doc = el.ownerDocument || document;
-		var wasInDoc = false;
-		var done = false;
-		var id = setInterval(function () {
-			if (doc.contains(el)) { wasInDoc = true; return; }
-			if (!wasInDoc) return;
-			clearInterval(id);
-			if (done) return;
-			done = true;
-			try { fn(); } catch (e) { /* 清理失败不能影响其余 */ }
-		}, 1000);
+		var w = { el: el, fn: fn, doc: el.ownerDocument || document, wasInDoc: false };
+		_detachWatchers.push(w);
+		if (_sweeperId === null) _sweeperId = setInterval(sweepDetach, 1000);
 		return function () {
-			clearInterval(id);
-			if (done) return;
-			done = true;
-			try { fn(); } catch (e) { /* 同上 */ }
+			var i = _detachWatchers.indexOf(w);
+			if (i >= 0) _detachWatchers.splice(i, 1);
+			if (!_detachWatchers.length && _sweeperId !== null) {
+				clearInterval(_sweeperId);
+				_sweeperId = null;
+			}
 		};
 	};
 

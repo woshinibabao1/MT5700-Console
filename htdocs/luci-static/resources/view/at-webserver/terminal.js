@@ -127,6 +127,35 @@ return L.view.extend({
 		}
 
 		/* ---------- 输出渲染 ---------- */
+
+		var MAX_LINES = 300;
+
+		/*
+		 * 增量渲染：原先每来一条就 `innerHTML = ''` 再重画全部条目，上限 300 条时
+		 * 等于每次发送重建 600 个节点 —— 终端常用来连发十几条，抖动很明显。
+		 * 现在只 append 新增的那一条；溢出几行就从头部摘掉几个节点（不重画剩下的）。
+		 */
+		function appendEntry(e, overflow) {
+			if (!entries.length) consoleEl.innerHTML = '';
+			consoleEl.appendChild(entryNodes(e));
+			for (var i = 0; i < (overflow || 0); i++) {
+				if (consoleEl.firstChild) consoleEl.removeChild(consoleEl.firstChild);
+			}
+			consoleEl.scrollTop = consoleEl.scrollHeight;
+		}
+
+		function entryNodes(e) {
+			var frag = document.createDocumentFragment();
+			var head = E('div', { 'class': 'mt5700-terminal-line mt5700-terminal-prompt' });
+			head.appendChild(E('span', {}, '› ' + e.cmd + '  '));
+			head.appendChild(E('span', { 'class': 'mt5700-log-cmd' }, e.at));
+			frag.appendChild(head);
+			frag.appendChild(E('div', {
+				'class': 'mt5700-terminal-line ' + (e.ok ? 'mt5700-log-ok' : 'mt5700-log-err')
+			}, e.body));
+			return frag;
+		}
+
 		function renderConsole() {
 			consoleEl.innerHTML = '';
 			if (!entries.length) {
@@ -134,40 +163,75 @@ return L.view.extend({
 					'暂无输出，输入 AT 指令开始调试'));
 				return;
 			}
-			for (var i = 0; i < entries.length; i++) {
-				var e = entries[i];
-				var head = E('div', { 'class': 'mt5700-terminal-line mt5700-terminal-prompt' });
-				head.appendChild(E('span', {}, '› ' + e.cmd + '  '));
-				head.appendChild(E('span', { 'class': 'mt5700-log-cmd' }, e.at));
-				consoleEl.appendChild(head);
-				consoleEl.appendChild(E('div', {
-					'class': 'mt5700-terminal-line ' + (e.ok ? 'mt5700-log-ok' : 'mt5700-log-err')
-				}, e.body));
-			}
+			for (var i = 0; i < entries.length; i++) consoleEl.appendChild(entryNodes(entries[i]));
 			consoleEl.scrollTop = consoleEl.scrollHeight;
 		}
+
+		/* ---------- 命令历史（↑ / ↓ 回溯） ---------- */
+
+		var history = [];
+		var histIdx = -1;   /* -1 = 正在编辑新命令，未进入回溯 */
+		var histDraft = ''; /* 进入回溯前未发送的内容，↓ 回到底部时还回去 */
+
+		cmdInput.addEventListener('keydown', function (e) {
+			if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+			if (e.key === 'ArrowUp' && !history.length) return;
+			e.preventDefault();
+			if (histIdx < 0) histDraft = cmdInput.value;
+			if (e.key === 'ArrowUp') {
+				histIdx = histIdx < 0 ? history.length - 1 : Math.max(0, histIdx - 1);
+			} else {
+				histIdx = histIdx + 1;
+				if (histIdx >= history.length) {   /* 回到底部：恢复未发送的草稿 */
+					histIdx = -1;
+					cmdInput.value = histDraft;
+					return;
+				}
+			}
+			cmdInput.value = history[histIdx];
+		});
 
 		/* ---------- 发送 ---------- */
 		var sending = false;
 
+		/*
+		 * 回车/点「发送」此前**完全没有确认**——哪怕输的是 `AT+CFUN=0`（断 5G）
+		 * 或 `AT+CMGD=1,4`（清空全部短信）也是直接下发。危险与否由 Parse.atDangerHint
+		 * 统一判定（同一张表也用在短信设置页），这里只负责拦一次。
+		 */
 		function send(cmd) {
 			var command = (cmd != null ? cmd : cmdInput.value).trim();
 			if (!command) { Mt5700.warning('请输入 AT 指令'); return; }
 			if (sending) return;
+			var danger = Parse.atDangerHint(command);
+			if (danger) {
+				Mt5700.confirm('该指令会影响模组运行：\n\n' + danger + '\n\n' + command + '\n\n确定发送？',
+					function () { doSend(command); }, '仍然发送');
+				return;
+			}
+			doSend(command);
+		}
+
+		function doSend(command) {
 			sending = true;
 			sendBtn.disabled = true;
 
 			AtWs.client.sendCommand(command).then(function (res) {
-				entries.push({
+				var entry = {
 					cmd: command,
 					body: res.success ? String(res.data || '(无输出)') : String(res.error || '未知错误'),
 					ok: !!res.success,
 					at: new Date().toLocaleTimeString('zh-CN', { hour12: false })
-				});
-				/* 无上限会越攒越多，而 renderConsole 每次都是全量重建 DOM */
-				if (entries.length > 300) entries.splice(0, entries.length - 300);
+				};
+				entries.push(entry);
+				/* 无上限会越攒越多；溢出量同时交给 appendEntry 去掉对应的 DOM 节点 */
+				var overflow = entries.length - MAX_LINES;
+				if (overflow > 0) entries.splice(0, overflow);
+				/* 只在「不是刚从历史里取出来的重复项」时记一条 */
+				if (history[history.length - 1] !== command) history.push(command);
+				histIdx = -1;
 				cmdInput.value = '';
-				renderConsole();
+				appendEntry(entry, overflow);
 			}).catch(function () {
 				Mt5700.error('发送失败');
 			}).then(function () {

@@ -306,6 +306,7 @@ return L.view.extend({
 						renderStorage();
 					}
 				}
+				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
 			}).catch(function () {});
 		}
 

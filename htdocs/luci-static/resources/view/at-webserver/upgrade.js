@@ -474,6 +474,7 @@ return L.view.extend({
 					// 但**每轮都发就又成了高频命令** —— 至少隔 RESUME_MIN_GAP 才发一次。
 					if (Date.now() - lastResumeAt > RESUME_MIN_GAP) {
 						lastResumeAt = Date.now();
+						/* 续传是尽力而为：失败不打断轮询，下一轮到点会再试，故不弹错 */
 						AtWs.client.sendCommand('AT^FOTADL=1').catch(function () {});
 					}
 					break;

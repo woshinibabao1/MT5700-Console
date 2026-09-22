@@ -33,6 +33,12 @@ const MAX_RPC_LINE: usize = 8192;
 /// 而这个排空若没有上限，对端只要持续发不含换行的字节流就能让服务把整条流读进内存
 /// （路由器上直接 OOM）。超过本上限就停止排空并交由上层断开连接。
 const MAX_RPC_DRAIN: usize = 64 * 1024;
+/// `events` 应答的单帧字节预算。
+///
+/// 入站有 MAX_RPC_LINE 限流，出站原先没有：总线最多 500 条事件，一次全回轻松
+/// 几十 KB，对端按行读只会拿到被截断的半个 JSON。留出 id/result 包装与中文转义
+/// 的余量，取 6 KB；多出来的下一轮再拉（seq 会停在实际回到的位置，不会跳过）。
+const EVENT_FRAME_BUDGET: usize = 6 * 1024;
 const CELLSCAN_ABORT_TOKEN: &str = "abcd";
 const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -128,12 +134,42 @@ impl EventBus {
         }
     }
 
-    /// 返回 (当前最新 seq, 自 since 之后的事件列表)。
-    fn since(&self, since: u64) -> (u64, Vec<serde_json::Value>) {
+    /// 返回 (本次实际回到的 seq, 自 since 之后的事件列表)。
+    ///
+    /// ★ budget 是单帧字节预算。RPC 是 newline-JSON，协议声明单帧 ≤ 8192 字节
+    ///   （MAX_RPC_LINE，入站侧已经按它限流），但**出站侧原先没有上限**：
+    ///   总线最多存 500 条，一次全回很容易几十 KB，对端按行读拿到的是被截断的
+    ///   半个 JSON —— 表现为 ucode 侧「events 方法整体失败」，比少拿几条难查得多。
+    ///
+    /// ★ 裁剪时回传的是**本次真正回到的 seq**，不是最新 seq：若报了最新 seq，
+    ///   前端会把游标推过去，被裁掉的那些事件就永久拉不到了。
+    fn since(&self, since: u64, budget: usize) -> (u64, Vec<serde_json::Value>) {
         let q = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        let seq = self.seq.load(Ordering::Relaxed);
-        let events = q.iter().filter(|(s, _)| *s > since).map(|(_, v)| v.clone()).collect();
-        (seq, events)
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        let mut bytes = 0usize;
+        let mut last = since;
+        let mut truncated = false;
+        for (s, v) in q.iter() {
+            if *s <= since {
+                continue;
+            }
+            // 单条就超预算时也放行第一条，否则大事件会被永远卡住
+            let size = serde_json::to_string(v).map(|t| t.len() + 1).unwrap_or(64);
+            if bytes + size > budget && !out.is_empty() {
+                truncated = true;
+                break;
+            }
+            bytes += size;
+            out.push(v.clone());
+            last = *s;
+        }
+        if truncated {
+            log_warn!(
+                "事件帧超出 {} 字节预算，本次回 {} 条，剩余等下一轮（seq 已停在 {}）",
+                budget, out.len(), last
+            );
+        }
+        (last, out)
     }
 }
 
@@ -345,7 +381,7 @@ impl RpcServer {
             }
             "events" => {
                 let since = req.params.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
-                let (seq, events) = self.hub.bus.since(since);
+                let (seq, events) = self.hub.bus.since(since, EVENT_FRAME_BUDGET);
                 serde_json::json!({ "id": id, "result": { "seq": seq, "events": events } })
             }
             // 后端运行日志（含被当前级别挡掉的部分）：拨号对齐、串口探测、URC 分发、

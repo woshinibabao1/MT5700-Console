@@ -188,8 +188,19 @@ has('清空短信不再漏第一个存储', /\+CPMS:\\s\*\(\.\*\)/.test(SMSSET),
 has('清空短信检查成败', /missed\) Mt5700\.error\('清空/.test(SMSSET), '不检查就报「已清空」');
 has('锁定邻区捕获构建异常', /catch \(err\)[\s\S]{0,160}构建锁频命令失败/.test(read(path.join(V, 'network_settings.js'))),
 	'buildLockCommand 抛错逃出点击回调会表现为「点了没反应」');
-has('终端输出有上限', /entries\.splice\(0, entries\.length - 300\)/.test(read(path.join(V, 'terminal.js'))),
-	'无上限会越攒越多，而每次渲染都是全量重建 DOM');
+/*
+ * 上限仍要在，但**判据换成不依赖具体算术写法**：原来断言
+ * `entries.splice(0, entries.length - 300)`，那是把「上限」和「溢出算法」绑在一起，
+ * 换个等价写法就误报。真正的约束是两件事：
+ *   ① 有个条数上限常量；② 超限后确实从数组头部裁掉（splice 的起点必须是 0）。
+ * 增量渲染之后还要多一条：DOM 侧也要按溢出量摘节点，否则数组裁了、DOM 照涨。
+ */
+const TERM = read(path.join(V, 'terminal.js'));
+has('终端输出有上限', /MAX_LINES\s*=\s*\d+/.test(TERM), '没有条数上限，entries 会无限增长');
+has('终端超限从头部裁剪', /entries\.splice\(0,\s*overflow\)/.test(TERM),
+	'超限必须从数组头部裁，否则丢的是最新一条');
+has('终端溢出时同步摘掉 DOM 节点', /consoleEl\.removeChild\(consoleEl\.firstChild\)/.test(TERM),
+	'数组裁了但 DOM 不摘，节点照样越攒越多');
 has('飞行模式二次确认', /开启飞行模式会立即关闭射频/.test(MODEM), 'AT+CFUN=0 误点等于整机断网');
 
 /* ------------------------------------------------------------------ */

@@ -90,10 +90,26 @@ ok('mt5700.js 不再自带 SIM 码表', !/SIM_TEXT\s*=\s*\{/.test(m5700Code),
 	'码表抄一份在 mt5700.js，改文案时必漏改');
 ok('network_status.js 不再自带 SIM 码表', !/SIM_STATE\s*=\s*\{/.test(netCode),
 	'码表抄一份在 network_status.js，改文案时必漏改');
-ok('mt5700.js 消费 Parse.simShort', /Parse\.simShort\(/.test(m5700Code));
-ok('mt5700.js 消费 Parse.simIsWarn', /Parse\.simIsWarn\(/.test(m5700Code));
-ok('network_status.js 消费 Parse.simShort', /Parse\.simShort\(/.test(netCode));
-ok('network_status.js 消费 Parse.simIsWarn', /Parse\.simIsWarn\(/.test(netCode));
+/*
+ * 消费入口升级为 Parse.parseSimsq：它一次性给出 status/label/shortLabel/warn/present，
+ * 调用方不必再自己 match 一遍 ^SIMSQ 取第 2 个字段（此前 mt5700.js 与
+ * network_status.js 各抄一份正则，与 parse.js 的正则分家，改任一侧都会悄悄失配）。
+ * 故这里断言的是「走 parseSimsq」＋「除 parse.js 与刻意零依赖的 euicc.js 外
+ * 不再有人内联 ^SIMSQ 正则」——比只断言 simShort/simIsWarn 更贴本质。
+ */
+ok('mt5700.js 走 Parse.parseSimsq 取 SIM 状态', /Parse\.parseSimsq\(/.test(m5700Code),
+	'又在 mt5700.js 内联解析 ^SIMSQ，与 parse.js 的正则分家');
+ok('network_status.js 走 Parse.parseSimsq 取 SIM 状态', /Parse\.parseSimsq\(/.test(netCode),
+	'又在 network_status.js 内联解析 ^SIMSQ，与 parse.js 的正则分家');
+
+/* ^SIMSQ 的正则只允许出现在 parse.js（真源）与 euicc.js（刻意零依赖，见其文件头） */
+const SIMSQ_RE = /SIMSQ:\\s/;   /* 源码里写作 `\^SIMSQ:\s*...`，这里匹配的是字面文本 */
+const euiccCode = fs.readFileSync(path.join(ROOT,
+	'htdocs/luci-static/resources/at-webserver/euicc.js'), 'utf8');
+ok('parse.js 持有 ^SIMSQ 正则（真源）', SIMSQ_RE.test(parseCode));
+ok('euicc.js 的内联 ^SIMSQ 有零依赖说明',
+	SIMSQ_RE.test(euiccCode) && /刻意零依赖/.test(euiccCode),
+	'euicc.js 内联了 ^SIMSQ 却没说明为什么可以不走 Parse');
 
 /* ---------------------------------------------------------------------------
  * 2. 11（已初始化）不算告警

@@ -446,10 +446,11 @@ function cacheTtlFor(command) {
 ATClient.prototype._cacheGet = function (command) {
 	var c = this._readCache;
 	if (!c) return null;
-	var hit = c[normalizeCommand(command)];
+	var k = normalizeCommand(command);   /* 归一化只算一次（原来命中/过期两条路各算一遍） */
+	var hit = c[k];
 	if (!hit) return null;
 	if (Date.now() - hit.t > cacheTtlFor(command)) {
-		delete c[normalizeCommand(command)];
+		delete c[k];
 		return null;
 	}
 	hit.hits = (hit.hits || 0) + 1;
@@ -458,14 +459,24 @@ ATClient.prototype._cacheGet = function (command) {
 
 ATClient.prototype._cachePut = function (command, value) {
 	if (!value || value.success !== true) return;   /* 只缓存成功结果 */
-	if (!this._readCache) this._readCache = {};
-	var keys = Object.keys(this._readCache);
-	if (keys.length >= READ_CACHE_MAX) {
-		/* 简单淘汰：清掉最旧的一半，避免无限增长 */
-		keys.sort(function (a, b) { return this._readCache[a].t - this._readCache[b].t; }.bind(this));
-		for (var i = 0; i < keys.length / 2; i++) delete this._readCache[keys[i]];
+	if (!this._readCache) { this._readCache = {}; this._cacheOrder = []; }
+	var k = normalizeCommand(command);
+	if (this._readCache[k]) {
+		this._readCache[k] = { t: Date.now(), value: value, hits: 0 };
+		return;
 	}
-	this._readCache[normalizeCommand(command)] = { t: Date.now(), value: value, hits: 0 };
+	/*
+	 * 淘汰改由 _cacheOrder（插入序数组）驱动，不再每次 put 都 Object.keys + sort：
+	 * put 在**每条 AT 应答后**都跑一次，而满仓时原实现要把全部 key 排序一遍
+	 * （O(n log n)/次）。插入序数组让淘汰变成「从队头丢几个」，O(淘汰个数)。
+	 */
+	var i;
+	while ((i = this._cacheOrder.indexOf(k)) >= 0) this._cacheOrder.splice(i, 1);
+	this._readCache[k] = { t: Date.now(), value: value, hits: 0 };
+	this._cacheOrder.push(k);
+	while (this._cacheOrder.length > READ_CACHE_MAX) {
+		delete this._readCache[this._cacheOrder.shift()];
+	}
 };
 
 ATClient.prototype.cacheStats = function () {
@@ -477,6 +488,7 @@ ATClient.prototype.cacheStats = function () {
 
 ATClient.prototype.clearReadCache = function () {
 	this._readCache = null;
+	this._cacheOrder = [];
 };
 
 /*
@@ -554,19 +566,15 @@ ATClient.prototype.sendCommand = function (command, opts) {
 		});
 	}
 	/*
-	 * 写命令：执行成功后丢掉状态类缓存。页面未必每次都记得调
-	 * invalidateReadCache()，而「改完 PIN 还显示旧状态」这类问题很难排查，
-	 * 因此在这里兜底——只丢状态类，物理标识类不受影响。
+	 * 写命令：执行成功后丢掉状态类缓存。原先这里还有一个
+	 * `invalidateReadCache()`（整仓清缓存）供页面手动调，但**全仓库零调用点**，
+	 * 而写命令路径已经自动 `_dropStateCache()` 兜底 —— 留着只会让人以为
+	 * 「记得手动清一下」是必经步骤。已删除；需要整仓清时用 clearReadCache()。
 	 */
 	return this.commandQueue.then(function (res) {
 		if (res && res.success) self._dropStateCache();
 		return res;
 	});
-};
-
-/* 写命令之后，之前的只读缓存很可能已经过期，主动清掉避免读到陈旧值 */
-ATClient.prototype.invalidateReadCache = function () {
-	this.clearReadCache();
 };
 
 ATClient.prototype.clearPendingCommands = function (err) {
@@ -790,10 +798,15 @@ function convertSinr(raw) {
 }
 function convertRssi(raw) { return raw === 0 ? -120 : (raw >= 96 ? -25 : -121 + raw); }
 
+/*
+ * 百分比只在这里算一次：量程与等级判定都在 Parse（见 parse.js 的「信号语义」段）。
+ * 此前这里另用 -110~-70 量程，与 mt5700.js 的 -120~-70 打架 —— 同一个 RSRP
+ * 在「网络设置」与「运行状态」两个页面给出两个百分比（-90 dBm：50% vs 60%）。
+ * 本函数只负责 Parse 给的数字 → 带 % 的展示串（取不到给空串，由调用方渲染成「—」）。
+ */
 function calculateSignalPercent(rsrp) {
-	if (!rsrp || rsrp >= 0) return '';
-	var ratio = (rsrp - (-110)) / ((-70) - (-110));
-	return Math.round(Math.max(0, Math.min(1, ratio)) * 100) + '%';
+	var pct = Parse.signalPercent(rsrp);
+	return pct == null ? '' : pct + '%';
 }
 
 function parseHexValue(hexStr) { return parseInt(hexStr, 16) || 0; }
@@ -900,24 +913,6 @@ function parseHCSQ(data) {
 	return result;
 }
 
-/* 从 CSS 变量取色，使信号配色随浅色 / 深色主题自动切换 */
-function cssColor(name, fallback) {
-	try {
-		var v = window.getComputedStyle(document.documentElement).getPropertyValue(name);
-		v = (v || '').trim();
-		return v || fallback;
-	} catch (e) {
-		return fallback;
-	}
-}
-
-function signalColor(rsrp) {
-	if (rsrp == null || rsrp >= 0) return cssColor('--mt5700-text-muted', '#8a93a0');
-	if (rsrp >= -90) return cssColor('--mt5700-sig-exc', '#0c7a54');
-	if (rsrp >= -105) return cssColor('--mt5700-sig-fair', '#9a5c00');
-	return cssColor('--mt5700-sig-bad', '#c62828');
-}
-
 /* ---- PS 注册状态 ---- */
 
 function psRegText(stat) {
@@ -948,12 +943,20 @@ function isUnsolicitedText(text) {
 function parseRawData(text) {
 	var out = [];
 	var re = /\^PDCPDATAINFO:\s*([^\r\n]+)/g;
-	var m, rest = text;
+	/*
+	 * 原实现在循环里 `rest.replace(m[0],'')`：每命中一次就把整段报文重新拷一遍，
+	 * 周期上报（^PDCPDATAINFO 一帧几十条）时是 O(n²)。改成按匹配下标切片，
+	 * 只在最后 join 一次 —— 总拷贝量从 O(n×k) 降到 O(n)。
+	 */
+	var m, cursor = 0;
+	var gaps = [];
 	while ((m = re.exec(text)) !== null) {
-		var fields = m[1].split(',');
-		out.push({ type: 'PDCP', raw: m[1], parsed: parsePDCP(fields) });
-		rest = rest.replace(m[0], '');
+		gaps.push(text.slice(cursor, m.index));
+		cursor = m.index + m[0].length;
+		out.push({ type: 'PDCP', raw: m[1], parsed: parsePDCP(m[1].split(',')) });
 	}
+	gaps.push(text.slice(cursor));
+	var rest = gaps.join('');
 	// 其余 URC
 	var lines = rest.split('\n');
 	for (var i = 0; i < lines.length; i++) {
@@ -1312,7 +1315,6 @@ var AtWs = {
 	parsePDCP: parsePDCP,
 	parseRawData: parseRawData,
 	PDCP_FIELDS: PDCP_FIELDS,
-	signalColor: signalColor,
 	psRegText: psRegText,
 	operatorFromCode: operatorFromCode,
 	qciLabel: qciLabel,

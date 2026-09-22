@@ -299,8 +299,15 @@ return L.view.extend({
 
 		/* ---------- 短信开关步骤 ---------- */
 
+		/*
+		 * ★ 这个开关一步到位下发 5 条 AT，其中含 `AT+CFUN=0/1`（动射频：5G WAN 会断）
+		 * 和关闭时的 `AT+CMGD=1,4`（**清空存储里的全部短信**）。此前翻一下开关就直接执行，
+		 * 没有任何确认 —— 关一次等于把短信全删了，且不可恢复。
+		 *
+		 * 危险与否由 Parse.atDangerHint 统一判定（与终端页同一张表），这里只负责
+		 * 在**执行前**把所有会踩到的危险项列出来让用户确认；取消就把开关拨回去。
+		 */
 		function toggleSMS(enable) {
-			smsOnChk.disabled = true;
 			var steps = enable ? [
 				['AT+CEUS=1', 1000, '开启 CEUS'],
 				['AT^IMSSWITCH=1,0,0', 2000, '开启 IMS'],
@@ -313,6 +320,25 @@ return L.view.extend({
 				['AT+CFUN=0', 500, '关闭射频'],
 				['AT+CMGD=1,4', 0, '清空短信']
 			];
+			var warnings = [];
+			steps.forEach(function (s) {
+				if (!s[0]) return;
+				var hint = Parse.atDangerHint(s[0]);
+				if (hint) warnings.push('· ' + s[2] + '（' + s[0] + '）：' + hint);
+			});
+			if (warnings.length) {
+				Mt5700.confirm((enable ? '开启' : '关闭') + '短信功能会下发以下指令：\n\n'
+					+ warnings.join('\n') + '\n\n确定继续？',
+					function () { runToggleSteps(enable, steps); },
+					'确定执行',
+					function () { smsOnChk.checked = !enable; });
+				return;
+			}
+			runToggleSteps(enable, steps);
+		}
+
+		function runToggleSteps(enable, steps) {
+			smsOnChk.disabled = true;
 			var chain = Promise.resolve();
 			for (var i = 0; i < steps.length; i++) {
 				(function (step) {
@@ -369,6 +395,7 @@ return L.view.extend({
 						state.smsOn = false;
 					}
 				}
+				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
 			}).catch(function () {});
 		}
 
@@ -420,6 +447,7 @@ return L.view.extend({
 						renderStorage();
 					}
 				}
+				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
 			}).catch(function () {});
 		}
 

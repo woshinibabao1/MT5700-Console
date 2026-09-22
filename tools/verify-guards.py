@@ -29,6 +29,9 @@ TARGETS = {
     # mt5700.js 是**全站共用**组件（errorState 的按钮文案默认值就在这里），
     # 也要能被变异、被还原 —— 单独挂键，别和 euicc.js 混。
     "mt5700js": ATWB / "mt5700.js",
+    # mt5700.js 再挂一个键：它同时被 single-source 契约守着（信号百分比真源），
+    # 而 "mt5700js" 固定跑 esim-contract —— 一份文件两条测试通道，别挂错。
+    "mt5700js2": ATWB / "mt5700.js",
     # 同一份 euicc.js 再挂第三个键：tag 白名单守卫走它自己的测试文件。
     "js3": ATWB / "euicc.js",
     # esim.js 再挂一个键：静默 catch 守卫是独立测试文件。
@@ -39,6 +42,14 @@ TARGETS = {
     "upgjs": ATWB.parent / "view" / "at-webserver" / "upgrade.js",
     # 测试文件自身也要能被变异：断言签名守卫查的就是测试文件的写法。
     "test2": ROOT / "tests" / "device-control-contract.test.js",
+    # 「单一真源」契约（tests/single-source-contract.test.js）覆盖多个文件，
+    # 每个被它守着的文件都要能单独变异 —— 一份文件一个键，别混。
+    "rpcjs": ATWB / "rpc.js",
+    "parsejs": ATWB / "parse.js",
+    "termjs": ATWB.parent / "view" / "at-webserver" / "terminal.js",
+    "smssetjs": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
+    # Rust 后端也在守卫范围内（事件帧预算）；.rs 不做语法预检，见 syntax_ok。
+    "rsrust": ROOT / "src" / "rust" / "src" / "rpcserver.rs",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -49,12 +60,18 @@ TARGET_TEST = {
     "esimcss": ROOT / "tests" / "esim-contract.test.js",
     "js2": ROOT / "tests" / "esim-contract.test.js",
     "mt5700js": ROOT / "tests" / "esim-contract.test.js",
+    "mt5700js2": ROOT / "tests" / "single-source-contract.test.js",
     "js3": ROOT / "tests" / "euicc-tag-whitelist-contract.test.js",
     "esimjs2": ROOT / "tests" / "silent-catch-contract.test.js",
     "shell": ROOT / "tests" / "shell-comment-style-contract.test.js",
     "msjs": ROOT / "tests" / "device-control-contract.test.js",
     "upgjs": ROOT / "tests" / "read-command-fresh-contract.test.js",
     "test2": ROOT / "tests" / "assert-signature-contract.test.js",
+    "rpcjs": ROOT / "tests" / "single-source-contract.test.js",
+    "parsejs": ROOT / "tests" / "single-source-contract.test.js",
+    "termjs": ROOT / "tests" / "single-source-contract.test.js",
+    "smssetjs": ROOT / "tests" / "single-source-contract.test.js",
+    "rsrust": ROOT / "tests" / "single-source-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -363,6 +380,63 @@ MUTATIONS = [
         "\tok('暂存项 ' + key + ' 走 ctrlStaged.set（不逐项立即写模组）', !!m);",
         "调用顺序都与自身定义一致",
     ),
+    # ---- 以下 8 条守的是 tests/single-source-contract.test.js（「同一件事只有一个家」）----
+    (
+        "rpc.js 又自己算 -110 量程的信号百分比（两页面显示两个百分比）",
+        "rpcjs",
+        "\tvar pct = Parse.signalPercent(rsrp);",
+        "\tvar pct = Math.round(100 * (rsrp - (-110)) / ((-70) - (-110)));",
+        "rpc.js 又开始自己算百分比了",
+    ),
+    (
+        "mt5700.js 又自己算 2*(rsrp+120)（与 parse.js 的公式分家）",
+        "mt5700js2",
+        "\t\treturn Parse.signalPercent(rsrp);",
+        "\t\treturn Math.max(0, Math.min(100, Math.round(2 * (Number(rsrp) + 120))));",
+        "mt5700.js 又开始自己算百分比了",
+    ),
+    (
+        "终端页不再查危险 AT（AT+CFUN=0 会直接把 5G 断掉）",
+        "termjs",
+        "var danger = Parse.atDangerHint(command);",
+        "var danger = null;",
+        "终端又没有危险指令提示了",
+    ),
+    (
+        "短信设置页不再查危险 AT（不经确认就清空全部短信）",
+        "smssetjs",
+        "var hint = Parse.atDangerHint(s[0]);",
+        "var hint = null;",
+        "短信开关又会不经确认就发",
+    ),
+    (
+        "parseRejInfo 缺字段又归 0（「没上报」显示成「CS 域」）",
+        "parsejs",
+        "var num = function (v) { return numOrNull(unquote(v)); };",
+        "var num = function (v) { var n = Number(unquote(v)); return isFinite(n) ? n : 0; };",
+        "缺字段又归 0 了",
+    ),
+    (
+        "parse.js 里再抄一份 numOrNull（两份契约迟早不一致）",
+        "parsejs",
+        "\t/* numOrNull / hexOrNull 已上移到文件顶部的「公共取值工具」，全文件共用一份 */",
+        "\tvar numOrNull = function (v) { return Number(v); };",
+        "恰好定义一处",
+    ),
+    (
+        "EventBus::since 去掉 budget 参数（500 条事件一次全回撑爆 8192 单帧）",
+        "rsrust",
+        "fn since(&self, since: u64, budget: usize) -> (u64, Vec<serde_json::Value>) {",
+        "fn since(&self, since: u64) -> (u64, Vec<serde_json::Value>) {",
+        "since 又没有字节预算了",
+    ),
+    (
+        "events 调用点不再传帧预算",
+        "rsrust",
+        "self.hub.bus.since(since, EVENT_FRAME_BUDGET)",
+        "self.hub.bus.since(since, 0)",
+        "events 调用点传入 EVENT_FRAME_BUDGET",
+    ),
 ]
 
 
@@ -390,6 +464,10 @@ def syntax_ok(path):
     if path.suffix == ".css":
         return True
     if path.suffix == ".sh":
+        return True
+    # Rust 不做预检：本机与 CI 都没有 cargo/编译器，而 `new Function(源码)` 对
+    # Rust 语法必然报错。这些变异只改标识符/参数/常量，不会把文件写坏。
+    if path.suffix == ".rs":
         return True
     if "tests" in path.parts:
         args = [NODE, "--check", str(path)]

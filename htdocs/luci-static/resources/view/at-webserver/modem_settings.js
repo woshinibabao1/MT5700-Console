@@ -803,6 +803,7 @@ return L.view.extend({
 				sysRaw.textContent = '模组当前值：acqorder=' + sysCfg.acqorder
 					+ '，band=' + sysCfg.band + '，roam=' + sysCfg.roam
 					+ '，srvdomain=' + sysCfg.srvdomain + '，lteband=' + sysCfg.lteband;
+				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
 			}).catch(function () {});
 		}
 
@@ -837,6 +838,7 @@ return L.view.extend({
 						+ '不提供「国内」与「国际」分别设置；固件若上报 0-3，本页会自动换成四档。')
 					+ '（手册 13.2.3）';
 				paintRoam();
+				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
 			}).catch(function () {});
 		}
 
@@ -938,6 +940,7 @@ return L.view.extend({
 						thermStatus.textContent = levelText;
 					}
 				}
+				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
 			}).catch(function () {});
 		}
 
@@ -1030,6 +1033,7 @@ return L.view.extend({
 					}
 				}
 				return fetchPinStatus();
+				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
 			}).catch(function () {});
 		}
 

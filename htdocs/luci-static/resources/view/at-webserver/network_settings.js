@@ -281,6 +281,55 @@ return L.view.extend({
 				+ '；先选制式，再设锁频类型与参数，「保存设置」只下发当前制式';
 		}
 
+		/*
+		 * 「关射频 → 干活 → 恢复射频」的括号封装。
+		 *
+		 * 锁频 / 锁小区 / 切 5G 接入模式三条链路原本各写一遍这三层，而且在各自的
+		 * catch 里都是 `Ui.setFlightMode(false).catch(function () {})` ——
+		 * **恢复射频失败是彻底静默的**：用户被留在飞行模式里，5G 完全没有网，
+		 * 界面却只报「设置失败」，看不出真正的后果是「现在没网了」。
+		 *
+		 * 收在这里后：正常与异常路径共用同一条恢复逻辑，恢复失败会重试并报警。
+		 */
+
+		/*
+		 * 恢复射频（关飞行模式）。刚关完射频时模组常还在忙，单次失败很常见，
+		 * 故最多重试 3 次；仍失败必须明确告诉用户「现在得手动关飞行模式才有救」，
+		 * 不能让 5G 断着而界面一声不吭。
+		 */
+		function restoreRadio() {
+			var attempt = function (n) {
+				return Ui.setFlightMode(false).then(function (ok) {
+					if (ok || n >= 3) {
+						if (!ok) Mt5700.error('恢复射频失败，请手动关闭飞行模式，否则 5G 不会恢复');
+						return ok;
+					}
+					return Ui.sleep(1000).then(function () { return attempt(n + 1); });
+				});
+			};
+			return attempt(1).catch(function () {
+				Mt5700.error('恢复射频失败，请手动关闭飞行模式，否则 5G 不会恢复');
+			});
+		}
+
+		/* work 是「射频已关」之后要做的事，返回 Promise；返回值原样透传给后续 then */
+		function withRadioOff(work) {
+			var radioOff = false;
+			return Ui.setFlightMode(true).then(function (ok) {
+				if (!ok) throw new Error('开启飞行模式失败');
+				radioOff = true;
+				return Ui.sleep(1000);
+			}).then(work).then(function (r) {
+				return Ui.setFlightMode(false).then(function (off) {
+					if (!off) throw new Error('关闭飞行模式失败');
+					return r;
+				});
+			}).catch(function (err) {
+				if (radioOff) restoreRadio();
+				throw err;
+			});
+		}
+
 		/* 保存当前制式的锁频配置 */
 		function saveActiveLock() {
 			if (busy) return;
@@ -297,27 +346,19 @@ return L.view.extend({
 			}
 			busy = true;
 			saveLockBtn.disabled = true;
-			var radioOff = false;
 			Mt5700.info('正在保存 ' + ratLabel(kind) + ' 锁频（先切飞行模式）…');
-			Ui.setFlightMode(true).then(function (ok) {
-				if (!ok) throw new Error('开启飞行模式失败');
-				radioOff = true;
-				return Ui.sleep(1000);
+			withRadioOff(function () {
+				return AtWs.client.sendCommand(cmd).then(function (res) {
+					if (!res.success) throw new Error(Ui.atErrorText(res, ratLabel(kind) + ' 锁频设置失败'));
+					Mt5700.success(ratLabel(kind) + ' 锁频设置成功');
+				});
 			}).then(function () {
-				return AtWs.client.sendCommand(cmd);
-			}).then(function (res) {
-				if (!res.success) throw new Error(Ui.atErrorText(res, ratLabel(kind) + ' 锁频设置失败'));
-				Mt5700.success(ratLabel(kind) + ' 锁频设置成功');
-				return Ui.setFlightMode(false);
-			}).then(function (off) {
-				if (!off) throw new Error('关闭飞行模式失败');
 				Mt5700.info('锁频已保存，等待模组重新驻网…');
 				return Ui.sleep(2000);
 			}).then(function () {
 				return fetchCurrent();
 			}).catch(function (err) {
 				Mt5700.error((err && err.message) || '保存锁频设置失败');
-				if (radioOff) Ui.setFlightMode(false).catch(function () {});
 			}).then(function () {
 				busy = false;
 				saveLockBtn.disabled = false;
@@ -476,23 +517,15 @@ return L.view.extend({
 			}
 			Mt5700.confirm('确定锁定 ' + cell.rat + ' ' + (kind === 'nr' ? 'n' : 'B') + band
 				+ '（ARFCN ' + cell.arfcn + '，PCI ' + cell.pci + '）？', function () {
-				var radioOff = false;
-				Ui.setFlightMode(true).then(function (ok) {
-					if (!ok) throw new Error('开启飞行模式失败');
-					radioOff = true;
-					return Ui.sleep(1000);
+				withRadioOff(function () {
+					return AtWs.client.sendCommand(cmd).then(function (res) {
+						if (!res.success) throw new Error(Ui.atErrorText(res, '锁定失败'));
+						Mt5700.success('已锁定 ' + cell.rat + ' PCI ' + cell.pci);
+					});
 				}).then(function () {
-					return AtWs.client.sendCommand(cmd);
-				}).then(function (res) {
-					if (!res.success) throw new Error(Ui.atErrorText(res, '锁定失败'));
-					return Ui.setFlightMode(false);
-				}).then(function (off) {
-					if (!off) throw new Error('关闭飞行模式失败');
-					Mt5700.success('已锁定 ' + cell.rat + ' PCI ' + cell.pci);
 					return fetchCurrent();
 				}).catch(function (err) {
 					Mt5700.error((err && err.message) || '锁定失败');
-					if (radioOff) Ui.setFlightMode(false).catch(function () {});
 				});
 			}, '确认锁定');
 		}
@@ -784,24 +817,16 @@ return L.view.extend({
 			if (!m) return;
 			Mt5700.confirm('切换 5G 接入模式为「' + m.label + '」（AT^C5GOPTION=' + m.triple.join(',') + '）？'
 				+ '切换期间会短暂断网，且需要软重启才生效。', function () {
-				var radioOff = false;
 				Mt5700.info('正在切换接入模式（先切飞行模式）…');
-				Ui.setFlightMode(true).then(function (ok) {
-					if (!ok) throw new Error('开启飞行模式失败');
-					radioOff = true;
-					return Ui.sleep(1000);
+				withRadioOff(function () {
+					return AtWs.client.sendCommand('AT^C5GOPTION=' + m.triple.join(',')).then(function (res) {
+						if (!res.success) throw new Error(Ui.atErrorText(res, '接入模式设置失败'));
+						Mt5700.success('已切换为「' + m.label + '」，软重启模组后生效');
+					});
 				}).then(function () {
-					return AtWs.client.sendCommand('AT^C5GOPTION=' + m.triple.join(','));
-				}).then(function (res) {
-					if (!res.success) throw new Error(Ui.atErrorText(res, '接入模式设置失败'));
-					return Ui.setFlightMode(false);
-				}).then(function (off) {
-					if (!off) throw new Error('关闭飞行模式失败');
-					Mt5700.success('已切换为「' + m.label + '」，软重启模组后生效');
 					return query5G();
 				}).catch(function (err) {
 					Mt5700.error((err && err.message) || '接入模式设置失败');
-					if (radioOff) Ui.setFlightMode(false).catch(function () {});
 					query5G();
 				});
 			}, '确认切换');

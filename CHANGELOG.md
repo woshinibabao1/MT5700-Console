@@ -5,6 +5,89 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.41] - 2026-09-22
+
+第二轮全仓走查（同 2.3.40 的 deep-module 视角），本轮的主题是**「同一件事只允许有一个家」**：
+全仓里同一件事被写了两遍的地方，改一处另一处不动，是 bug 与"改了没变化"的源头。
+
+### Fixed（真缺陷）
+
+- **信号百分比有两套量程**：`rpc.js` 用 -110~-70、`mt5700.js` 用 -120~-70，
+  同一个 RSRP 在「运行状态」与「网络设置」显示两个百分比（-90 dBm：50% vs 60%）。
+  更糟的是 `mt5700.js` 给百分比定的分级阈值（75/50/25）是按 **rpc.js 那套**量程
+  推出来的，与它自己文件里的公式差一档，仪表会判错档。
+  统一到 `Parse.signalPercent / signalLevel / percentLevel`（新增，parse.js 一处），
+  阈值按新量程重算为 80/60/40。
+- **`parseRejInfo` 把「没上报」显示成「CS 域」**：内部的 `num()` 缺字段时返回 0，
+  而 0 在域/制式/类型三张表里**都是合法取值** —— 用户看到的不是「未知」，
+  而是一个看似确凿、实则编造的结论。改为公共 `numOrNull`（缺 → null）并落地到文案。
+- **`decodeBandMask` 在大位上会判丢位**：用 `Math.floor(v/mask)%2` 测位，
+  而手册里 WCDMA VIII/IX/XIX 的宏值在第 49/50/60 位，超过 2^53 后双精度开始丢低位
+  （2^60 附近的浮点间隔是 256），「GSM 1800 + WCDMA XIX」这种组合的低位会被判丢。
+  改成在十六进制串上按字符取位（`hexBit`），任意位宽都精确。
+- **短信开关会不经确认就清空全部短信翻**：翻一下「短信功能」开关就直接下发
+  `AT+CFUN=0`（断 5G）与 `AT+CMGD=1,4`（**清空存储里的全部短信**），全程没有确认。
+  危险判定收到 `Parse.atDangerHint`（新增表），执行前逐条列出会影响什么，取消就把开关拨回去。
+- **终端回车发送没有危险提示**：常用命令与已保存命令有二次确认，但直接回车/点发送没有 ——
+  输 `AT+CFUN=0` 也是直接下发。改为统一过 `Parse.atDangerHint`，命中时列出具体后果。
+- **恢复射频失败是静默的**：锁频 / 锁小区 / 切 5G 接入模式三条链路的 catch 里都是
+  `Ui.setFlightMode(false).catch(function () {})` —— 失败时用户被留在飞行模式里、
+  5G 完全没网，界面却只报「设置失败」。收敛为 `withRadioOff()` + `restoreRadio()`
+  （失败重试 3 次，仍失败明确提示"请手动关闭飞行模式"）。
+- **`AT^SIMSQ?` 的解析又分家**：`mt5700.js` 与 `network_status.js` 各自内联正则取 `m[2]`，
+  与 `parse.js` 的正则分家（改任一侧另一边都会悄悄失配）。改为统一走 `Parse.parseSimsq`。
+  `euicc.js` 那份保留（该模块刻意零依赖，已加注释说明）。
+
+### Changed（可维护性 / 性能）
+
+- **删死代码 199 行（ui.js）**：`panel / field / kv / tag / primaryButton / dangerButton /
+  toast(+success/error/warning/info) / confirm / renderConnectionBar / deriveNetworkMode /
+  page / spinner / subscribe` 共 13 个导出**全仓库零调用点**（页面实际用的是 mt5700.js 那套）。
+  两库并存时改一处另一处不动，读代码还得先判断"该用哪个"。ui.js 498 → 299 行。
+  同时删掉 `Mt5700.autoRefresh`（同样零调用点，真用的是 `Ui.autoRefresh`）与
+  `AtClient.invalidateReadCache`。
+- **parse.js 的小工具收成一份**：`unquote / numOrNull / hexOrNull / power` 原先在各函数体里
+  各写一份且契约不一致，统一到文件顶部；`tok` 改为在 `unquote` 上只加自己的两条业务规则。
+- **定时器收敛**：`api.page` 与 `api.onDetach` 原先各自起一个 1 秒 `setInterval` 盯自己的节点，
+  一个页面就是好几个定时器在后台空转（且每个都攥着本页 DOM 闭包）。改为一张注册表 +
+  全站唯一一个巡检定时器，没有待观察节点时定时器直接停掉。
+- **热路径去 O(n²)**：
+  - `parseRawData` 在循环里 `rest.replace(m[0],'')` 每命中一次就重拷整段报文 → 改为按匹配下标切片、最后 join 一次；
+  - `_cachePut` 满仓时 `Object.keys + sort` 每次都排序 → 改为插入序数组淘汰；
+  - `_cacheGet` 把归一化只算一次（原先命中/过期两条路各算一遍）。
+- **euicc.js 大响应拼接**：`bytesToHex` / `swapNibbles` 的逐字节 `+=` 与
+  `sendAndCollect` 每轮 `acc + a.data`，在 BPP 这种量级（8160 字节以上、几十轮 GET RESPONSE）
+  上会反复重拷整串。改为数组攒片段、最后 join 一次。
+- **终端输出改增量渲染**：原先每来一条就 `innerHTML=''` 重画全部（上限 300 条 = 600 节点）。
+  改为只 append 新条目，溢出几行就从头部摘掉几个节点。新增 ↑/↓ 命令历史。
+- **8 处「合理地静默」的 catch 补了交代**：只读探测失败保持「—」/原值、下一轮会再试，
+  不弹错是刻意的 —— 但必须写清（见 `tests/silent-catch-contract.test.js` 的口径）。
+
+### Added
+
+- `Parse.signalPercent / signalLevel / percentLevel / atDangerHint / hexFromBits`（唯一真源）。
+- `tests/single-source-contract.test.js`：**单一真源契约**，把「同一件事只有一个家」
+  变成可执行断言（信号量程、危险 AT 表、取值小工具、RPC 帧预算）。
+- `tools/verify-guards.py` 新增 8 条变异样例（守卫总数 38 → 46），逐条验证这些断言**真能判红**。
+  ★ 过程中发现一处恒绿：只匹配 `function numOrNull(` 的断言拦不住 `var numOrNull = function`
+  这种抄法，已修正。
+- `src/rust/src/rpcserver.rs`：RPC **出站**帧加字节预算 `EVENT_FRAME_BUDGET`（6 KB）。
+  入站一直有 8192 限流，出站没有 —— 事件总线最多 500 条，一次全回轻松几十 KB，
+  对端按行读只会拿到被截断的半个 JSON，表现为 ucode 侧「events 方法整体失败」。
+  裁剪时回传的是**本次真正回到的 seq**（不是最新 seq），免得被裁掉的事件被永久跳过。
+
+### Known（走查发现、本轮未动）
+
+- euicc.js 里有 4 套 BER-TLV 解析器（`readTlvHead` / `tlvFindHex` / `readTlvAt` / `pickIn`），
+  长度解码各写一遍。四者对扩展长度（0x81/0x82）处理一致、对 0x80/0xFF 都拒绝（红线安全），
+  差异只在多字节 tag 的接受范围。合并需要真机跑完整下载链路回归，本轮只做了性能与命名清理。
+- euicc.js 的模块级 `TRANSPORT / lastChannel` 仍是可变全局（红线 24 点名过跨会话覆盖事故），
+  改成每会话透传要动所有 APDU 调用点，同样需要真机回归。
+- Rust 侧另有三项已定位未改：`serial_linux.rs` 的 `into_parts` 保留了 `expect`
+  （注释说明是刻意暴露内部不变量，改需动 `Transport` trait 签名）；模组假死时
+  `read` 阻塞导致不会触发重连（需加链路看门狗）；`has_service` 的探测预算 6s
+  小于单条命令最坏耗时 10s，长期超时会让用户配的锁频被当成「锁死」擦掉。
+
 ## [2.3.40] - 2026-09-22
 
 本轮以 mattpocock/skills 的 deep-module 视角做了一次全仓走查（Rust 后端 / eSIM 链路 /

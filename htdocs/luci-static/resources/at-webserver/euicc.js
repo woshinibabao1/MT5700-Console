@@ -145,25 +145,28 @@ var Euicc = (function () {
 		return out;
 	};
 
+	/*
+	 * 逐字节 `+=` 在 BPP 这种量级（实测 8160 字节以上，546 个分块）上会反复
+	 * 重建字符串；改成数组 join —— 只拼一次。短输入（APDU 头 4 字节）行为完全不变。
+	 */
 	api.bytesToHex = function (b) {
-		var s = '';
+		var parts = new Array(b.length);
 		for (var i = 0; i < b.length; i++) {
-			s += hex2(b[i]);
+			parts[i] = hex2(b[i]);
 		}
-		return s;
+		return parts.join('');
 	};
 
 	/* ICCID 的 BCD 半字节交换：逐字节交换高低 4 位（标准 SIM ICCID 解码）。 */
 	api.swapNibbles = function (hex) {
 		if (hex.length % 2 !== 0) throw makeError('EUICC_BAD_HEX', '奇数长度无法交换：' + hex);
 		if (!api.isHex(hex)) throw makeError('EUICC_BAD_HEX', '非法十六进制：' + hex);
-		var out = '';
+		var out = new Array(hex.length / 2);
+		var n = 0;
 		for (var i = 0; i < hex.length; i += 2) {
-			var hi = hex.charAt(i);
-			var lo = hex.charAt(i + 1);
-			out += lo + hi;
+			out[n++] = hex.charAt(i + 1) + hex.charAt(i);
 		}
-		return out.toUpperCase();
+		return out.join('').toUpperCase();
 	};
 
 	/* UTF-8 解码：优先 TextDecoder，否则手写循环；非法序列替换为 U+FFFD，不抛。 */
@@ -873,6 +876,14 @@ var Euicc = (function () {
 	 * 返回 { data, sw }，data 为拼接完整的响应数据（不含 SW）。
 	 */
 	function sendAndCollect(send, ch, apdu, round, acc) {
+		/*
+		 * acc 既接受字符串（外部调用点传 ''）也接受数组（内部累加形态）。
+		 *
+		 * 用数组是因为大响应（BPP 实测 8160 字节以上）要分几十轮 GET RESPONSE 取完，
+		 * 而 `acc + a.data` 每轮都要把已经累积的整串重新拷一遍 —— O(n × 轮数)。
+		 * 改成数组攒片段、最后 join 一次，总拷贝量降到 O(n)。
+		 */
+		var parts = Array.isArray(acc) ? acc : (acc ? [acc] : []);
 		return send(apduCommand(apdu)).then(function (res) {
 			/* R05：统一先过 atFailure，把 AT 层失败按形态分流，避免「AT 未连接」被误报成「固件不支持」。 */
 			var fail = api.atFailure(res);
@@ -903,9 +914,11 @@ var Euicc = (function () {
 					throw makeError('EUICC_TLV_TRUNCATED', 'GET RESPONSE 超过 ' + maxRounds() + ' 轮');
 				}
 				var gr = api.getResponseApdu(ch, a.le);
-				return sendAndCollect(send, ch, gr, round + 1, acc + a.data);
+				parts.push(a.data);
+				return sendAndCollect(send, ch, gr, round + 1, parts);
 			}
-			var data = acc + a.data;
+			parts.push(a.data);
+			var data = parts.join('');
 			/*
 			 * ★ 2026-09-19 真机实测：AT+CSIM 单条响应上限 256 字节，且**卡上不留残留**
 			 *   （四种 GET RESPONSE 全 0 字节）。也就是说超过 256 字节的响应永远取不全。
@@ -1489,6 +1502,12 @@ var Euicc = (function () {
 				if (fail.kind === 'error' || fail.kind === 'empty') {
 					throw makeError('EUICC_AT_ERROR', 'AT 服务未就绪');
 				}
+				/*
+				 * 这里没有走 Parse.parseSimsq：本模块是**刻意零依赖**的纯函数模块
+				 * （无 DOM、不依赖 rpc/ui/mt5700/parse），测试把整段源码抠到 Node 里
+				 * 直接跑，多一个 Parse 就要多一份桩。SIMSQ 在这里只用「卡在不在」一位，
+				 * 故保留内联正则；但**状态码到文案的映射**仍只准查 Parse，别在这里另写。
+				 */
 				var txt = res && typeof res.data === 'string' ? res.data : '';
 				var m = txt.match(/\^SIMSQ:\s*\d+\s*,\s*(\d+)/);
 				if (m) {

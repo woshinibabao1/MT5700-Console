@@ -10,6 +10,117 @@
 var Parse = (function () {
 	var api = {};
 
+	/* ================= 公共取值工具（全文件唯一真源） =================
+	 *
+	 * 此前「剥引号」「转数字」「转十六进制」在各函数体内各写一份，且**契约不一致**：
+	 * parseRejInfo 里的 num() 缺字段时返回 0，于是「域」字段一丢就被
+	 * REJ_DOMAINS[0] 渲染成「CS 域」——把「没取到」伪装成了「取到了 CS 域」。
+	 * 统一后的契约：缺字段 / 非法值一律 **null**（null 才表示「没取到」），
+	 * 绝不用 0 兜底（0 在 RSRP/域/制式里都是**合法取值**，会和真实测量混淆）。
+	 */
+
+	/* 剥掉首尾成对的引号。只剥首尾各一对，字段内部的引号不动。 */
+	function unquote(v) {
+		return String(v == null ? '' : v).trim().replace(/^"|"$/g, '');
+	}
+
+	/* 数字或 null：空串与非法值都归 null（注意 Number('') === 0，必须显式判空） */
+	function numOrNull(v) {
+		var t = String(v == null ? '' : v).trim();
+		if (t === '') return null;
+		var n = Number(t);
+		return isFinite(n) ? n : null;
+	}
+
+	/*
+	 * 十六进制字段（PCI / TAC / Cell-ID 都是）。
+	 *
+	 * 必须先判空再用 parseInt：parseInt(undefined, 16) 是 NaN，而 NaN 会一路
+	 * 传到界面变成字面上的「NaN」，还会让「锁定小区」的校验把它当成非法值拒掉。
+	 * 字段缺失（`^MONNC: NR,524910` 或尾随逗号）时应当显示「—」而不是 NaN。
+	 */
+	function hexOrNull(v) {
+		var t = String(v == null ? '' : v).trim().replace(/"/g, '');
+		if (t === '') return null;
+		var n = parseInt(t, 16);
+		return isFinite(n) ? n : null;
+	}
+
+	/*
+	 * 取十六进制字符串第 bitIndex 位（0 = 最低位）。
+	 *
+	 * ★ 为什么不能用数值做位测试：手册里 WCDMA VIII/IX/XIX 的宏值在第 49/50/60 位，
+	 *   `parseInt(hex,16)` 一旦超过 2^53 就开始丢低位（2^60 附近的浮点间隔是 256），
+	 *   此时 `Math.floor(v/mask) % 2` 会把「GSM 1800 + WCDMA XIX」这种组合里的
+	 *   低位判丢 —— 掩码越大越危险。改成直接在十六进制串上按字符取位，任意位宽都精确。
+	 */
+	function hexBit(hexStr, bitIndex) {
+		var pos = hexStr.length - 1 - Math.floor(bitIndex / 4);
+		if (pos < 0) return false;
+		var d = parseInt(hexStr.charAt(pos), 16);
+		return !isNaN(d) && ((d >> (bitIndex % 4)) & 1) === 1;
+	}
+
+	/* 把一组位下标还原成十六进制串（用于「未识别位」提示，同样不受 2^53 限制） */
+	function hexFromBits(bits) {
+		if (!bits.length) return '';
+		var nibbles = [];
+		for (var i = 0; i <= Math.floor(bits[bits.length - 1] / 4); i++) nibbles.push(0);
+		bits.forEach(function (b) { nibbles[Math.floor(b / 4)] |= 1 << (b % 4); });
+		var out = '';
+		for (var j = nibbles.length - 1; j >= 0; j--) out += nibbles[j].toString(16);
+		return out.replace(/^0+/, '') || '0';
+	}
+	api.hexFromBits = hexFromBits;
+
+	/* ================= 信号语义（百分比 / 等级）唯一真源 =================
+	 *
+	 * 此前 rpc.js 的 calculateSignalPercent 用 -110~-70 量程、mt5700.js 的
+	 * signalPercent 用 -120~-70，**同一个 RSRP 在两个页面显示两个百分比**
+	 * （-90 dBm 一处 50%、一处 60%），而且 mt5700.js 里给百分比定的分级阈值
+	 * （75/50/25）又是按 -110~-70 那套算出来的，与自己文件里的公式对不上。
+	 *
+	 * 现在统一到 -120 dBm=0% / -70 dBm=100%（RSRP 的可用动态范围），
+	 * 分级阈值同步按新公式重算，rpc.js 与 mt5700.js 一律消费这里。
+	 */
+
+	var SIGNAL_RANGE = { min: -120, max: -70 };
+	var PERCENT_LEVELS = [
+		[80, 'exc'], [60, 'good'], [40, 'fair'], [0, 'bad']
+	];
+
+	/* RSRP(dBm) → 0-100 的整数百分比；取不到返回 null（null 才渲染成「—」）
+	 *
+	 * ★ 为什么把 >= 0 也当「没取到」：RSRP 实测上限是 -44 dBm，0 dBm 不存在。
+	 *   而多条解析路径用 0 当「未测到」的哨兵值（例如 convertRsrp 的入参），
+	 *   若不拦，0 会被算成满格 100% —— 界面上是「信号满格」，实际是没测到。
+	 */
+	api.signalPercent = function (rsrp) {
+		if (rsrp == null || !isFinite(Number(rsrp)) || Number(rsrp) >= 0) return null;
+		var span = SIGNAL_RANGE.max - SIGNAL_RANGE.min;
+		var pct = Math.round(100 * (Number(rsrp) - SIGNAL_RANGE.min) / span);
+		return Math.max(0, Math.min(100, pct));
+	};
+
+	/*
+	 * RSRP → 等级（exc/good/fair/poor/bad）。
+	 * 阈值与上面百分比的 80/60/40 对齐：-80→80%、-90→60%、-100→40%。
+	 */
+	api.signalLevel = function (rsrp) {
+		if (rsrp == null || !isFinite(Number(rsrp)) || Number(rsrp) >= 0) return null;
+		var v = Number(rsrp);
+		return v >= -80 ? 'exc' : v >= -90 ? 'good' : v >= -100 ? 'fair' : v >= -110 ? 'poor' : 'bad';
+	};
+
+	/* 百分比 → 等级（仪表/条共用一套判定，不再各写一个三元表达式） */
+	api.percentLevel = function (pct) {
+		if (pct == null || !isFinite(Number(pct))) return null;
+		for (var i = 0; i < PERCENT_LEVELS.length; i++) {
+			if (Number(pct) >= PERCENT_LEVELS[i][0]) return PERCENT_LEVELS[i][1];
+		}
+		return 'bad';
+	};
+
 	/* ================= 状态类 ================= */
 
 	// AT^LENDC?
@@ -34,11 +145,10 @@ var Parse = (function () {
 		 * 空字段必须当「无测量」返回 null。
 		 * Number('') 是 0 且 isFinite(0) 为真，缺字段（`1,2,3,,5`）会被算成
 		 * 0 dBm —— 界面上就是「发射功率 0」，看着像故障，其实是没测到。
+		 * 数值转换走公共 numOrNull，这里只加「999 = 无效读数」这一条业务规则。
 		 */
-		var t = String(v == null ? '' : v).trim();
-		if (t === '') return null;
-		var n = Number(t);
-		if (!isFinite(n) || n === INVALID_POWER) return null;
+		var n = numOrNull(v);
+		if (n === null || n === INVALID_POWER) return null;
 		return n;
 	};
 
@@ -339,11 +449,11 @@ var Parse = (function () {
 		var m = String(text == null ? '' : text)
 			.match(/\^SYSCFGEX:\s*"([^"]*)",\s*([^,]*),\s*(\d+),\s*(\d+),\s*([^,\r\n]*)/);
 		if (!m) return null;
+		/* 只比公共 unquote 多两件事：应答尾部可能带 \r\n 与 OK/ERROR（见上） */
 		var tok = function (v) {
-			return String(v == null ? '' : v)
+			return unquote(String(v == null ? '' : v)
 				.replace(/[\r\n]+/g, '')
-				.replace(/\s*(OK|ERROR)\s*$/i, '')
-				.trim();
+				.replace(/\s*(OK|ERROR)\s*$/i, ''));
 		};
 		return {
 			acqorder: tok(m[1]), band: tok(m[2]),
@@ -387,36 +497,42 @@ var Parse = (function () {
 	};
 
 	/*
-	 * <band>（GSM/WCDMA 频带位掩码）。手册 13.2.3 的宏值 → 名称。
+	 * <band>（GSM/WCDMA 频带位掩码）。手册 13.2.3 的宏值 → **位下标**。
 	 * 0x00680380 是手册特别标注的「自动」组合；0x3FFFFFFF=任何频带；0x40000000=不修改。
+	 *
+	 * ★ 存位下标而不是掩码值：掩码值一旦超过 2^53 就装不进双精度，
+	 *   `Math.floor(v/0x1000000000000000)%2` 这类测位会在存在低位时判丢。
 	 */
 	var BAND_BITS = [
-		[0x00000080, 'GSM 1800'], [0x00000100, 'GSM 900(EGSM)'], [0x00000200, 'GSM 900(PGSM)'],
-		[0x00080000, 'GSM 850'], [0x00100000, 'GSM 900(铁路)'], [0x00200000, 'GSM 1900'],
-		[0x00400000, 'WCDMA I (2100)'], [0x00800000, 'WCDMA II (1900)'],
-		[0x04000000, 'WCDMA V (850)'], [0x08000000, 'WCDMA VI (800)'],
-		[0x0002000000000000, 'WCDMA VIII (900)'], [0x0004000000000000, 'WCDMA IX (1700)'],
-		[0x1000000000000000, 'WCDMA XIX (850)']
+		[7, 'GSM 1800'], [8, 'GSM 900(EGSM)'], [9, 'GSM 900(PGSM)'],
+		[19, 'GSM 850'], [20, 'GSM 900(铁路)'], [21, 'GSM 1900'],
+		[22, 'WCDMA I (2100)'], [23, 'WCDMA II (1900)'],
+		[26, 'WCDMA V (850)'], [27, 'WCDMA VI (800)'],
+		[49, 'WCDMA VIII (900)'], [50, 'WCDMA IX (1700)'],
+		[60, 'WCDMA XIX (850)']
 	];
 	api.decodeBandMask = function (s) {
 		var t = String(s == null ? '' : s).trim();
 		if (!t) return '未设置';
-		var v = parseInt(t, 16);
-		if (isNaN(v)) return '无法解析（应为十六进制）';
-		if (v === 0x3FFFFFFF) return '任何频带（不限制）';
-		if (v === 0x40000000) return '不修改';
-		if (t.replace(/^0+/, '').toUpperCase() === '680380') {
+		var h = t.replace(/^0+/, '').toUpperCase();
+		if (!h) h = '0';
+		if (!/^[0-9A-F]+$/.test(h)) return '无法解析（应为十六进制）';
+		if (h === '3FFFFFFF') return '任何频带（不限制）';
+		if (h === '40000000') return '不修改';
+		if (h === '680380') {
 			return '自动（GSM 850/900/1800/1900 + WCDMA I；如需含 WCDMA 900，值为 2000000680380）';
 		}
-		/* 注意：JS 位运算只有 32 位，而手册里 WCDMA VIII/IX/XIX 的宏值在第 49/50/60 位，
-		   所以一律用「取模 + 除法」拆位，不能用 & 1 << n。 */
+		/* 位测试直接在十六进制串上做，任意位宽都精确（见 hexBit 的说明） */
 		var names = [];
-		var known = 0;
+		var known = {};
 		BAND_BITS.forEach(function (b) {
-			if (Math.floor(v / b[0]) % 2 === 1) { names.push(b[1]); known += b[0]; }
+			if (hexBit(h, b[0])) { names.push(b[1]); known[b[0]] = true; }
 		});
-		var left = v - known;
-		if (left > 0) names.push('未识别位 0x' + left.toString(16).toUpperCase());
+		var unknown = [];
+		for (var i = 0; i < h.length * 4; i++) {
+			if (hexBit(h, i) && !known[i]) unknown.push(i);
+		}
+		if (unknown.length) names.push('未识别位 0x' + hexFromBits(unknown).toUpperCase());
 		return names.length ? names.join(' · ') : '未设置';
 	};
 
@@ -1118,25 +1234,7 @@ var Parse = (function () {
 	var descale = function (value, min, max) {
 		return value < min || value > max ? Number((value / 8).toFixed(1)) : value;
 	};
-	var numOrNull = function (v) {
-		var t = String(v == null ? '' : v).trim();
-		if (t === '') return null;
-		var n = Number(t);
-		return isFinite(n) ? n : null;
-	};
-	/*
-	 * 十六进制字段（PCI / TAC / Cell-ID 都是）。
-	 *
-	 * 必须先判空再用 parseInt：parseInt(undefined, 16) 是 NaN，而 NaN 会一路
-	 * 传到界面变成字面上的「NaN」，还会让「锁定小区」的校验把它当成非法值拒掉。
-	 * 字段缺失（`^MONNC: NR,524910` 或尾随逗号）时应当显示「—」而不是 NaN。
-	 */
-	var hexOrNull = function (v) {
-		var t = String(v == null ? '' : v).trim().replace(/"/g, '');
-		if (t === '') return null;
-		var n = parseInt(t, 16);
-		return isFinite(n) ? n : null;
-	};
+	/* numOrNull / hexOrNull 已上移到文件顶部的「公共取值工具」，全文件共用一份 */
 
 	/*
 	 * 解析 ^NRSSBID（手册 13.28）：SA 连接态且网侧配置测量时，报服务小区
@@ -1302,22 +1400,28 @@ var Parse = (function () {
 		if (!match) return null;
 		var f = match[1].split(',').map(function (v) { return v.trim(); });
 		if (f.length < 6) return null;
-		var unquote = function (v) { return String(v == null ? '' : v).trim().replace(/^"|"$/g, ''); };
-		var num = function (v) {
-			var n = Number(unquote(v));
-			return isFinite(n) ? n : 0;
-		};
+		/*
+		 * num 原来是 `isFinite(n) ? n : 0`——缺字段就归 0，而 0 在下面三张表里
+		 * **都是合法取值**：domain 0 = CS 域、rat 0 = GSM、rejectType 0 也有含义。
+		 * 于是「这一位没上报」被渲染成「CS 域 / GSM」，用户看到的不是「未知」
+		 * 而是一个看似确凿、实则编造的结论。改为公共 numOrNull：缺 → null，
+		 * 下面的 xxxText 判 `!= null` 时自然落到「域 0 → 未上报」这类文案。
+		 */
+		var num = function (v) { return numOrNull(unquote(v)); };
 		var domain = num(f[1]), cause = num(f[2]), rat = num(f[3]), rejectType = num(f[4]);
+		var text = function (table, v, noun) {
+			return v == null ? (noun + '未上报') : (table[v] != null ? table[v] : noun + ' ' + v);
+		};
 		return {
 			plmn: unquote(f[0]),
 			domain: domain,
-			domainText: REJ_DOMAINS[domain] != null ? REJ_DOMAINS[domain] : '域 ' + domain,
+			domainText: text(REJ_DOMAINS, domain, '域'),
 			cause: cause,
-			causeText: api.rejectCauseText(cause),
+			causeText: cause == null ? '原因未上报' : api.rejectCauseText(cause),
 			rat: rat,
-			ratText: REJ_RATS[rat] != null ? REJ_RATS[rat] : '制式 ' + rat,
+			ratText: text(REJ_RATS, rat, '制式'),
 			rejectType: rejectType,
-			rejectTypeText: REJ_TYPES[rejectType] != null ? REJ_TYPES[rejectType] : '类型 ' + rejectType,
+			rejectTypeText: text(REJ_TYPES, rejectType, '类型'),
 			originalCause: num(f[5]),
 			lac: unquote(f[6] || ''),
 			rac: unquote(f[7] || ''),
@@ -1414,6 +1518,47 @@ var Parse = (function () {
 			dead: status === 98,
 			present: status !== 0 && status !== 99
 		};
+	};
+
+	/* ================= AT 危险指令识别（唯一真源） =================
+	 *
+	 * 「哪些 AT 会动到射频 / 重启模组 / 删数据」这类知识原先散在各页面：有的页面
+	 * 写了确认文案、有的没写 —— 短信设置页翻一下开关就直接发 `AT+CFUN=0` 加
+	 * `AT+CMGD=1,4`（清空全部短信），全程没有任何确认。
+	 *
+	 * 判定收在这里，终端页与设置页消费同一张表，将来手册新增危险命令只改一处。
+	 *
+	 * ★ 这是**提示**不是**拦截**：终端的用途就是发原始指令，拦下来排障就走不下去了。
+	 *   所以只返回「为什么危险」的说明，由调用方决定要不要二次确认。
+	 * ★ 结尾带 `?` 的是查询/测试命令（AT+CFUN=? / AT^SYSCFGEX=?），一律不算危险。
+	 */
+	var AT_DANGER = [
+		{ re: /^\s*AT\+CFUN\s*=\s*1\s*,\s*1/i, hint: '重启模组，5G 拨号会断开重连' },
+		{ re: /^\s*AT\+CFUN\s*=\s*0/i, hint: '关闭射频（飞行模式），5G WAN（eth2）会断开' },
+		{ re: /^\s*AT\+CFUN\s*=/i, hint: '改动射频状态，5G WAN（eth2）会短暂中断' },
+		{ re: /^\s*AT\^RESET/i, hint: '重启模组，期间全部业务中断' },
+		{ re: /^\s*AT\^SETMODE/i, hint: '切换模组工作模式，可能改变网卡形态并需要重新拨号' },
+		{ re: /^\s*AT\s*&\s*F/i, hint: '恢复出厂设置，所有已改配置丢失' },
+		{ re: /^\s*ATZ/i, hint: '复位模组到默认配置' },
+		{ re: /^\s*AT\+CMGD\s*=\s*[^,]*,\s*4/i, hint: '删除存储里的全部短信，不可恢复' },
+		{ re: /^\s*AT\+CLCK/i, hint: 'PIN 锁定操作；输错 PUK 会永久锁卡（本项目界面不下发）' },
+		{ re: /^\s*AT\+CPIN\s*=/i, hint: 'PIN 码操作；输错会锁卡（本项目不碰 PIN）' },
+		{ re: /^\s*AT\^HVSST/i, hint: 'SIM 热插拔，卡会重新上电，正在进行的 eSIM 操作会中断' },
+		{ re: /^\s*AT\^TDSIMHP\s*=/i, hint: 'SIM 热插拔开关，改动会触发卡重新上电' },
+		{ re: /^\s*AT\^SCICHG/i, hint: '切换当前使用的卡，会重新注册网络' },
+		{ re: /^\s*AT\^SYSCFGEX\s*=/i, hint: '改接入制式/频段，模组会重新搜网，可能长时间无服务' },
+		{ re: /^\s*AT\^NRRCCAPCFG/i, hint: '改 NR 能力配置，影响 5G 载波聚合与 VoNR' },
+		{ re: /FOTA/i, hint: '固件升级指令，中途断电会变砖' }
+	];
+
+	/* 返回「为什么危险」的说明；不危险（或只是查询）返回 null */
+	api.atDangerHint = function (cmd) {
+		var t = String(cmd == null ? '' : cmd).trim();
+		if (!t || /\?\s*$/.test(t)) return null;
+		for (var i = 0; i < AT_DANGER.length; i++) {
+			if (AT_DANGER[i].re.test(t)) return AT_DANGER[i].hint;
+		}
+		return null;
 	};
 
 	return api;

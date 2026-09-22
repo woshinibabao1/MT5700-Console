@@ -249,8 +249,9 @@ return L.view.extend({
 				return AtWs.client.sendCommand(cmd).catch(function () { return { success: false }; });
 			};
 			var chain = q('AT^SIMSQ?').then(function (r) {
-				var m = String(r && r.data ? r.data : '').match(/\^SIMSQ:\s*(\d+)\s*,\s*(\d+)/);
-				st.sim = m ? parseInt(m[2], 10) : null;
+				/* SIMSQ 只准走 Parse.parseSimsq，别在这里另抄一份正则 */
+				var sim = r && r.success ? Parse.parseSimsq(r.data) : null;
+				st.sim = sim ? sim.status : null;
 				return q('AT+CPIN?');
 			}).then(function (r) {
 				st.pin = (String(r && r.data ? r.data : '').match(/CPIN:\s*(\S+)/) || [])[1] || '';
