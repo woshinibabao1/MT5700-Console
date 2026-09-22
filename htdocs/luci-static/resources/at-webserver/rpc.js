@@ -921,15 +921,15 @@ function signalColor(rsrp) {
 /* ---- PS 注册状态 ---- */
 
 function psRegText(stat) {
-	switch (parseInt(stat, 10)) {
-		case 0: return '未注册，正在搜索';
-		case 1: return '已注册';
-		case 2: return '未注册，正在搜索（但允许紧急呼叫）';
-		case 3: return '注册被拒绝';
-		case 4: return '未知';
-		case 5: return '已注册（漫游）';
-		default: return '等待状态中';
-	}
+	/*
+	 * 注册态文案统一到 Parse.REG_STATES（3GPP TS 27.007 的 stat 定义）。
+	 * 这里原先另有一套 switch：0 号写「未注册，正在搜索」、2 号缀「但允许紧急呼叫」，
+	 * 与 parse.js 那张表对不上 —— 同一个 stat 码在不同页面两种说法。
+	 * stat 0 的准确含义是「未注册，且当前没在搜网」（正在搜网是 2 号），
+	 * 紧急呼叫也不是 2 号的语义。现在以 parse.js 为唯一口径。
+	 */
+	var t = Parse.REG_STATES ? Parse.REG_STATES[parseInt(stat, 10)] : null;
+	return t || '等待状态中';
 }
 
 /* ---- 主动上报识别 ---- */

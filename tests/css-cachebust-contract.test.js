@@ -44,7 +44,7 @@ const js = fs.readFileSync(JSP, 'utf8');
  * 变更日志：
  *   2026-09-20  eSIM 管理页重排（EID 等宽块 / Profile 行卡 / 卡内分区标题）→ 5.5.20
  */
-const CSS_FINGERPRINT = '391758ec9d00d6a2';
+const CSS_FINGERPRINT = '4465c2cb90cdc1c7';
 
 let pass = 0;
 const fails = [];

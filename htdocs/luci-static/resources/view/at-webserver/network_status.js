@@ -249,7 +249,7 @@ return L.view.extend({
 				return AtWs.client.sendCommand(cmd).catch(function () { return { success: false }; });
 			};
 			var chain = q('AT^SIMSQ?').then(function (r) {
-				var m = String(r && r.data ? r.data : '').match(/SIMSQ:\s*(\d+)\s*,\s*(\d+)/);
+				var m = String(r && r.data ? r.data : '').match(/\^SIMSQ:\s*(\d+)\s*,\s*(\d+)/);
 				st.sim = m ? parseInt(m[2], 10) : null;
 				return q('AT+CPIN?');
 			}).then(function (r) {

@@ -8,7 +8,9 @@
 用法：python tools/verify-guards.py
 新增守卫时应在上面的 MUTATIONS 里补一条「故意违反」样例。
 """
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -27,6 +29,16 @@ TARGETS = {
     # mt5700.js 是**全站共用**组件（errorState 的按钮文案默认值就在这里），
     # 也要能被变异、被还原 —— 单独挂键，别和 euicc.js 混。
     "mt5700js": ATWB / "mt5700.js",
+    # 同一份 euicc.js 再挂第三个键：tag 白名单守卫走它自己的测试文件。
+    "js3": ATWB / "euicc.js",
+    # esim.js 再挂一个键：静默 catch 守卫是独立测试文件。
+    "esimjs2": ESIM,
+    # shell 脚本也要能变异：C 风格注释那条事故（glob 被当命令执行）守的是 .sh。
+    "shell": ROOT / "root" / "usr" / "share" / "mt5700" / "diag-probe.sh",
+    "msjs": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
+    "upgjs": ATWB.parent / "view" / "at-webserver" / "upgrade.js",
+    # 测试文件自身也要能被变异：断言签名守卫查的就是测试文件的写法。
+    "test2": ROOT / "tests" / "device-control-contract.test.js",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -37,9 +49,35 @@ TARGET_TEST = {
     "esimcss": ROOT / "tests" / "esim-contract.test.js",
     "js2": ROOT / "tests" / "esim-contract.test.js",
     "mt5700js": ROOT / "tests" / "esim-contract.test.js",
+    "js3": ROOT / "tests" / "euicc-tag-whitelist-contract.test.js",
+    "esimjs2": ROOT / "tests" / "silent-catch-contract.test.js",
+    "shell": ROOT / "tests" / "shell-comment-style-contract.test.js",
+    "msjs": ROOT / "tests" / "device-control-contract.test.js",
+    "upgjs": ROOT / "tests" / "read-command-fresh-contract.test.js",
+    "test2": ROOT / "tests" / "assert-signature-contract.test.js",
 }
 
-NODE = r"C:\Users\Ajmd007\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"
+def _resolve_node() -> str:
+    """定位 node 可执行文件。
+
+    CI（ubuntu）上没有下面那条 Windows 绝对路径，写死会让整个脚本在 CI 上直接崩，
+    而崩掉和"判红"从退出码上分不出来（见下面 syntax_ok 那条注释）。
+    解析顺序：显式 NODE_BIN → 本机托管 node → PATH 里的 node。
+    """
+    env = os.environ.get("NODE_BIN")
+    if env:
+        return env
+    managed = pathlib.Path(
+        r"C:\Users\Ajmd007\.workbuddy\binaries\node\versions\22.22.2-3\node.exe")
+    if managed.exists():
+        return str(managed)
+    found = shutil.which("node")
+    if found:
+        return found
+    raise SystemExit("找不到 node：请设置 NODE_BIN 环境变量指向 node 可执行文件")
+
+
+NODE = _resolve_node()
 
 ORIG = {k: v.read_bytes() for k, v in TARGETS.items()}
 
@@ -270,6 +308,61 @@ MUTATIONS = [
         "卡只有 1~3 条，6A81）。 */\n\t\t\tEuicc.listNotifications(send).then(function (r) {",
         "X5 showPendingReceipts",
     ),
+    # ↓ 以下三条守的是「守卫本身是否有效」—— 它们对应的契约测试都是新加的，
+    #   新守卫最容易犯的错就是恒绿（看起来在防，其实永远通过）。
+    (
+        "shell 里写 C 风格注释（会被 glob 展开成根目录文件列表并当命令执行）",
+        "shell",
+        "#!/bin/sh\n",
+        "#!/bin/sh\n/* 兼容老模组的分支 */\n",
+        "会被 glob 展开",
+    ),
+    (
+        "向卡发送白名单外的 tag（盲目探测 tag 曾把模组 AT 通道锁死，只能整机断电）",
+        "js3",
+        "var payload = 'BF2D'",
+        "var payload = 'BF99'",
+        "白名单外",
+    ),
+    (
+        "扫码逐帧解码的 catch 不再交代为何吞错（又变成「读不出来」=「没有」）",
+        "esimjs2",
+        "\t" * 9 + "/* 单帧解码失败不打断：继续下一帧，直到识别成功、用户取消或超时。\n"
+        + "\t" * 9 + "   这里没有用户可见反馈是刻意的 —— 扫码过程中每一帧都可能失败，\n"
+        + "\t" * 9 + "   逐帧提示只会让画面一直闪 */\n",
+        "",
+        "每个无参数 catch 都有交代",
+    ),
+    (
+        "暂存项 led 的 run 不再 reject（界面会报「已应用」而模组其实没改）",
+        "msjs",
+        "return send('AT^LEDSWITCH=' + (checked ? 1 : 0)).then(function (res) {\n"
+        "\t\t\t\t\tif (!res.success) throw new Error('模组返回失败');\n",
+        "return send('AT^LEDSWITCH=' + (checked ? 1 : 0)).then(function (res) {\n",
+        "暂存项 led",
+    ),
+    (
+        "finishByIdle 的版本查询去掉 fresh（FOTA 版本复核会读到旧版本）",
+        "upgjs",
+        "\t\t\tAtWs.client.sendCommand('AT+CGMR', { fresh: true })",
+        "\t\t\tAtWs.client.sendCommand('AT+CGMR')",
+        "finishByIdle",
+    ),
+    (
+        "删掉 deleteProfile 的二次 busy 拦截（确认框停留期可重入）",
+        "esimjs",
+        "\t\t\t\t\tif (busy) { Mt5700.error('有操作正在进行'); return; }\n"
+        "\t\t\t\t\t/* P17：iccidRaw 为空不下发，避免只弹一句「操作失败」 */",
+        "\t\t\t\t\t/* P17：iccidRaw 为空不下发，避免只弹一句「操作失败」 */",
+        "恰好 5 处",
+    ),
+    (
+        "把断言写成定义相反的顺序（字符串落进条件位 → 恒为真）",
+        "test2",
+        "\tok(!!m, '暂存项 ' + key + ' 走 ctrlStaged.set（不逐项立即写模组）');",
+        "\tok('暂存项 ' + key + ' 走 ctrlStaged.set（不逐项立即写模组）', !!m);",
+        "调用顺序都与自身定义一致",
+    ),
 ]
 
 
@@ -289,9 +382,14 @@ def syntax_ok(path):
         里属非法 return，--check 必然报错 → 包一层 new Function()（函数体内 return 合法，
         仍能抓出真的语法错误）。
         ★ 注意 new Function 不认 shebang，所以测试文件不能走这条路。
-      · CSS 不做预检（改的是属性值 / 选择器，不会产生解析错误）。
+       · CSS 不做预检（改的是属性值 / 选择器，不会产生解析错误）。
+       · shell 也不做预检：变异只是插入/删除注释行，不会产生语法错误；
+         而 `bash -n` 在 Windows 与 CI 上路径不同，为一条永远合法的变异去
+         引入平台分支不值得（真想查可以本地跑 bash -n）。
     """
     if path.suffix == ".css":
+        return True
+    if path.suffix == ".sh":
         return True
     if "tests" in path.parts:
         args = [NODE, "--check", str(path)]

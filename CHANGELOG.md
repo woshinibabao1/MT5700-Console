@@ -5,6 +5,86 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.40] - 2026-09-22
+
+本轮以 mattpocock/skills 的 deep-module 视角做了一次全仓走查（Rust 后端 / eSIM 链路 /
+网络状态页与 RPC 层 / 测试与工程化四条线），下面只列**已落地**的改动；
+走查结论里需要真机 A/B 才能定的项记在最后的 Known，未动。
+
+### Fixed
+
+- **`AT^SIMSQ?` 的正则漏了 `^` 锚定**：`network_status.js` 里写成 `/SIMSQ:\s*(\d+)…/`，
+  仓库另外两处（`mt5700.js`、`euicc.js`）都是 `/\^SIMSQ:…/`。虽然目前也能匹配上
+  （`^SIMSQ:` 里含 `SIMSQ:`），但一旦应答里别处出现同名子串就会取错值。统一加锚定。
+- **页面标题字重被宿主主题压掉**：`.mt5700-page-title` 的元素是 `h2`
+  （`Mt5700.page`），而 LuCI Argon 会给 `h1~h6` 强加 `font-weight: normal !important`，
+  没有 `!important` 的 `font-weight: 700` 必然失效 —— 标题看着和正文一样细。
+  按「几何/排版关键项一律 `!important`」的既有惯例补上（`font-size` 同时补）。
+- **同一个注册状态码有两套文案**：`parse.js` 的 `REG_STATES` 与 `rpc.js` 的
+  `psRegText` 各写一份且不一致 —— 0 号在诊断项是「未注册，未搜网」，在网络状态页
+  却是「未注册，正在搜索」；2 号还被缀上「但允许紧急呼叫」（紧急业务其实是 8 号）。
+  按 3GPP TS 27.007 的 stat 定义，以 `parse.js` 为唯一口径：`REG_STATES` 导出，
+  `psRegText` 改为查这张表。顺带清掉两处引用旧文案的注释。
+- CSS 版本号 `MT5700_CSS_VERSION` 5.5.20 → 5.5.21（改了 `mt5700.css` 必须 bump，
+  否则 squashfs 上 mtime 恒为 1970，浏览器会一直吃旧副本）。
+
+### Added — 三个此前**零覆盖**的历史事故守卫
+
+走查发现下面三类事故的**根因一条测试都没有**，全部补上（每条都配了「故意违反」
+的反向验证，且已接入 `tools/verify-guards.py`）：
+
+- `tests/shell-comment-style-contract.test.js`：禁止在 shell 里写 C 风格注释。
+  `/*` 在 shell 里是 glob，会被展开成根目录文件列表并当命令执行，而 `bash -n`
+  查不出来。守卫能放过真实的路径 glob（含 `.pkgdir/*/usr/bin/` 这类带 `*/` 的形态）。
+- `tests/euicc-tag-whitelist-contract.test.js`：发给卡的 BF 系列 tag 必须在白名单内。
+  盲目探测未定义 tag 曾把模组 AT 通道锁死、只能整机断电。新增 tag 未登记即判红。
+- `tests/silent-catch-contract.test.js`：吞掉异常必须给交代 —— 要么有用户可见反馈，
+  要么旁边写明为什么可以吞。针对的是「把读不出来伪装成没有」这一类。
+  本轮它点名了两处（扫码解码的两条 catch），已补上说明，行为未改。
+- `tests/assert-signature-contract.test.js`：**断言自身的签名守卫**。仓里多数测试
+  文件是 `ok(name, cond, …)`，但有文件是反过来的 `ok(cond, name)`；跨文件复制断言
+  忘调换顺序，字符串就落进条件位 → 恒为真 → 假守卫（本轮真踩到一次，见下）。
+
+### Changed — 计数式断言改为定位断言
+
+计数式断言（`出现 ≥N 处`）对「同一个函数里写了两遍」完全不设防：删一处、补一处，
+计数照样达标，守卫恒绿。改造三处：
+
+- `device-control-contract`：三项暂存设置改为按 `led` / `pcie-pwr` / `nic`
+  逐个定位，「走暂存」与「失败要 reject」绑在同一个块里验。
+- `esim-contract`：二次 busy 拦截由「≥5 处」改为**恰好 5 处**（多一处＝重复拦截，
+  少一处＝漏拦截）；5 处各落在哪个函数由既有的按函数体定位断言钉死。
+- `read-command-fresh-contract`：由「带 fresh 的 AT+CGMR ≥2 处」改为按
+  `fetchVersion` / `finishByIdle` 分别取各自第一次 `sendCommand` 来验。
+
+> ⚠ 改造过程中暴露的一个坑：改 `device-control-contract` 时按主流签名
+> `ok(name, cond, hint)` 写了 6 条断言，而该文件是 `ok(cond, name)` —— 字符串落进
+> 条件位，**6 条全部恒为真**，变异验证时才发现（注入缺陷后测试照样全绿）。
+> 已修正，并为这类错误加了专门守卫（见上）。
+
+### Changed — CI 与守卫有效性验证
+
+- `.github/workflows/build-openwrt.yml` 新增 `contract-check` job：
+  **此前 40 多个 JS 契约测试在 CI 里一次都没跑过**（workflow 只有 `cargo check`），
+  全靠本地手工。现在跑 `tests/run-all.js` + `tools/verify-guards.py`，
+  并设为 `build` 的前置闸门（与 `rust-check` 同层）。
+- `tools/verify-guards.py`：node 路径不再写死 Windows 绝对路径（CI 上必崩），
+  改为 `NODE_BIN` 环境变量 → 本机托管 node → PATH 三级查找；变异数 31 → **38**，
+  新增的 7 条覆盖本轮新守卫与上面三处定位断言；shell 目标跳过 JS 语法预检
+  （注释型变异不会产生语法错误）。
+
+### Known — 走查发现但**本轮未改**的项
+
+- **`AT+CEREG?` 慢档一轮发两次**：`getPSReg`（第 2 位）与 `loadDiagnostics`
+  （第 10 位）各发一次，间隔远超 2.5s 只读缓存，确实走了两趟串口；两条解析路径
+  （手工 split 与 `Parse.parseRegStat`）也各写一套。收益有限（每 30 秒多 1 次），
+  但合并要动诊断项的数据结构，按项目铁律必须真机 A/B 实测后再定，故留作后续。
+- 页面自述「稳态 2.60 次/秒、其中 AT 1.73 次/秒」仍高于硬指标 2 次/秒 ——
+  与本条相关，需连同刷新调度一起实测收敛。
+- 走查另记下若干**浅模块与重复逻辑**（4 套 TLV 解析器、9 份 `REQUIRE_AUTH_KEY`
+  提示块、2 份 `renderConnectionBar`、CSS 约 30% 类名无引用等），属架构层面的
+  深化机会，改动面大、收益需逐个论证，未在本轮动。
+
 ## [2.3.39] - 2026-09-22
 
 ### Fixed — 复核 2.3.38 新增功能时发现的缺陷
