@@ -184,8 +184,12 @@
 }
 
 .mt5700-page-title {
-  font-size: var(--mt5700-font-size-3xl);
-  font-weight: 700;
+  font-size: var(--mt5700-font-size-3xl) !important;
+  /* ★ 元素是 h2（mt5700.js 的 Mt5700.page），而 LuCI Argon 会给 h1~h6 强加
+     `font-weight: normal !important`。不加 !important 的话这里的 700 会被宿主主题
+     直接压掉，页面标题看着和正文一样细 —— 与同文件 .mt5700-card .mt5700-metric-value
+     那条「几何/排版关键项一律 !important」是同一个坑。 */
+  font-weight: 700 !important;
   color: var(--mt5700-text);
   margin: 0 0 var(--mt5700-space-sm) 0;
   letter-spacing: -0.02em;
@@ -2613,8 +2617,8 @@
 /* ★ 长文本读数必须破例允许折行（CSS v5.5.19）
    --------------------------------------------------------------------------
    .mt5700-metrics 的格子是 minmax(150px, 1fr)，而上面那条 nowrap 是给
-   「1000 Mbps」这类短数值用的。两者一撞，PS 注册状态那句
-   「未注册，正在搜索（但允许紧急呼叫）」（16 个汉字 ≈ 300px）会横向顶破卡片，
+   「1000 Mbps」这类短数值用的。两者一撞，偏长的中文读数
+   （如 PS 注册状态文案）会横向顶破卡片，
    溢出到相邻格子外面。
 
    这里不放大格子、也不让卡片按内容撑开（用户明确要求固定尺寸），
