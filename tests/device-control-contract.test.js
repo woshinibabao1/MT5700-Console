@@ -114,13 +114,28 @@ has('PCIe 控制器', '「电源管理」已按手册正名为「PCIe 控制器�
 
 /* ---------------- 5. 交互：三项都走暂存，不逐项立即写模组 ---------------- */
 
-const stagedCount = (msSrc.match(/ctrlStaged\.set\(/g) || []).length;
-ok(stagedCount >= 3, '三项设置都走暂存（ctrlStaged.set 出现 ' + stagedCount + ' 次）');
+/*
+ * ★ 这里原先写的是「ctrlStaged.set 出现 ≥3 次」/「!res.success throw 出现 ≥3 次」
+ *   —— 那是**计数式断言**，对「同一个函数里写了两遍」完全不设防：
+ *   删掉其中一项、再在别处补一遍，计数照样达标，守卫恒绿。
+ *   改成逐个 key 定位：每项都单独钉，「走暂存」和「失败要 reject」绑在同一个块里验。
+ *
+ * ⚠ 本文件的 ok() 签名是 **ok(cond, name)**，与仓里多数测试文件
+ *   （ok(name, cond, detail)）**顺序相反**。从别处复制断言过来若忘记调换，
+ *   字符串会落进 cond 位置 → 恒为真 → 守卫静默失效（这个坑真踩过一次）。
+ *   统一签名的守卫见 tests/assert-signature-contract.test.js。
+ */
+['led', 'pcie-pwr', 'nic'].forEach(function (key) {
+	const m = msSrc.match(new RegExp(
+		"ctrlStaged\\.set\\('" + key + "'[\\s\\S]*?\\n\\t\\t\\}\\);"));
+	ok(!!m, '暂存项 ' + key + ' 走 ctrlStaged.set（不逐项立即写模组）');
+	ok(!!m && /if \(!res\.success\) throw new Error/.test(m[0]),
+		'暂存项 ' + key + ' 的 run 失败时 reject（否则界面会报「已应用」而模组其实没改）');
+});
+
 has('Mt5700.staged({ onChanged: function () { fetchDeviceControl(); } })',
 	'暂存条应用/撤销后回读模组实际值');
 hasNot('handleSetNic', '旧的「改下拉即写模组 + 弹重启」处理函数已移除');
-ok((msSrc.match(/if \(!res\.success\) throw new Error/g) || []).length >= 3,
-	'暂存项的 run 失败时 reject（否则界面会报「已应用」而模组其实没改）');
 
 /* ---------------- 6. 读回正则要吃得下真机原文 ---------------- */
 

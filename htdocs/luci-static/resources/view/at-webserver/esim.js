@@ -511,6 +511,8 @@ return L.view.extend({
 					return null;
 				}
 				return (r && r.data) ? String(r.data) : null;
+			/* 解码器整体失败（含 jsQR 内部抛异常）同样按「没识别到」处理，
+			   与上面 try/catch 同一口径：让用户看到"没识别到"，而不是被带到报错页 */
 			}).catch(function () { return null; });
 		}
 
@@ -856,7 +858,10 @@ return L.view.extend({
 											return;
 										}
 										if (stream) loop();
-									}).catch(function () { if (stream) loop(); });
+									/* 单帧解码失败不打断：继续下一帧，直到识别成功、用户取消或超时。
+									   这里没有用户可见反馈是刻意的 —— 扫码过程中每一帧都可能失败，
+									   逐帧提示只会让画面一直闪 */
+								}).catch(function () { if (stream) loop(); });
 								}, 300);
 							})();
 						}).catch(function (e) {

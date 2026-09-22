@@ -36,9 +36,24 @@ const upgrade = fs.readFileSync(path.join(VIEW, 'upgrade.js'), 'utf8');
 ok('P01 升级页不再有裸 AT+CGMR 调用',
 	!hasBareCall(upgrade, 'AT+CGMR'),
 	'存在未带 fresh 的 AT+CGMR —— FOTA 版本复核会读到旧版本');
-ok('P01 升级页两处版本查询都带 fresh（fetchVersion 与 finishByIdle）',
-	(upgrade.match(/sendCommand\(\s*'AT\+CGMR'\s*,\s*\{\s*fresh\s*:\s*true\s*\}\s*\)/g) || []).length >= 2,
-	'带 fresh 的 AT+CGMR 少于 2 处');
+/*
+ * ★ 原先写的是「带 fresh 的 AT+CGMR 出现 ≥2 处」，那是**计数式断言**：
+ *   对「在同一个函数里连发两条」完全不设防（删掉 finishByIdle 里那条、
+ *   再在 fetchVersion 里补一条，计数照样是 2，守卫恒绿）。
+ *   改成按函数名定位：各自取**第一次** sendCommand 调用来验，
+ *   少一个函数、或某个函数的第一次调用不带 fresh，都会当场判红。
+ */
+['fetchVersion', 'finishByIdle'].forEach(function (fn) {
+	const dm = new RegExp('function\\s+' + fn + '\\s*\\(').exec(upgrade);
+	let seg = null;
+	if (dm) {
+		const j = upgrade.indexOf('sendCommand(', dm.index);
+		if (j >= 0) seg = upgrade.slice(j, j + 90);
+	}
+	ok('P01 ' + fn + ' 的版本查询带 fresh（FOTA 版本复核会读到旧版本）',
+		!!seg && /sendCommand\(\s*'AT\+CGMR'\s*,\s*\{\s*fresh\s*:\s*true\s*\}\s*\)/.test(seg),
+		'该函数内第一次 sendCommand 不是带 fresh 的 AT+CGMR');
+});
 ok('P01 反向：旧文本（裸 AT+CGMR）被同一检查判为不通过',
 	hasBareCall("AtWs.client.sendCommand('AT+CGMR').then(function (res) {", 'AT+CGMR'),
 	'旧文本竟被判为通过，检查函数无效');
