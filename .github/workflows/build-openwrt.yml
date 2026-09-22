@@ -45,10 +45,35 @@ jobs:
         working-directory: src/rust
         run: cargo check --all-targets
 
+  # ---- 契约测试闸门 ----
+  # 为什么单独要这一条：40 个 JS 契约测试 + verify-guards.py 此前在 CI 里一次都没跑过，
+  # 只在本地手工跑。它们守的恰恰是「编译能过、真机会炸」的那一类：
+  # APDU 时序与超时恢复、init.d 的 start/reload 幂等、行尾必须 LF、三处版本号一致、
+  # 以及「守卫本身会不会真的判红」。cargo check 对这些一无所知。
+  # 与 rust-check 同层：几十秒出结果，拦在四矩阵打包之前。
+  contract-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 跑全部契约测试
+        run: node tests/run-all.js
+
+      # 铁律「写了守卫 ≠ 有了守卫」：这一条变异源码、断言守卫真的判红。
+      # 少了它，上面的 40 个测试里有多少是恒绿的谁也不知道。
+      - name: 守卫有效性验证（故意违反须被判红）
+        run: python3 tools/verify-guards.py
+
   build:
-    # 闸门：rust-check 挂了就不打包、更不发布。没有 needs 的话两个 job 并行跑，
-    # 检查结果只能靠人盯着看，等于没拦。
-    needs: rust-check
+    # 闸门：rust-check / contract-check 挂了就不打包、更不发布。没有 needs 的话
+    # 两个 job 并行跑，检查结果只能靠人盯着看，等于没拦。
+    needs: [rust-check, contract-check]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
