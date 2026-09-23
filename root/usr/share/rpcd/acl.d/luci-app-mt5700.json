@@ -26,7 +26,8 @@
 					"logs",
 					"netrate",
 					"sysdiag",
-					"es9p"
+					"es9p",
+					"exitip"
 				],
 				"service": [
 					"list",
@@ -99,7 +100,8 @@
 				"mt5700": [
 					"at",
 					"events",
-					"es9p"
+					"es9p",
+					"exitip"
 				],
 				"service": [
 					"set",

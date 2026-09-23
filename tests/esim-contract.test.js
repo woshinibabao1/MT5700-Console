@@ -384,17 +384,21 @@ ok('P01 esim.js 源码含回执异常判据（failed 或 total=0）', /nf\.faile
 ok('P02 esim.js 删除回调含「请先禁用该 Profile 再删除」拦截', /请先禁用该 Profile 再删除/.test(esimSrc));
 ok('P02 esim.js 该拦截在 deleteProfile 入口（state === \'enabled\'）', /if \(p\.state === 'enabled'\) \{[\s\S]{0,80}?请先禁用该 Profile 再删除/.test(esimSrc));
 /*
- * P03：弹窗回调二次 busy 校验。★ R03 后共 5 处：toggle / rename / delete / sendAll / remove
+ * P03：弹窗回调二次 busy 校验。★ R03 后共 5 处（toggle / rename / delete / sendAll / remove），
+ *      2.3.45 加「切回原 Profile」后共 **6 处** —— 新增的 restoreProfile 同样走
+ *      Mt5700.confirm 确认框，确认框停留期间 busy 可能被别的操作置位，必须同样拦截。
  *
  * ★ 原先这条写的是「≥5 处」，那是**计数式断言**：对「同一个函数里写了两遍」
  *   完全不设防 —— 删掉一处、再在别处补一处，计数照样凑够 5，守卫恒绿。
- *   改成**恰好 5 处**：多一处（重复拦截）少一处（漏拦截）都会判红。
- *   至于这 5 处分别落在哪个函数，由后面两条（sendAll / remove 的回调定位）
- *   与 toggleProfile/renameProfile/deleteProfile 的按函数体定位断言分别钉死。
+ *   改成**恰好 N 处**：多一处（重复拦截）少一处（漏拦截）都会判红。
+ *   至于这 N 处分别落在哪个函数，由后面两条（sendAll / remove 的回调定位）
+ *   与 toggleProfile/renameProfile/deleteProfile/restoreProfile 的定位断言分别钉死。
  */
 const busyCount = (esimSrc.match(/Mt5700\.error\('有操作正在进行'\)/g) || []).length;
-ok('P03 esim.js 含恰好 5 处「有操作正在进行」二次 busy 拦截', busyCount === 5,
+ok('P03 esim.js 含恰好 6 处「有操作正在进行」二次 busy 拦截', busyCount === 6,
 	'实际 ' + busyCount + ' 处（多一处＝重复拦截，少一处＝漏拦截）');
+ok('★ restoreProfile 的确认回调内也有二次 busy（切回同样会断网，必须防重入）',
+	/切回原 Profile？[\s\S]{0,200}?if \(busy\) \{ Mt5700\.error\('有操作正在进行'\)/.test(esimSrc));
 ok('R03 sendAllNotifications 回调内也有二次 busy（确认框停留期防重入）',
 	/确定发送全部待发回执[\s\S]{0,200}?if \(busy\) \{ Mt5700\.error\('有操作正在进行'\)/.test(esimSrc));
 ok('R03 removeNotification 回调内也有二次 busy',

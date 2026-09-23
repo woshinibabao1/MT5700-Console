@@ -53,6 +53,12 @@ TARGETS = {
     "smssetjs": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
     # Rust 后端也在守卫范围内（事件帧预算）；.rs 不做语法预检，见 syntax_ok。
     "rsrust": ROOT / "src" / "rust" / "src" / "rpcserver.rs",
+    # ucode 后端（rpcd 插件）也在守卫范围内：exitip 的 bind 校验是**命令注入面**，
+    # 必须能被故意违反并验证守卫判红。.uc 不做语法预检，见 syntax_ok。
+    "uc": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
+    # parse.js 再挂一个键：出口 IP 解析那组守卫在 exitip-contract 里，
+    # 而 "parsejs" 固定跑 single-source-contract —— 一份文件两条测试通道，别挂错。
+    "parsejs2": ATWB / "parse.js",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -76,6 +82,8 @@ TARGET_TEST = {
     "termjs": ROOT / "tests" / "single-source-contract.test.js",
     "smssetjs": ROOT / "tests" / "single-source-contract.test.js",
     "rsrust": ROOT / "tests" / "single-source-contract.test.js",
+    "uc": ROOT / "tests" / "exitip-contract.test.js",
+    "parsejs2": ROOT / "tests" / "exitip-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -129,6 +137,23 @@ MUTATIONS = [
         "\t\tif (sw.charAt(0) === '9') {",
         "\t\tif (false) {",
         "91xx 判「成功待 refresh」",
+    ),
+    (
+        # ★ 锚点唯一性已核：mt5700.uc 里 `let bind = safeBindIp(getStr(req.args, 'bind'));`
+        #   只出现 1 次（就在 exitip 方法里）—— 变异工具改的是全文件第一次出现。
+        "exitip 绕过 bind 校验直接拼进命令行（命令注入面）",
+        "uc",
+        "let bind = safeBindIp(getStr(req.args, 'bind'));",
+        "let bind = getStr(req.args, 'bind');",
+        "拼 --interface 之前先过 safeBindIp",
+    ),
+    (
+        # ★ 锚点唯一性已核：parse.js 里 `if (!s) return null;` 只出现 1 次（parseExitIpBody 内）。
+        "出口 IP 取不到时返回 0.0.0.0 占位（红线 23：把读不出来伪装成有值）",
+        "parsejs2",
+        "if (!s) return null;",
+        "if (!s) return '0.0.0.0';",
+        "空串 → null（不是 0.0.0.0）",
     ),
     (
         "去掉时间窗（退化成只靠轮数上限）",
@@ -481,6 +506,11 @@ def syntax_ok(path):
     # Rust 不做预检：本机与 CI 都没有 cargo/编译器，而 `new Function(源码)` 对
     # Rust 语法必然报错。这些变异只改标识符/参数/常量，不会把文件写坏。
     if path.suffix == ".rs":
+        return True
+    # ucode 不做预检：本机与 CI 都没有 ucode 解释器；而 `new Function(源码)` 对
+    # ucode 的顶层写法（对象常量、纯声明式结构）可能误报语法错误。
+    # 这些变异只改一个表达式/一个分支，语法上必然仍合法。
+    if path.suffix == ".uc":
         return True
     if "tests" in path.parts:
         args = [NODE, "--check", str(path)]

@@ -84,6 +84,25 @@ var rpcEs9p = L.rpc.declare({
 	expect: {}
 });
 
+/*
+ * 出口 IP 探测（「换卡换 IP」的判定依据）。
+ *
+ * ★ 为什么必须绕一圈让路由器去问：判断「互联网看到的我是谁」，只能由**数据链路那一侧**
+ *   自己发出去一个请求、看对端认到的源地址。浏览器做不到这件事 —— 打开页面的电脑
+ *   未必走这台设备的蜂窝链路，它问到的公网 IP 跟本设备毫无关系。
+ *
+ * 后端是 mt5700.uc 的 exitip（http 回显，端点写死白名单，不接受外部传入 URL），
+ * 只回原文；IP 的解析与合法性校验在这里的 Parse.parseExitIpBody 完成。
+ *
+ * bind 用来锁定源地址（多出口时防止请求从以太网那条链路出去），传空串表示不绑定。
+ */
+var rpcExitIp = L.rpc.declare({
+	object: 'mt5700',
+	method: 'exitip',
+	params: ['bind'],
+	expect: {}
+});
+
 function withTimeout(p, ms, msg) {
 	/*
 	 * ★ P11（2026-09-19 会审）：竞速胜出后清掉另一路的定时器。
@@ -1320,11 +1339,40 @@ function es9pAvailable() {
 		});
 }
 
+/*
+ * 探测出口 IP：返回 Promise<{success, ip, endpoint, error}>。
+ *
+ * ★ ip 为空串必须按「无法判定」处理，不许退化成 0.0.0.0 之类占位（红线 23）：
+ *   回显服务返回了 HTML 错误页、DNS 没解析、curl 不存在，都会走到这里，
+ *   它们都不是「出口 IP 是 0.0.0.0」。
+ *
+ * 超时给 20s：后端三个端点各限时 8s，最坏 24s 才轮完，这里取 20s 让它先失败并
+ * 如实报「未取到」，而不是让用户干等 —— 探测是手动触发的，快失败比慢成功更有用。
+ */
+function fetchExitIp(bind) {
+	return withTimeout(rpcExitIp(bind || ''), 20000, '出口 IP 探测超时')
+		.then(function (resp) {
+			if (!resp || resp.success === false) {
+				return { success: false, ip: '', endpoint: '', error: (resp && resp.error) || 'rpcd 没有 mt5700.exitip 方法（后端未升级）' };
+			}
+			var ip = Parse.parseExitIpBody(resp.body);
+			if (!ip) {
+				/* 取到了响应但里面不是 IP —— 如实说明，别假装成功 */
+				return { success: false, ip: '', endpoint: String(resp.endpoint || ''), error: '回显服务返回的内容不是 IP（可能没网或返回了错误页）' };
+			}
+			return { success: true, ip: ip, endpoint: String(resp.endpoint || '') };
+		})
+		.catch(function (err) {
+			return { success: false, ip: '', endpoint: '', error: (err && err.message) || '出口 IP 探测失败' };
+		});
+}
+
 var AtWs = {
 	client: atClient(),
 	netRate: fetchNetRate,
 	sysDiag: fetchSysDiag,
 	es9p: es9pPost,
+	exitIp: fetchExitIp,
 	es9pAvailable: es9pAvailable,
 	extractATData: extractATData,
 	extractATDataMultiline: extractATDataMultiline,

@@ -236,6 +236,53 @@ var Parse = (function () {
 			});
 	};
 
+	/*
+	 * 出口 IP 回显响应解析（mt5700.exitip 的 body）。
+	 *
+	 * ★ 为什么解析放在前端而不是 ucode：后端只负责「取回原文」，不解读含义 ——
+	 *   与 sysdiag「只给事实、判定交前端」是同一条分工线。回显服务返回的是纯文本
+	 *   （有的带 HTML、有的带换行），这里必须严格校验成合法 IP 才认，
+	 *   不能把一段错误页当地址显示出去。
+	 *
+	 * 返回 null 表示「取回来的东西不是 IP」—— 调用方必须按「无法判定」呈现，
+	 * 不许退化成 0.0.0.0 之类看起来像有值的占位（红线 23 的同构要求）。
+	 */
+	api.parseExitIpBody = function (text) {
+		var s = String(text == null ? '' : text).trim();
+		if (!s) return null;
+		/* 先整串试：ipify / ifconfig.me/ip 这类回的就是一个裸 IP */
+		if (isIpLiteral(s)) return s;
+		/* 再退而求其次：从响应里抠第一个像 IP 的片段（myip.ipip.net 会带「当前 IP：x.x.x.x 来自于：…」） */
+		var m = s.match(/(\d{1,3}(?:\.\d{1,3}){3})/);
+		if (m && isIpLiteral(m[1])) return m[1];
+		var m6 = s.match(/([0-9A-Fa-f:]{2,39})/);
+		if (m6 && isIpLiteral(m6[1])) return m6[1];
+		return null;
+	};
+
+	/* 严格 IP 字面量校验：IPv4 四段各 0~255；IPv6 交给 Node/浏览器不兜，
+	 *   这里只认「含冒号且每段 1~4 位十六进制」的形态。 */
+	function isIpLiteral(s) {
+		var v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+		if (v4) {
+			for (var i = 1; i <= 4; i++) {
+				var n = Number(v4[i]);
+				if (!Number.isInteger(n) || n < 0 || n > 255) return false;
+			}
+			return true;
+		}
+		if (s.indexOf(':') < 0) return false;
+		if (!/^[0-9A-Fa-f:]+$/.test(s)) return false;
+		var parts = s.split(':');
+		if (parts.length < 3 || parts.length > 8) return false;
+		for (var j = 0; j < parts.length; j++) {
+			if (parts[j].length === 0) continue;   /* "::" 压缩写法允许空段 */
+			if (parts[j].length > 4) return false;
+			if (!/^[0-9A-Fa-f]+$/.test(parts[j])) return false;
+		}
+		return true;
+	}
+
 	/* ================= 空口健康 ================= */
 
 	/*

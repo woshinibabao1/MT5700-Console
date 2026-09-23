@@ -707,6 +707,111 @@ function diagFacts() {
 	return facts;
 }
 
+/*
+ * ================= 出口 IP 探测（「换卡换 IP」能不能成立的判定依据） =================
+ *
+ * 为什么非有它不可：AT+CGPADDR 给的是 **PDP 地址**（本模组是桥接模式，路由器 WAN
+ * 侧拿到的就是它，见 network_status.js 关于 CGPADDR 与 ^DHCP 同源的说明）。但运营商
+ * 普遍做 CGNAT，PDP 地址常常是 10.x / 100.x 这类私网地址 —— 此时「互联网看到的我」
+ * 是 CGNAT 出口地址，**只看 PDP 地址根本判断不出换卡后公网出口到底变没变**。
+ *
+ * 对照 vohive 的做法（internal/netprobe/netprobe.go）：它也是从设备侧发一次 HTTP
+ * 回显，用「对端看到的源地址」当公网 IP（`GetPublicIPv4AndV6NoCache`），并且区分
+ * privateIP（承载地址）与 publicIP（回显地址）两个字段 —— 上面这段区别正是它分两
+ * 个字段的原因。本项目此前完全没有这个手段，所以只能给出「观测」而不是「轮换」。
+ *
+ * 分工（与 sysdiag 保持一致）：这里只取回**原文**，不解析、不判定；解析与合法性校验
+ * 交给前端 Parse.parseExitIpBody。加一个回显服务只改这里，加一条判据只改前端。
+ *
+ * ★ 安全：URL 写死在白名单常量里，不接受 req 传入任意地址 —— 没有命令注入面。
+ *   唯一的用户输入是 bind（要绑定的源 IP），逐字符校验成 IPv4 点分十进制才拼进命令行。
+ */
+const EXITIP_MAX_BODY = 64;
+const EXITIP_TIMEOUT = 12;
+
+/* 全部走 http：设备上的 curl 未必带 CA 信任库，https 缺根时会静默失败
+   （es9p 那边为了过 GSMA CI 得额外拼一份 CA，这里没必要引入那份复杂度）。
+   传出去的只是「我的 IP 是多少」这种公开信息，不需要机密性。 */
+const EXITIP_ENDPOINTS = [
+	{ id: 'ipify', url: 'http://api.ipify.org' },
+	{ id: 'ifconfig', url: 'http://ifconfig.me/ip' },
+	{ id: 'ipip', url: 'http://myip.ipip.net' }
+];
+
+/* bind 校验：只放行 IPv4 点分十进制。返回 '' 表示不绑定，null 表示不合法。 */
+function safeBindIp(s) {
+	if (s == null || s == '') {
+		return '';
+	}
+	if (length(s) > 15) {
+		return null;
+	}
+	let dots = 0;
+	let digits = 0;
+	for (let i = 0; i < length(s); i++) {
+		let c = substr(s, i, 1);
+		if (c >= '0' && c <= '9') {
+			digits++;
+		} else if (c == '.') {
+			dots++;
+		} else {
+			return null;
+		}
+	}
+	/* 3 个点 + 至少 4 位数字：挡掉 "...." / "1" / "999" 这类畸形输入 */
+	if (dots != 3 || digits < 4) {
+		return null;
+	}
+	return s;
+}
+
+function exitIpOnce(url, bind) {
+	let cmd = 'timeout ' + EXITIP_TIMEOUT + ' curl -sS --max-time 8';
+	if (bind != null && bind != '') {
+		cmd = cmd + ' --interface ' + bind;
+	}
+	cmd = cmd + ' ' + url;
+	let p;
+	try {
+		p = fs.popen(cmd, 'r');
+	} catch (e) {
+		return null;
+	}
+	if (!p) {
+		return null;
+	}
+	let body = '';
+	for (let i = 0; i < 8; i++) {
+		let line = p.read('line');
+		if (line == null) {
+			break;
+		}
+		body = body + line;
+		if (length(body) > EXITIP_MAX_BODY) {
+			break;
+		}
+	}
+	p.close();
+	if (body == '') {
+		return null;
+	}
+	return substr(body, 0, EXITIP_MAX_BODY);
+}
+
+function exitIpFacts(bind) {
+	if (!es9pToolAvailable()) {
+		return { success: false, error: '设备上没有 curl，无法探测出口 IP' };
+	}
+	for (let i = 0; i < length(EXITIP_ENDPOINTS); i++) {
+		let ep = EXITIP_ENDPOINTS[i];
+		let body = exitIpOnce(ep.url, bind);
+		if (body != null) {
+			return { success: true, endpoint: ep.id, body: body };
+		}
+	}
+	return { success: false, error: '三个回显服务都没返回内容（可能没网，或 DNS 未解析）' };
+}
+
 function es9pMktemp() {
 	let p;
 	try {
@@ -967,6 +1072,19 @@ return {
 					};
 				}
 				return { success: true, at: time(), facts: facts };
+			}
+		},
+		/* 出口 IP 探测：从路由器侧取「互联网看到的我」—— 换卡换 IP 的判定依据。
+		   只回原文（端点 id + 响应前 64 字节），解析与合法性校验在前端。
+		   bind 可选：绑定到指定源 IP，多出口时用它锁定蜂窝那条链路。 */
+		exitip: {
+			args: { bind: '' },
+			call: function (req) {
+				let bind = safeBindIp(getStr(req.args, 'bind'));
+				if (bind == null) {
+					return { success: false, error: 'bind 不是合法 IPv4 地址' };
+				}
+				return exitIpFacts(bind);
 			}
 		},
 		es9p: {

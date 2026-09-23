@@ -85,22 +85,108 @@ return L.view.extend({
 			ipObsBody.innerHTML = '';
 			if (!ipObs.length) {
 				ipObsBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'暂无记录。启用或禁用任一 Profile，在重注册完成后这里会自动记一笔当前的 PDP 地址。'));
+					'暂无记录。启用或禁用任一 Profile，在重注册完成后这里会自动记一笔；' +
+					'也可以先点下面的按钮取一次当前出口 IP 作为基线（不切卡、不改任何配置）。'));
+				/* 基线探测入口：不切卡就能先知道「现在互联网看到的我是谁」，
+				   之后换卡才有得比。失败也要如实显示，不许静默。 */
+				ipObsBody.appendChild(Mt5700.ghostButton('探测当前出口 IP', function () {
+					if (busy) return;
+					if (!AtWs.exitIp) { Mt5700.error('后端未升级：rpcd 没有 mt5700.exitip 方法'); return; }
+					ipObsBody.innerHTML = '';
+					ipObsBody.appendChild(Mt5700.loading('正在探测出口 IP…'));
+					AtWs.exitIp('').then(function (r) {
+						lastExitIp = (r && r.success) ? r.ip : '';
+						ipObsBody.innerHTML = '';
+						ipObsBody.appendChild(E('div', { 'class': r && r.success
+							? 'mt5700-notice' : 'mt5700-notice-warning' },
+							(r && r.success)
+								? ('当前出口 IP：' + r.ip + '（来源 ' + (r.endpoint || '未知') + '）—— 已记为基线')
+								: ('未取到出口 IP：' + ((r && r.error) || '未知原因'))));
+						/* 探测完把常驻内容补回去，否则这里只剩一行结果 */
+						later(renderIpObs, 0);
+					});
+				}));
 				return;
 			}
 			ipObsBody.appendChild(E('div', { 'class': 'mt5700-esim-sectitle' },
 				'最近观测（最多 ' + IP_OBS_MAX + ' 条）'));
 			ipObs.slice(-IP_OBS_MAX).forEach(function (it) {
+				var verdict = it.changed === 'yes' ? '出口 IP 已变'
+					: it.changed === 'no' ? '出口 IP 未变'
+						: '出口 IP 无法判定';
 				ipObsBody.appendChild(E('div', { 'class': 'mt5700-hint mt5700-mono' },
-					it.time + '  ' + it.key + '  →  ' + it.addr));
+					it.time + '  ' + it.key));
+				ipObsBody.appendChild(E('div', { 'class': 'mt5700-hint mt5700-mono' },
+					'　承载 ' + it.addr + '　出口 ' + it.exit + '　' + verdict));
 			});
+
+			/*
+			 * 结论只在**有可比基线**时才下。
+			 * 三者含义不同，别混成一句话：
+			 *   ① 出口 IP 变了        → 换卡换 IP 在本机成立；
+			 *   ② 出口 IP 没变        → 该运营商/APN 复用同一出口，换卡换不了 IP；
+			 *   ③ 无法判定            → 基线或本次没取到，是「不知道」不是「没变」
+			 *                          （红线 23：不许把读不出来当成结论）。
+			 */
 			var last = ipObs[ipObs.length - 1];
-			var prev = ipObs[ipObs.length - 2];
-			if (prev && last.addr === prev.addr && last.key !== prev.key && last.addr !== '未取到地址') {
+			if (last.changed === 'no') {
 				ipObsBody.appendChild(E('div', { 'class': 'mt5700-notice-warning mt5700-mt-sm' },
-					'换了 Profile 但地址没变 —— 该运营商/APN 会复用同一地址池，' +
-					'此环境下「靠切 Profile 换出口 IP」不成立。'));
+					'换了 Profile 但出口 IP 没变 —— 该运营商/APN 会复用同一个出口地址，' +
+					'此环境下「靠切 Profile 换出口 IP」不成立（承载地址也可能一样，见上面的记录）。'));
+			} else if (last.changed === 'yes') {
+				ipObsBody.appendChild(E('div', { 'class': 'mt5700-notice mt5700-mt-sm' },
+					'出口 IP 已变化 —— 本机上「切 Profile ⇒ 换出口 IP」成立。'));
+			} else if (last.exit === '未取到' || last.exit === '后端未升级') {
+				ipObsBody.appendChild(E('div', { 'class': 'mt5700-notice-warning mt5700-mt-sm' },
+					'本次没取到出口 IP（' + last.exit + '），因此**无法判定**换没换 —— 这不是「没变」。'));
 			}
+		}
+
+		/*
+		 * 出口 IP 基线 + 当前生效 Profile（本次会话内有效）。
+		 *
+		 * ★ 为什么必须是**会话内**的、而不是模块级全局（红线 24）：跨会话/并发传值
+		 *   用全局变量会拿到别的页面甚至上一张卡留下的值。这里记的是「这台设备这一刻」
+		 *   的状态，页面重载就重新取，绝不带到下一次。
+		 *
+		 * ★ 为什么要单独记「出口 IP」而不只看 PDP 地址：AT+CGPADDR 给的是承载地址，
+		 *   运营商普遍 CGNAT 时它是 10.x/100.x 私网地址 —— 「互联网看到的我」是 CGNAT
+		 *   出口地址，两者不是一回事。判断「换卡到底有没有换 IP」只能看后者。
+		 *   （对照 vohive：internal/device/pool_health_ip.go 里 privateIP 与 publicIP
+		 *   就是分开存、分开比的，本项目此前缺的正是 publicIP 这一半。）
+		 */
+		var lastExitIp = null;      /* null = 还没取过；'' = 取过但没取到 */
+		var currentEnabledRaw = null;   /* 当前处于 enabled 的 Profile 的 iccidRaw */
+
+		/*
+		 * ★ 不给自动回滚，只给「一键切回」。
+		 *
+		 * vohive 在 pool_esim_switch 里有切换失败的 restore，但它的池子里有**多个模组**，
+		 * 回滚只是把流量挪到另一条链路上。本设备是**单模组、蜂窝即唯一上行**：
+		 * 自动再切一次 = 再制造一次全屋断网窗口，而且第二次切换同样可能失败，
+		 * 于是变成「越救越断」。所以这里把决定权交回给用户：把「现在生效的可能是谁 /
+		 * 数据承载有没有起来」说清楚，再给一个一键切回的按钮。
+		 * 断网类操作必须可预期，这是本项目一贯的取舍（见红线：不自动下发周期类 AT）。
+		 */
+		function restoreProfile(prevRaw, why) {
+			if (!prevRaw) {
+				Mt5700.error('无法确定切换前是哪张 Profile，请手动在上方列表里启用要用的那张');
+				return;
+			}
+			if (busy) return;
+			Mt5700.confirm('切回原 Profile？' + (why || '') + ' 切换期间网络会再中断一次（约 10~30 秒）。', function () {
+				if (busy) { Mt5700.error('有操作正在进行'); return; }
+				busy = true;
+				try { AtWs.client.clearReadCache(); } catch (e) { /* 无此实现时退化，不得阻断下发 */ }
+				Euicc.enableProfile(send, { kind: 'iccid', hex: prevRaw }, true).then(function () {
+					busy = false;
+					Mt5700.success('已下发切回，等待重注册');
+					pollListAfterToggle(prevRaw, '切回');
+				}).catch(function (e) {
+					busy = false;
+					handleErr(e);
+				});
+			}, '切回');
 		}
 
 		/*
@@ -1277,11 +1363,18 @@ return L.view.extend({
 
 
 		/*
-		 * 记一笔当前的数据承载 IP（P13）。
+		 * 记一笔「数据承载地址 + 出口 IP」（P13 + 换 IP 验证）。
 		 *
 		 * 只在身份收敛之后被调用，因此读到的地址确实属于「刚生效的那张 Profile」。
-		 * 读地址失败**不追加重试**：这只是一条观测记录，缺一笔不影响任何功能；
-		 * 但要把「读不到」如实记下来，不许写成 0.0.0.0 之类看起来像有地址的值。
+		 * 读数失败**不追加重试**：这只是一条观测记录，缺一笔不影响任何功能；
+		 * 但要把「读不到」如实记下来，不许写成 0.0.0.0 之类看起来像有地址的值
+		 * （红线 23：不许把「读不出来」伪装成「没有/有」）。
+		 *
+		 * ★ 两个地址各是什么、为什么都要记：
+		 *   entry.addr —— AT+CGPADDR 的 PDP 地址，即运营商给这条承载分配的地址；
+		 *   entry.exit —— 从路由器侧发一次 HTTP 回显得到的「互联网看到的我」。
+		 *   CGNAT 下前者是 10.x/100.x 私网地址，**只看它判断不出出口换没换**；
+		 *   后者才是判据。两者都记下来，才能看出「换了卡但出口没变」到底发生在哪一层。
 		 */
 		function observeDataIp(iccidHex) {
 			if (!ipObs) return;
@@ -1292,8 +1385,11 @@ return L.view.extend({
 			var entry = {
 				key: iccidHex ? Euicc.iccidKey(iccidHex) : '(未知 ICCID)',
 				addr: '',
+				exit: '',
+				changed: 'unknown',
 				time: hh + ':' + mm + ':' + ss
 			};
+			var pdpAddr = '';
 			return send('AT+CGPADDR', { fresh: true }).then(function (r) {
 				var list = (r && r.success && r.data) ? Parse.parseCgpaddr(String(r.data)) : [];
 				var hit = null;
@@ -1302,10 +1398,37 @@ return L.view.extend({
 				}
 				if (!hit && list.length) hit = list[0];
 				entry.addr = hit ? hit.address : '未取到地址';
+				if (hit) pdpAddr = hit.address;
 			}).catch(function () {
 				/* 可吞：读不到地址不是"错"，是观测结果的一种 —— 这里把它如实写成
 				   「未取到地址」并由 renderIpObs 显示出来，用户看得见，不是无声消失。 */
 				entry.addr = '未取到地址';
+			}).then(function () {
+				/* 老固件的 rpcd 没有 mt5700.exitip，别让整条观测链挂掉 */
+				if (!AtWs.exitIp) {
+					entry.exit = '后端未升级';
+					return;
+				}
+				/* 绑到刚读到的 PDP 地址：多出口时保证请求确实从蜂窝这条链路出去 */
+				return AtWs.exitIp(pdpAddr).then(function (r) {
+					if (!r || !r.success) {
+						entry.exit = '未取到';
+						return;
+					}
+					entry.exit = r.ip;
+					if (lastExitIp === null) {
+						entry.changed = 'unknown';       /* 没有切换前基线，无从比较 */
+					} else if (lastExitIp === '') {
+						entry.changed = 'unknown';       /* 基线本身就没取到 */
+					} else {
+						entry.changed = (r.ip === lastExitIp) ? 'no' : 'yes';
+					}
+					lastExitIp = r.ip;
+				}).catch(function () {
+					/* 可吞：探测失败同样是观测结果的一种，如实记为「未取到」，
+					   由 renderIpObs 显示出来，不静默丢掉这一笔。 */
+					entry.exit = '未取到';
+				});
 			}).then(function () {
 				ipObs.push(entry);
 				renderIpObs();
@@ -1391,19 +1514,22 @@ return L.view.extend({
 			body.appendChild(listCard);
 
 			/*
-			 * 数据承载 IP 观测卡（P13）——「私有代理池」能否成立的前提实测。
+			 * 换卡换出口 IP 卡（P13 + 出口 IP 实测）——「靠切 Profile 换 IP」在本机成不成立，
+			 * 由这张卡给出**实测结论**，而不是靠推理。
 			 *
-			 * ★ 为什么先做观测而不是直接做轮换：「换一张 Profile ⇒ 出口 IP 变化」看起来天经地义，
-			 *   但在运营商 CGNAT 环境下**同一 APN 地址池完全可能复用同一个地址**。全仓此前
-			 *   没有任何外部出口 IP 探测手段，也就是说这个前提是**零证据**的 —— 在拿到实测前
-			 *   动工任何自动轮换，都是把功能建在未验证的假设上。
+			 * ★ 为什么要有「出口 IP」这一列：AT+CGPADDR 只给承载地址，运营商普遍 CGNAT 时
+			 *   它是 10.x/100.x 私网地址，光看它根本判断不出「互联网看到的我」换没换。
+			 *   所以这里补了 mt5700.exitip：从路由器侧发一次 HTTP 回显，取回真正的出口 IP。
+			 *   （对照 vohive：pool_health_ip.go 里 privateIP 与 publicIP 分开存、分开比，
+			 *    本项目 2.3.44 只有 privateIP 那一半，2.3.45 补齐 publicIP 这一半。）
 			 *
-			 *   这里只做只读观测：每次 Profile 切换收敛后读一次 AT+CGPADDR（PDP 地址，
-			 *   即运营商实际分配的那个）记一笔。用户跑一次「切换 → 看地址变没变」就能定性。
-			 *   ★ 不自动轮换、不改任何网络配置、不引入任何外部服务（不扩攻击面）。
-			 *   ★ 固定尺寸：只显示最近 5 条，不按数据量撑开（UI 红线）。
+			 * ★ 仍然**不自动轮换**：本设备是单模组、蜂窝即唯一上行，定时自动切换等于定时断网。
+			 *   这里给的是「切一次 → 立刻拿到换没换的实测结论 + 失败可一键切回」，
+			 *   是不是要定时轮换由用户自己按实测结论决定。
+			 * ★ 固定尺寸：只显示最近 5 条，不按数据量撑开（UI 红线）。
 			 */
-			var ipObsCard = Mt5700.card('数据承载 IP 观测', '判断「切换 Profile ⇒ 出口 IP 变化」在本机上是否成立');
+			var ipObsCard = Mt5700.card('换卡换出口 IP（实测）',
+				'每次切换收敛后记录承载地址与出口 IP，并判定「切 Profile ⇒ 出口 IP 变化」在本机是否成立');
 			ipObsBody = ipObsCard._body;
 			body.appendChild(ipObsCard);
 			renderIpObs();
@@ -1462,6 +1588,19 @@ return L.view.extend({
 		}
 
 		function renderTable(listCard, list) {
+			/*
+			 * 顺手记下「当前哪张是启用的」。
+			 * 用途只有一个：切换失败时给「一键切回」一个明确的目标 ——
+			 * 不记的话，等用户发现网络没起来时，页面早就被重新渲染过，
+			 * 谁也不知道刚才该切回哪张（这正是红线 24「旧身份带给新卡」的同类坑）。
+			 */
+			currentEnabledRaw = null;
+			for (var k = 0; k < list.length; k++) {
+				if (list[k].state === 'enabled' && list[k].iccidRaw) {
+					currentEnabledRaw = list[k].iccidRaw;
+					break;
+				}
+			}
 			/* 卡容量那张卡上的「已装 Profile」在这里回填（列表读成功才有准数）。 */
 			if (capProfileMetric) {
 				capProfileMetric.lastChild.textContent = String(list.length);
@@ -1529,6 +1668,12 @@ return L.view.extend({
 				if (busy) { Mt5700.error('有操作正在进行'); return; }
 				/* P17：iccidRaw 为空不下发，避免只弹一句「操作失败」 */
 				if (!p.iccidRaw) { Mt5700.error('这个 Profile 没读到 ICCID，无法对该卡下发操作'); return; }
+				/*
+				 * ★ 切换前先抓一份「原来生效的是谁」。
+				 *   必须在下发**之前**取：下发成功后列表会被重新渲染，
+				 *   currentEnabledRaw 那时已经指向新卡了，再取就取不回来了。
+				 */
+				var prevRaw = currentEnabledRaw;
 				busy = true;
 				/*
 				 * ★ 下发前主动作废读缓存（P03）。
@@ -1561,8 +1706,8 @@ return L.view.extend({
 						verb + '成功，网络将中断并重注册，约 10~30 秒后恢复。');
 					body.insertBefore(note, body.firstChild);
 					later(function () { if (note.parentNode) note.parentNode.removeChild(note); }, 8000);
-					/* P07 + R03：有限轮询替换一刀切的 12 秒；回执读取挪到轮询结束之后串行调用 */
-					pollListAfterToggle(p.iccidRaw, verb);
+				/* P07 + R03：有限轮询替换一刀切的 12 秒；回执读取挪到轮询结束之后串行调用 */
+				pollListAfterToggle(p.iccidRaw, verb, prevRaw);
 				}).catch(function (e) {
 					busy = false;
 					handleErr(e);
@@ -1589,7 +1734,7 @@ return L.view.extend({
 		 *   ② AT 探针读失败（卡片 busy / CME ERROR）**不计 attempt**——失败的是探针不是切换；
 		 *   ③ 总时长上限维持 6+12+24=42s 不延长，不给同一轮里多发的命令加带宽。
 		 */
-		function pollListAfterToggle(expectIccidHex, verb) {
+		function pollListAfterToggle(expectIccidHex, verb, prevIccidHex) {
 			var listCard = findListCard();
 			if (!listCard) return;
 			var attempt = 0;
@@ -1661,6 +1806,17 @@ return L.view.extend({
 					putNote('mt5700-notice-warning',
 						(verb || '切换') + '已下发，但卡片仍在重注册：当前生效的可能还是原 Profile，' +
 						'请稍后点击「刷新列表」确认。');
+					/*
+					 * 切过去没确认生效 → 给一个「切回原 Profile」的出口。
+					 * 只在**启用另一张**时给：那才存在「新的没起来、旧的已经让位」的风险。
+					 * 不给自动回滚的理由见 restoreProfile 上方的注释。
+					 */
+					if (verb === '启用' && prevIccidHex && prevIccidHex !== expectIccidHex) {
+						listCard._body.appendChild(E('div', { 'class': 'mt5700-mt-sm' },
+							Mt5700.dangerButton('切回原 Profile', function () {
+								restoreProfile(prevIccidHex, '（当前这张没确认生效）');
+							})));
+					}
 					showPendingReceipts();
 				});
 			}
