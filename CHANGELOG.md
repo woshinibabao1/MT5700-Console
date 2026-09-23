@@ -5,6 +5,35 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.42] - 2026-09-23
+
+### Fixed（真缺陷）
+
+- **修复 4G（LTE）下 SINR 读不出来**（漫游回落到 LTE 时尤其明显，界面恒为「—」）。
+  两处原因叠加，各占一半：
+  1. `^MONSC` 的 LTE 布局**根本不带 SINR**（手册 13.9：
+     `<MCC>,<MNC>,<ARFCN>,<Cell_ID>,<PCI>,<TAC>,<RSRP>,<RSRQ>,<RSSI>`，末位是 RSSI），
+     4G 的 SINR 只能由 `^HCSQ` 补。而补查条件写成了「`^HFREQINFO` 一条载波都没返回」，
+     4G 下 `^HFREQINFO` **正常返回 LTE 载波** → 条件恒不成立 → `^HCSQ` 永远不发。
+     现改为「RSRP / RSRQ / SINR 三项里有缺才补一次」，且只填空缺、不覆盖 `^MONSC`
+     的实测值（NR 下两者本就有 1~2 dB 差，实测 -65/28 对 -63/27.2）。
+  2. `^HCSQ` 的 LTE 字段序被按 NR 的顺序解析。手册 13.5 字段表：
+     `"LTE",<lte_rssi>,<lte_rsrp>,<lte_sinr>,<lte_rsrq>` —— LTE 比 NR 前面多一个
+     RSSI，且 **SINR 在 value3、RSRQ 在 value4**（NR 恰好相反）。旧代码把 RSRQ 的
+     工程值当 SINR 换算（实测 `^HCSQ: "LTE",45,34,106,19` 被解成 SINR -16.2，
+     正确应为 **SINR 1.2 / RSRQ -10**）。NR 分支与手册本就一致，未改动。
+- **消除制式切换时的陈旧值**：旧写法 `serving.sinr != null ? serving.sinr : state.cell.sinr`
+  在 5G→4G 掉制时会把掉线前 5G 的 SINR 一直留在界面上 —— 陈旧值伪装成当前值，
+  比老实显示「—」更有误导性。现每轮以本轮实测为准。
+- `^HCSQ` 的字段留空 / 非数字一律转 null：此前 `convert*(NaN)` 会把 NaN 一路传
+  到界面（信号条 `width:NaN%`、仪表盘显示 NaN）。手册明确写「暂时未获取到的参数留空」。
+
+### Added
+
+- `tests/lte-signal-contract.test.js`：4G 信号契约测试（31 项）。用真机原文验解析
+  结果（而非数字符串），并钉住补查时机与「LTE 无 SINR」这条手册事实。
+  配套变异验证 8 条全部判红并指向正确。
+
 ## [2.3.41] - 2026-09-22
 
 第二轮全仓走查（同 2.3.40 的 deep-module 视角），本轮的主题是**「同一件事只允许有一个家」**：

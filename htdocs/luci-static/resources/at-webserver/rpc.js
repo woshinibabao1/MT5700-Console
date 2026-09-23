@@ -892,23 +892,45 @@ function parseHCSQ(data) {
 	else if (mode.indexOf('LTE') === 0) networkMode = 'LTE';
 	else if (mode.indexOf('WCDMA') === 0) networkMode = 'WCDMA';
 	else networkMode = mode || '';
+	/*
+	 * 工程值字段缺位 / 非数字时一律为 null。
+	 * convert*(NaN) 会原样返回 NaN（NaN 不 ===0、也不 >= 阈值，直接进线性公式），
+	 * 而 NaN 会一路传到界面：信号条变成 `width:NaN%`、仪表盘显示 NaN。
+	 */
+	var eng = function (v, conv) {
+		var n = parseInt(v, 10);
+		if (!isFinite(n)) return null;
+		var out = conv(n);
+		return isFinite(out) ? out : null;
+	};
 	var result = { networkMode: networkMode, rssi: null, rsrp: null, rsrq: null, sinr: null };
 	if (networkMode === 'NR') {
 		/*
 		 * NR 格式（实测 ^HCSQ: "NR",77,236,31）与 LTE 顺序不同：
-		 *   "NR",<rsrp_raw>,<sinr_raw>,<rsrq_raw>
+		 *   "NR",<5g_rsrp>,<5g_sinr>,<5g_rsrq>
 		 * 交叉验证：rsrp 77 → -63 dBm、sinr 236 → 27.2 dB，与 ^MONSC 的
 		 * -65 dBm / 28 dB 独立吻合，故按此顺序解析（兼容 3 或 4 数值字段）。
 		 */
-		if (p.length >= 2) result.rsrp = convertRsrp(parseInt(p[1], 10));
-		if (p.length >= 3) result.sinr = convertSinr(parseInt(p[2], 10));
-		if (p.length >= 4) result.rsrq = convertRsrq(parseInt(p[3], 10));
+		if (p.length >= 2) result.rsrp = eng(p[1], convertRsrp);
+		if (p.length >= 3) result.sinr = eng(p[2], convertSinr);
+		if (p.length >= 4) result.rsrq = eng(p[3], convertRsrq);
 	} else if (networkMode === 'LTE') {
-		if (p.length >= 3) result.rsrp = convertRsrp(parseInt(p[2], 10));
-		if (p.length >= 4) result.rsrq = convertRsrq(parseInt(p[3], 10));
-		if (p.length >= 5) result.sinr = convertSinr(parseInt(p[4], 10));
+		/*
+		 * 手册 13.5 的 LTE 字段表（**与 NR 顺序不同**，此前一律按 NR 的
+		 * <rsrp>,<sinr>,<rsrq> 套，SINR 与 RSRQ 整个对调）：
+		 *   "LTE",<lte_rssi>,<lte_rsrp>,<lte_sinr>,<lte_rsrq>
+		 * 即 LTE 比 NR 前面多一个 RSSI，且 **SINR 在 value3、RSRQ 在 value4**
+		 * （NR 恰好相反：SINR 在 value2、RSRQ 在 value3）。
+		 * 实测 ^HCSQ: "LTE",45,34,106,19 → RSSI -76 / RSRP -106 / SINR 1.2 / RSRQ -10；
+		 * 错位时 SINR 吃到的是 RSRQ 的工程值（19 → -16.2 dB），RSRQ 又吃到 SINR 的
+		 * 工程值（106 → 被 rsrq 的 34 上限截成 -3），两项同时错。
+		 */
+		if (p.length >= 2) result.rssi = eng(p[1], convertRssi);
+		if (p.length >= 3) result.rsrp = eng(p[2], convertRsrp);
+		if (p.length >= 4) result.sinr = eng(p[3], convertSinr);
+		if (p.length >= 5) result.rsrq = eng(p[4], convertRsrq);
 	} else {
-		if (p.length >= 2) result.rssi = convertRssi(parseInt(p[1], 10));
+		if (p.length >= 2) result.rssi = eng(p[1], convertRssi);
 	}
 	return result;
 }

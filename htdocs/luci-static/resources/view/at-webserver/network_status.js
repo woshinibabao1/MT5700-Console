@@ -2265,32 +2265,64 @@ return L.view.extend({
 			});
 		}
 
+		/*
+		 * ^MONSC 的 LTE 布局**不带 SINR**（手册 13.9.3：<RSRP>,<RSRQ>,<RSSI>，
+		 * 末位是 RSSI 工程值），所以 4G 下 SINR 只能由 ^HCSQ 补。
+		 *
+		 * 旧实现把补查条件写成「^HFREQINFO 一条载波都没返回」——而 4G 下
+		 * ^HFREQINFO 正常返回 LTE 载波，条件恒不成立，**4G（含漫游回落）的
+		 * SINR 永远是「—」**。现在改成「三项里有缺就补一次」。
+		 *
+		 * 只填空缺、不覆盖：^MONSC 是服务小区的实测值，^HCSQ 是模组侧的量，
+		 * NR 下两者本来就有 1~2 dB 的差（实测 -65/28 对 -63/27.2），让 ^MONSC 优先。
+		 */
+		function fillSignalFromHCSQ() {
+			if (state.cell.rsrp != null && state.cell.rsrq != null && state.cell.sinr != null) {
+				return Promise.resolve();
+			}
+			return AtWs.client.sendCommand('AT^HCSQ?').then(function (hcsq) {
+				var h = hcsq.success && hcsq.data ? AtWs.parseHCSQ(hcsq.data) : null;
+				if (!h) return;
+				/*
+				 * 制式刚切的那一轮，^HCSQ 可能还报旧制式的值（漫游时 5G↔4G 来回
+				 * 重选很频繁）。与 ^MONSC 报的制式不一致时不采信，等下一轮刷新对齐：
+				 * 拿 NR 的 SINR 填进 LTE 那一栏，比留空更误导。
+				 */
+				if (h.networkMode && state.cell.sysMode && state.cell.sysMode !== '未知'
+					&& h.networkMode !== state.cell.sysMode) return;
+				if (state.cell.rsrp == null) state.cell.rsrp = h.rsrp;
+				if (state.cell.rsrq == null) state.cell.rsrq = h.rsrq;
+				if (state.cell.sinr == null) state.cell.sinr = h.sinr;
+			}).catch(function () {
+				/* 补查只是填空：失败就保持 ^MONSC 的结果，下一轮刷新会再试 */
+			});
+		}
+
 		function updateNetworkInfo() {
 			var carriers = [];
 			return AtWs.client.sendCommand('AT^MONSC').then(function (monsc) {
 				var serving = monsc.success && monsc.data ? AtWs.parseMONSC(monsc.data) : null;
 				return AtWs.client.sendCommand('AT^HFREQINFO?').then(function (hfreq) {
 					carriers = hfreq.success && hfreq.data ? AtWs.parseHFREQINFO(hfreq.data) : [];
-					if (!carriers.length) return AtWs.client.sendCommand('AT^HCSQ?').then(function (hcsq) {
-						var hcsqData = hcsq.success && hcsq.data ? AtWs.parseHCSQ(hcsq.data) : null;
-						if (hcsqData) {
-							state.cell.rsrp = hcsqData.rsrp;
-							state.cell.rsrq = hcsqData.rsrq;
-							state.cell.sinr = hcsqData.sinr;
-						}
-						return null;
-					});
 					return null;
 				}).then(function () {
 					if (serving) {
 						state.cell.mcc = serving.mcc; state.cell.mnc = serving.mnc;
 						state.cell.lac = serving.lac; state.cell.cid = serving.cid;
 						state.cell.channel = serving.channel; state.cell.pci = serving.pci;
-						state.cell.rsrp = serving.rsrp != null ? serving.rsrp : state.cell.rsrp;
-						state.cell.rsrq = serving.rsrq != null ? serving.rsrq : state.cell.rsrq;
-						state.cell.sinr = serving.sinr != null ? serving.sinr : state.cell.sinr;
-					state.cell.sysMode = serving.sysMode || state.cell.sysMode;
-					state.cell.signalPercent = serving.signalPercent || '';
+						/*
+						 * 每轮以本轮实测为准，取不到就是取不到（parseMONSC 的 num()
+						 * 已把空串与非数字统一成 null，不会往下传 NaN）。
+						 * 旧写法 `serving.sinr != null ? serving.sinr : state.cell.sinr`
+						 * 在 5G→4G 掉制时会把掉线前 5G 的 SINR 一直留在界面上 ——
+						 * 陈旧值伪装成当前值，比老实显示「—」更有误导性。
+						 * 缺的那几项由下面的 fillSignalFromHCSQ() 补。
+						 */
+						state.cell.rsrp = serving.rsrp;
+						state.cell.rsrq = serving.rsrq;
+						state.cell.sinr = serving.sinr;
+						state.cell.sysMode = serving.sysMode || state.cell.sysMode;
+						state.cell.signalPercent = serving.signalPercent || '';
 					}
 					/*
 					 * ^HFREQINFO 解析结果原样带过来（parseHFREQINFO 已按手册
@@ -2305,6 +2337,8 @@ return L.view.extend({
 							downlinkOnly: !!c.downlinkOnly
 						};
 					});
+					return fillSignalFromHCSQ();
+				}).then(function () {
 					renderSignal();
 					renderCarriers();
 					renderConn();
