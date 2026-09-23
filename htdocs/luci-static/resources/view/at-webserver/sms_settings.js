@@ -43,6 +43,40 @@ return L.view.extend({
 			return wrap;
 		}
 
+		/*
+		 * IMS 开关回读（P06）。
+		 *
+		 * ★ 为什么必须回读：手册《4 呼叫控制命令》4.10 给 AT^IMSSWITCH 列了三条失败条件
+		 *   （① 当前存在 IMS 业务；② 语音优选模式为 PS_ONLY 时关闭 LTE 域 IMS；
+		 *    ③ 切换 IMS 协议栈对 LTE/UTRAN/GSM 的支持能力失败），而它同时是**掉电保存**
+		 *   的命令（同节「属性说明」）—— 一次没真正生效的写入会被记住，界面却报成功。
+		 *
+		 * ★ 回读必须 { fresh: true }：`AT^IMSSWITCH?` 既不在 rpc.js 的 IDENTIFIER 档
+		 *   （10 分钟）也不在 STATE 档，落到**默认 2500ms** 读缓存；而写命令路径只调
+		 *   `_dropStateCache()`，清不到它 —— 不 fresh 就会立刻捞出下发前的旧值，
+		 *   把「已生效」误判成「未生效」，反向制造假故障。
+		 *
+		 * ★ 只回不纠（禁止反向再下发）：三条失败条件在回滚那一刻通常仍然成立
+		 *   （尤其①「存在 IMS 业务」），反向命令大概率同样失败；且协议栈切换是异步的，
+		 *   中途再下发会把开关撬到第三种语义状态。正确做法是**收敛到实测值**
+		 *   （调现成的 loadIMS()），并把「已下发但未生效」如实说给用户。
+		 */
+		function readImsSwitch() {
+			return AtWs.client.sendCommand('AT^IMSSWITCH?', { fresh: true }).then(function (res) {
+				if (!res.success || !res.data) return null;
+				var m = String(res.data).match(/\^IMSSWITCH:\s*(\d+),\s*\d+,\s*\d+/);
+				return m ? Number(m[1]) : null;
+			}).catch(function () { return null; });
+		}
+
+		/* unknown=true 表示回读不到（不许据此断言生效与否，按旧行为放行） */
+		function verifyImsSwitch(expect) {
+			return readImsSwitch().then(function (actual) {
+				if (actual === null) return { ok: true, actual: null, unknown: true };
+				return { ok: actual === expect, actual: actual, unknown: false };
+			});
+		}
+
 		/* ---------- IMS 与短信开关 ---------- */
 		var smsCard = Mt5700.card('短信服务', 'IMS 与短信收发开关');
 		var smsBody = E('div');
@@ -51,13 +85,28 @@ return L.view.extend({
 
 		var imsSwitch = mkCheck(function (checked, input) {
 			AtWs.client.sendCommand('AT^IMSSWITCH=' + (checked ? '1,0,0' : '0,0,0')).then(function (res) {
-				if (res.success) {
-					Mt5700.success((checked ? '开启' : '关闭') + ' IMS 成功');
-				} else {
+				if (!res.success) {
 					Mt5700.error((checked ? '开启' : '关闭') + ' IMS 失败');
 					input.checked = !checked;
+					return;
 				}
-			}).catch(function () { Mt5700.error('IMS 设置失败'); });
+				/* R04：这是 AT^IMSSWITCH 的**两条写入口之一**（另一条在短信总开关的序列里），
+				 *      两条都必须过同一套回读，否则「从这里改就说成功、从那里改就漏判」。 */
+				return verifyImsSwitch(checked ? 1 : 0).then(function (v) {
+					if (v.unknown) {
+						Mt5700.success((checked ? '开启' : '关闭') + ' IMS 已下发（未能回读确认，请刷新查看）');
+						return;
+					}
+					if (v.ok) {
+						Mt5700.success((checked ? '开启' : '关闭') + ' IMS 成功');
+						return;
+					}
+					/* 下发成功但实际没生效 —— 不反向重发，收敛到实测值并如实告知 */
+					loadIMS();
+					Mt5700.error((checked ? '开启' : '关闭') + ' IMS 已下发但未生效（当前实测值 ' + v.actual +
+						'）；手册列出的常见原因是存在进行中的 IMS 业务，或语音优选模式为 PS_ONLY');
+				});
+			}).catch(function () { Mt5700.error('IMS 设置失败'); loadIMS(); });
 		});
 		var imsChk = imsSwitch.querySelector('input');
 		smsBody.appendChild(Mt5700.formGroup('IMS 短信', imsSwitch, '开启后可收发短信'));
@@ -354,10 +403,25 @@ return L.view.extend({
 					});
 				})(steps[i]);
 			}
+			/*
+			 * R04：回读窗口必须放在**整串步骤全部结束之后**。
+			 *   序列里 `AT^IMSSWITCH=0,0,0` 之后 500ms 就是 `AT+CFUN=0`（关射频）—
+			 *   夹在中间回读时 IMS 协议栈正在切换、射频也正在动，读到的值既不能确认
+			 *   也不能否认任何结论，只会制造假故障。
+			 */
 			chain.then(function () {
-				Mt5700.success(enable ? '短信功能已开启' : '短信功能已关闭');
-				state.smsOn = enable;
-				smsOnChk.checked = enable;
+				return verifyImsSwitch(enable ? 1 : 0);
+			}).then(function (v) {
+				if (v.unknown || v.ok) {
+					Mt5700.success(enable ? '短信功能已开启' : '短信功能已关闭');
+					state.smsOn = enable;
+					smsOnChk.checked = enable;
+				} else {
+					/* 序列跑完但 IMS 没到位：不许谎报成功，也不反向重发 —— 收敛到实测值 */
+					Mt5700.error((enable ? '开启' : '关闭') + '短信：指令序列已执行，但 IMS 未生效（当前实测值 ' +
+						v.actual + '），短信可能仍然不可用');
+					loadIMS();
+				}
 				loadStorage();
 				return AtWs.client.sendCommand('AT+CSCA?');
 			}).then(function (res) {
@@ -373,10 +437,90 @@ return L.view.extend({
 			});
 		}
 
+		/*
+		 * ---------- 短信可达性三要素（P07） ----------
+		 *
+		 * 三条前置缺一不可，而此前它们在**三张不同的卡片里各自孤立展示**，
+		 * 没有任何一处把它们合起来判 —— 用户得自己在脑子里做 AND。
+		 *
+		 *   ① IMS 开关（LTE 域）   AT^IMSSWITCH?     手册 4.10
+		 *   ② IMS 注册（含能力值） AT+CIREG?         手册 7.6
+		 *   ③ 短信承载域           AT+CGSMS?         手册 7.7
+		 *     ★③ 是最容易漏的一条：5G SA 下**没有 CS 域**，承载域若选了「优先 CS」，
+		 *       短信一条都发不出去，而前两条此时看着都是好的。
+		 *
+		 * ★ 只读，不下发任何写命令；任一项读不到就如实写「读不到」，不许按乐观值补齐。
+		 */
+		var reachCard = Mt5700.card('短信可达性', '三条前置缺一不可，缺哪条这里指名');
+		reachCard._body.appendChild(Mt5700.loading('正在检查…'));
+		body.appendChild(reachCard);
+
+		function loadReachability() {
+			var v = { ims: null, cireg: null, cgsms: null };
+			return Promise.resolve()
+				.then(function () {
+					return readImsSwitch().then(function (n) { v.ims = n; });
+				})
+				.then(function () {
+					return AtWs.client.sendCommand('AT+CIREG?', { fresh: true }).then(function (res) {
+						v.cireg = (res.success && res.data) ? Parse.parseCireg(String(res.data)) : null;
+					});
+				})
+				.then(function () {
+					return AtWs.client.sendCommand('AT+CGSMS?', { fresh: true }).then(function (res) {
+						v.cgsms = (res.success && res.data) ? Parse.parseCgsms(String(res.data)) : null;
+					});
+				})
+				.catch(function () { /* 单项读不到就保持 null，下面如实显示 */ })
+				.then(function () { renderReachability(v); });
+		}
+
+		function renderReachability(v) {
+			var b = reachCard._body;
+			b.innerHTML = '';
+			var rows = [
+				['IMS 开关（LTE 域）', v.ims === null ? '读不到' : (v.ims === 1 ? '已开启' : '已关闭')],
+				['IMS 注册', !v.cireg ? '读不到' : (v.cireg.text +
+					(v.cireg.ext ? ('（能力值 ' + v.cireg.ext + '）') : ''))],
+				['短信承载域', !v.cgsms ? '读不到' : v.cgsms.text]
+			];
+			var grid = E('div', { 'class': 'mt5700-metrics' });
+			rows.forEach(function (r) { grid.appendChild(Mt5700.metric(r[0], r[1])); });
+			b.appendChild(grid);
+
+			/* 逐条点名，而不是笼统说「可能不可用」 */
+			var bad = [];
+			var unknown = [];
+			if (v.ims === 0) bad.push('IMS（LTE 域）未开启');
+			if (v.ims === null) unknown.push('IMS 开关');
+			if (v.cireg) {
+				if (v.cireg.info === 0) bad.push('IMS 未注册');
+				else if (v.cireg.info === null) unknown.push('IMS 注册状态');
+			} else unknown.push('IMS 注册状态');
+			if (v.cgsms) {
+				if (v.cgsms.preferCs) bad.push('短信承载域选了「优先/只选 CS」，而当前网络（5G SA）没有 CS 域');
+			} else unknown.push('短信承载域');
+
+			if (bad.length) {
+				b.appendChild(E('div', { 'class': 'mt5700-notice-warning mt5700-mt-sm' },
+					'当前不满足的条件：' + bad.join('；') + '。'));
+			} else if (unknown.length) {
+				b.appendChild(E('div', { 'class': 'mt5700-notice mt5700-mt-sm' },
+					unknown.join('、') + '未能读到，暂不判定可达性（不按乐观值补齐）。'));
+			} else {
+				b.appendChild(E('div', { 'class': 'mt5700-notice mt5700-mt-sm' },
+					'三项前置均满足（IMS 语音与 IMS 短信能力以能力值为准）。'));
+			}
+		}
+
 		/* ---------- 加载 ---------- */
 
 		function loadIMS() {
-			return AtWs.client.sendCommand('AT^IMSSWITCH?').then(function (res) {
+			/*
+			 * fresh 必给：本命令落在 rpc.js 的默认 2500ms 读缓存档，写命令路径的
+			 * _dropStateCache() 清不到它 —— 不 fresh 会读到上一次的旧值（见 readImsSwitch 注释）。
+			 */
+			return AtWs.client.sendCommand('AT^IMSSWITCH?', { fresh: true }).then(function (res) {
 				if (res.success && res.data) {
 					var m = String(res.data).match(/\^IMSSWITCH:\s*(\d+),\d+,\d+/);
 					if (m) {
@@ -474,6 +618,7 @@ return L.view.extend({
 				.then(loadStorageOptions)
 				.then(loadStorage)
 				.then(refreshCacheCount)
+				.then(loadReachability)
 				.catch(function () { /* 单项数据失败时保留其余卡片，不打断整页 */ });
 		}
 

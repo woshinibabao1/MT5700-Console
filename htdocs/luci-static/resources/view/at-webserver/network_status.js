@@ -1648,7 +1648,26 @@ return L.view.extend({
 				return r[1] && r[1] !== '—' && r[1] !== '不适用';
 			});
 			if (d.creg) rows.push(['4G(EPS) 注册', d.creg.statText]);
-			if (d.cireg) rows.push(['IMS 注册', d.cireg.text + (d.cireg.info ? '（VoLTE/VoNR/IMS 短信可用）' : '（语音/IMS 短信不可用）')]);
+			/*
+			 * ★ 原先是 `d.cireg.info ? '（VoLTE/VoNR/IMS 短信可用）' : '（语音/IMS 短信不可用）'`，
+			 *   两处都是谎报：
+			 *   ① `info === 1` 只表示「IMS 已注册」，**不等于**语音/短信能力可用 ——
+			 *      能开什么要看 `ext_info`（IMS 域能力值，手册 7.6）。注册上了但能力值里
+			 *      没有 voice，「IMS 注册 OK 但打不了 VoLTE」是真实存在的故障态，
+			 *      旧文案会把它报成可用。
+			 *   ② 反过来，`info === null`（固件回了十六进制之类解析不了）时走进 else，
+			 *      直接甩一句「语音/IMS 短信不可用」—— 那是把「我没读明白」说成「你不能用」。
+			 *   现在的口径：能定的才定，定不了就写明「未上报 / 无法判定」。
+			 */
+			if (d.cireg) {
+				var t = d.cireg.text;
+				if (d.cireg.info === 1) {
+					t += d.cireg.ext ? ('（IMS 能力值 ' + d.cireg.ext + '）') : '（IMS 能力值未上报）';
+				} else if (d.cireg.info !== 0) {
+					t += '（可用性无法判定）';
+				}
+				rows.push(['IMS 注册', t]);
+			}
 			if (d.rrc) rows.push(['RRC 状态', d.rrc.rrcText + (d.rrc.campText ? ' · ' + d.rrc.campText : '')]);
 			if (d.cops) {
 				var copsTxt = d.cops.modeText + (d.cops.oper ? ' · ' + d.cops.oper : '');

@@ -3,7 +3,8 @@
 'require at-webserver/ui';
 'require at-webserver/mt5700';
 'require at-webserver/euicc';
-/* global L, AtWs, Ui, Mt5700, Euicc, jsQR */
+'require at-webserver/parse';
+/* global L, AtWs, Ui, Mt5700, Euicc, Parse, jsQR */
 /* 注：jsQR **不走** 'require' —— LuCI 的 require 要求每个模块 return 一个 Class，
    而 jsQR 是第三方 UMD 包（只往全局挂 window.jsQR），硬塞进去会破坏加载契约；
    改为用户真的去用「上传图片 / 拍照」时才按需 <script> 注入（见 loadJsQr），
@@ -55,6 +56,52 @@ return L.view.extend({
 
 		/* ---------- single-flight：独占串口，写操作绝不重试（P10） ---------- */
 		var busy = false;
+
+		/*
+		 * 最近一次 Euicc.probe() 的结果（含 capacity）。
+		 *
+		 * ★ 为什么需要这个跨函数通道（审查意见 R01）：probe 的结果只在 renderOk(p)
+		 *   的作用域里，而下载入口 runDownload(p, cc) 的那个 `p` 是
+		 *   **Euicc.parseActivationCode() 解析出来的激活码**，两者同名不同对象 ——
+		 *   直接在下载入口写 `p.capacity` 会恒为 undefined，预检就一次也不会触发，
+		 *   而看上去像是已经做了。这里把 probe 结果挂到渲染闭包上，下载流程才够得着。
+		 */
+		var lastProbe = null;
+
+		/*
+		 * 数据承载 IP 观测记录（P13）：每次 Profile 切换收敛后记一笔 PDP 地址。
+		 * 元素形如 { key: 归一化 ICCID, addr: 地址文本, time: 'HH:MM:SS' }。
+		 * 用途见「数据承载 IP 观测卡」的说明：它是「靠切 Profile 换出口 IP」能否成立的前提证据，
+		 * 不是功能入口。
+		 */
+		var ipObs = [];
+
+		/* 观测卡正文容器（由 renderOk 创建观测卡后赋值）与渲染函数 —— 必须定义在外层，
+		   否则 observeDataIp（定义在 renderOk 之外）够不着。 */
+		var IP_OBS_MAX = 5;
+		var ipObsBody = null;
+		function renderIpObs() {
+			if (!ipObsBody) return;
+			ipObsBody.innerHTML = '';
+			if (!ipObs.length) {
+				ipObsBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'暂无记录。启用或禁用任一 Profile，在重注册完成后这里会自动记一笔当前的 PDP 地址。'));
+				return;
+			}
+			ipObsBody.appendChild(E('div', { 'class': 'mt5700-esim-sectitle' },
+				'最近观测（最多 ' + IP_OBS_MAX + ' 条）'));
+			ipObs.slice(-IP_OBS_MAX).forEach(function (it) {
+				ipObsBody.appendChild(E('div', { 'class': 'mt5700-hint mt5700-mono' },
+					it.time + '  ' + it.key + '  →  ' + it.addr));
+			});
+			var last = ipObs[ipObs.length - 1];
+			var prev = ipObs[ipObs.length - 2];
+			if (prev && last.addr === prev.addr && last.key !== prev.key && last.addr !== '未取到地址') {
+				ipObsBody.appendChild(E('div', { 'class': 'mt5700-notice-warning mt5700-mt-sm' },
+					'换了 Profile 但地址没变 —— 该运营商/APN 会复用同一地址池，' +
+					'此环境下「靠切 Profile 换出口 IP」不成立。'));
+			}
+		}
 
 		/*
 		 * 卸载清理清单（V01）：
@@ -213,6 +260,27 @@ return L.view.extend({
 				iccidLine.textContent = m ? ('卡槽 ICCID：' + m[1]) : '无法读取卡槽 ICCID';
 			}).catch(function () {
 				iccidLine.textContent = '无法读取卡槽 ICCID';
+			});
+
+			/*
+			 * ★ 当前卡槽号（AT^SCICHG?）—— 裸值直出，不做猜测性文案。
+			 *
+			 *   为什么必须补这一行：手册《11 鼎桥私有接口：状态控制命令》明载本模组是
+			 *   **单 Modem 双卡槽（卡槽 0 / 卡槽 1）**。选在外置卡槽上时，卡上没有 ISD-R
+			 *   是**正常现象**，而页面原来只说「这张卡不是 eUICC」，把「选错卡槽」
+			 *   误报成「卡不支持」—— 用户会据此得出错误结论（甚至去换卡）。
+			 *
+			 *   ★ 显示裸值而不是「请先切到内置卡槽」：后者是在替用户猜，且切卡槽走
+			 *   ^HVSST/^SCICHG 写命令（高危、会断网），本页**不代劳**。读到几就显示几，
+			 *   读不到就明说读不到 —— 不许把「读不出来」兜成「内置卡槽」（无差别 catch 红线）。
+			 */
+			var slotLine = E('div', { 'class': 'mt5700-hint' }, '正在读取当前卡槽…');
+			card._body.appendChild(slotLine);
+			send('AT^SCICHG?').then(function (r) {
+				var m = atText(r).match(/\^SCICHG:\s*(\d+)/);
+				slotLine.textContent = m ? ('当前卡槽：' + m[1]) : '无法读取当前卡槽（命令已返回但无法识别）';
+			}).catch(function () {
+				slotLine.textContent = '无法读取当前卡槽';
 			});
 
 			var explain = E('div', { 'class': 'mt5700-card' });
@@ -917,6 +985,36 @@ return L.view.extend({
 			}
 
 			function runDownload(p, cc) {
+				/*
+				 * ★ 下载前的空间预检（P04 / R01）。
+				 *
+				 *   形态照抄 vohive internal/esim/manager.go 的 `FreeNvramBytes > 0 && < 阈值`
+				 *   —— **那条 `> 0` 守卫是关键，不是可选项**：SGP.22 的 EUICCInfo2 只定义
+				 *   「剩余多少」，读不到容量（0 / 未上报）时按「无法预检」放行并说明，
+				 *   绝不能把「读不出来」当成「空间为零」去硬拦（无差别兜底红线）。
+				 *
+				 *   阈值不照搬 vohive 的 81920 —— 那是对它的卡型取的；这里取一个明显偏保守的
+				 *   下限（30 KiB），宁可漏拦也不误拦；真机拿到实测后再据实调整。
+				 *   容量取自 lastProbe（跨函数通道，见其声明处注释），**不是**本函数的 p。
+				 */
+				var freeNV = 0;
+				if (lastProbe && lastProbe.capacity &&
+					typeof lastProbe.capacity.freeNonVolatileMemory === 'number') {
+					freeNV = lastProbe.capacity.freeNonVolatileMemory;
+				}
+				var MIN_FREE_NV = 30 * 1024;
+				if (freeNV > 0 && freeNV < MIN_FREE_NV) {
+					/* 注意：此处**不能**调内部 log() —— 它依赖下面才建好的 pre / lines */
+					actions.innerHTML = '';
+					logBox.innerHTML = '';
+					logBox.appendChild(E('div', { 'class': 'mt5700-notice-warning' },
+						'剩余非易失存储不足（实测 ' + freeNV + ' 字节，低于 ' + MIN_FREE_NV +
+						' 字节）—— 继续下载会在写入中途失败。请先删除不用的 Profile 再试。'));
+					Mt5700.error('卡上剩余空间不足（仅 ' + freeNV + ' 字节），已中止下载');
+					busy = false;
+					return;
+				}
+
 				busy = true;
 				actions.innerHTML = '';
 				logBox.innerHTML = '';
@@ -1178,10 +1276,48 @@ return L.view.extend({
 		}
 
 
+		/*
+		 * 记一笔当前的数据承载 IP（P13）。
+		 *
+		 * 只在身份收敛之后被调用，因此读到的地址确实属于「刚生效的那张 Profile」。
+		 * 读地址失败**不追加重试**：这只是一条观测记录，缺一笔不影响任何功能；
+		 * 但要把「读不到」如实记下来，不许写成 0.0.0.0 之类看起来像有地址的值。
+		 */
+		function observeDataIp(iccidHex) {
+			if (!ipObs) return;
+			var now = new Date();
+			var hh = String(now.getHours()).padStart(2, '0');
+			var mm = String(now.getMinutes()).padStart(2, '0');
+			var ss = String(now.getSeconds()).padStart(2, '0');
+			var entry = {
+				key: iccidHex ? Euicc.iccidKey(iccidHex) : '(未知 ICCID)',
+				addr: '',
+				time: hh + ':' + mm + ':' + ss
+			};
+			return send('AT+CGPADDR', { fresh: true }).then(function (r) {
+				var list = (r && r.success && r.data) ? Parse.parseCgpaddr(String(r.data)) : [];
+				var hit = null;
+				for (var i = 0; i < list.length; i++) {
+					if (list[i].family === 'IPv4') { hit = list[i]; break; }
+				}
+				if (!hit && list.length) hit = list[0];
+				entry.addr = hit ? hit.address : '未取到地址';
+			}).catch(function () {
+				/* 可吞：读不到地址不是"错"，是观测结果的一种 —— 这里把它如实写成
+				   「未取到地址」并由 renderIpObs 显示出来，用户看得见，不是无声消失。 */
+				entry.addr = '未取到地址';
+			}).then(function () {
+				ipObs.push(entry);
+				renderIpObs();
+			});
+		}
+
 		/* ---------- 正常态：EID + Profile 表 + 操作 ---------- */
 		function renderOk(p) {
 			body.innerHTML = '';
 			body.appendChild(connBar);
+			/* R01：把 probe 结果留一份给下载流程做空间预检用（见 lastProbe 声明处注释） */
+			if (p && p.capacity) lastProbe = p;
 
 			var headCard = Mt5700.card('eSIM 状态');
 
@@ -1253,6 +1389,24 @@ return L.view.extend({
 			var listCard = Mt5700.card('Profile 列表', '启用 / 禁用会触发卡片刷新，期间网络将短暂中断并重注册（约 10~30 秒）');
 			listCard._body.appendChild(Mt5700.loading('正在读取 Profile 列表…'));
 			body.appendChild(listCard);
+
+			/*
+			 * 数据承载 IP 观测卡（P13）——「私有代理池」能否成立的前提实测。
+			 *
+			 * ★ 为什么先做观测而不是直接做轮换：「换一张 Profile ⇒ 出口 IP 变化」看起来天经地义，
+			 *   但在运营商 CGNAT 环境下**同一 APN 地址池完全可能复用同一个地址**。全仓此前
+			 *   没有任何外部出口 IP 探测手段，也就是说这个前提是**零证据**的 —— 在拿到实测前
+			 *   动工任何自动轮换，都是把功能建在未验证的假设上。
+			 *
+			 *   这里只做只读观测：每次 Profile 切换收敛后读一次 AT+CGPADDR（PDP 地址，
+			 *   即运营商实际分配的那个）记一笔。用户跑一次「切换 → 看地址变没变」就能定性。
+			 *   ★ 不自动轮换、不改任何网络配置、不引入任何外部服务（不扩攻击面）。
+			 *   ★ 固定尺寸：只显示最近 5 条，不按数据量撑开（UI 红线）。
+			 */
+			var ipObsCard = Mt5700.card('数据承载 IP 观测', '判断「切换 Profile ⇒ 出口 IP 变化」在本机上是否成立');
+			ipObsBody = ipObsCard._body;
+			body.appendChild(ipObsCard);
+			renderIpObs();
 
 			/*
 			 * R01：Profile 列表与待发回执都各自开 ISD-R 逻辑通道（withIsdrSession）。
@@ -1376,6 +1530,21 @@ return L.view.extend({
 				/* P17：iccidRaw 为空不下发，避免只弹一句「操作失败」 */
 				if (!p.iccidRaw) { Mt5700.error('这个 Profile 没读到 ICCID，无法对该卡下发操作'); return; }
 				busy = true;
+				/*
+				 * ★ 下发前主动作废读缓存（P03）。
+				 *
+				 *   为什么必须在**下发前**这一步做：rpc.js 的读缓存分三档，
+				 *   IMSI / ICCID 落在 `CACHE_TTL_IDENTIFIER = 10 分钟` 那一档
+				 *   （`rpc.js:404`、命令清单 `:408-417`），而写命令路径只调
+				 *   `_dropStateCache()`（`:575`）—— 它清的是 STATE 档，**碰不到 IDENTIFIER 档**。
+				 *   也就是说：切卡之后，其它页面（网络状态等）最长 10 分钟读到的还是**旧卡身份**。
+				 *   这正是「旧卡身份带给新卡」那条事故（红线 24）的机械路径。
+				 *
+				 *   clearReadCache() 是 rpc.js:489 的现成 API，零新增；这里清空后，
+				 *   后续任何一次身份读取都会被强制走真机。
+				 */
+				try { AtWs.client.clearReadCache(); } catch (e) { /* 无此实现时退化即可，不得阻断下发 */ }
+
 				var op = enable ? Euicc.enableProfile : Euicc.disableProfile;
 				op(send, { kind: 'iccid', hex: p.iccidRaw }, true).then(function (r) {
 					busy = false;
@@ -1393,7 +1562,7 @@ return L.view.extend({
 					body.insertBefore(note, body.firstChild);
 					later(function () { if (note.parentNode) note.parentNode.removeChild(note); }, 8000);
 					/* P07 + R03：有限轮询替换一刀切的 12 秒；回执读取挪到轮询结束之后串行调用 */
-					pollListAfterToggle();
+					pollListAfterToggle(p.iccidRaw, verb);
 				}).catch(function (e) {
 					busy = false;
 					handleErr(e);
@@ -1405,37 +1574,94 @@ return L.view.extend({
 		 * 退避 6s→12s→24s（覆盖「卡片正忙」窗口），attempt 统一封顶 3 次；
 		 * 期间用户已发起其它操作（busy）时计入 attempt 并重排，而非静默丢弃；
 		 * 回执读取（showPendingReceipts）挪到轮询结束之后串行调用，避免与轮询抢 ISD-R 通道。 */
-		function pollListAfterToggle() {
+		/*
+		 * 切换后的收敛轮询（P02 + P09 + R03 + R10）。
+		 *
+		 * ★ 判据从「列表读成功」换成「目标 ICCID 真的生效了」。原因很实在：
+		 *   Profile 列表是**卡自己**记的配置，而「当前实际生效哪张」是**模组/网络侧**的状态。
+		 *   开关下发后两者会有一段不一致窗口，此时列表早已能读成功，但生效的仍是旧 Profile。
+		 *   原实现就在这一刻收工，于是下游页面拿到的还是旧身份 —— 这正是红线 24
+		 *   「旧卡身份带给新卡」那条事故的形状（对照 vohive 的处理：
+		 *   internal/device/pool_esim_switch.go 明确写了「目标 ICCID 已知时必须等到目标卡生效」）。
+		 *
+		 * ★ 三条硬约束（审查意见 R03/R10，都是防止「改完比现状更差」）：
+		 *   ① 列表**照常渲染**：收敛只决定提示条文案，绝不因为身份没读到就把已拿到的列表藏起来；
+		 *   ② AT 探针读失败（卡片 busy / CME ERROR）**不计 attempt**——失败的是探针不是切换；
+		 *   ③ 总时长上限维持 6+12+24=42s 不延长，不给同一轮里多发的命令加带宽。
+		 */
+		function pollListAfterToggle(expectIccidHex, verb) {
 			var listCard = findListCard();
 			if (!listCard) return;
 			var attempt = 0;
 			var backoff = [6000, 12000, 24000];
+			var settled = false;
+			var expectKey = expectIccidHex ? Euicc.iccidKey(expectIccidHex) : '';
+			var noteEl = null;
+
+			function dropNote() {
+				if (noteEl && noteEl.parentNode) noteEl.parentNode.removeChild(noteEl);
+				noteEl = null;
+			}
+			function putNote(cls, text) {
+				dropNote();
+				noteEl = E('div', { 'class': cls }, text);
+				listCard._body.appendChild(noteEl);
+			}
+
+			/*
+			 * 身份收敛：先 ICCID 命中，命中后再等 IMSI 非空。
+			 * fresh 必须显式给：IMSI / ICCID 落在 rpc.js 的 10 分钟 IDENTIFIER 档。
+			 * 等 IMSI 的理由同 vohive —— ICCID 已生效时 IMSI 可能仍在 USIM 重初始化窗口里读空，
+			 * 此时把空 IMSI 放出去等于又制造一次「身份不明」。
+			 */
+			function confirmIdentity() {
+				if (!expectKey) return Promise.resolve(true);   /* 无目标可言时保持旧语义 */
+				return send('AT^ICCID?', { fresh: true }).then(function (r) {
+					var m = atText(r).match(/ICCID:\s*([0-9A-Fa-f]+)/);
+					var liveKey = m ? Euicc.iccidKey(m[1]) : '';
+					if (!liveKey || liveKey !== expectKey) return false;
+					return send('AT+CIMI', { fresh: true }).then(function (r2) {
+						var im = atText(r2).match(/(\d{14,15})/);
+						return !!(im && im[1]);
+					});
+				}).catch(function () {
+					/* 探针读不出来 ≠ 没切成功；按「尚未确认」处理，交下一轮再探 */
+					return false;
+				});
+			}
+
 			function tryOnce() {
-				if (busy) {
-					/* 用户已发起其它操作：计入 attempt 并重排，列表不会卡在旧状态而用户毫不知情 */
-					attempt++;
-					if (attempt < 3) later(tryOnce, backoff[Math.min(attempt, backoff.length - 1)]);
-					return;
-				}
+				if (settled) return;
+				/* P09：被用户自己的操作占用 —— 只延后，不计 attempt（原来会把用户操作算成失败次数） */
+				if (busy) { later(tryOnce, 3000); return; }
+				attempt++;
 				busy = true;
 				Euicc.listProfiles(send).then(function (res) {
 					busy = false;
+					/* R03：列表无条件渲染 —— 读到的东西先给用户看 */
 					renderTable(listCard, res.list || []);
-					/* 轮询结束（成功）后串行读回执，避免并发开通道 */
-					showPendingReceipts();
 				}).catch(function () {
-					busy = false;
-					attempt++;
-					if (attempt < 3) {
-						later(tryOnce, backoff[Math.min(attempt, backoff.length - 1)]); /* 失败退避重试，最多 3 次 */
-					} else {
-						/* 保留旧列表，仅提示，不覆盖为 errorState */
-						if (!listCard._body.querySelector('.mt5700-notice')) {
-							listCard._body.appendChild(E('div', { 'class': 'mt5700-notice' },
-								'卡片刷新中，请稍后点击「刷新列表」'));
-						}
+					busy = false;   /* 读失败：保留旧列表，不覆盖成错误态 */
+				}).then(confirmIdentity).then(function (converged) {
+					if (converged) {
+						settled = true;
+						dropNote();
+						/* 收敛达成：再清一次缓存，让其它页面立刻拿到新身份而不是等 10 分钟过期 */
+						try { AtWs.client.clearReadCache(); } catch (e) { /* 无此实现时退化 */ }
+						/* P13：身份已收敛，此时读到的 PDP 地址才是「新 Profile 的」地址 */
+						observeDataIp(expectIccidHex);
 						showPendingReceipts();
+						return;
 					}
+					if (attempt < 3) {
+						later(tryOnce, backoff[Math.min(attempt, backoff.length - 1)]);
+						return;
+					}
+					settled = true;
+					putNote('mt5700-notice-warning',
+						(verb || '切换') + '已下发，但卡片仍在重注册：当前生效的可能还是原 Profile，' +
+						'请稍后点击「刷新列表」确认。');
+					showPendingReceipts();
 				});
 			}
 			later(tryOnce, backoff[0]);

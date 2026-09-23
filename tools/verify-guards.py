@@ -36,6 +36,9 @@ TARGETS = {
     "js3": ATWB / "euicc.js",
     # esim.js 再挂一个键：静默 catch 守卫是独立测试文件。
     "esimjs2": ESIM,
+    # euicc.js 再挂第四个键：SW 9xxx 分支那组守卫在 euicc-contract 里
+    # （「js」键跑的是下载契约测试，别挂错 —— 挂错就是变到别处、守卫恒绿）。
+    "js4": ATWB / "euicc.js",
     # shell 脚本也要能变异：C 风格注释那条事故（glob 被当命令执行）守的是 .sh。
     "shell": ROOT / "root" / "usr" / "share" / "mt5700" / "diag-probe.sh",
     "msjs": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
@@ -63,6 +66,7 @@ TARGET_TEST = {
     "mt5700js2": ROOT / "tests" / "single-source-contract.test.js",
     "js3": ROOT / "tests" / "euicc-tag-whitelist-contract.test.js",
     "esimjs2": ROOT / "tests" / "silent-catch-contract.test.js",
+    "js4": ROOT / "tests" / "euicc-contract.test.js",
     "shell": ROOT / "tests" / "shell-comment-style-contract.test.js",
     "msjs": ROOT / "tests" / "device-control-contract.test.js",
     "upgjs": ROOT / "tests" / "read-command-fresh-contract.test.js",
@@ -116,6 +120,15 @@ MUTATIONS = [
         "\t\tsendAndCollect(send, ch, _probe, 0, '');\n"
         "\t\tvar ps = [];",
         "不发任何卡侧 APDU",
+    ),
+    (
+        # ★ 回归锚点唯一性已核：euicc.js 里 `if (sw.charAt(0) === '9') {` 只出现 1 次
+        #   （变异工具改的是全文件第一次出现，同形多处会变到别处 → 误判守卫恒绿）。
+        "去掉 SW 9xxx 分支（9100 掉回兜底被当失败，三处放行判据变死代码）",
+        "js4",
+        "\t\tif (sw.charAt(0) === '9') {",
+        "\t\tif (false) {",
+        "91xx 判「成功待 refresh」",
     ),
     (
         "去掉时间窗（退化成只靠轮数上限）",

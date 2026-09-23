@@ -683,15 +683,41 @@ var Parse = (function () {
 		return { stat: stat, statText: REG_STATES[stat] || ('状态 ' + stat) };
 	};
 
-	/* +CIREG?（IMS 注册）：<n>,<info>；info 0=未注册 1=已注册（决定 VoLTE/VoNR/IMS 短信能否用） */
+	/* +CIREG?（IMS 注册）：<n>,<reg_info>[,<ext_info>]（手册 7.6） */
 	api.parseCireg = function (text) {
 		var m = String(text).match(/\+CIREG:\s*([^\r\n]*)/);
 		if (!m) return null;
 		var f = m[1].split(',').map(function (x) { return x.trim(); });
-		var info = Number(f[1]);
-		if (isFinite(info)) return { info: info, text: info ? '已注册' : '未注册' };
-		/* 有些固件返回位域形式（16 进制），退化为原样显示 */
-		return { info: null, text: (f[1] || '—') };
+		var rawInfo = f[1];
+		/*
+		 * ★ ext_info（第三段）原先**被整个丢弃**。而手册 7.6 明说这一项才是
+		 *   「IMS 域能力值」（取值 [1,0xFFFFFFFF]，列举 voice / text / SMS over IMS / video）。
+		 *   丢掉它的直接后果不是少一个字段，而是下游凭 `reg_info===1` 就宣称
+		 *   「VoLTE/VoNR/IMS 短信可用」——「IMS 注册上了但语音能力没开」这个最常见的
+		 *   故障态会被**谎报成可用**。
+		 *
+		 *   ★ 只**原样透出字符串，不做位解码**：手册同一节既写「每个 bit 位表示不同的能力」
+		 *     又按枚举方式列了取值，两处口径本身不一致；没有真机实测前就解码等于编造语义。
+		 *
+		 *   ★ 是否带第三段取决于 <n>（URC 上报看到的是 n=2 才带），把 n 设成 2 是**写命令**，
+		 *     本页不静默下发 —— 读到就有、读不到就显示「未上报」。
+		 */
+		var ext = (f.length > 2 && f[2] !== '') ? f[2] : null;
+		var info = Number(rawInfo);
+		if (isFinite(info)) {
+			var txt = (info === 1) ? '已注册' : (info === 0 ? '未注册' : '未知取值 ' + rawInfo);
+			return { info: info, ext: ext, text: txt };
+		}
+		/*
+		 * 固件返回非十进制（例如十六进制 0x03）时走到这里。
+		 * ★ 旧实现把它与「未注册」混同 → UI 直接显示「语音/IMS 短信不可用」，
+		 *   那是**编造的坏消息**；解析不了就该明说解析不了。
+		 */
+		return {
+			info: null,
+			ext: ext,
+			text: rawInfo ? ('无法识别该取值（' + rawInfo + '）') : '未上报'
+		};
 	};
 
 	/* ^RRCSTAT?：<enable>,<rrc_status>[,<camp_status>]（手册 13.21） */

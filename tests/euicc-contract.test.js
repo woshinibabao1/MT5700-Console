@@ -113,6 +113,17 @@ ok('⑥ enable/delete 结构不对称（对照）', enApdu.replace('5A0A', '').i
 const disApdu = Euicc.buildProfileOperation(1, 'disable', { kind: 'aid', hex: 'A0000005591010FFFFFFFF8900001000' }, false);
 ok('⑦ disable 含 A0 容器 + 810100（refresh=false）', disApdu.indexOf('A0') >= 0 && disApdu.indexOf('810100') >= 0, disApdu);
 
+/*
+ * ===== 9xxx 分支（P01）=====
+ * 这条不是文案润色：缺了它，swInfo('9100') 掉到兜底 level:'error'，
+ * 而 sendAndCollect 凡 error/fatal 一律抛 —— 卡回「成功但带 refresh」时整条链路报错，
+ * 而 :2382/:2417/:2625 那三处 `!== '9100'` 放行判据**永远执行不到**（死代码）。
+ */
+ok('★ 9000 仍判成功', Euicc.swInfo('9000').level === 'ok', JSON.stringify(Euicc.swInfo('9000')));
+ok('★ 91xx 判「成功待 refresh」，不是失败', Euicc.swInfo('9100').level === 'warn', JSON.stringify(Euicc.swInfo('9100')));
+ok('★ 91xx 之外的 9xxx 同样按「正常处理」放行（不误杀）', Euicc.swInfo('9F00').level === 'warn', JSON.stringify(Euicc.swInfo('9F00')));
+ok('★ 反向：6xxx 仍必须是失败（别把放行范围开太大）', Euicc.swInfo('6A80').level === 'error', JSON.stringify(Euicc.swInfo('6A80')));
+
 /* ---------- 4. P07 / §1.4 KORE 样本解析（只取 8 字段，不泄漏） ---------- */
 
 /* 用程序化构造保证 TLV 长度自洽，避免手算字节数出错 */

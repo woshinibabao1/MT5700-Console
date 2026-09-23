@@ -386,6 +386,37 @@ var Euicc = (function () {
 			};
 		}
 		if (sw === '9000') return { level: 'ok', text: '', hint: '' };
+		/*
+		 * ★ 9xxx（除 9000）＝ ISO 7816-4 的「命令已正常处理，带限定信息」，不是失败。
+		 *
+		 *   这条分支是 P0 功能缺陷修复，不是文案润色 —— 缺了它的实际后果：
+		 *   sendAndCollect（:878）拿到 SW 先过 swInfo，凡 level 为 error/fatal 一律抛；
+		 *   91xx 原先在这里没有分支，掉到文末兜底 level:'error'，于是**永远到不了**
+		 *   :2382 / :2417 / :2625 那三处 `sw !== '9000' && sw !== '9100'` 的放行判据
+		 *   —— 它们是执行不到的死代码，卡回「成功带 refresh」时的下场是整条链路报错。
+		 *
+		 *   其中 91xx 有明确语义（GSMA/ETSI）：命令已执行成功，**但有待处理的
+		 *   proactive SIM Toolkit 命令（refresh）**，需复位/重注册后才生效。
+		 *   对照实现见 VoCat internal/device/esim_lpa.go（sw>>8 == 0x91 判成功）。
+		 *
+		 *   ★ 放行范围放宽到全部 9xxx 而非只 9[01]：规范里 9xxx 除 9000 外都属
+		 *   「正常 + 限定信息」，窄判会把其余合法状态误杀成失败。
+		 */
+		if (sw.charAt(0) === '9') {
+			if (sw.charAt(1) === '1') {
+				return {
+					level: 'warn',
+					text: '卡片已接受该操作，但有待处理的 refresh（SW=' + sw + '）',
+					hint: '操作本身成功了；需模组复位或重新注册后才完全生效，' +
+						'在此之前读到的可能仍是旧状态'
+				};
+			}
+			return {
+				level: 'warn',
+				text: '卡片已处理，但返回了限定信息（SW=' + sw + '）',
+				hint: '属「正常处理」类状态（非错误）；若结果不符预期，请连同此状态码提 issue'
+			};
+		}
 		if (sw.charAt(0) === '6' && sw.charAt(1) === '1') {
 			var xx = sw.slice(2);
 			return {
@@ -1664,13 +1695,30 @@ var Euicc = (function () {
 	function runOperation(send, op, ident, refresh) {
 		return api.withIsdrSession(send, function (ch, sendApdu) {
 			return sendApdu(api.buildProfileOperation(ch, op, ident, refresh)).then(function (r) {
+				/*
+				 * ★ 启用/禁用/删除这类 Profile 操作原先**完全不看 SW**，只解 ES10 结果码
+				 *   —— 卡给了一个非成功 SW 却带回可解析的数据时会漏判，反之 ES10 结果
+				 *   为 null（无数据）时又把「SW 已经报错」当成成功返回。
+				 *
+				 *   判据与 api.swInfo 的 9xxx 分支保持一致（9xxx＝正常处理带限定信息）：
+				 *   · 9xxx 放行，其中 91xx 挂 refreshPending 交上层决定要不要提示；
+				 *     · 6xxx / 其它  → EUICC_OP_FAILED；
+				 *     · SW 缺失      → 同样抛（Fail-Fast，不许把「不知道」当成功）。
+				 */
+				var sw = r && r.sw;
+				/* 注意量词：SW 是 4 位十六进制，首字符 9 之后还有 **3** 位，不是 2 位 */
+				if (typeof sw !== 'string' || !/^9[0-9A-Fa-f]{3}$/.test(sw)) {
+					throw makeSwError('EUICC_OP_FAILED', sw);
+				}
 				var code = es10Result(r.data);
 				if (code !== null && code !== 0) {
 					var e = makeError(es10CodeToErr(code), 'ES10 result ' + code);
 					e.result = code;
 					throw e;
 				}
-				return { sw: r.sw, result: code };
+				var out = { sw: sw, result: code };
+				if (sw.charAt(1) === '1') out.refreshPending = true;
+				return out;
 			});
 		});
 	}
