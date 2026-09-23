@@ -72,7 +72,7 @@ function grab(name, src) {
 }
 
 const parseHCSQ = eval('(function(){' +
-	['extractATData', 'convertRsrp', 'convertRsrq', 'convertSinr', 'convertRssi', 'parseHCSQ']
+	['extractATData', 'round1', 'convertRsrp', 'convertRsrq', 'convertSinr', 'convertRssi', 'parseHCSQ']
 		.map(function (n) { return grab(n, rSrc); }).join('\n') +
 	'\nreturn parseHCSQ;})()');
 
@@ -188,6 +188,55 @@ ok('★ ^MONSC 的 LTE 分支不带 SINR（手册 13.9 布局里没有该字段�
 	'parseMONSC 的 LTE 分支给 sinr 赋了值 —— 末位字段是 RSSI 不是 SINR');
 ok('^MONSC 的 LTE 分支末位是 RSSI（p[9]）', /rssi:\s*num\(p\[9\]\)/.test(monLteBlock),
 	'末位字段不是 RSSI —— 布局一旦错位，RSRP/RSRQ 会整体串位');
+
+/* ================= ⑤ 浮点尾数：SINR 只能有一位小数 ================= */
+
+/*
+ * 真机报障：界面上 SINR 显示成 `9.200000000000003 dB`。
+ * 数值本身没错（^HCSQ 原始值 146 → -20 + 146 × 0.2 = 9.2 dB），错在
+ * **0.2 不是二进制有限小数**，而界面是 `sinr + ' dB'` 直接拼串 —— 尾数
+ * 原样显示。修法是在换算出口统一收到一位小数（下游不用各自 toFixed）。
+ *
+ * 这里用**字符串形态**断言，而不是 Math.abs 容差：容差判不出尾数，
+ * 9.200000000000003 与 9.2 的差远小于任何合理容差。
+ */
+const convertSinr = eval('(function(){' +
+	['round1', 'convertSinr'].map(function (n) { return grab(n, rSrc); }).join('\n') +
+	'\nreturn convertSinr;})()');
+
+const sinr146 = convertSinr ? convertSinr(146) : null;
+ok('★ SINR 原始值 146 → 9.2 dB（不是 9.200000000000003）', sinr146 === 9.2,
+	'实际 ' + sinr146);
+ok('★ SINR 拼成展示串后没有浮点尾数', String(sinr146) === '9.2',
+	'实际展示为 "' + String(sinr146) + ' dB"');
+ok('★ ^HCSQ 整帧解析出来的 SINR 也是干净的（106 → 1.2）', String(lte && lte.sinr) === '1.2',
+	'实际 "' + String(lte && lte.sinr) + '"');
+
+/*
+ * 全量程扫一遍（0~255 是 ^HCSQ 的原始值域）：只要有一档留着尾数就判红。
+ * 用字符串形态而不是数值 —— 尾数在数值上几乎看不出来。
+ */
+let dirty = null;
+for (let raw = 0; raw <= 255; raw++) {
+	const v = convertSinr(raw);
+	if (!/^-?\d+(\.\d)?$/.test(String(v))) { dirty = raw + ' → ' + v; break; }
+}
+ok('★ 原始值 0~255 全量程换算后都是一位小数（无浮点尾数）', dirty === null,
+	'第一处带尾数的是 ' + dirty);
+
+/* 边界值仍要落在手册规定的 -20~30 dB 上（收尾数不能把量程收窄） */
+ok('SINR 下限仍是 -20 dB（原始值 0）', convertSinr(0) === -20, '实际 ' + convertSinr(0));
+ok('SINR 上限仍是 30 dB（原始值 251 及以上）', convertSinr(251) === 30 && convertSinr(255) === 30,
+	'实际 ' + convertSinr(251) + ' / ' + convertSinr(255));
+
+/*
+ * 定位断言：收尾数只能发生在 convertSinr 里（换算出口）。
+ * 若有人在调用处各自 toFixed，或者把 round1 从 convertSinr 里摘走，
+ * 上面那几条会先红；这条负责保证修法**留在单一真源**上。
+ */
+const sinrFn = grab('convertSinr', rSrc);
+ok('★ 收尾数发生在 convertSinr 内部（单一真源，调用处不再各自处理）',
+	/round1\(/.test(sinrFn), 'convertSinr 里没有调用 round1');
 
 console.log('通过 ' + pass + ' 项，失败 ' + fails.length + ' 项');
 if (fails.length) {

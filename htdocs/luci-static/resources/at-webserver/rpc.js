@@ -792,11 +792,20 @@ function extractATDataMultiline(data, command) {
 
 function convertRsrp(raw) { return raw === 0 ? -140 : (raw >= 97 ? -44 : -140 + raw); }
 function convertRsrq(raw) { return raw === 0 ? -19.5 : (raw >= 34 ? -3 : -19.5 + raw * 0.5); }
+function convertRssi(raw) { return raw === 0 ? -120 : (raw >= 96 ? -25 : -121 + raw); }
+
+/*
+ * SINR 步进 0.2 dB（一位小数），但 0.2 不是二进制有限小数：
+ * `-20 + 146 * 0.2` 在 JS 里是 9.200000000000003，而界面是 `sinr + ' dB'`
+ * 直接拼串 —— 尾数会原样显示给用户（RSRP/RSRQ/RSSI 都是整数或 0.5 步进，
+ * 二进制能精确表示，不需要这一步）。所以换算出口统一收到一位小数，
+ * 下游（文本 / 仪表 / 邻区表）拿到的都是干净值，不用各自 toFixed。
+ */
+function round1(v) { return Math.round(v * 10) / 10; }
 function convertSinr(raw) {
 	var v = raw === 0 ? -20 : (raw >= 251 ? 30 : -20 + raw * 0.2);
-	return Math.min(30, Math.max(-20, v));
+	return round1(Math.min(30, Math.max(-20, v)));
 }
-function convertRssi(raw) { return raw === 0 ? -120 : (raw >= 96 ? -25 : -121 + raw); }
 
 /*
  * 百分比只在这里算一次：量程与等级判定都在 Parse（见 parse.js 的「信号语义」段）。
