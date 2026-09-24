@@ -347,14 +347,15 @@ MUTATIONS = [
         "EF_DIR 用 AT+CRSM=178 读记录",
     ),
     (
-        # ★ 锚点唯一性已核：`if (crsmSw(r.data) != '9000') {` 全仓 1 次（efDirApps 内）。
-        #   6A83（记录不存在）是「读完了」的正常结束信号；不看状态字会一路读到 6 条上限，
-        #   把空记录塞进 apps 里。
-        "EF_DIR 不再看状态字（6A83＝读完的信号丢了，空记录被当应用）",
+        # ★ 锚点唯一性已核：`if (sw != '9000') {` 全仓 1 次（efDirApps 内）。
+        #   异常状态字（6A88/6A82/6981…）下必须**停**并留痕；删掉这段会一路读到 6 条上限，
+        #   把错误应答的内容当 EF_DIR 记录塞进 apps，且不留下任何「读不到」的痕迹。
+        # ★ 关键词随断言改名同步（现在是「其它非 9000 状态字要留下 err」）。
+        "EF_DIR 不再看异常状态字（一路读到上限，空记录被当应用且不留痕）",
         "uc2",
-        "\t\tif (crsmSw(r.data) != '9000') {\n\t\t\tbreak;\n\t\t}",
-        "\t\tif (false) {\n\t\t\tbreak;\n\t\t}",
-        "状态字不是 9000 就停",
+        "\t\tif (sw != '9000') {\n\t\t\terr = 'ef_dir_sw_' + sw;\n\t\t\tbreak;\n\t\t}",
+        "",
+        "留下 err",
     ),
     (
         # ★ 锚点唯一性已核：`return decHex2(sw1) + decHex2(sw2);` 全仓 1 次。
@@ -438,6 +439,59 @@ MUTATIONS = [
         "\t} else if (ep.verdict == 'unknown') {\n\t\tverdict = 'unknown';",
         "\t} else if (false) {\n\t\tverdict = 'unknown';",
         "ePDG 无法判定时总判定不许说",
+    ),
+    (
+        # ★★ 真机形态 sim✓ identity✓ aka✓ epdg✗ ims✓ 下，「最后一个 ok」会算出 ims_ready，
+        #   界面于是同时显示「走到：IMS 已注册」和「VoWiFi 不成立」——自相矛盾。
+        # ★ 锚点唯一性已核：`if (!stages[i].ok) {` 全仓 1 次（vowifiFacts 的 phase 循环）。
+        "phase 退回「取最后一个 ok 的门」（卡在第 3 道门却报 ims_ready，界面自相矛盾）",
+        "uc2",
+        "\t\tif (!stages[i].ok) {\n\t\t\tbreak;\n\t\t}\n\t\tphase = PHASE_BY_STAGE[i];",
+        "\t\tif (stages[i].ok) {\n\t\t\tphase = PHASE_BY_STAGE[i];\n\t\t}",
+        "phase 是「连续通过的前缀」",
+    ),
+    (
+        # ★ 红线 23：AT 通道挂了 = 读不到，不是「卡上没装应用」。
+        #   去掉这两处 err，调用方会拿到空 apps 并把一次失败说成「没有 ISIM」。
+        # ★ 锚点唯一性已核：`err = 'ef_dir_read_failed';` 全仓 2 次，锚点含上下文只命中第 1 处。
+        "EF_DIR 读失败不留 err（一次 AT 失败被当成「卡上没有 ISIM」）",
+        "uc2",
+        "\t\tif (r == null || !r.success || r.data == null) {\n\t\t\terr = 'ef_dir_read_failed';\n\t\t\tbreak;\n\t\t}",
+        "\t\tif (r == null || !r.success || r.data == null) {\n\t\t\tbreak;\n\t\t}",
+        "都要留 err",
+    ),
+    (
+        # ★ 6A83 是「记录不存在＝读完了」，是**卡的客观事实**。
+        #   删掉这个分支后它会掉进 `sw != '9000'`，于是「读完了」被记成「读不到」。
+        "EF_DIR 丢掉 6A83 分支（「读完了」被当成「读不到」）",
+        "uc2",
+        "\t\tif (sw == '6A83') {\n\t\t\tbreak;",
+        "\t\tif (false) {\n\t\t\tbreak;",
+        "6A83 就停",
+    ),
+    (
+        # ★ 与上一条相反：给 6A83 也置 err，同样是把「没装应用」说成「读不到」。
+        "EF_DIR 给 6A83 也置 err（「卡上没装应用」被说成「读不到」）",
+        "uc2",
+        "\t\tif (sw == '6A83') {\n\t\t\tbreak;",
+        "\t\tif (sw == '6A83') {\n\t\t\terr = 'ef_dir_sw_' + sw;\n\t\t\tbreak;",
+        "6A83 分支只 break 不置 err",
+    ),
+    (
+        # ★ 返回体少了 err，调用方拿不到「读不到」这个信息，前端只能显示「没有」。
+        "efDirApps 退化成只回 apps（读不到的信息在调用链上丢掉）",
+        "uc2",
+        "\treturn { apps: apps, err: err };",
+        "\treturn apps;",
+        "efDirApps 返回 { apps, err }",
+    ),
+    (
+        # 前端：dirError 分支一去掉，「读不到」就又变成「没有 ISIM」。
+        "前端不再区分 dirError（读不到又被显示成「没有 ISIM」）",
+        "nsjs",
+        "\t\t\t\tif (d.identity.dirError) {",
+        "\t\t\t\tif (false) {",
+        "读不到 EF_DIR",
     ),
     (
         # 前端：不发不出去的命令，但**要说清为什么发不出去**，否则用户以为是没实现。

@@ -324,8 +324,26 @@ ok('★★ EF_DIR 必须带 path="3F00"（真机实测：不带 path 一律 +CME
 	/const EF_DIR_PATH = '3F00';/.test(ucSrc));
 ok('★ EF_DIR 最多读 6 条记录就停（不无限读）',
 	/const EF_DIR_MAX_REC = 6;/.test(ucSrc) && /rec <= EF_DIR_MAX_REC/.test(ucSrc));
-ok('★ EF_DIR 逐条读，状态字不是 9000 就停（6A83＝读完了，不猜「再读一条也许有」）',
-	/if \(crsmSw\(r\.data\) != '9000'\) \{\s*\n\s*break;/.test(grab('efDirApps', ucSrc)));
+/*
+ * ★★ EF_DIR 的停止条件有两种，性质完全不同，必须分开（红线 23）：
+ *   6A83（记录不存在）＝卡上就这些，读完了 —— 这是**客观事实**，err 保持空；
+ *   其它状态字（6A88/6A82/6981…）= 这次**读不到** —— 不许当成「卡上没有」。
+ */
+const dirBody = grab('efDirApps', ucSrc);
+ok('★ EF_DIR 读到 6A83 就停（记录不存在＝读完了，不猜「再读一条也许有」）',
+	/if \(sw == '6A83'\) \{\s*\n\s*break;/.test(dirBody));
+const branch83 = dirBody.slice(dirBody.indexOf("if (sw == '6A83')")).split('}')[0];
+ok('★★ 6A83 分支只 break 不置 err（真读完了；err 非空会把「没装应用」说成「读不到」）',
+	/break;/.test(branch83) && branch83.indexOf('err') < 0);
+ok('★★ 其它非 9000 状态字要留下 err（ef_dir_sw_XXXX —— 读不到 ≠ 没有）',
+	/if \(sw != '9000'\) \{\s*\n\s*err = 'ef_dir_sw_' \+ sw;/.test(dirBody));
+ok('★ AT 通道失败 / 解不出状态字 / 没有数据段都要留 err（三种「读不到」都不许静默成空列表）',
+	/err = 'ef_dir_read_failed';/.test(dirBody) && /err = 'ef_dir_nodata';/.test(dirBody)
+	&& (dirBody.match(/err = 'ef_dir_read_failed';/g) || []).length === 2);
+ok('★ efDirApps 返回 { apps, err }（调用方要能区分「读不到」与「确实没有」）',
+	/return \{ apps: apps, err: err \};/.test(dirBody));
+ok('★ 编排层把 dirError 带出去（前端据此显示「读不到」而不是「没有 ISIM」）',
+	/dirError: dir\.err,/.test(ucSrc) && /let dir = efDirApps\(\);[\s\S]{0,80}?let apps = dir\.apps;/.test(ucSrc));
 
 const crsmSw = ucFn(['decHex2', 'crsmSw'], 'crsmSw');
 /* 真机：+CRSM: 106,131,"" —— 6A83＝EF_DIR 记录不存在（读到头了） */
@@ -428,8 +446,19 @@ ok('★ 五门全过才叫 capable（不做「前面过了所以后面也应该�
 	|| /if \(length\(blockers\) == 0\) \{\s*\n\s*verdict = 'capable';/.test(vwBody));
 ok('★ ePDG 无法判定时总判定不许说「不通」',
 	/\} else if \(ep\.verdict == 'unknown'\) \{\s*\n\s*verdict = 'unknown';/.test(vwBody));
-ok('★ phase 按「最后通过的那道门」推进（五档齐全）',
-	/const PHASE_BY_STAGE = \['sim_ready', 'identity_ready', 'aka_ready', 'access_ready', 'ims_ready'\];/.test(vwBody));
+/*
+ * ★★ phase 必须是**连续通过的前缀**，不是「最后一个 ok 的门」。
+ *   真机形态（sim✓ identity✓ aka✓ epdg✗ ims✓）下，取「最后一个 ok」会算出
+ *   ims_ready —— 界面于是同时显示「走到：IMS 已注册」和「VoWiFi 不成立」，
+ *   自相矛盾且看着像只差最后一步。卡在第三道门就该报 aka_ready。
+ *   （断言收窄到 PHASE_BY_STAGE 之后那段，避免被别处同形代码顶住而恒绿）
+ */
+const phaseBlock = vwBody.slice(vwBody.indexOf('const PHASE_BY_STAGE'));
+ok('★★ phase 是「连续通过的前缀」：遇到第一道没过的门就 break',
+	/PHASE_BY_STAGE = \['sim_ready', 'identity_ready', 'aka_ready', 'access_ready', 'ims_ready'\];/.test(phaseBlock)
+	&& /if \(!stages\[i\]\.ok\) \{\s*\n\s*break;/.test(phaseBlock));
+ok('★ phase 初值为 blocked（第一道门就没过时不能停在 sim_ready）',
+	/let phase = 'blocked';/.test(phaseBlock) && /phase = PHASE_BY_STAGE\[i\];/.test(phaseBlock));
 ok('★ 带 traceId（排障时能对应到这一次评估）',
 	/traceId: vowifiTraceId\(ep\.iccid\),/.test(vwBody));
 ok('★ 编排层注明「不关射频」的理由（参考项目会关，这台设备关了就是断网）',
@@ -473,8 +502,10 @@ const stateMap = viewSrc.slice(viewSrc.indexOf('var EPDG_STATE = {'), viewSrc.in
 ok('前端 EPDG_STATE 四态齐全（available/polluted/not_published/unknown）',
 	/available:/.test(stateMap) && /polluted:/.test(stateMap)
 	&& /not_published:/.test(stateMap) && /unknown:/.test(stateMap));
-ok('前端总判定 EPDG_VERDICT 四态齐全',
-	/var EPDG_VERDICT = \{[\s\S]{0,400}?unknown: '无法判定'/.test(viewSrc));
+ok('前端 ePDG 门的结论提示四态齐全（available/not_published/polluted/unknown）',
+	/var EPDG_VERDICT_HINT = \{[\s\S]{0,600}?unknown:/.test(viewSrc));
+ok('★ 不再有裸的 EPDG_VERDICT 常量（总判定已统一用 VOWIFI_VERDICT，留着同形死表会被误用）',
+	!/var EPDG_VERDICT = \{/.test(viewSrc));
 
 /* 前端：新增的三张表必须和后端字段对得上 */
 const blockerMap = viewSrc.slice(viewSrc.indexOf('var BLOCKER_TEXT = {'), viewSrc.indexOf('var VOWIFI_PHASE = {'));
@@ -493,6 +524,8 @@ ok('★ 前端展示 IMPI 与 EF_DIR 应用列表（这两项是本轮新增的�
 ok('★ 前端展示 AUTHENTICATE 实测能力（不发不出去的命令，但要说清为什么）',
 	/AUTHENTICATE 实测/.test(viewSrc));
 ok('★ 前端展示 traceId', /'trace ' \+ d\.traceId/.test(viewSrc));
+ok('★★ 前端把「读不到 EF_DIR」与「没有 ISIM」分开显示（一次 AT 失败不许说成卡的客观事实）',
+	/if \(d\.identity\.dirError\) \{\s*\n\s*irows\.push\(\['卡上有 ISIM', '读不到', 'EF_DIR 读取失败（' \+ d\.identity\.dirError \+ '）'\]\);/.test(viewSrc));
 
 /* ---------- 汇总 ---------- */
 

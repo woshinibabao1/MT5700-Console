@@ -1705,8 +1705,7 @@ function epdgFacts() {
 		mnc: mnc,
 		mncLen: mncLen,
 		mncSource: mncSource,
-		aid: aidInfo.aid,
-		app: aidInfo.app,
+		/* ★ 不再单独回 aid/app：它俩就是 aka.aid / aka.app，两处同值没人看第二处 */
 		aka: aka,
 		smsc: smsc,
 		ims: { stat: imsStat, registered: (imsStat != null && imsStat == '1') },
@@ -1854,24 +1853,41 @@ function appKind(aid) {
 
 /*
  * 卡上装了哪些应用（EF_DIR 逐条读记录）。
- * ★ 结束条件只有两个：读到 6 条，或者状态字不是 9000（6A83＝记录不存在＝读完了）。
- *   其它状态字同样停 —— 不猜「再读一条也许就有了」。
+ *
+ * ★ 结束条件：读到 6 条，或者状态字 6A83（记录不存在＝读完了）。
+ *
+ * ★★ 「读不出来」必须和「确实没有」分开（红线 23）：
+ *   AT 通道挂了 / 状态字异常 → err 非空，调用方要显示「读不到」，
+ *   **不许**落到「卡上没有 ISIM」——那会把一次读取失败说成一张卡的客观事实。
+ *   只有读到 6A83（第一条就没有记录）才是真的「卡上没装任何应用」，err 保持空。
  */
 function efDirApps() {
 	let apps = [];
+	let err = '';
 	for (let rec = 1; rec <= EF_DIR_MAX_REC; rec++) {
 		let r = rpcCall('at', {
 			cmd: 'AT+CRSM=178,' + EF_DIR_ID + ',' + rec + ',4,0,,"' + EF_DIR_PATH + '"',
 			fresh: true
 		});
 		if (r == null || !r.success || r.data == null) {
+			err = 'ef_dir_read_failed';
 			break;
 		}
-		if (crsmSw(r.data) != '9000') {
+		let sw = crsmSw(r.data);
+		if (sw == null) {
+			err = 'ef_dir_read_failed';
+			break;
+		}
+		if (sw == '6A83') {
+			break;             /* 记录不存在＝读完了（卡上就这些） */
+		}
+		if (sw != '9000') {
+			err = 'ef_dir_sw_' + sw;
 			break;
 		}
 		let hex = crsmHex(r.data);
 		if (hex == null) {
+			err = 'ef_dir_nodata';
 			break;
 		}
 		let aid = tlvVal(hex, '4F');
@@ -1884,7 +1900,7 @@ function efDirApps() {
 			};
 		}
 	}
-	return apps;
+	return { apps: apps, err: err };
 }
 
 function isimOf(apps) {
@@ -1964,7 +1980,8 @@ function vowifiFacts() {
 		return { success: false, error: (ep == null ? 'ePDG 探测返回空' : ep.error) };
 	}
 
-	let apps = efDirApps();
+	let dir = efDirApps();
+	let apps = dir.apps;
 	let isim = isimOf(apps);
 	let mnc3 = mnc3Of(ep.mnc);
 	let impi = deriveImpi(ep.imsi, ep.mcc, mnc3);
@@ -2041,12 +2058,19 @@ function vowifiFacts() {
 		blockers[length(blockers)] = 'ims_not_registered';
 	}
 
+	/*
+	 * ★ phase 必须是**连续**通过的前缀，不是「最后一个 ok 的门」。
+	 *   真机形态（sim✓ identity✓ aka✓ epdg✗ ims✓）：取「最后一个 ok」会算出
+	 *   ims_ready，于是界面同时显示「走到：IMS 已注册」和「VoWiFi 不成立」——
+	 *   自相矛盾，看着像只差最后一步。卡在第三道门就该报 aka_ready。
+	 */
 	const PHASE_BY_STAGE = ['sim_ready', 'identity_ready', 'aka_ready', 'access_ready', 'ims_ready'];
 	let phase = 'blocked';
 	for (let i = 0; i < length(stages); i++) {
-		if (stages[i].ok) {
-			phase = PHASE_BY_STAGE[i];
+		if (!stages[i].ok) {
+			break;
 		}
+		phase = PHASE_BY_STAGE[i];
 	}
 
 	/* 总判定：五门全过才叫「这条路通」；ePDG 无法判定时不许说「不通」。 */
@@ -2071,6 +2095,8 @@ function vowifiFacts() {
 			impi: impi,
 			impiSource: 'derived',
 			imsDomain: imsDomain,
+			/* dirError 非空 = **读不到** EF_DIR，此时 isim=null 不代表「没有 ISIM」 */
+			dirError: dir.err,
 			isim: (isim == null ? null : { aid: isim.aid, label: isim.label }),
 			apps: apps
 		},

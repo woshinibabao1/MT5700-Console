@@ -548,14 +548,10 @@ return L.view.extend({
 			return box;
 		}
 
-		/* 总判定 */
-		var EPDG_VERDICT = {
-			available: '运营商发布了 ePDG —— VoWiFi 这条路通',
-			not_published: '运营商未在公网发布 ePDG —— VoWiFi 不成立',
-			polluted: 'DNS 通配污染，拿到的不是真 ePDG',
-			unknown: '无法判定'
-		};
-
+		/*
+		 * 总判定用的是下面的 VOWIFI_VERDICT（五道门的整体结论）；
+		 * ePDG 那一门自己的结论体现在门表里，不再单独造一张同名的总判定表。
+		 */
 		var EPDG_VERDICT_HINT = {
 			available: '这道门过了，下一步才是 IKEv2/EAP-AKA 隧道与 IMS 客户端 —— 本页只判这一道门。',
 			not_published: '标准写法（由卡上 EF_AD 定的 MNC 长度推出）明确查不到。'
@@ -633,8 +629,16 @@ return L.view.extend({
 					d.identity.impiSource === 'derived' ? '按 TS 23.003 从 IMSI 派生'
 						: '从 ISIM 的 EF_IMPI 读出']);
 				irows.push(['归属 IMS 域', d.identity.imsDomain || '—', '']);
-				irows.push(['卡上有 ISIM', d.identity.isim ? ('有 · ' + d.identity.isim.aid
-					+ (d.identity.isim.label ? '（' + d.identity.isim.label + '）' : '')) : '没有', '']);
+				/*
+				 * ★「读不到 EF_DIR」≠「没有 ISIM」（红线 23）：dirError 非空时
+				 *   必须显示读不到，否则一次 AT 失败会被当成「这张卡没有 ISIM」的客观结论。
+				 */
+				if (d.identity.dirError) {
+					irows.push(['卡上有 ISIM', '读不到', 'EF_DIR 读取失败（' + d.identity.dirError + '）']);
+				} else {
+					irows.push(['卡上有 ISIM', d.identity.isim ? ('有 · ' + d.identity.isim.aid
+						+ (d.identity.isim.label ? '（' + d.identity.isim.label + '）' : '')) : '没有', '']);
+				}
 			}
 			if (d.aka) {
 				irows.push(['AKA 应用', (d.aka.app || '—') + (d.aka.aid ? ' · ' + d.aka.aid : ''),
