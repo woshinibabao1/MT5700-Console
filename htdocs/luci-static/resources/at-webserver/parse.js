@@ -391,6 +391,30 @@ var Parse = (function () {
 		};
 	};
 
+	/*
+	 * AT+CREG? —— CS 域注册状态（手册 CREG；stat 与 +CEREG 同一套定义，见上面 REG_STATES）。
+	 *
+	 * ★ 为什么必须补这一个原语：短信可达性里「承载域选了 CS 优先」那条告警原来是
+	 *   **无条件**触发的，措辞还写死「5G SA 下没有 CS 域」——那是**假设**，不是实测。
+	 *   真机实测（2026-09-24，中国移动卡）：
+	 *       +CREG: 0,0        ← CS 域未注册
+	 *       +CEREG: 2,1 / +C5GREG: 2,1   ← PS 侧正常
+	 *       +CGSMS: 3         ← 承载域却选了「优先 CS」
+	 *   三条合起来才是「短信被指向了一个不存在的域」的证据，缺 +CREG 就缺了最关键一环。
+	 *
+	 *   反过来，机器回落到 GSM/UMTS 时 CS 域是**存在**的，那时 CGSMS=3 是正确的，
+	 *   无条件告警会误报。所以判据必须是「preferCs」**且**「CS 域实测未注册」两个条件同时成立。
+	 *
+	 * ★ registered 只对 stat ∈ {1, 5} 为 true（已注册本地网 / 已注册漫游）；
+	 *   其余（0 未注册、2 搜网中、3 被拒、4 未知、8 仅紧急）一律 false。
+	 * ★ 解析不出来返回 null —— 由调用方归入「读不到」，不许按乐观值补齐（红线 23）。
+	 */
+	api.parseCsDomain = function (text) {
+		var r = api.parseRegStat(String(text == null ? '' : text), '+CREG');
+		if (!r) return null;
+		return { stat: r.stat, text: r.statText, registered: r.stat === 1 || r.stat === 5 };
+	};
+
 	/* ================= 温度 ================= */
 
 	// AT^CHIPTEMP?

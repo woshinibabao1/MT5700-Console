@@ -59,6 +59,13 @@ TARGETS = {
     # parse.js 再挂一个键：出口 IP 解析那组守卫在 exitip-contract 里，
     # 而 "parsejs" 固定跑 single-source-contract —— 一份文件两条测试通道，别挂错。
     "parsejs2": ATWB / "parse.js",
+    # ★ 再挂两个键（2026-09-24 真机校准）：短信可达性的「承载域 × CS 域」交叉判据
+    #   横跨 parse.js（parseCsDomain）与 sms_settings.js（判据表达式），
+    #   守卫在自己的 sms-reachability-contract 里。
+    #   ★ 复用 parsejs2 / smssetjs 会**跑错测试**（它们分别固定跑 exitip-contract
+    #   与 single-source-contract）→ 变异生效但没人判红 → 比没守卫更危险（红线 16b）。
+    "parsejs3": ATWB / "parse.js",
+    "smssetjs2": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -84,6 +91,8 @@ TARGET_TEST = {
     "rsrust": ROOT / "tests" / "single-source-contract.test.js",
     "uc": ROOT / "tests" / "exitip-contract.test.js",
     "parsejs2": ROOT / "tests" / "exitip-contract.test.js",
+    "parsejs3": ROOT / "tests" / "sms-reachability-contract.test.js",
+    "smssetjs2": ROOT / "tests" / "sms-reachability-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -154,6 +163,24 @@ MUTATIONS = [
         "if (!s) return null;",
         "if (!s) return '0.0.0.0';",
         "空串 → null（不是 0.0.0.0）",
+    ),
+    (
+        # ★ 锚点唯一性已核：sms_settings.js 里 `preferCs && !v.cs.registered`
+        #   只出现 1 次（renderReachability 的判据表达式，缩进 3 个 tab）。
+        "短信可达性退化成单条件（只看承载域，不交叉 CS 域实测 → 回落 GSM/UMTS 时误报）",
+        "smssetjs2",
+        "\t\t\telse if (v.cgsms.preferCs && !v.cs.registered) {",
+        "\t\t\telse if (v.cgsms.preferCs) {",
+        "两个条件在同一个 && 表达式里",
+    ),
+    (
+        # ★ 锚点唯一性已核：parse.js 里 `registered: r.stat === 1 || r.stat === 5`
+        #   只出现 1 次（parseCsDomain 内）。
+        "CS 域判定丢掉 stat=5（漫游态被当未注册 → 漫游时误报短信不可达）",
+        "parsejs3",
+        "registered: r.stat === 1 || r.stat === 5",
+        "registered: r.stat === 1",
+        "stat=5（已注册漫游）→ registered",
     ),
     (
         "去掉时间窗（退化成只靠轮数上限）",
@@ -409,7 +436,11 @@ MUTATIONS = [
         "\t\t\t\t\tif (busy) { Mt5700.error('有操作正在进行'); return; }\n"
         "\t\t\t\t\t/* P17：iccidRaw 为空不下发，避免只弹一句「操作失败」 */",
         "\t\t\t\t\t/* P17：iccidRaw 为空不下发，避免只弹一句「操作失败」 */",
-        "恰好 5 处",
+        # ★ expect 必须是测试里**当前的**措辞（2026-09-24 校准）：出口 IP 探测按钮那次
+        #   把拦截数从 5 提到 6，测试断言同步改成「恰好 6 处」，这里没跟着改，
+        #   于是变异明明被判红（rc=1）却因关键词失配报成「变异被放过」——假警报。
+        #   ★ 改拦截数量时必须同步：esim-contract 的断言文案 + 本 expect，两处。
+        "恰好 6 处",
     ),
     (
         "把断言写成定义相反的顺序（字符串落进条件位 → 恒为真）",
@@ -558,7 +589,12 @@ def main():
         rc, out = run_test(tgt)
         hit = key in out
         if rc != 0 and hit and "异步用例异常" not in out:
-            print(f"[{i}] ✓ 变异被断言检出：{name}（判红 {out.count(chr(10) + '  ✗')} 处）")
+            # ★ 统计口径（2026-09-24 修正）：全仓测试统一用 `'  ✗ '` 前缀输出失败项。
+            #   原先这里写 `'\n  ✗'`，会把**第一行**失败漏掉（首行前面没有 '\n'）→
+            #   「只被 1 条断言抓住」的变异会显示「判红 0 处」，看着像守卫没生效，
+            #   实际是 off-by-one。去掉 '\n' 约束即可；`'  ✗'` 仍足以与汇总行区分
+            #   （汇总行是无前导空格的 `'\n✗ N 项断言失败'`）。
+            print(f"[{i}] ✓ 变异被断言检出：{name}（判红 {out.count('  ✗')} 处）")
         else:
             print(f"[{i}] ✗ 变异被放过：{name}（rc={rc}, 关键词命中={hit}）")
             bad += 1

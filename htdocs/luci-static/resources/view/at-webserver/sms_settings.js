@@ -446,17 +446,25 @@ return L.view.extend({
 		 *   ① IMS 开关（LTE 域）   AT^IMSSWITCH?     手册 4.10
 		 *   ② IMS 注册（含能力值） AT+CIREG?         手册 7.6
 		 *   ③ 短信承载域           AT+CGSMS?         手册 7.7
-		 *     ★③ 是最容易漏的一条：5G SA 下**没有 CS 域**，承载域若选了「优先 CS」，
-		 *       短信一条都发不出去，而前两条此时看着都是好的。
+		 *   ④ CS 域注册           AT+CREG?          （2026-09-24 真机校准新增）
+		 *
+		 *   ★③④ 必须**交叉**判，单看任何一条都会错：
+		 *     - 只看③：选了「优先 CS」就报警 → 机器回落 GSM/UMTS 时 CS 域确实存在，
+		 *       那时 CGSMS=3 是正确配置，会误报。
+		 *     - 只看④：CS 未注册就报警 → CS 域本来就不是短信必经之路（走 IMS 就不需要），
+		 *       而且「5G SA 没有 CS 域」是假设不是实测。
+		 *     真机实测（中国移动卡）：+CGSMS: 3（优先 CS）+ +CREG: 0,0（CS 未注册）
+		 *     + +CEREG: 2,1 / +C5GREG: 2,1（PS 侧正常）+ +CIREG: 1,1（IMS 已注册）
+		 *     ——四条合起来才构成「短信被指向了一个不存在的域」的证据链。
 		 *
 		 * ★ 只读，不下发任何写命令；任一项读不到就如实写「读不到」，不许按乐观值补齐。
 		 */
-		var reachCard = Mt5700.card('短信可达性', '三条前置缺一不可，缺哪条这里指名');
+		var reachCard = Mt5700.card('短信可达性', '三项前置 + 承载域/CS 域交叉校验，缺哪条这里指名');
 		reachCard._body.appendChild(Mt5700.loading('正在检查…'));
 		body.appendChild(reachCard);
 
 		function loadReachability() {
-			var v = { ims: null, cireg: null, cgsms: null };
+			var v = { ims: null, cireg: null, cgsms: null, cs: null };
 			return Promise.resolve()
 				.then(function () {
 					return readImsSwitch().then(function (n) { v.ims = n; });
@@ -471,6 +479,16 @@ return L.view.extend({
 						v.cgsms = (res.success && res.data) ? Parse.parseCgsms(String(res.data)) : null;
 					});
 				})
+				.then(function () {
+					/*
+					 * ④ CS 域是否**真的**注册（2026-09-24 真机校准新增）。
+					 *   没有这一项就只能靠「5G SA 没有 CS 域」这句假设去告警 —— 机器回落
+					 *   GSM/UMTS 时 CS 域是存在的，那时 CGSMS=3 反而是正确配置，会误报。
+					 */
+					return AtWs.client.sendCommand('AT+CREG?', { fresh: true }).then(function (res) {
+						v.cs = (res.success && res.data) ? Parse.parseCsDomain(String(res.data)) : null;
+					});
+				})
 				.catch(function () { /* 单项读不到就保持 null，下面如实显示 */ })
 				.then(function () { renderReachability(v); });
 		}
@@ -480,9 +498,17 @@ return L.view.extend({
 			b.innerHTML = '';
 			var rows = [
 				['IMS 开关（LTE 域）', v.ims === null ? '读不到' : (v.ims === 1 ? '已开启' : '已关闭')],
+				/*
+				 * ★「能力值未上报」是**正常态**，不是故障：手册 7.6 明说只有 <n>=2 时
+				 *   URC 才带 ext_info，而真机实测 AT+CIREG? 返回 `+CIREG: 1,1`（n=1）。
+				 *   把 n 改成 2 是写命令，且要等下一次注册状态变化才上报 —— 本页不静默下发。
+				 *   所以这里如实写「未上报」，绝不倒推出「IMS 短信不可用」。
+				 */
 				['IMS 注册', !v.cireg ? '读不到' : (v.cireg.text +
-					(v.cireg.ext ? ('（能力值 ' + v.cireg.ext + '）') : ''))],
-				['短信承载域', !v.cgsms ? '读不到' : v.cgsms.text]
+					(v.cireg.ext ? ('（能力值 ' + v.cireg.ext + '）') : '（能力值未上报，n=1）'))],
+				['短信承载域', !v.cgsms ? '读不到' : v.cgsms.text],
+				/* ④ 新增：CS 域实测。真机 +CREG: 0,0 ⇒ 未注册 ⇒ 与「优先 CS」构成冲突 */
+				['CS 域注册', !v.cs ? '读不到' : (v.cs.text + '（stat ' + v.cs.stat + '）')]
 			];
 			var grid = E('div', { 'class': 'mt5700-metrics' });
 			rows.forEach(function (r) { grid.appendChild(Mt5700.metric(r[0], r[1])); });
@@ -497,9 +523,20 @@ return L.view.extend({
 				if (v.cireg.info === 0) bad.push('IMS 未注册');
 				else if (v.cireg.info === null) unknown.push('IMS 注册状态');
 			} else unknown.push('IMS 注册状态');
-			if (v.cgsms) {
-				if (v.cgsms.preferCs) bad.push('短信承载域选了「优先/只选 CS」，而当前网络（5G SA）没有 CS 域');
-			} else unknown.push('短信承载域');
+			/*
+			 * ★ 双条件判据（2026-09-24 真机校准）：「选了 CS 优先」**本身不是错**，
+			 *   错的是「选了 CS 优先」**且**「CS 域实测未注册」。
+			 *
+			 *   原实现是单条件 `preferCs` 就报，措辞还写死「5G SA 下没有 CS 域」——那是假设。
+			 *   机器回落 GSM/UMTS 时 CS 域确实存在，那时 CGSMS=3 是**正确**配置，会误报。
+			 *   ★ CS 域读不到时归入 unknown，不许按「5G 下必然没 CS 域」倒推着报警。
+			 */
+			if (v.cgsms === null) unknown.push('短信承载域');
+			else if (v.cs === null) unknown.push('CS 域注册状态（判不了承载域是否选错）');
+			else if (v.cgsms.preferCs && !v.cs.registered) {
+				bad.push('短信承载域选了「' + v.cgsms.text + '」，但 CS 域实测未注册（+CREG stat=' +
+					v.cs.stat + '）—— 短信被指向了一个当前不存在的域，建议改为「优先 PS 域」');
+			}
 
 			if (bad.length) {
 				b.appendChild(E('div', { 'class': 'mt5700-notice-warning mt5700-mt-sm' },
