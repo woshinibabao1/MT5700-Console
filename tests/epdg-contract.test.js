@@ -235,6 +235,8 @@ ok('★ DoH 端点写成常量（不接受外部传入）',
 	/const EPDG_DOH = 'https:\/\/dns\.alidns\.com\/resolve';/.test(ucSrc));
 ok('★ 只有 DoH 给出**更确定**的结论才覆盖系统 DNS（unknown 不覆盖）',
 	/if \(r\.doh\.state == 'unknown'\) \{\s*\n\s*return r;/.test(probeBody));
+ok('★ 系统 DNS 的原结论要单独留一份（被 DoH 覆盖后，页面仍要能看到两条路各说了什么）',
+	/r\.sysState = r\.state;/.test(probeBody) && /r\.sysAddrs = r\.addrs;/.test(probeBody));
 ok('★ DoH 的结论要单独留在 r.doh 上（两条路各说了什么必须都能看见，否则判不了污染）',
 	/r\.doh = \{ addrs: d\.addrs, nx: d\.nx, status: d\.status, state: epdgState\(d\) \};/.test(probeBody));
 ok('★ 系统 DNS 已经说 available 就不再查 DoH（省一次往返）',

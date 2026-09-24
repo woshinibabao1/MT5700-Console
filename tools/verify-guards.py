@@ -229,17 +229,106 @@ MUTATIONS = [
         "后缀不对但长度合规",
     ),
     (
+        # ★ 锚点唯一性已核：`let d = dohLookup(fqdn, EPDG_ECS);` 全仓 1 次（epdgProbe 内）。
+        #   真机（2026-09-24）：系统 DNS 对 *.3gppnetwork.org 有通配污染，只看一条路
+        #   会把「污染」当「有」、把「本机 DNS 抽风」当「运营商没发布」。
+        "ePDG 不再做 DoH 回退（单条链路的结论可能正好说反）",
+        "uc2",
+        "\tlet d = dohLookup(fqdn, EPDG_ECS);",
+        "\tlet d = null;",
+        "系统 DNS 没给出 available 时，要换 DoH 再问一次",
+    ),
+    (
+        # ★ 锚点唯一性已核：`url = url + '&edns_client_subnet=' + ecs;` 全仓 1 次。
+        #   ePDG 的权威 DNS 常只对归属国的解析器返回地址（参考 VoCat 的地理回退），
+        #   不带 ECS 等于白问一趟。
+        "ePDG 的 DoH 不带 EDNS Client Subnet（归属国权威 DNS 不给答案）",
+        "uc2",
+        "\t\turl = url + '&edns_client_subnet=' + ecs;",
+        "\t\turl = url;",
+        "DoH 要带归属国的 EDNS Client Subnet",
+    ),
+    (
+        # ★ 锚点唯一性已核：`if (r.doh.state == 'unknown') {` 全仓 1 次。
+        #   换链路是为了**纠偏**，不是替换：DoH 自己也说不清时不许覆盖系统 DNS 的结论。
+        "ePDG 的 DoH 无条件覆盖系统 DNS 结论（换链路从纠偏变成替换）",
+        "uc2",
+        "\tif (r.doh.state == 'unknown') {",
+        "\tif (false) {",
+        "只有 DoH 给出**更确定**的结论才覆盖系统 DNS",
+    ),
+    (
+        # ★ 锚点唯一性已核：全仓 1 次。
+        #   真机：mnc000 明确 NXDOMAIN、mnc00 返回 127.0.0.1（与必然不存在的 mnc999 同值）。
+        #   去掉 canonical 优先后，「运营商明确没发布」会被污染的变体搅成「无法判定」。
+        "ePDG 丢掉 canonical 优先（被污染的变体把「没发布」搅成「无法判定」）",
+        "uc2",
+        "\t\tif (canon != null && canon.state == 'not_published') {",
+        "\t\tif (false) {",
+        "权威域名说 NXDOMAIN 时，被污染的变体不许把结论搅成 unknown",
+    ),
+    (
+        # ★ 锚点唯一性已核：全仓 1 次。
+        #   覆盖后前端只能看到「最终结论」，看不到「两条路各说了什么」——
+        #   而那个不一致正是判污染的根据。
+        "ePDG 覆盖系统 DNS 结论时不留原值（页面看不到两条路的对比）",
+        "uc2",
+        "\tr.sysState = r.state;",
+        "\tr.sysState = null;",
+        "系统 DNS 的原结论要单独留一份",
+    ),
+    (
+        # ★ 锚点唯一性已核：全仓 1 次（epdgFacts 内）。
+        #   猜成固定 2 位：换一张 3 位 MNC 的卡就会拼出必然 NXDOMAIN 的域名，
+        #   把「我拼错了」报成「运营商没发布」。
+        "ePDG 的 MNC 长度改成猜（不从卡上 EF_AD 读）",
+        "uc2",
+        "\tlet mncLen = readMncLength();",
+        "\tlet mncLen = 2;",
+        "MNC 长度先问卡（EF_AD）",
+    ),
+    (
+        # ★★ 真机事故（2026-09-24）：在页面里发 AT+CCHO 开逻辑通道，通道占上后
+        #   AT+CCHC 关不掉（一律 SIM failure），只能重启模组才恢复。
+        #   这里变异成「加回一条 CCHO」，反向断言必须把它判红。
+        "ePDG/VoWiFi 探测里又出现 AT+CCHO（逻辑通道占上后不可回收）",
+        "uc2",
+        "\tlet aka = akaEvidence(aidInfo);",
+        "\tlet aka = akaEvidence(aidInfo);\n\trpcCall('at', { cmd: 'AT+CCHO=\"A0000000871002\"' });",
+        "ePDG/VoWiFi 探测全程不许发 AT+CCHO",
+    ),
+    (
         # ★★ 真机真踩过这一条（2026-09-24）：去掉这道门禁后，busybox nslookup 开头的
         #   Server/Address 两行（223.5.5.5:53）会被当成解析结果 —— 连必然不存在的
         #   mnc999 都「解析到了地址」，总判定恒为 available，最关键的结论被反过来说。
-        # ★ 锚点唯一性已核：`if (!seenName) {` 只出现 1 次（nsPickAddrs 内）。
-        #   ★ 变异点选在**过滤条件**上而不是 seenName 门禁上：门禁之外还有一道
-        #     `v != dns + ':53'` 的兜底，单独拆门禁会被兜底接住 → 变异判不出来
-        #     （实测放过过一次）。真正的最后一道是这个条件本身。
+        # ★ 锚点唯一性已核：下面这段多行锚点在全仓只出现 1 次（nsPickAddrs 内）。
+        # ★★ 为什么必须**两道一起拆**（2026-09-24 第 3 次修正）：
+        #     只拆 `!seenName` 门禁 → `v != dns + ':53'` 兜底接住，判不出来；
+        #     只拆 `v != dns + ':53'` → seenName 门禁接住，也判不出来（放过过一次）。
+        #     NXDOMAIN 的输出里只有 Server 段那一行 Address，任一防线单独存在都足以
+        #     把它挡掉。两道互为冗余是好事，但**变异必须模拟「两道都失效」**，
+        #     否则守卫会显示「能检出」而其实根本没验证到这个失效模式。
         "nslookup 输出不过滤 Server 段（DNS 服务器自己被当成结果 → 任何域名都判「解析到了」）",
         "uc2",
-        "\t\t\t\tif (v != '' && v != dns && v != dns + ':53') {",
-        "\t\t\t\tif (v != '') {",
+        "\t\tif (!seenName) {\n\t\t\tcontinue;\n\t\t}\n"
+        "\t\tif (index(line, 'Address') == 0) {\n"
+        "\t\t\tlet k = index(line, ':');\n"
+        "\t\t\tif (k >= 0) {\n"
+        "\t\t\t\tlet v = trim(substr(line, k + 1));\n"
+        "\t\t\t\tif (v != '' && v != dns && v != dns + ':53') {\n"
+        "\t\t\t\t\taddrs[length(addrs)] = v;\n"
+        "\t\t\t\t}\n"
+        "\t\t\t}\n"
+        "\t\t}",
+        "\t\tif (index(line, 'Address') == 0) {\n"
+        "\t\t\tlet k = index(line, ':');\n"
+        "\t\t\tif (k >= 0) {\n"
+        "\t\t\t\tlet v = trim(substr(line, k + 1));\n"
+        "\t\t\t\tif (v != '') {\n"
+        "\t\t\t\t\taddrs[length(addrs)] = v;\n"
+        "\t\t\t\t}\n"
+        "\t\t\t}\n"
+        "\t\t}",
         "NXDOMAIN 输出（真机格式）一个地址都不产生",
     ),
     (

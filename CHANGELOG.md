@@ -63,9 +63,14 @@ epdg.epc.mnc00.mcc460.pub.3gppnetwork.org   -> 127.0.0.1            污染（与
 
 ### Added（测试）
 
-- `tests/epdg-contract.test.js` 扩到 **62 项**：EF_AD 定长不猜、两种域名写法、
-  DoH 两段式（只有更确定才覆盖、unknown 不覆盖）、canonical 优先、AKA 证据等级、
-  **全程不许发 `AT+CCHO`**、ACL 两段放行、前端四态齐全。
+- `tests/epdg-contract.test.js` 扩到 **63 项**：EF_AD 定长不猜、两种域名写法、
+  DoH 两段式（只有更确定才覆盖、unknown 不覆盖）、**系统 DNS 原结论要单独留一份**、
+  canonical 优先、AKA 证据等级、**全程不许发 `AT+CCHO`**、ACL 两段放行、前端四态齐全。
+- `tools/verify-guards.py` 补 **7 条 ePDG 变异**（DoH 回退被摘、不带 ECS、无条件覆盖、
+  丢 canonical 优先、不留 sysState、MNC 改回猜、又出现 CCHO），全部实测判红后还原。
+  ★ 同时修掉原有 1 条**假阳性变异**：`nslookup` 的 Server 段过滤有两道互为冗余的防线
+  （`!seenName` 门禁 + `!= dns + ':53'` 兜底），只拆任一道都会被另一道接住而判不出来
+  —— 现在改成一次拆两道，才真正验证到这个失效模式。
 
 ## [2.3.46] - 2026-09-24
 
