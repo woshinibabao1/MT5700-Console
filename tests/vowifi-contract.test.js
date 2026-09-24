@@ -35,12 +35,19 @@ const ROOT = path.join(__dirname, '..');
 const UCODE = path.join(ROOT, 'root', 'usr', 'share', 'rpcd', 'ucode', 'mt5700.uc');
 const ACL = path.join(ROOT, 'root', 'usr', 'share', 'rpcd', 'acl.d', 'luci-app-mt5700.json');
 const RPC = path.join(ROOT, 'htdocs', 'luci-static', 'resources', 'at-webserver', 'rpc.js');
-const VIEW = path.join(ROOT, 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'network_status.js');
+/*
+ * ★ 2026-09-24 迁页：VoWiFi 是「能开的功能」，属于**模组设置**页（那页全是开关与下发），
+ *   不再挂在「网络状态」（那页全是读数）。这里读的是新宿主；另加反向断言，
+ *   保证旧宿主里不留残骸 —— 两页都渲染同一张卡是最难发现的一类重复。
+ */
+const VIEW = path.join(ROOT, 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'modem_settings.js');
+const OLD_VIEW = path.join(ROOT, 'htdocs', 'luci-static', 'resources', 'view', 'at-webserver', 'network_status.js');
 
 const ucSrc = fs.readFileSync(UCODE, 'utf8');
 const aclSrc = fs.readFileSync(ACL, 'utf8');
 const rpcSrc = fs.readFileSync(RPC, 'utf8');
 const viewSrc = fs.readFileSync(VIEW, 'utf8');
+const oldViewSrc = fs.readFileSync(OLD_VIEW, 'utf8');
 
 let pass = 0;
 const fails = [];
@@ -562,10 +569,33 @@ ok('★ rpc 声明不带 params（域名由后端拼，前端不传任何东西�
 ok('rpc.js 暴露了 AtWs.vowifi', /\bvowifi: fetchVowifi,/.test(rpcSrc));
 ok('★ 后端没升级时前端要明确提示（不能静默什么都不出）',
 	/后端未升级：rpcd 没有 mt5700\.vowifi 方法/.test(viewSrc));
-ok('★ 评估是手动触发（不在页面加载时偷偷联网）',
+ok('★ 评估按钮保留（自动取过之后仍可手动重取）',
 	/Mt5700\.ghostButton\(t\.busy \? '评估中…' : '评估 VoWiFi', runVowifi\)/.test(viewSrc));
 ok('★ 评估中重复点击要挡住（并发会占满 rpcd 工作线程）',
-	/function runVowifi\(\) \{\s*\n\s*var t = state\.tools\.vowifi;\s*\n\s*if \(t\.busy\) return;/.test(viewSrc));
+	/function runVowifi\(\) \{\s*\n\s*var t = vowifiState;\s*\n\s*if \(t\.busy\) return;/.test(viewSrc));
+
+/*
+ * ★★ 进页面就取一次（2026-09-24 用户口径：后端像 exitip 那样直接暴露成 AtWs.vowifi，
+ *   前端不必等用户点一下才有数据）。
+ *   两条必须同时成立：
+ *   ① 挂在连接成功之后的链里（否则没连上就发，必然失败）；
+ *   ② 排在 loadAll() **之后** —— 五道门真机实测 1.8~8.5s，并进 loadAll 会把首屏
+ *      其它卡一起拖住。只断言「有调用」是不够的，顺序同样是契约。
+ */
+ok('★★ 进页面自动取一次 VoWiFi（挂在连接成功之后）',
+	/\}\)\.then\(function \(\) \{\s*\n\s*loadAll\(\);\s*\n\s*\}\)\.then\(function \(\) \{[\s\S]{0,400}?runVowifi\(\);/.test(viewSrc));
+ok('★★ 自动取数排在 loadAll 之后（不拖慢首屏其它卡）',
+	viewSrc.indexOf('loadAll();') < viewSrc.indexOf('runVowifi();', viewSrc.indexOf('loadAll();')));
+ok('★ 刷新按钮也重取 VoWiFi（与首屏顺序一致：先其它卡，再五道门）',
+	/Mt5700\.primaryButton\('刷新', function \(\) \{\s*\n\s*loadAll\(\)\.then\(function \(\) \{ runVowifi\(\); \}\);\s*\n\s*\}\)/.test(viewSrc));
+
+/* 迁移：旧宿主不许留残骸（两页都渲染同一张卡是最难发现的一类重复） */
+ok('★★ 网络状态页已不再有任何 VoWiFi / ePDG 痕迹（整块迁到模组设置）',
+	!/vowifi/i.test(oldViewSrc) && !/epdg/i.test(oldViewSrc));
+ok('★★ 模组设置页是 VoWiFi 的新宿主（卡片 + 开关 + 渲染齐全）',
+	/Mt5700\.card\('VoWiFi（Wi-Fi 通话）'/.test(viewSrc)
+	&& /var vowifiSwitchWrap = E\('div', \{ 'class': 'mt5700-switch' \}\);/.test(viewSrc)
+	&& /function renderVowifi\(\)/.test(viewSrc));
 ok('★ 页面已卸载就不再重绘（避免已发起的链回来时操作已销毁的 DOM）',
 	/if \(!disposed\) renderVowifi\(\);/.test(viewSrc));
 
@@ -593,8 +623,20 @@ ok('前端 VOWIFI_VERDICT 三态齐全（capable/blocked/unknown）',
 	/var VOWIFI_VERDICT = \{[\s\S]{0,300}?unknown: '无法判定'/.test(viewSrc));
 ok('★ 前端展示 IMPI 与 EF_DIR 应用列表（这两项是本轮新增的证据）',
 	/IMPI（IMS 身份）/.test(viewSrc) && /EF_DIR 里的应用/.test(viewSrc));
+/*
+ * ★ AUTHENTICATE 实测这一行要钉死：**发不出去**是实测结论，不是没实现；
+ *   而且必须把两个数都摆出来（需要 76 个十六进制字符 / AT+CSIM 上限 42），
+ *   否则用户只会看到「不支持」三个字，无从判断能不能绕。
+ *   （数值取自后端 aka.probe，前端只负责展示，不在这里写死 76/42。）
+ */
 ok('★ 前端展示 AUTHENTICATE 实测能力（不发不出去的命令，但要说清为什么）',
 	/AUTHENTICATE 实测/.test(viewSrc));
+ok('★ AUTHENTICATE 那一行把「发不出去 + 需要多少字符 + 上限多少」三件事都说清',
+	/'本模组发不出去'/.test(viewSrc)
+	&& /'需要 ' \+ \(\(d\.aka\.probe && d\.aka\.probe\.apduHex\) \|\| '\?'\) \+ ' 个十六进制字符，'/
+		.test(viewSrc)
+	&& /'AT\+CSIM 上限 ' \+ \(\(d\.aka\.probe && d\.aka\.probe\.maxHex\) \|\| '\?'\) \+ '（实测）'/
+		.test(viewSrc));
 ok('★ 前端展示 traceId', /'trace ' \+ d\.traceId/.test(viewSrc));
 ok('★★ 前端把「读不到 EF_DIR」与「没有 ISIM」分开显示（一次 AT 失败不许说成卡的客观事实）',
 	/if \(d\.identity\.dirError\) \{\s*\n\s*irows\.push\(\['卡上有 ISIM', '读不到', 'EF_DIR 读取失败（' \+ d\.identity\.dirError \+ '）'\]\);/.test(viewSrc));

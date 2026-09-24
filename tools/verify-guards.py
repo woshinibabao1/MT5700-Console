@@ -72,7 +72,13 @@ TARGETS = {
     #   → 比没守卫更危险（红线 16b）。
     "uc2": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
     "rpcjs2": ATWB / "rpc.js",
-    "nsjs": ATWB.parent / "view" / "at-webserver" / "network_status.js",
+    # ★★ 2026-09-24 迁页：VoWiFi 已整块搬到**模组设置**页，它的变异必须跟着改挂
+    #   vowifijs（同为 modem_settings.js，但跑 vowifi-contract，不是 device-control）。
+    #   原 "nsjs" 键指向 network_status.js 却配 vowifi-contract —— 迁页后这是**跑错
+    #   测试**的组合（红线 16b），所以删键而不是留着。
+    "vowifijs": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
+    # 「调用了未定义的函数」守卫（tests/undefined-fn-contract.test.js）也按文件变异。
+    "undeffnjs": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -102,7 +108,8 @@ TARGET_TEST = {
     "smssetjs2": ROOT / "tests" / "sms-reachability-contract.test.js",
     "uc2": ROOT / "tests" / "vowifi-contract.test.js",
     "rpcjs2": ROOT / "tests" / "vowifi-contract.test.js",
-    "nsjs": ROOT / "tests" / "vowifi-contract.test.js",
+    "vowifijs": ROOT / "tests" / "vowifi-contract.test.js",
+    "undeffnjs": ROOT / "tests" / "undefined-fn-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -488,7 +495,7 @@ MUTATIONS = [
     (
         # 前端：dirError 分支一去掉，「读不到」就又变成「没有 ISIM」。
         "前端不再区分 dirError（读不到又被显示成「没有 ISIM」）",
-        "nsjs",
+        "vowifijs",
         "\t\t\t\tif (d.identity.dirError) {",
         "\t\t\t\tif (false) {",
         "读不到 EF_DIR",
@@ -559,7 +566,7 @@ MUTATIONS = [
     (
         # ★ 关 IMS 会断掉 IMS 短信与 VoLTE 语音 —— 必须确认，且取消要把开关拨回去。
         "关 IMS 不再确认（误点一下就断掉短信与 VoLTE）",
-        "nsjs",
+        "vowifijs",
         "\t\t\tif (!on) {\n\t\t\t\tMt5700.confirm('关闭会下发 AT^IMSSWITCH=0,0,0，"
         "IMS 短信与 VoLTE 语音会一起断掉。确定关闭？',\n\t\t\t\t\tfunction () { doVowifiSet(0); }, '确定关闭',"
         "\n\t\t\t\t\tfunction () { renderVowifiSwitch(); });\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tdoVowifiSet(1);",
@@ -589,7 +596,7 @@ MUTATIONS = [
         # ★ 被拒绝时只报「设置失败」，用户不知道该换卡还是该等运营商 ——
         #   正是本轮要治的「点了没反应 / 只给一句失败」。
         "被拒绝时前端只报「设置失败」（不给原因）",
-        "nsjs",
+        "vowifijs",
         "\t\t\t\tt.setMsg = '无法开启：' + blockersToText(r.blockers);",
         "\t\t\t\tt.setMsg = '设置失败';",
         "无法开启",
@@ -597,7 +604,7 @@ MUTATIONS = [
     (
         # 前端：不发不出去的命令，但**要说清为什么发不出去**，否则用户以为是没实现。
         "前端不再展示 AUTHENTICATE 实测能力（用户看不出为什么没实测）",
-        "nsjs",
+        "vowifijs",
         "\t\t\tirows.push(['AUTHENTICATE 实测',",
         "\t\t\tirows.push(['AKA 实测',",
         "前端展示 AUTHENTICATE 实测能力",
@@ -605,10 +612,21 @@ MUTATIONS = [
     (
         # 前端：阻断清单少一项，界面就会显示 undefined（测试逐 key 断言覆盖）。
         "前端 BLOCKER_TEXT 少了 epdg_not_published（界面显示 undefined）",
-        "nsjs",
+        "vowifijs",
         "\t\t\tepdg_not_published: '运营商未在公网发布 ePDG（这台设备改不了，只能换一张其运营商发布了 ePDG 的卡）',\n",
         "",
         "覆盖了后端阻断项 epdg_not_published",
+    ),
+    (
+        # ★★ 这个变异守的是**守卫本身**：`epdgResultNode` 曾被调用 3 次却从未定义，
+        #   语法检查与全部契约测试都放行，只有真机渲染才会炸（而真机前端渲染在本环境
+        #   做不了）。现在由 tests/undefined-fn-contract.test.js 静态兜住 —— 这条变异
+        #   就是证明它**真能检出**，不是又一个恒绿的摆设。
+        "又出现「调用了未定义的函数」（语法合法，只有渲染时才炸）",
+        "undeffnjs",
+        "\t\trenderVowifi();   /* 出初始态（未评估时不发任何请求） */",
+        "\t\trenderVowifi();\n\t\tvar _x = epdgResultNodeGhost({ state: 'x' });",
+        "没有「调用了未定义的函数」",
     ),
     (
         # ★ 一旦开放 params，这个登录用户能用的口子就变成「借路由器做任意 DNS 探测」。

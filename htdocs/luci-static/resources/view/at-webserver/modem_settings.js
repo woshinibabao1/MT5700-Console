@@ -560,6 +560,390 @@ return L.view.extend({
 			});
 		}
 
+		/* ================= VoWiFi（Wi-Fi 通话） ================= */
+
+		/* ⑦ VoWiFi（Wi-Fi 通话）：**开关 + 五道门判定**。
+		 *
+		 * VoWiFi＝「非 3GPP 接入 → ePDG → IMS」。这两半里：
+		 *   · **本机可控的那一半**（IMS 域能力）→ 做成真开关：下发
+		 *     `AT^IMSSWITCH=1,0,0` / `=0,0,0`（手册 4.10，掉电保存，真机实测可写）。
+		 *   · **运营商的那一半**（ePDG 有没有在公网发布）→ 只能判定，只能换卡。
+		 *     ★ 手册 238 条命令里**没有任何 VoWiFi / ePDG 命令**，所以开关管不到隧道
+		 *     那一段，这一点在开关的说明里写明白，不假装开了它 VoWiFi 就通。
+		 *
+		 * ★ 判定必须带对照（红线 49）：只查本运营商域名拿到 NXDOMAIN，分不清是
+		 *   ①运营商没发布、②本机 DNS 坏了、还是③DNS 通配污染（不存在的域名也返回
+		 *   127.0.0.1，看着像解析到了）。所以同时查阳性对照（境外已商用、稳定可解析
+		 *   的 ePDG）与阴性对照（必然不存在的 mnc999）两组。阳性对照都查不到时，
+		 *   结论必须是「无法判定」，不许把锅甩给运营商。
+		 *
+		 * ★ 开不了要**告知原因**，不是点了没反应：本地三门（卡身份 / IMPI / AKA）
+		 *   任一门不过时后端**拒绝下发任何写命令**，并把阻断项逐条回给这里展示。
+		 *
+		 * ★ 尺寸固定：最多 4 行域名 + 1 行 PLMN + 1 行结论，不随结果多少撑开。 */
+		var vowifiCard = Mt5700.card('VoWiFi（Wi-Fi 通话）', '开关 · 五道门能力判定');
+
+		/*
+		 * 开关（放在卡片最上面：它是这一块里唯一「能做事」的控件）。
+		 *
+		 * ★ 状态取自后端实测的 `^IMSSWITCH`，不是本地记忆的勾选状态 ——
+		 *   "已勾选"不等于"已生效"，掉电保存的命令一次没生效会被记住。
+		 * ★ 关会断掉 IMS 短信与 VoLTE 语音 → 走确认框（onCancel 把开关拨回去）。
+		 */
+		var vowifiSwitchWrap = E('div', { 'class': 'mt5700-switch' });
+		var vowifiSwitch = E('input', { type: 'checkbox' });
+		vowifiSwitchWrap.appendChild(vowifiSwitch);
+		vowifiSwitch.addEventListener('change', function () { requestVowifiSet(vowifiSwitch.checked); });
+		vowifiCard._body.appendChild(Mt5700.formGroup('VoWiFi（本机 IMS 能力）', vowifiSwitchWrap,
+			'开＝AT^IMSSWITCH=1,0,0，关＝AT^IMSSWITCH=0,0,0（掉电保存）。'
+			+ 'ePDG 隧道由运营商发布，本机没有可下发的参数 —— 开了开关仍要看下面五道门才知道通不通。'));
+		var vowifiSetMsg = E('p', { 'class': 'mt5700-hint mt5700-mt-sm' }, '');
+		vowifiCard._body.appendChild(vowifiSetMsg);
+
+		var vowifiBody = E('div');
+		vowifiCard._body.appendChild(vowifiBody);
+
+		body.appendChild(vowifiCard);
+
+		/*
+		 * VoWiFi 的状态是**页内局部**的：这一页没有 state 对象（每张卡各自 load），
+		 * 而且它**手动触发、不进 loadAll()** —— 评估要跑五道门（含多次卡上读取与两次
+		 * 公网解析），跟着底部「刷新」一起跑会把整页加载拖到几十秒。
+		 */
+		var vowifiState = { busy: false, ran: false, data: null, err: '', setBusy: false, setMsg: '' };
+
+		/* ---------- 常量与渲染 ---------- */
+
+		/* ---------- ⑦ VoWiFi（Wi-Fi 通话）：ePDG 可达性判定 ----------
+		 *
+		 * 这一格只回答**一道门**：运营商在公网发布 ePDG 了吗。过不了这道门，
+		 * 后面 IKEv2/EAP-AKA 隧道与 IMS 客户端做得再完整也连不上 —— 所以先判它。
+		 */
+
+		/* 单域名四态，与 ucode 的 epdgState() 返回值一一对应（加一种要两边一起加）。 */
+		var EPDG_STATE = {
+			available: '解析到地址',
+			polluted: '只有环回地址（通配污染，不是真 ePDG）',
+			not_published: '查不到（NXDOMAIN）',
+			unknown: '无法判定'
+		};
+
+		/* 阻断清单的人话解释 —— 「不可用」这三个字没用，用户要知道该换卡还是该等运营商。 */
+		var BLOCKER_TEXT = {
+			sim_unread: '读不到 IMSI / MCC / MNC（卡没插好、没就绪，或 AT+CIMI 失败）',
+			mnc_ambiguous: '卡上读不出 MNC 长度（EF_AD 与 EF_EHPLMN 都没有），身份定不下来；两种写法都查过',
+			no_impi: '构造不出 IMPI（IMS 身份）—— EAP-AKA 没有身份可用',
+			no_usim_isim: '卡上既没有 USIM 也没有 ISIM —— 没有能做 AKA 的应用',
+			epdg_not_published: '运营商未在公网发布 ePDG（这台设备改不了，只能换一张其运营商发布了 ePDG 的卡）',
+			epdg_polluted: '本网 DNS 把 *.3gppnetwork.org 做了通配解析，拿到的不是真地址',
+			epdg_unknown: '两条解析链路都没给出确定结论（阳性对照也没解析出来 → 先恢复上网与 DNS）',
+			ims_not_registered: '蜂窝侧 IMS 未注册（+CIREG stat≠1）'
+		};
+
+		/* 走到哪一步了：与 ucode 的 phase 一一对应 */
+		var VOWIFI_PHASE = {
+			blocked: '第一道门就没过',
+			sim_ready: '卡身份就绪',
+			identity_ready: 'IMS 身份就绪',
+			aka_ready: 'AKA 就绪',
+			access_ready: 'ePDG 已发布（接入就绪）',
+			ims_ready: 'IMS 已注册'
+		};
+
+		var VOWIFI_VERDICT = {
+			capable: '五道门全过 —— VoWiFi 这条路通',
+			blocked: 'VoWiFi 不成立',
+			unknown: '无法判定'
+		};
+
+		/*
+		 * 单个 ePDG 条目的结论。
+		 *
+		 * ★ 这个函数曾经**只有调用没有定义**（4ad7004 引入至今）：渲染到 ePDG 那张表时
+		 *   直接抛 ReferenceError，卡片从这一行起就断掉。没有任何测试拦得住它 ——
+		 *   已补 tests/undefined-fn-contract.test.js 做静态扫描。
+		 * ★ 地址只在「解析到地址」时才补：下面还有一行专门讲两条链路各说了什么，
+		 *   这里再摊一遍就是重复。
+		 */
+		function epdgResultNode(it) {
+			if (!it) return '—';
+			var box = E('span', { 'class': 'mt5700-mono' }, EPDG_STATE[it.state] || '未知状态');
+			if (it.state === 'available' && it.addrs && it.addrs.length) {
+				box.appendChild(E('span', { 'class': 'mt5700-hint' }, ' → ' + it.addrs.join(' / ')));
+			}
+			return box;
+		}
+
+
+		/*
+		 * 两条解析链路各说了什么 —— **不一致本身就是判污染的根据**，必须都显示出来。
+		 * 真机（2026-09-24）：系统 DNS 说「解析到 127.0.0.1」，DoH+ECS 说 NXDOMAIN，
+		 *   只看一条就会得出相反结论。
+		 */
+		function epdgViaNode(it) {
+			if (!it) return '—';
+			var sys = EPDG_STATE[it.sysState] || '—';
+			var doh = (it.doh && EPDG_STATE[it.doh.state]) || '未走 DoH（系统 DNS 已给结论）';
+			var box = E('span', { 'class': 'mt5700-mono' }, '系统 DNS：' + sys + '　/　DoH+ECS：' + doh);
+			if (it.state === 'available' && it.addrs && it.addrs.length) {
+				box.appendChild(E('span', { 'class': 'mt5700-hint' }, ' → ' + it.addrs.join(' / ')));
+			}
+			if (it.cname) {
+				box.appendChild(E('span', { 'class': 'mt5700-hint' }, '（CNAME ' + it.cname + '）'));
+			}
+			return box;
+		}
+
+		/*
+		 * 总判定用的是下面的 VOWIFI_VERDICT（五道门的整体结论）；
+		 * ePDG 那一门自己的结论体现在门表里，不再单独造一张同名的总判定表。
+		 */
+		var EPDG_VERDICT_HINT = {
+			available: '这道门过了，下一步才是 IKEv2/EAP-AKA 隧道与 IMS 客户端 —— 本页只判这一道门。',
+			not_published: '标准写法（由卡上 EF_AD 定的 MNC 长度推出）明确查不到。'
+				+ '这不取决于设备怎么配：ePDG 是运营商侧的网元，只能换一张其运营商发布了 ePDG 的卡。'
+				+ '两位变体即便返回地址，若与「必然不存在的 mnc999」同值，那是通配污染不是证据。',
+			polluted: '本网 DNS 把 *.3gppnetwork.org 做了通配解析，任何不存在的子域都会返回一个假地址。',
+			unknown: '阳性对照（境外已商用的 ePDG）也没解析出来 —— 是本机的 DNS 链路有问题，'
+				+ '不是运营商没发布。先恢复上网与 DNS，再探测一次。'
+		};
+
+		/* 开关状态 = 后端实测值（^IMSSWITCH），不是本地勾选记忆 */
+		function renderVowifiSwitch() {
+			var t = vowifiState;
+			vowifiSwitch.checked = !!(t.data && t.data.ims && String(t.data.ims.imsswitch) === '1');
+			/* 评估或开关正在跑时锁住：两条路都会碰串口，并发会让回读拿到别人的包 */
+			vowifiSwitch.disabled = !!(t.busy || t.setBusy);
+			vowifiSetMsg.textContent = t.setMsg || '';
+			/* 「无法开启」是这一块要让用户看见的结论 → 用现成的红色小字类，
+			   不另造 CSS 类（另造一个不存在的类名是静默失效）。 */
+			var bad = t.setMsg.indexOf('无法开启') === 0 || t.setMsg.indexOf('失败') >= 0
+				|| t.setMsg.indexOf('未生效') >= 0;
+			vowifiSetMsg.className = bad ? 'mt5700-error' : 'mt5700-hint mt5700-mt-sm';
+		}
+
+		/* 阻断项 → 人话（文案只有一份，在 BLOCKER_TEXT 里） */
+		function blockersToText(list) {
+			if (!list || !list.length) return '原因未知';
+			var out = [];
+			for (var i = 0; i < list.length; i++) {
+				out.push(BLOCKER_TEXT[list[i]] || list[i]);
+			}
+			return out.join('；');
+		}
+
+		/*
+		 * 开关点击 → 后端 `mt5700.vowifi_set`。
+		 *
+		 * ★ 关（=0）会断掉 IMS 短信与 VoLTE 语音，先确认；取消时把开关拨回去
+		 *   （Mt5700.confirm 的第 4 个参数就是给这种场景用的）。
+		 */
+		function requestVowifiSet(on) {
+			var t = vowifiState;
+			if (t.busy || t.setBusy) { renderVowifiSwitch(); return; }
+			if (!AtWs.vowifiSet) {
+				t.setMsg = '后端未升级：rpcd 没有 mt5700.vowifi_set 方法';
+				renderVowifiSwitch();
+				return;
+			}
+			if (!on) {
+				Mt5700.confirm('关闭会下发 AT^IMSSWITCH=0,0,0，IMS 短信与 VoLTE 语音会一起断掉。确定关闭？',
+					function () { doVowifiSet(0); }, '确定关闭',
+					function () { renderVowifiSwitch(); });
+				return;
+			}
+			doVowifiSet(1);
+		}
+
+		function doVowifiSet(on) {
+			var t = vowifiState;
+			if (t.setBusy) return;
+			t.setBusy = true;
+			t.setMsg = on ? '正在开启…' : '正在关闭…';
+			renderVowifiSwitch();
+			AtWs.vowifiSet(on).then(function (r) {
+				t.setBusy = false;
+				if (!r || r.success === false) {
+					t.setMsg = '设置失败：' + ((r && r.error) || '未知原因');
+					if (!disposed) { renderVowifiSwitch(); renderVowifi(); }
+					return;
+				}
+				if (r.refused) {
+					/* ★ 拒绝不是失败：一条写命令都没下发，把原因逐条说出来 */
+					t.setMsg = '无法开启：' + blockersToText(r.blockers);
+				} else if (r.applied && r.effective) {
+					t.setMsg = (on ? '已开启' : '已关闭') + '本机 IMS 能力（实测 ^IMSSWITCH=' + r.imsswitch + '）'
+						+ (r.verdict === 'capable' ? '' : '，但 VoWiFi 仍不成立：' + blockersToText(r.blockers));
+				} else if (r.applied && r.unknown) {
+					t.setMsg = (on ? '开启' : '关闭') + '命令已下发，但回读不到 ^IMSSWITCH —— 请点「评估」刷新确认';
+				} else if (r.applied) {
+					/* 下发成功但没生效：只收敛到实测值，不反向重下发（手册三条失败条件仍在） */
+					t.setMsg = (on ? '开启' : '关闭') + '已下发但未生效（实测 ^IMSSWITCH=' + r.imsswitch + '）；'
+						+ '手册列出的常见原因是存在进行中的 IMS 业务，或语音优选模式为 PS_ONLY';
+				} else {
+					t.setMsg = '下发失败：' + (r.error || '未知原因');
+				}
+				/* 后端顺带回了一份最新的五门结果 —— 直接刷新，不用再手点一次评估 */
+				if (r.facts) {
+					t.ran = true;
+					t.data = r.facts;
+					t.err = '';
+				}
+				if (!disposed) { renderVowifiSwitch(); renderVowifi(); }
+			});
+		}
+
+		function renderVowifi() {
+			if (!vowifiBody) return;
+			var t = vowifiState;
+			renderVowifiSwitch();
+			vowifiBody.innerHTML = '';
+
+			var bar = E('div', { 'class': 'mt5700-toolbar' });
+			bar.appendChild(Mt5700.ghostButton(t.busy ? '评估中…' : '评估 VoWiFi', runVowifi));
+			var done = t.ran && t.data && t.data.verdict === 'capable';
+			bar.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (done ? ' is-on' : '') },
+				t.ran ? (VOWIFI_VERDICT[t.data.verdict] || '无法判定') : '未评估'));
+			if (t.ran && t.data && t.data.phase) {
+				bar.appendChild(E('span', { 'class': 'mt5700-hint' },
+					'走到：' + (VOWIFI_PHASE[t.data.phase] || t.data.phase)));
+			}
+			vowifiBody.appendChild(bar);
+
+			if (t.err) {
+				vowifiBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' }, t.err));
+				return;
+			}
+			if (!t.ran || !t.data) {
+				vowifiBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'点「评估」：后端从卡上读 IMSI / ICCID / EF_AD（MNC 长度由卡定，不猜）/ EF_DIR（卡上装了哪些应用），'
+					+ '派生 IMPI，拼出 3GPP 标准 ePDG 域名走系统 DNS 与 DoH+ECS 两条链路各查一次，'
+					+ '再用一正一负两组对照判断这张卡能不能走 VoWiFi。全程只读，一条会改模组状态的命令都不发。'));
+				return;
+			}
+
+			var d = t.data;
+
+			/*
+			 * 五道门分开报（参考 VoCat 的 State）：前一门没过不代表后面没过，
+			 * 也不做「前面过了所以后面也应该过」的推理 —— 用户要的是卡在哪一步。
+			 */
+			if (d.stages && d.stages.length) {
+				var srows = [];
+				for (var s = 0; s < d.stages.length; s++) {
+					var st = d.stages[s];
+					srows.push([
+						E('span', { 'class': 'mt5700-badge ' + (st.ok ? 'mt5700-badge-success' : 'mt5700-badge-danger') },
+							st.ok ? '通过' : '未过'),
+						st.label,
+						st.detail
+					]);
+				}
+				vowifiBody.appendChild(Mt5700.table(['', '这道门', '实测'], srows, { striped: true }));
+			}
+
+			/* 阻断清单：逐条点名，不给一个笼统的「不可用」 */
+			if (d.blockers && d.blockers.length) {
+				var brows = [];
+				for (var b = 0; b < d.blockers.length; b++) {
+					brows.push([d.blockers[b], BLOCKER_TEXT[d.blockers[b]] || '']);
+				}
+				vowifiBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' }, '卡在哪儿：'));
+				vowifiBody.appendChild(Mt5700.table(['阻断', '说明'], brows, { striped: true }));
+			}
+
+			/* 身份明细：VoWiFi 用的是 IMPI 不是 IMSI，这一行必须有 */
+			var irows = [];
+			if (d.imsi) irows.push(['IMSI', d.imsi, '']);
+			if (d.iccid) irows.push(['ICCID', d.iccid, '']);
+			if (d.identity) {
+				irows.push(['IMPI（IMS 身份）', d.identity.impi || '—',
+					d.identity.impiSource === 'derived' ? '按 TS 23.003 从 IMSI 派生'
+						: '从 ISIM 的 EF_IMPI 读出']);
+				irows.push(['归属 IMS 域', d.identity.imsDomain || '—', '']);
+				/*
+				 * ★「读不到 EF_DIR」≠「没有 ISIM」（红线 23）：dirError 非空时
+				 *   必须显示读不到，否则一次 AT 失败会被当成「这张卡没有 ISIM」的客观结论。
+				 */
+				if (d.identity.dirError) {
+					irows.push(['卡上有 ISIM', '读不到', 'EF_DIR 读取失败（' + d.identity.dirError + '）']);
+				} else {
+					irows.push(['卡上有 ISIM', d.identity.isim ? ('有 · ' + d.identity.isim.aid
+						+ (d.identity.isim.label ? '（' + d.identity.isim.label + '）' : '')) : '没有', '']);
+				}
+			}
+			if (d.aka) {
+				irows.push(['AKA 应用', (d.aka.app || '—') + (d.aka.aid ? ' · ' + d.aka.aid : ''),
+					'证据：' + (d.aka.evidence || '—')]);
+				irows.push(['AUTHENTICATE 实测',
+					d.aka.probe && d.aka.probe.supported ? '可发' : '本模组发不出去',
+					'需要 ' + ((d.aka.probe && d.aka.probe.apduHex) || '?') + ' 个十六进制字符，'
+					+ 'AT+CSIM 上限 ' + ((d.aka.probe && d.aka.probe.maxHex) || '?') + '（实测）']);
+			}
+			/* 一条都没读到时不落这一行：否则会出现「EF_DIR 里的应用 │ （空） │ 共 0 个」。 */
+			if (d.identity && d.identity.apps && d.identity.apps.length) {
+				var names = [];
+				for (var a = 0; a < d.identity.apps.length; a++) {
+					names.push(d.identity.apps[a].kind
+						+ (d.identity.apps[a].label ? '（' + d.identity.apps[a].label + '）' : ''));
+				}
+				irows.push(['EF_DIR 里的应用', names.join(' / '), '共 ' + d.identity.apps.length + ' 个']);
+			}
+			vowifiBody.appendChild(Mt5700.table(['身份项', '取值', '说明'], irows, { striped: true }));
+
+			var e = d.epdg || {};
+			var rows = [];
+			var items = e.items || [];
+			for (var i = 0; i < items.length; i++) {
+				/* label 由后端按 EF_AD 定长结果给出（标准写法 / 两位变体），不在这里猜 */
+				rows.push([items[i].label || '本卡 ePDG', items[i].fqdn, epdgResultNode(items[i])]);
+				rows.push(['　两条链路各说了什么', '', epdgViaNode(items[i])]);
+			}
+			if (e.posCtl) rows.push(['阳性对照（境外已商用）', e.posCtl.fqdn, epdgResultNode(e.posCtl)]);
+			if (e.negCtl) rows.push(['阴性对照（必然不存在）', e.negCtl.fqdn, epdgResultNode(e.negCtl)]);
+			vowifiBody.appendChild(Mt5700.table(['条目', '域名', '结果'], rows, { striped: true }));
+
+			var hint = EPDG_VERDICT_HINT[e.verdict] || '';
+			if (d.verdict === 'capable') {
+				hint = '五道门都过了。下一步才是 IKEv2/EAP-AKA 隧道与 IMS 客户端 —— '
+					+ '本页只判这五道门，且本设备没有可用的 UDP 发包工具，隧道那一步无法在这里验证。';
+			}
+			if (hint) {
+				vowifiBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' }, hint));
+			}
+			if (d.traceId) {
+				vowifiBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mono' }, 'trace ' + d.traceId));
+			}
+		}
+
+		/* 手动触发：换卡才变的东西，不做自动轮询（也不该在页面加载时偷偷联网）。 */
+		function runVowifi() {
+			var t = vowifiState;
+			if (t.busy) return;
+			if (!AtWs.vowifi) {
+				t.ran = true;
+				t.err = '后端未升级：rpcd 没有 mt5700.vowifi 方法';
+				renderVowifi();
+				return;
+			}
+			t.busy = true;
+			t.err = '';
+			renderVowifi();
+			AtWs.vowifi().then(function (r) {
+				t.busy = false;
+				t.ran = true;
+				if (!r || r.success === false) {
+					t.data = null;
+					t.err = (r && r.error) || 'VoWiFi 评估失败';
+				} else {
+					t.data = r;
+				}
+				if (!disposed) renderVowifi();
+			});
+		}
+
+		renderVowifi();   /* 出初始态（未评估时不发任何请求） */
+
 		/* ================= 网络系统配置 SYSCFGEX ================= */
 
 		var sysCard = Mt5700.card('网络系统配置',
@@ -1106,7 +1490,10 @@ return L.view.extend({
 		}
 
 		var bottomActions = Mt5700.panelActions(
-			Mt5700.primaryButton('刷新', function () { loadAll(); })
+			/* 刷新 = 全部重取（含 VoWiFi），顺序与首屏一致：先其它卡，再五道门 */
+			Mt5700.primaryButton('刷新', function () {
+				loadAll().then(function () { runVowifi(); });
+			})
 		);
 		body.appendChild(bottomActions);
 
@@ -1121,6 +1508,16 @@ return L.view.extend({
 			}
 		}).then(function () {
 			loadAll();
+		}).then(function () {
+			/*
+			 * VoWiFi：**进页面就取一次** —— 后端像 exitip 那样直接暴露成 AtWs.vowifi，
+			 *   不需要用户先点一下才有数据（2026-09-24 用户口径）。
+			 * ★ 排在 loadAll() **之后**，不并进它的链里：五道门要读卡（EF_AD / EF_DIR
+			 *   逐条）+ 走系统与 DoH 两条公网解析，真机实测 1.8~8.5s，串进 loadAll
+			 *   会把首屏其它卡一起拖住；放在后面则其它卡照常先出来，这张卡显示「评估中…」。
+			 * ★ 仍然**只取一次，不做轮询**（换卡才变的东西）。
+			 */
+			runVowifi();
 		});
 
 		/*
