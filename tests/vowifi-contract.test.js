@@ -478,6 +478,16 @@ eq('★ 关 = AT^IMSSWITCH=0,0,0', run(cmdFn, 0), 'AT^IMSSWITCH=0,0,0');
 ok('ucode 注册了 mt5700.vowifi_set', /\bvowifi_set: \{/.test(ucSrc));
 ok('★ 开关只收 enable 一个参数（其余一律不接受 → 没有注入面）',
 	/vowifi_set: \{\s*\n\s*args: \{ enable: 0 \},/.test(ucSrc));
+/*
+ * ★★ 真机实测（2026-09-24）：args 声明整型后，字符串 '1' 与布尔 true 都被 rpcd
+ *   以 code=2 挡在 ucode 之外（界面只能落到兜底的「设置失败」，看不出是类型问题）。
+ *   → 后端只写数字分支（其余是不可达的死分支），前端必须传数字，两侧各钉一条。
+ */
+ok('★★ 后端只认数字 0/1（字符串与布尔被 rpcd 挡在 ucode 外，写了也跑不到）',
+	/let enable = -1;\s*\n\s*if \(v === 1\) \{\s*\n\s*enable = 1;\s*\n\s*\} else if \(v === 0\) \{\s*\n\s*enable = 0;\s*\n\s*\}/
+		.test(ucSrc));
+ok('★★ 后端不为「字符串形态的 enable」留分支（真机拿不到，留着就是死代码）',
+	!/v === '1'/.test(ucSrc) && !/v === true/.test(ucSrc));
 ok('★★ 缺 enable 必须报错，不许默认成 0（默认 0＝关 IMS，是有后果的动作）',
 	/if \(v == null\) \{\s*\n\s*return \{ success: false, error: '缺少 enable 参数（0=关，1=开）' \};/.test(ucSrc));
 ok('★ enable 只认 0/1，其它一律拒绝',
@@ -617,6 +627,13 @@ ok('★ 开关与评估两条路互斥（都碰串口，并发会让回读拿到
 	/vowifiSwitch\.disabled = !!\(t\.busy \|\| t\.setBusy\);/.test(viewSrc));
 ok('★ 开关文案说清「ePDG 由运营商发布，本机没有可下发的参数」（不假装开了就通）',
 	/ePDG 隧道由运营商发布，本机没有可下发的参数/.test(viewSrc));
+
+/* ★ 真机事实（2026-09-24 实测）：`args: { enable: 0 }` 声明的是**整型**，
+ *   传字符串 '1' 会被 rpcd 以 code=2（Invalid argument）整包拒掉，ucode 根本进不去。
+ *   所以前端必须传数字 —— 这条钉的是「点的通不通」，不是风格问题。 */
+ok('★★ 前端传的是数字 0/1（传字符串会被 rpcd 以 Invalid argument 拒，点了没反应）',
+	/rpcVowifiSet\(enable \? 1 : 0\)/.test(rpcSrc)
+	&& !/rpcVowifiSet\(enable \? '1' : '0'\)/.test(rpcSrc));
 
 /* ---------- 汇总 ---------- */
 

@@ -567,6 +567,25 @@ MUTATIONS = [
         "关 IMS 要先确认",
     ),
     (
+        # ★★ 同上实测的后端侧：`args: { enable: 0 }` 是整型，字符串/布尔进不了 ucode。
+        #   给 enable 补字符串分支＝写一段永远跑不到的代码，还让人误以为类型不敏感。
+        "后端又给 enable 补字符串分支（rpcd 挡在前面，这段永远跑不到）",
+        "uc2",
+        "\t\t\t\tlet enable = -1;\n\t\t\t\tif (v === 1) {",
+        "\t\t\t\tlet enable = -1;\n\t\t\t\tif (v === 1 || v === '1') {",
+        "后端只认数字 0/1",
+    ),
+    (
+        # ★★ 真机实测（2026-09-24）：`args: { enable: 0 }` 声明整型，传字符串 '1'
+        #   被 rpcd 以 code=2（Invalid argument）整包拒掉 —— 点了开关完全没反应，
+        #   连 ucode 里的报错都走不到，界面只会显示兜底的「设置失败」。
+        "前端给开关传字符串 '1'（被 rpcd 以 Invalid argument 拒，点了没反应）",
+        "rpcjs2",
+        "\treturn withTimeout(rpcVowifiSet(enable ? 1 : 0), 60000, 'VoWiFi 开关超时')",
+        "\treturn withTimeout(rpcVowifiSet(enable ? '1' : '0'), 60000, 'VoWiFi 开关超时')",
+        "前端传的是数字 0/1",
+    ),
+    (
         # ★ 被拒绝时只报「设置失败」，用户不知道该换卡还是该等运营商 ——
         #   正是本轮要治的「点了没反应 / 只给一句失败」。
         "被拒绝时前端只报「设置失败」（不给原因）",

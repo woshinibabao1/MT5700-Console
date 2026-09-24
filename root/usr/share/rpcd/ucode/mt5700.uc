@@ -2556,11 +2556,17 @@ return {
 				if (v == null) {
 					return { success: false, error: '缺少 enable 参数（0=关，1=开）' };
 				}
-				/* ★ 只认 0/1：缺省值不能是 0（那是「关 IMS」这种有后果的动作） */
+				/*
+				 * ★ 只认数字 0/1，且**不写缺省值**（缺省 0 就是「关 IMS」这种有后果的动作）。
+				 * ★★ 真机实测（2026-09-24）：上面 `args: { enable: 0 }` 声明的是整型，
+				 *   rpcd 会在进 ucode **之前**把字符串 '1' 与布尔 true 一律以
+				 *   code=2（Invalid argument）拒掉 —— 所以这里不需要（也拿不到）其它形态，
+				 *   前端必须传 `enable ? 1 : 0`。这条由契约测试与变异守卫钉住。
+				 */
 				let enable = -1;
-				if (v === true || v === 1 || v === '1') {
+				if (v === 1) {
 					enable = 1;
-				} else if (v === false || v === 0 || v === '0') {
+				} else if (v === 0) {
 					enable = 0;
 				}
 				if (enable < 0) {
