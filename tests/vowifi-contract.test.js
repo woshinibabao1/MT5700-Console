@@ -464,6 +464,68 @@ ok('★ 带 traceId（排障时能对应到这一次评估）',
 ok('★ 编排层注明「不关射频」的理由（参考项目会关，这台设备关了就是断网）',
 	/唯一上行/.test(ucSrc));
 
+/* ---------- 6c. VoWiFi 开关（用户口径：能开的功能，开不了要告知原因） ---------- */
+
+/*
+ * ★ 这台模组的 238 条 AT 命令里**没有 VoWiFi / ePDG 命令**，跟 IMS 有关的只有
+ *   AT^IMSSWITCH（手册 4.10，掉电保存）。开关落在它身上：真实可写、可回读，
+ *   不是「点一下改个本地变量」的空壳（红线 14）。
+ */
+const setBody = grab('vowifiSet', ucSrc);
+const cmdFn = ucFn(['vowifiSetCmd'], 'vowifiSetCmd');
+eq('★ 开 = AT^IMSSWITCH=1,0,0（手册 4.10 的举例写法）', run(cmdFn, 1), 'AT^IMSSWITCH=1,0,0');
+eq('★ 关 = AT^IMSSWITCH=0,0,0', run(cmdFn, 0), 'AT^IMSSWITCH=0,0,0');
+ok('ucode 注册了 mt5700.vowifi_set', /\bvowifi_set: \{/.test(ucSrc));
+ok('★ 开关只收 enable 一个参数（其余一律不接受 → 没有注入面）',
+	/vowifi_set: \{\s*\n\s*args: \{ enable: 0 \},/.test(ucSrc));
+ok('★★ 缺 enable 必须报错，不许默认成 0（默认 0＝关 IMS，是有后果的动作）',
+	/if \(v == null\) \{\s*\n\s*return \{ success: false, error: '缺少 enable 参数（0=关，1=开）' \};/.test(ucSrc));
+ok('★ enable 只认 0/1，其它一律拒绝',
+	/if \(enable < 0\) \{\s*\n\s*return \{ success: false, error: 'enable 只能是 0 或 1' \};/.test(ucSrc));
+
+/*
+ * ★★ 拒绝路径：**一条写命令都不下发**，把阻断项带回去（用户要的是原因，
+ *   不是静默失败，也不是下发一条注定失败的命令）。
+ *   断言方式：比较两侧的**位置** —— 拒绝分支必须排在真正下发之前。
+ */
+ok('★★ 本地三门没过时拒绝下发：refused 分支在 imsswitchWrite 调用之前',
+	setBody.indexOf('refused: true') >= 0
+	&& setBody.indexOf('refused: true') < setBody.indexOf('imsswitchWrite(enable)'));
+ok('★ 拒绝时把最新五门一起回给前端（用户能看见卡在哪儿，不用再点一次评估）',
+	/refused: true,[\s\S]{0,200}?facts: f/.test(setBody));
+ok('★ 只有开启方向设门禁（关 = 收敛现状，不需要前置条件）',
+	/if \(enable\) \{\s*\n\s*let local = vowifiLocalBlockers\(f\);/.test(setBody));
+
+/* 本地三门白名单：ePDG 与「IMS 已注册」不是本机/这张卡能改的事，不该挡住开启 */
+const localFn = ucFn(['vowifiLocalBlockers'], 'vowifiLocalBlockers');
+eq('★ 只把本机/本卡的四类阻断算作「不能开启」',
+	JSON.stringify(run(localFn, { success: true, blockers: ['sim_unread', 'no_impi', 'no_usim_isim',
+		'epdg_not_published', 'ims_not_registered'] })),
+	JSON.stringify(['sim_unread', 'no_impi', 'no_usim_isim']));
+eq('★★ ePDG 没发布不挡开启（它是运营商侧的网元，挡了开关就永远是死的）',
+	JSON.stringify(run(localFn, { success: true, blockers: ['epdg_not_published'] })),
+	JSON.stringify([]));
+eq('★ 评估失败时按「读不到卡」处理（不许放行）',
+	JSON.stringify(run(localFn, { success: false })), JSON.stringify(['sim_unread']));
+
+/*
+ * ★ 回读：^IMSSWITCH? 不在 rpc.js 的读缓存档（默认 2500ms），不 fresh 会捞到
+ *   下发前的旧值 → 把「已生效」误判成「没生效」（sms_settings R04 同一套约定）。
+ */
+const imsswBody = grab('imsswitchStat', ucSrc);
+ok('★★ 回读 ^IMSSWITCH? 必须 fresh（否则读到下发前的旧值）',
+	/cmd: 'AT\^IMSSWITCH\?', fresh: true/.test(imsswBody));
+const wrBody = grab('imsswitchWrite', ucSrc);
+ok('★ 写命令不带 fresh（写路径不走读缓存，带上反而误导）',
+	/cmd: vowifiSetCmd\(enable\)/.test(wrBody) && wrBody.indexOf('vowifiSetCmd(enable)') > 0
+	&& !/vowifiSetCmd\(enable\),\s*\n?\s*fresh/.test(wrBody));
+ok('★★ 回读不一致只报「未生效」，不反向重下发（手册三条失败条件那一刻通常仍成立）',
+	wrBody.indexOf('AT^IMSSWITCH') < 0 && /effective: \(actual == \(enable \? '1' : '0'\)\)/.test(wrBody));
+ok('★ 回读不到要标 unknown（不许据此断言生效）',
+	/unknown: true/.test(wrBody) && /if \(actual == null\)/.test(wrBody));
+ok('★ 下发后重跑五门（开关状态与「VoWiFi 成不成立」是两件事，都要回）',
+	/let after = vowifiFacts\(\);/.test(setBody) && /facts: after/.test(setBody));
+
 /* ---------- 7. ACL / rpc / 前端 ---------- */
 
 const aclJson = JSON.parse(aclSrc);
@@ -526,6 +588,35 @@ ok('★ 前端展示 AUTHENTICATE 实测能力（不发不出去的命令，但�
 ok('★ 前端展示 traceId', /'trace ' \+ d\.traceId/.test(viewSrc));
 ok('★★ 前端把「读不到 EF_DIR」与「没有 ISIM」分开显示（一次 AT 失败不许说成卡的客观事实）',
 	/if \(d\.identity\.dirError\) \{\s*\n\s*irows\.push\(\['卡上有 ISIM', '读不到', 'EF_DIR 读取失败（' \+ d\.identity\.dirError \+ '）'\]\);/.test(viewSrc));
+
+/* 开关：ACL / rpc / 前端三处都得通，缺一段就是点了没反应 */
+ok('★ ACL 两段都放行 vowifi_set（漏一处就是 rpcd Access denied，点了静默失败）',
+	aclHits >= 0 && aclJson['luci-app-mt5700'].read.ubus.mt5700.indexOf('vowifi_set') >= 0
+	&& aclJson['luci-app-mt5700'].write.ubus.mt5700.indexOf('vowifi_set') >= 0);
+ok('rpc.js 声明了 mt5700.vowifi_set，且参数只有 enable',
+	/method: 'vowifi_set',\s*\n\s*params: \['enable'\],/.test(rpcSrc));
+ok('rpc.js 暴露了 AtWs.vowifiSet', /\bvowifiSet: fetchVowifiSet,/.test(rpcSrc));
+ok('★ 后端没升级时前端对开关也要明确提示（不能点了什么都不出）',
+	/后端未升级：rpcd 没有 mt5700\.vowifi_set 方法/.test(viewSrc));
+ok('★ 开关用五页共用的 .mt5700-switch 组件（不另造一套开关）',
+	/var vowifiSwitchWrap = E\('div', \{ 'class': 'mt5700-switch' \}\);/.test(viewSrc));
+ok('★★ 开关状态取后端实测值，不是本地勾选记忆（掉电保存的命令会记住一次没生效的写入）',
+	/vowifiSwitch\.checked = !!\(t\.data && t\.data\.ims && String\(t\.data\.ims\.imsswitch\) === '1'\);/
+		.test(viewSrc));
+ok('★★ 关 IMS 要先确认（会断掉 IMS 短信与 VoLTE 语音），取消时把开关拨回去',
+	/Mt5700\.confirm\('关闭会下发 AT\^IMSSWITCH=0,0,0/.test(viewSrc)
+	&& /function \(\) \{ doVowifiSet\(0\); \}, '确定关闭',\s*\n\s*function \(\) \{ renderVowifiSwitch\(\); \}/
+		.test(viewSrc));
+ok('★★ 被拒绝时前端要说出「无法开启：原因」，不是笼统的「设置失败」',
+	/t\.setMsg = '无法开启：' \+ blockersToText\(r\.blockers\);/.test(viewSrc));
+ok('★ 开了但 VoWiFi 仍不成立时，要把还差什么一起说出来',
+	/'，但 VoWiFi 仍不成立：' \+ blockersToText\(r\.blockers\)/.test(viewSrc));
+ok('★ 回读不到不许说「已生效」（unknown 单独成一句）',
+	/'命令已下发，但回读不到 \^IMSSWITCH/.test(viewSrc));
+ok('★ 开关与评估两条路互斥（都碰串口，并发会让回读拿到别人的包）',
+	/vowifiSwitch\.disabled = !!\(t\.busy \|\| t\.setBusy\);/.test(viewSrc));
+ok('★ 开关文案说清「ePDG 由运营商发布，本机没有可下发的参数」（不假装开了就通）',
+	/ePDG 隧道由运营商发布，本机没有可下发的参数/.test(viewSrc));
 
 /* ---------- 汇总 ---------- */
 

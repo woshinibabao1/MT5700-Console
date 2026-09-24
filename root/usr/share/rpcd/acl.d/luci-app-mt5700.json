@@ -28,7 +28,8 @@
 						"sysdiag",
 					"es9p",
 					"exitip",
-					"vowifi"
+					"vowifi",
+					"vowifi_set"
 				],
 				"service": [
 					"list",
@@ -103,7 +104,8 @@
 					"events",
 					"es9p",
 					"exitip",
-					"vowifi"
+					"vowifi",
+					"vowifi_set"
 				],
 				"service": [
 					"set",

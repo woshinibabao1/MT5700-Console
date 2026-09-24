@@ -2130,6 +2130,144 @@ function vowifiFacts() {
 	};
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * VoWiFi 开关：开/关的是**本机这一半**（IMS 域能力）
+ * ---------------------------------------------------------------------------
+ *
+ * ★ 为什么开关落在 AT^IMSSWITCH 上（2026-09-24 查手册 + 真机实测）：
+ *   手册全部 238 条命令里**没有任何 VoWiFi / ePDG 命令**，跟 IMS 有关的只有
+ *   AT^IMSSWITCH（4.10 IMS 业务能力开关）与 AT+CIREG（IMS 注册状态查询）。
+ *   VoWiFi 走的正是 IMS，而 ePDG 隧道是**运营商侧的网元** —— 本机没有可下发的
+ *   参数。所以开关只能管到「本机 IMS 域能力」这一层，这一点在界面上写明白，
+ *   **不假装开了它 VoWiFi 就通**（红线 14：不写永远生效不了的开关）。
+ *
+ * ★ 真机实测（同一天）：
+ *   AT^IMSSWITCH?  → `^IMSSWITCH: 1,0,0`（IMS 已开）
+ *   AT^IMSSWITCH=? → `(0,1),(0,1),(0,1)`（值域正常，不是占位符）
+ *   AT^IMSSWITCH=1,0,0 → OK，回读仍是 1,0,0 —— **真实可写，不是空壳**
+ *   手册：掉电保存=Y、PIN=N；三条失败条件之一是「当前存在 IMS 业务时返回失败」。
+ *
+ * ★ 开启前先过**本地三门**（卡身份 / IMPI / AKA）：任一门不过就**一条写命令
+ *   都不下发**，并把阻断项逐条回给前端 —— 用户要的是「不能开启则告知原因」，
+ *   不是点了没反应，也不是下发一条注定失败的命令。
+ * ★ ePDG 与「IMS 已注册」**不参与开启门禁**：前者由运营商决定，后者是开关
+ *   开了之后才可能发生的事。开了开关仍不成立时，由 facts 里的 blockers 说明。
+ *
+ * ★ 写入后必须 fresh 回读（与 sms_settings.js 的 R04 同一套约定）：
+ *   ^IMSSWITCH? 不在 rpc.js 的 IDENTIFIER/STATE 读缓存档，落到默认 2500ms，
+ *   不 fresh 就会捞到下发前的旧值，把「已生效」误判成「没生效」。
+ * ★ 回读与目标不一致时**只收敛到实测值，不反向重下发**（手册那三条失败条件
+ *   在回滚那一刻通常仍然成立，反向命令大概率同样失败）。
+ */
+function vowifiSetCmd(enable) {
+	return 'AT^IMSSWITCH=' + (enable ? '1,0,0' : '0,0,0');
+}
+
+/* 只有这四项是「本机/这张卡」的问题，够得上拒绝开启；其余是运营商侧或时序问题 */
+function vowifiLocalBlockers(f) {
+	let out = [];
+	if (f == null || !f.success || f.blockers == null) {
+		out[length(out)] = 'sim_unread';
+		return out;
+	}
+	for (let i = 0; i < length(f.blockers); i++) {
+		let b = f.blockers[i];
+		if (b == 'sim_unread' || b == 'mnc_ambiguous' || b == 'no_impi' || b == 'no_usim_isim') {
+			out[length(out)] = b;
+		}
+	}
+	return out;
+}
+
+/*
+ * 下发 + 回读。返回 { sent, actual, effective, unknown, err }：
+ *   sent      写命令是否发出成功
+ *   actual    回读到的实测值（'1'/'0'，null＝读不到）
+ *   effective 回读值等于目标值
+ *   unknown   回读不到 —— 不许据此断言生效与否，如实交给前端
+ */
+function imsswitchWrite(enable) {
+	let r = rpcCall('at', { cmd: vowifiSetCmd(enable) });
+	if (r == null || !r.success) {
+		return {
+			sent: false, actual: null, effective: false, unknown: true,
+			err: (r == null ? 'AT 通道无响应' : (r.error || '下发失败'))
+		};
+	}
+	let actual = imsswitchStat();
+	if (actual == null) {
+		return { sent: true, actual: null, effective: false, unknown: true, err: '' };
+	}
+	return {
+		sent: true,
+		actual: actual,
+		effective: (actual == (enable ? '1' : '0')),
+		unknown: false,
+		err: ''
+	};
+}
+
+function vowifiSet(enable) {
+	let f = vowifiFacts();
+	if (f == null || !f.success) {
+		return { success: false, error: (f == null ? 'VoWiFi 评估返回空' : f.error) };
+	}
+
+	/* ★ 拒绝路径：本地三门没过 → 不下发任何写命令，把原因逐条带回去 */
+	if (enable) {
+		let local = vowifiLocalBlockers(f);
+		if (length(local) > 0) {
+			return {
+				success: true,
+				enable: enable,
+				applied: false,
+				refused: true,
+				blockers: local,
+				facts: f
+			};
+		}
+	}
+
+	let w = imsswitchWrite(enable);
+	if (!w.sent) {
+		return {
+			success: true,
+			enable: enable,
+			applied: false,
+			refused: false,
+			error: w.err,
+			imsswitch: null,
+			facts: f
+		};
+	}
+
+	/*
+	 * 下发后**重跑一次五门**：开关状态与「VoWiFi 成不成立」是两件事，
+	 *   前端要能同时显示「已开启」和「还差什么」（本机此时差的是 ePDG）。
+	 *   重跑失败就退回下发前的那份，不因此否认这次写入。
+	 */
+	let after = vowifiFacts();
+	if (after == null || !after.success) {
+		after = f;
+	}
+
+	return {
+		success: true,
+		enable: enable,
+		applied: true,
+		refused: false,
+		effective: w.effective,
+		unknown: w.unknown,
+		imsswitch: w.actual,
+		error: w.err,
+		blockers: after.blockers,
+		verdict: after.verdict,
+		phase: after.phase,
+		facts: after
+	};
+}
+
 function es9pMktemp() {
 	let p;
 	try {
@@ -2401,6 +2539,34 @@ return {
 			args: {},
 			call: function (req) {
 				return vowifiFacts();
+			}
+		},
+		/*
+		 * VoWiFi 开关：enable=1 开 / =0 关，动作是 AT^IMSSWITCH（本机 IMS 域能力）。
+		 * ★ 参数只有 0/1 两种取值，其它一律报错 —— 不接收命令片段、域名、通道号，
+		 *   没有任何注入面。
+		 * ★ 本地三门不过时**拒绝下发**并回 blockers（「不能开启则告知原因」）。
+		 * 返回 { success, enable, applied, refused, effective, unknown, imsswitch, blockers, facts }
+		 *   —— applied=false + refused=true 表示「没下发，原因见 blockers」。
+		 */
+		vowifi_set: {
+			args: { enable: 0 },
+			call: function (req) {
+				let v = getStr(req.args, 'enable');
+				if (v == null) {
+					return { success: false, error: '缺少 enable 参数（0=关，1=开）' };
+				}
+				/* ★ 只认 0/1：缺省值不能是 0（那是「关 IMS」这种有后果的动作） */
+				let enable = -1;
+				if (v === true || v === 1 || v === '1') {
+					enable = 1;
+				} else if (v === false || v === 0 || v === '0') {
+					enable = 0;
+				}
+				if (enable < 0) {
+					return { success: false, error: 'enable 只能是 0 或 1' };
+				}
+				return vowifiSet(enable);
 			}
 		},
 		es9p: {

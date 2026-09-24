@@ -494,6 +494,88 @@ MUTATIONS = [
         "读不到 EF_DIR",
     ),
     (
+        # ★★ 开关的方向写反：点「开」实际下发的是关 IMS 的命令。
+        #   真机后果＝IMS 短信与 VoLTE 语音一起断掉，而界面还显示「已开启」。
+        "开关方向写反（点「开」下发的是 AT^IMSSWITCH=0,0,0，直接断掉 IMS）",
+        "uc2",
+        "return 'AT^IMSSWITCH=' + (enable ? '1,0,0' : '0,0,0');",
+        "return 'AT^IMSSWITCH=' + (enable ? '0,0,0' : '1,0,0');",
+        "开 = AT^IMSSWITCH=1,0,0",
+    ),
+    (
+        # ★★ 缺 enable 时默认成 0 = 默认「关 IMS」。
+        #   任何漏传参数的调用方（含未来的新页面）都会静默断掉 IMS，是有后果的动作。
+        "开关缺 enable 时默认成 0（漏传参数＝静默关掉 IMS）",
+        "uc2",
+        "\t\t\t\tif (v == null) {\n\t\t\t\t\treturn { success: false, error: '缺少 enable 参数（0=关，1=开）' };\n\t\t\t\t}",
+        "\t\t\t\tif (v == null) {\n\t\t\t\t\tv = 0;\n\t\t\t\t}",
+        "缺 enable 必须报错",
+    ),
+    (
+        # ★★ ePDG 是运营商侧的网元，本机改不了。把它也算进「不能开启」的门禁，
+        #   这个开关在本机（中国移动卡）就永远是死的 —— 又回到「空壳开关」。
+        "把 epdg_not_published 也算进开启门禁（开关在本机永远是死的）",
+        "uc2",
+        "if (b == 'sim_unread' || b == 'mnc_ambiguous' || b == 'no_impi' || b == 'no_usim_isim') {",
+        "if (b == 'sim_unread' || b == 'mnc_ambiguous' || b == 'no_impi' || b == 'no_usim_isim'"
+        " || b == 'epdg_not_published') {",
+        "ePDG 没发布不挡开启",
+    ),
+    (
+        # ★ 开启方向的门禁一去掉，本地三门没过也会去下发一条注定失败的命令，
+        #   而用户拿到的是一句「下发失败」，不是「为什么开不了」。
+        "开启不再过本地门禁（先下发再失败，用户拿不到原因）",
+        "uc2",
+        "\tif (enable) {\n\t\tlet local = vowifiLocalBlockers(f);",
+        "\tif (false) {\n\t\tlet local = vowifiLocalBlockers(f);",
+        "只有开启方向设门禁",
+    ),
+    (
+        # ★ ^IMSSWITCH? 不在 rpc.js 的读缓存档 → 落到默认 2500ms 缓存，
+        #   不 fresh 会捞到下发前的旧值，把「已生效」误判成「没生效」（R04 同一套约定）。
+        "开关回读不再 fresh（读到下发前的旧值，制造假故障）",
+        "uc2",
+        "{ cmd: 'AT^IMSSWITCH?', fresh: true }",
+        "{ cmd: 'AT^IMSSWITCH?' }",
+        "回读 ^IMSSWITCH? 必须 fresh",
+    ),
+    (
+        # ★ 开关状态与「VoWiFi 成不成立」是两件事，都要回。
+        #   不重跑的话界面只会显示「已开启」，看不到还差 ePDG 这一门。
+        "下发后不再重跑五门（开了开关却不说还差什么）",
+        "uc2",
+        "\tlet after = vowifiFacts();",
+        "\tlet after = f;",
+        "下发后重跑五门",
+    ),
+    (
+        # ★ 参数表多一个口子，前端就能把别的东西送进 ubus。
+        "rpc 给 vowifi_set 多开一个参数（开关的口子被开大）",
+        "rpcjs2",
+        "\tmethod: 'vowifi_set',\n\tparams: ['enable'],",
+        "\tmethod: 'vowifi_set',\n\tparams: ['enable', 'cmd'],",
+        "参数只有 enable",
+    ),
+    (
+        # ★ 关 IMS 会断掉 IMS 短信与 VoLTE 语音 —— 必须确认，且取消要把开关拨回去。
+        "关 IMS 不再确认（误点一下就断掉短信与 VoLTE）",
+        "nsjs",
+        "\t\t\tif (!on) {\n\t\t\t\tMt5700.confirm('关闭会下发 AT^IMSSWITCH=0,0,0，"
+        "IMS 短信与 VoLTE 语音会一起断掉。确定关闭？',\n\t\t\t\t\tfunction () { doVowifiSet(0); }, '确定关闭',"
+        "\n\t\t\t\t\tfunction () { renderVowifiSwitch(); });\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tdoVowifiSet(1);",
+        "\t\t\tdoVowifiSet(on ? 1 : 0);",
+        "关 IMS 要先确认",
+    ),
+    (
+        # ★ 被拒绝时只报「设置失败」，用户不知道该换卡还是该等运营商 ——
+        #   正是本轮要治的「点了没反应 / 只给一句失败」。
+        "被拒绝时前端只报「设置失败」（不给原因）",
+        "nsjs",
+        "\t\t\t\tt.setMsg = '无法开启：' + blockersToText(r.blockers);",
+        "\t\t\t\tt.setMsg = '设置失败';",
+        "无法开启",
+    ),
+    (
         # 前端：不发不出去的命令，但**要说清为什么发不出去**，否则用户以为是没实现。
         "前端不再展示 AUTHENTICATE 实测能力（用户看不出为什么没实测）",
         "nsjs",

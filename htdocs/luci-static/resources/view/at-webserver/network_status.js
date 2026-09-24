@@ -85,11 +85,14 @@ return L.view.extend({
 		var flowGrid = E('div', { 'class': 'mt5700-metrics mt5700-metrics-flow mt5700-mt-md' });
 		rateCard._body.appendChild(flowGrid);
 
-		/* ⑦ VoWiFi（Wi-Fi 通话）：ePDG 可达性判定。
+		/* ⑦ VoWiFi（Wi-Fi 通话）：**开关 + 五道门判定**。
 		 *
-		 * VoWiFi＝「非 3GPP 接入 → ePDG → IMS」。第一道门是**运营商有没有在公网发布
-		 * ePDG** —— 这一维不取决于本机怎么配，只取决于插的是什么卡，所以这里做的是
-		 * 「判定」而不是「开关」。
+		 * VoWiFi＝「非 3GPP 接入 → ePDG → IMS」。这两半里：
+		 *   · **本机可控的那一半**（IMS 域能力）→ 做成真开关：下发
+		 *     `AT^IMSSWITCH=1,0,0` / `=0,0,0`（手册 4.10，掉电保存，真机实测可写）。
+		 *   · **运营商的那一半**（ePDG 有没有在公网发布）→ 只能判定，只能换卡。
+		 *     ★ 手册 238 条命令里**没有任何 VoWiFi / ePDG 命令**，所以开关管不到隧道
+		 *     那一段，这一点在开关的说明里写明白，不假装开了它 VoWiFi 就通。
 		 *
 		 * ★ 判定必须带对照（红线 49）：只查本运营商域名拿到 NXDOMAIN，分不清是
 		 *   ①运营商没发布、②本机 DNS 坏了、还是③DNS 通配污染（不存在的域名也返回
@@ -97,8 +100,29 @@ return L.view.extend({
 		 *   的 ePDG）与阴性对照（必然不存在的 mnc999）两组。阳性对照都查不到时，
 		 *   结论必须是「无法判定」，不许把锅甩给运营商。
 		 *
+		 * ★ 开不了要**告知原因**，不是点了没反应：本地三门（卡身份 / IMPI / AKA）
+		 *   任一门不过时后端**拒绝下发任何写命令**，并把阻断项逐条回给这里展示。
+		 *
 		 * ★ 尺寸固定：最多 4 行域名 + 1 行 PLMN + 1 行结论，不随结果多少撑开。 */
-		var vowifiCard = Mt5700.card('VoWiFi（Wi-Fi 通话）', '五道门能力判定');
+		var vowifiCard = Mt5700.card('VoWiFi（Wi-Fi 通话）', '开关 · 五道门能力判定');
+
+		/*
+		 * 开关（放在卡片最上面：它是这一块里唯一「能做事」的控件）。
+		 *
+		 * ★ 状态取自后端实测的 `^IMSSWITCH`，不是本地记忆的勾选状态 ——
+		 *   "已勾选"不等于"已生效"，掉电保存的命令一次没生效会被记住。
+		 * ★ 关会断掉 IMS 短信与 VoLTE 语音 → 走确认框（onCancel 把开关拨回去）。
+		 */
+		var vowifiSwitchWrap = E('div', { 'class': 'mt5700-switch' });
+		var vowifiSwitch = E('input', { type: 'checkbox' });
+		vowifiSwitchWrap.appendChild(vowifiSwitch);
+		vowifiSwitch.addEventListener('change', function () { requestVowifiSet(vowifiSwitch.checked); });
+		vowifiCard._body.appendChild(Mt5700.formGroup('VoWiFi（本机 IMS 能力）', vowifiSwitchWrap,
+			'开＝AT^IMSSWITCH=1,0,0，关＝AT^IMSSWITCH=0,0,0（掉电保存）。'
+			+ 'ePDG 隧道由运营商发布，本机没有可下发的参数 —— 开了开关仍要看下面五道门才知道通不通。'));
+		var vowifiSetMsg = E('p', { 'class': 'mt5700-hint mt5700-mt-sm' }, '');
+		vowifiCard._body.appendChild(vowifiSetMsg);
+
 		var vowifiBody = E('div');
 		vowifiCard._body.appendChild(vowifiBody);
 
@@ -169,9 +193,14 @@ return L.view.extend({
 				/* 断网排查：atSteps = L1 的 AT 逐步结果，items = L2/L3 由系统事实判定的结果。
 				   facts 是后端 diag-probe.sh 回的 key=value，factsErr 非空说明后端没升级。 */
 				diag: { busy: false, ran: false, at: 0, atSteps: [], items: [], facts: {}, factsErr: '' },
-				/* VoWiFi 能力评估：data 是后端回的整包，err 非空说明后端没升级或读不到 IMSI。
-				   ★ 手动触发、不做轮询 —— 换卡才变的东西，没有自动刷新的理由。 */
-				vowifi: { busy: false, ran: false, data: null, err: '' }
+				/* VoWiFi：data 是后端回的整包，err 非空说明后端没升级或读不到 IMSI。
+				   ★ 手动触发、不做轮询 —— 换卡才变的东西，没有自动刷新的理由。
+				   ★ setBusy/setMsg 是**开关**那一路的独立状态：评估与开关是两件事，
+				     共用一个 busy 会互相挡住（点开关时评估按钮变灰，反之亦然）。 */
+				vowifi: {
+					busy: false, ran: false, data: null, err: '',
+					setBusy: false, setMsg: ''
+				}
 			},
 			/* 12 路传感器温度，键名与 Parse.parseCHIPTEMP 的返回严格一一对应
 			   （手册 17.1：sub3G/sub6G/MIMO/TCXO/peri1/peri2/ap1/ap2/modem1/modem2/bbp1/bbp2）。
@@ -562,9 +591,95 @@ return L.view.extend({
 				+ '不是运营商没发布。先恢复上网与 DNS，再探测一次。'
 		};
 
+		/* 开关状态 = 后端实测值（^IMSSWITCH），不是本地勾选记忆 */
+		function renderVowifiSwitch() {
+			var t = state.tools.vowifi;
+			vowifiSwitch.checked = !!(t.data && t.data.ims && String(t.data.ims.imsswitch) === '1');
+			/* 评估或开关正在跑时锁住：两条路都会碰串口，并发会让回读拿到别人的包 */
+			vowifiSwitch.disabled = !!(t.busy || t.setBusy);
+			vowifiSetMsg.textContent = t.setMsg || '';
+			/* 「无法开启」是这一块要让用户看见的结论 → 用现成的红色小字类，
+			   不另造 CSS 类（另造一个不存在的类名是静默失效）。 */
+			var bad = t.setMsg.indexOf('无法开启') === 0 || t.setMsg.indexOf('失败') >= 0
+				|| t.setMsg.indexOf('未生效') >= 0;
+			vowifiSetMsg.className = bad ? 'mt5700-error' : 'mt5700-hint mt5700-mt-sm';
+		}
+
+		/* 阻断项 → 人话（文案只有一份，在 BLOCKER_TEXT 里） */
+		function blockersToText(list) {
+			if (!list || !list.length) return '原因未知';
+			var out = [];
+			for (var i = 0; i < list.length; i++) {
+				out.push(BLOCKER_TEXT[list[i]] || list[i]);
+			}
+			return out.join('；');
+		}
+
+		/*
+		 * 开关点击 → 后端 `mt5700.vowifi_set`。
+		 *
+		 * ★ 关（=0）会断掉 IMS 短信与 VoLTE 语音，先确认；取消时把开关拨回去
+		 *   （Mt5700.confirm 的第 4 个参数就是给这种场景用的）。
+		 */
+		function requestVowifiSet(on) {
+			var t = state.tools.vowifi;
+			if (t.busy || t.setBusy) { renderVowifiSwitch(); return; }
+			if (!AtWs.vowifiSet) {
+				t.setMsg = '后端未升级：rpcd 没有 mt5700.vowifi_set 方法';
+				renderVowifiSwitch();
+				return;
+			}
+			if (!on) {
+				Mt5700.confirm('关闭会下发 AT^IMSSWITCH=0,0,0，IMS 短信与 VoLTE 语音会一起断掉。确定关闭？',
+					function () { doVowifiSet(0); }, '确定关闭',
+					function () { renderVowifiSwitch(); });
+				return;
+			}
+			doVowifiSet(1);
+		}
+
+		function doVowifiSet(on) {
+			var t = state.tools.vowifi;
+			if (t.setBusy) return;
+			t.setBusy = true;
+			t.setMsg = on ? '正在开启…' : '正在关闭…';
+			renderVowifiSwitch();
+			AtWs.vowifiSet(on).then(function (r) {
+				t.setBusy = false;
+				if (!r || r.success === false) {
+					t.setMsg = '设置失败：' + ((r && r.error) || '未知原因');
+					if (!disposed) { renderVowifiSwitch(); renderVowifi(); }
+					return;
+				}
+				if (r.refused) {
+					/* ★ 拒绝不是失败：一条写命令都没下发，把原因逐条说出来 */
+					t.setMsg = '无法开启：' + blockersToText(r.blockers);
+				} else if (r.applied && r.effective) {
+					t.setMsg = (on ? '已开启' : '已关闭') + '本机 IMS 能力（实测 ^IMSSWITCH=' + r.imsswitch + '）'
+						+ (r.verdict === 'capable' ? '' : '，但 VoWiFi 仍不成立：' + blockersToText(r.blockers));
+				} else if (r.applied && r.unknown) {
+					t.setMsg = (on ? '开启' : '关闭') + '命令已下发，但回读不到 ^IMSSWITCH —— 请点「评估」刷新确认';
+				} else if (r.applied) {
+					/* 下发成功但没生效：只收敛到实测值，不反向重下发（手册三条失败条件仍在） */
+					t.setMsg = (on ? '开启' : '关闭') + '已下发但未生效（实测 ^IMSSWITCH=' + r.imsswitch + '）；'
+						+ '手册列出的常见原因是存在进行中的 IMS 业务，或语音优选模式为 PS_ONLY';
+				} else {
+					t.setMsg = '下发失败：' + (r.error || '未知原因');
+				}
+				/* 后端顺带回了一份最新的五门结果 —— 直接刷新，不用再手点一次评估 */
+				if (r.facts) {
+					t.ran = true;
+					t.data = r.facts;
+					t.err = '';
+				}
+				if (!disposed) { renderVowifiSwitch(); renderVowifi(); }
+			});
+		}
+
 		function renderVowifi() {
 			if (!vowifiBody) return;
 			var t = state.tools.vowifi;
+			renderVowifiSwitch();
 			vowifiBody.innerHTML = '';
 
 			var bar = E('div', { 'class': 'mt5700-toolbar' });

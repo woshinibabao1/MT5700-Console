@@ -117,6 +117,19 @@ var rpcVowifi = L.rpc.declare({
 	expect: {}
 });
 
+/*
+ * VoWiFi 开关：只传一个 0/1。
+ *
+ * ★ 参数表只有 enable 一项，且后端只接受 0/1（其它一律报错）—— 命令本身
+ *   （AT^IMSSWITCH=…）由后端拼，前端没有把任何字符串送进 AT 通道的路径。
+ */
+var rpcVowifiSet = L.rpc.declare({
+	object: 'mt5700',
+	method: 'vowifi_set',
+	params: ['enable'],
+	expect: {}
+});
+
 function withTimeout(p, ms, msg) {
 	/*
 	 * ★ P11（2026-09-19 会审）：竞速胜出后清掉另一路的定时器。
@@ -1405,6 +1418,30 @@ function fetchVowifi() {
 		});
 }
 
+/*
+ * VoWiFi 开关：enable=1 开 / 0 关。
+ *
+ * 返回 Promise<{success, enable, applied, refused, effective, unknown, imsswitch, blockers, facts}>。
+ * ★ refused=true 表示**后端拒绝下发**（本地三门没过），原因在 blockers 里 ——
+ *   这不是失败，是「告知原因」，前端要原样展示，不能笼统报「设置失败」。
+ * ★ unknown=true 表示下发成功但回读不到实测值，同样不许断言成「已生效」。
+ */
+function fetchVowifiSet(enable) {
+	return withTimeout(rpcVowifiSet(enable ? 1 : 0), 60000, 'VoWiFi 开关超时')
+		.then(function (resp) {
+			if (!resp || resp.success === false) {
+				return {
+					success: false,
+					error: (resp && resp.error) || 'rpcd 没有 mt5700.vowifi_set 方法（后端未升级）'
+				};
+			}
+			return resp;
+		})
+		.catch(function (err) {
+			return { success: false, error: (err && err.message) || 'VoWiFi 开关设置失败' };
+		});
+}
+
 var AtWs = {
 	client: atClient(),
 	netRate: fetchNetRate,
@@ -1412,6 +1449,7 @@ var AtWs = {
 	es9p: es9pPost,
 	exitIp: fetchExitIp,
 	vowifi: fetchVowifi,
+	vowifiSet: fetchVowifiSet,
 	es9pAvailable: es9pAvailable,
 	extractATData: extractATData,
 	extractATDataMultiline: extractATDataMultiline,
