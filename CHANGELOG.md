@@ -5,6 +5,52 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.48] - 2026-09-24
+
+### Added（VoWiFi：从「只判 ePDG 一道门」扩成五道门的编排）
+
+继续按 `1239t/vohive` 与 `MengMengCode/VoCat` 的实现思路推进。上一版只回答了
+「运营商发没发布 ePDG」，这一版把 VoWiFi 真正要过的门**按顺序列全**，
+方法名 `mt5700.epdg` 随之改为 `mt5700.vowifi`（它判的已经不止 ePDG 这一件事）：
+
+- **五道门**：卡身份（MCC/MNC）→ IMS 身份（IMPI）→ AKA 就绪 → ePDG 发布 → IMS 已注册。
+  参考 VoCat `orchestrator` 的编排思想：**「已请求 / 已启用」不是状态**，
+  每道门的 ok 只由实测事实决定，不做「前面过了所以后面也应该过」的推理。
+- **IMS 身份（IMPI）**：VoWiFi 的 EAP-AKA 用的**不是 IMSI 而是 IMPI**
+  （TS 23.003 §13.3：`<IMSI>@ims.mnc<MNC>.mcc<MCC>.3gppnetwork.org`）。
+  标准做法是先读 ISIM 的 EF_IMPI；**本模组读不到**（见下），故一律派生，
+  并在 `identity.impiSource` 如实标 `derived`，不假装读过。
+- **卡上装了哪些应用**：新增读 EF_DIR（`AT+CRSM=178,12032,<rec>,4,0,,"3F00"`），
+  按 tag 4F 取 AID、tag 50 取标签，逐条报出 USIM / ISIM。
+  **有没有 ISIM 单独报** —— 它和「有 USIM」不是一回事。
+- **阻断清单**：没过的门逐条点名（`no_usim_isim` / `epdg_not_published` / …），
+  参考 VoCat 前端的「{items} 未就绪」。只给一个「不可用」，用户不知道该换卡还是该等运营商。
+- `phase`（走到哪一步）与 `traceId`（这次评估的编号）一并返回，便于排障时对上号。
+
+### ★ 三条真机实测给出的事实（本版最主要的产出是「知道在哪里停」）
+
+- **`AT+CRSM` 的 `<path>` 不接受 AID**：传 16 字节 AID 一律
+  `+CME ERROR: Incorrect parameters`，只认 `"3F00"` 这种 MF 路径；
+  不带 path 读 EF_DIR 则一律 `+CME ERROR: UNKNOWN`。
+- **`AT+CSIM` 的命令长度上限是 42 个十六进制字符**：42 通过，**44 起一律 ERROR**
+  （用同一条 SELECT 补填充到 44 也一样，与命令内容无关）。
+  而 USIM AUTHENTICATE（`80 88 00 80 22 <RAND 16B><AUTN 16B> 00`）需要 76 个 ——
+  **发不出去**。所以「这张卡能不能真的算一次 AKA」在本机上无法实测；
+  `aka.probe.supported` 如实报 false 并把两个数字带回前端，**不写一个永远跑不到的分支**。
+- **设备上没有任何可用的 UDP 发包工具**（无 socat / nping / python / perl，
+  busybox 的 `nc` 是精简版无 `-u`），所以 ePDG 的**隧道可达性无法在本机验证**。
+  这一门直接不做，而不是用 TCP 探测去冒充（TCP 不通 ≠ UDP 不通，会误导）。
+
+### Changed
+
+- `mt5700.epdg` → `mt5700.vowifi`（ACL 两处 / rpc.js / 前端一起改名，不留旧名残留）。
+- 阶段链从 ePDG 层上移到编排层：ePDG 只报自己的四态结论，五道门只在 `vowifiFacts()`
+  里组装 —— 两套 stages 必然有一套没人看。
+
+### Fixed
+
+- 前端 `EPDG_STAGE_LABEL` 是没人用的死代码（阶段文案其实由后端下发），本版删除。
+
 ## [2.3.47] - 2026-09-24
 
 ### Added（VoWiFi / ePDG 体检：按参考项目的判定链重写）

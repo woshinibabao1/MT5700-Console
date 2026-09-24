@@ -66,7 +66,7 @@ TARGETS = {
     #   与 single-source-contract）→ 变异生效但没人判红 → 比没守卫更危险（红线 16b）。
     "parsejs3": ATWB / "parse.js",
     "smssetjs2": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
-    # ★ 再挂三个键（2026-09-24）：ePDG / VoWiFi 判定的守卫在自己的 epdg-contract 里。
+    # ★ 再挂三个键（2026-09-24）：VoWiFi 判定的守卫在自己的 vowifi-contract 里。
     #   复用 uc / rpcjs / msjs 会**跑错测试**（它们分别固定跑 exitip-contract、
     #   single-source-contract、device-control-contract）→ 变异生效却没人判红
     #   → 比没守卫更危险（红线 16b）。
@@ -100,9 +100,9 @@ TARGET_TEST = {
     "parsejs2": ROOT / "tests" / "exitip-contract.test.js",
     "parsejs3": ROOT / "tests" / "sms-reachability-contract.test.js",
     "smssetjs2": ROOT / "tests" / "sms-reachability-contract.test.js",
-    "uc2": ROOT / "tests" / "epdg-contract.test.js",
-    "rpcjs2": ROOT / "tests" / "epdg-contract.test.js",
-    "nsjs": ROOT / "tests" / "epdg-contract.test.js",
+    "uc2": ROOT / "tests" / "vowifi-contract.test.js",
+    "rpcjs2": ROOT / "tests" / "vowifi-contract.test.js",
+    "nsjs": ROOT / "tests" / "vowifi-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -295,7 +295,9 @@ MUTATIONS = [
         "uc2",
         "\tlet aka = akaEvidence(aidInfo);",
         "\tlet aka = akaEvidence(aidInfo);\n\trpcCall('at', { cmd: 'AT+CCHO=\"A0000000871002\"' });",
-        "ePDG/VoWiFi 探测全程不许发 AT+CCHO",
+        # ★ 断言名随方法改名（epdg → vowifi）同步改名，关键词必须跟着改，
+        #   否则变异生效却匹配不到断言 → 显示「被放过」（红线 16b）。
+        "VoWiFi 评估全程不许发 AT+CCHO",
     ),
     (
         # ★★ 真机真踩过这一条（2026-09-24）：去掉这道门禁后，busybox nslookup 开头的
@@ -330,6 +332,136 @@ MUTATIONS = [
         "\t\t\t}\n"
         "\t\t}",
         "NXDOMAIN 输出（真机格式）一个地址都不产生",
+    ),
+    # ---------- 2026-09-24 VoWiFi 五道门：EF_DIR / IMPI / AKA 实测能力 ----------
+    (
+        # ★★ 真机（2026-09-24）：AT+CRSM 读 EF_DIR **不带 path** 一律回
+        #   "+CME ERROR: UNKNOWN"，整条身份链直接断在第一步。
+        # ★ 锚点唯一性已核：这条命令串全仓只出现 1 次（efDirApps 内）。
+        "EF_DIR 读记录不带 path（真机实测：一律 +CME ERROR: UNKNOWN，身份链断在第一步）",
+        "uc2",
+        "'AT+CRSM=178,' + EF_DIR_ID + ',' + rec + ',4,0,,\"' + EF_DIR_PATH + '\"'",
+        "'AT+CRSM=178,' + EF_DIR_ID + ',' + rec + ',4,0,'",
+        # ★ 关键词要指向**真的会红的那条断言**：改的是使用处，判红的是
+        #   「EF_DIR 用 AT+CRSM=178 读记录」；常量的那条断言不会红（常量没动）。
+        "EF_DIR 用 AT+CRSM=178 读记录",
+    ),
+    (
+        # ★ 锚点唯一性已核：`if (crsmSw(r.data) != '9000') {` 全仓 1 次（efDirApps 内）。
+        #   6A83（记录不存在）是「读完了」的正常结束信号；不看状态字会一路读到 6 条上限，
+        #   把空记录塞进 apps 里。
+        "EF_DIR 不再看状态字（6A83＝读完的信号丢了，空记录被当应用）",
+        "uc2",
+        "\t\tif (crsmSw(r.data) != '9000') {\n\t\t\tbreak;\n\t\t}",
+        "\t\tif (false) {\n\t\t\tbreak;\n\t\t}",
+        "状态字不是 9000 就停",
+    ),
+    (
+        # ★ 锚点唯一性已核：`return decHex2(sw1) + decHex2(sw2);` 全仓 1 次。
+        #   CRSM 的 sw 是**十进制**回的（106,131），不转十六进制就判不出 6A83。
+        "crsmSw 不再把十进制 sw 转成十六进制（6A83 判不出来）",
+        "uc2",
+        "return decHex2(sw1) + decHex2(sw2);",
+        "return sw1 + sw2;",
+        "106,131 解成 6A83",
+    ),
+    (
+        # ★★ 锚点唯一性已核：`if (k == '02') {\n\t\t\treturn 'USIM';\n\t\t}` 全仓 1 次
+        #   （appKind 内；uiccAkaAid 里那段变量名是 kind，写法不同）。
+        #   真机本卡 EF_DIR 里只有一条 USIM 记录（rec2 起就是 6A83）——
+        #   一旦把别的应用也判成 USIM，「卡上没有 ISIM」这类关键事实就没了。
+        "appKind 把非 USIM 的 AID 也判成 USIM（应用类型全失真）",
+        "uc2",
+        "\t\tif (k == '02') {\n\t\t\treturn 'USIM';\n\t\t}",
+        "\t\treturn 'USIM';",
+        "appKind 认 ISIM",
+    ),
+    (
+        # ★ 锚点唯一性已核：mnc3Of 的补零分支全仓 1 次。
+        #   TS 23.003 的 IMS 域名里 MNC 恒三位；不补就会拼出 mnc00.mcc460 这种错域名。
+        "MNC 不补零（TS 23.003 的 IMS 域名里 MNC 恒三位）",
+        "uc2",
+        "\tif (length(mnc) == 3) {\n\t\treturn mnc;\n\t}\n\treturn '0' + mnc;",
+        "\treturn mnc;",
+        "两位 MNC 补成三位",
+    ),
+    (
+        # ★ 锚点唯一性已核：全仓 1 次（deriveImpi 内）。
+        "IMPI 派生式少拼 ims. 段（EAP-AKA 拿到一个运营商不认的身份）",
+        "uc2",
+        "return imsi + '@ims.mnc' + mnc3 + '.mcc' + mcc + '.3gppnetwork.org';",
+        "return imsi + '@mnc' + mnc3 + '.mcc' + mcc + '.3gppnetwork.org';",
+        "拼出真机 IMPI",
+    ),
+    (
+        # ★★★ 本轮最重要的一条。真机实测：AT+CSIM 上限 42 个十六进制字符，
+        #   而 USIM AUTHENTICATE 需要 76 —— **发不出去**。
+        #   拍成 true 等于凭空宣称「能实测 AKA」，是红线 14 那类空壳能力。
+        # ★ 锚点唯一性已核：全仓 1 次。
+        "AKA 实测能力拍成「支持」（抹掉 42<76 这条真机事实，宣称能发 AUTHENTICATE）",
+        "uc2",
+        "return AKA_AUTH_HEX <= CSIM_MAX_HEX;",
+        "return true;",
+        "本模组不支持 AUTHENTICATE 实测",
+    ),
+    (
+        # ★ 同上：把常量拍大也能让 supported 变 true，是同一条事实的另一条逃逸路径。
+        "CSIM 上限常量拍大（AUTHENTICATE 被当成能发出去）",
+        "uc2",
+        "const CSIM_MAX_HEX = 42;",
+        "const CSIM_MAX_HEX = 512;",
+        "CSIM 上限常量取真机实测值 42",
+    ),
+    (
+        # ★ 锚点唯一性已核：`ok: (impi != ''),` 全仓 1 次（vowifiFacts 的 identity 门）。
+        #   VoWiFi 用的是 IMPI 不是 IMSI —— 省掉这道门等于把「身份都没有」算作通过。
+        "identity 门恒绿（不判 IMPI 有没有就放行）",
+        "uc2",
+        "\t\t\tok: (impi != ''),",
+        "\t\t\tok: true,",
+        "identity 门独立存在",
+    ),
+    (
+        # ★ 锚点唯一性已核：全仓 1 次。
+        #   阻断清单的价值在于**逐条点名**：只给一个「不可用」，用户不知道该换卡还是该等运营商。
+        "阻断清单丢掉 no_usim_isim（卡上没 USIM/ISIM 这条关键事实不再点名）",
+        "uc2",
+        "\t\tblockers[length(blockers)] = 'no_usim_isim';",
+        "\t\tblockers[length(blockers)] = '';",
+        "逐条点名",
+    ),
+    (
+        # ★ 锚点唯一性已核：全仓 1 次。
+        #   ePDG 无法判定（两条链路都没结论）时必须说 unknown，不许说「不通」。
+        "ePDG 无法判定时总判定仍落 blocked（把「测不出来」说成「不通」）",
+        "uc2",
+        "\t} else if (ep.verdict == 'unknown') {\n\t\tverdict = 'unknown';",
+        "\t} else if (false) {\n\t\tverdict = 'unknown';",
+        "ePDG 无法判定时总判定不许说",
+    ),
+    (
+        # 前端：不发不出去的命令，但**要说清为什么发不出去**，否则用户以为是没实现。
+        "前端不再展示 AUTHENTICATE 实测能力（用户看不出为什么没实测）",
+        "nsjs",
+        "\t\t\tirows.push(['AUTHENTICATE 实测',",
+        "\t\t\tirows.push(['AKA 实测',",
+        "前端展示 AUTHENTICATE 实测能力",
+    ),
+    (
+        # 前端：阻断清单少一项，界面就会显示 undefined（测试逐 key 断言覆盖）。
+        "前端 BLOCKER_TEXT 少了 epdg_not_published（界面显示 undefined）",
+        "nsjs",
+        "\t\t\tepdg_not_published: '运营商未在公网发布 ePDG（这台设备改不了，只能换一张其运营商发布了 ePDG 的卡）',\n",
+        "",
+        "覆盖了后端阻断项 epdg_not_published",
+    ),
+    (
+        # ★ 一旦开放 params，这个登录用户能用的口子就变成「借路由器做任意 DNS 探测」。
+        "rpc 声明开放 params（域名由后端拼的口子被打开）",
+        "rpcjs2",
+        "\tmethod: 'vowifi',\n\tparams: [],",
+        "\tmethod: 'vowifi',\n\tparams: ['fqdn'],",
+        "rpc 声明不带 params",
     ),
     (
         "去掉时间窗（退化成只靠轮数上限）",

@@ -1692,46 +1692,11 @@ function epdgFacts() {
 	}
 
 	/*
-	 * 阶段链 —— 参考 VoCat 的 State（SIMReady / AccessReady / TunnelReady / IMSReady）：
-	 * 每一阶段是**独立的一道门**，前一门没过不等于后一门没过，
-	 * 也不等于整条路不通。分开报，用户才知道卡在哪一步。
-	 * ★ ok 只由实测事实决定，不做「前面过了所以后面也应该过」的推理。
+	 * ★ 这里**不组装阶段链**：ePDG 只是 VoWiFi 五道门里的第三道。
+	 *   阶段链、阻断清单、总判定都在 vowifiFacts() 里（那里才有五道门的全部事实）。
+	 *   放在这里会变成「ePDG 探测顺手报一个四段链」，两套 stages 前端只认一套，
+	 *   另一套必然是没人看的死数据。
 	 */
-	let stages = [
-		{
-			key: 'sim',
-			label: '卡身份（MCC/MNC）',
-			ok: (imsi != '' && mcc != '' && mnc != ''),
-			detail: 'IMSI ' + imsi + ' · MCC ' + mcc + ' / MNC ' + mnc
-				+ '（' + (mncSource == 'ef_ad' ? 'EF_AD 定长'
-					: (mncSource == 'ehplmn' ? 'EF_EHPLMN 兜底' : '未定长，两种都查')) + '）'
-		},
-		{
-			key: 'aka',
-			label: '卡上有 USIM/ISIM 应用',
-			ok: (aka != null && aka.ready),
-			detail: (aka.aid == null ? '没读到 AKA 应用 AID（' + aka.how + '）'
-				: (aka.app + ' ' + aka.aid + ' · 来自卡上 FCI；'
-					+ '未开逻辑通道实测（通道占上后不可回收，见 akaEvidence 注释）'))
-		},
-		{
-			key: 'epdg',
-			label: '运营商发布 ePDG',
-			ok: (verdict == 'available'),
-			detail: (verdict == 'available' ? '已解析到 ePDG 地址'
-				: (verdict == 'not_published' ? '公网查不到该运营商的 ePDG'
-					: (verdict == 'polluted' ? 'DNS 通配污染，拿到的不是真地址'
-						: '两条解析链路都没给出确定结论')))
-		},
-		{
-			key: 'ims',
-			label: 'IMS 已注册',
-			ok: (imsStat != null && imsStat == '1'),
-			detail: (imsStat == null ? 'AT+CIREG? 读不到'
-				: '+CIREG stat=' + imsStat + (imsStat == '1' ? '（已注册）' : '（未注册）'))
-		}
-	];
-
 	return {
 		success: true,
 		imsi: imsi,
@@ -1749,8 +1714,393 @@ function epdgFacts() {
 		posCtl: posCtl,
 		negCtl: negCtl,
 		verdict: verdict,
-		stages: stages,
 		at: time()
+	};
+}
+
+/* ---------- VoWiFi 的第二半：卡上装了哪些应用 / IMPI 从哪来 ----------
+ *
+ * ★ 参考 VoCat 的 identity discovery：VoWiFi 的 EAP-AKA 用的**不是 IMSI**，
+ *   而是 IMPI（IMS Private Identity），形如
+ *       <IMSI>@ims.mnc<MNC>.mcc<MCC>.3gppnetwork.org   （3GPP TS 23.003 §13.3）
+ *   标准做法是**先读 ISIM 的 EF_IMPI**，卡上没有 ISIM 才按上式派生
+ *   （VoCat 的 types.go 明确写了「IMS 没下发号码时不从 IMSI 推断」，
+ *   但 IMPI 是可以从 IMSI 派生的，两者不是一回事）。
+ *
+ * ★★ 本设备实测（2026-09-24）→ 为什么这里一律走派生而不去读 ISIM：
+ *   - AT+CRSM 的 <path> **不接受 AID**：传 16 字节 AID 一律回
+ *     "+CME ERROR: Incorrect parameters"，只认 "3F00" 这种 MF 路径；
+ *   - AT+CSIM 下 SELECT EF（00 A4 02 xx 02 <FID>）对本卡一律回 6B00。
+ *   → ISIM 下面的 EF 在本机上**读不到**。不假装能读：identity.impiSource
+ *     恒定是 "derived"，卡上有没有 ISIM 另外单独报（它本身就是要紧的证据）。
+ */
+const EF_DIR_ID = 12032;        /* 0x2F00　EF_DIR：列出卡上装了哪些应用 */
+const EF_DIR_PATH = '3F00';     /* ★ 必须带 path，不带就 +CME ERROR: UNKNOWN（真机实测） */
+const EF_DIR_MAX_REC = 6;       /* 线性记录文件，读满 6 条就停，不无限读 */
+
+/*
+ * ★★ AT+CSIM 在本模组上的命令长度上限（真机实测 2026-09-24）：
+ *   42 个十六进制字符（21 字节）通过，44 起一律 "ERROR"（与命令内容无关 ——
+ *   用同一条 SELECT 命令补填充到 44 也一样 ERROR）。
+ *   而 USIM AUTHENTICATE（80 88 00 80 22 <RAND 16B><AUTN 16B> 00）需要 76 个
+ *   十六进制字符 —— **发不出去**。
+ *   → 「这张卡能不能真的算一次 AKA」在本机上无法实测。这不是漏实现，是通道
+ *     不支持；aka.probe.supported 如实报 false，不写一个永远跑不到的分支。
+ */
+const CSIM_MAX_HEX = 42;
+const AKA_AUTH_HEX = 76;
+
+/* 十进制字符串 → 2 位十六进制（CRSM 的 sw1/sw2 是十进制回的） */
+function decHex2(s) {
+	let v = 0;
+	for (let i = 0; i < length(s); i++) {
+		let c = substr(s, i, 1);
+		if (c < '0' || c > '9') {
+			return '??';
+		}
+		v = v * 10 + index('0123456789', c);
+	}
+	if (v > 255) {
+		return '??';
+	}
+	return substr(HEX_UP, (v >> 4) & 15, 1) + substr(HEX_UP, v & 15, 1);
+}
+
+/*
+ * CRSM 的状态字 → 4 位十六进制（如 "6A83"）。解析不出来返回 null。
+ * ★ 与 crsmOk 的分工：crsmOk 只回答「是不是 9000」（读 EF 内容那几处在用），
+ *   这里要拿**完整**状态字 —— EF_DIR 得靠 6A83 才知道「记录读完了」，
+ *   只看成功/失败会把「读完」和「出错」混成一回事。
+ */
+function crsmSw(data) {
+	if (data == null) {
+		return null;
+	}
+	let k = index(data, '+CRSM:');
+	if (k < 0) {
+		return null;
+	}
+	let s = substr(data, k + length('+CRSM:'));
+	let c = index(s, ',');
+	if (c < 0) {
+		return null;
+	}
+	let sw1 = trim(substr(s, 0, c));
+	let s2 = substr(s, c + 1);
+	let c2 = index(s2, ',');
+	if (c2 < 0) {
+		c2 = index(s2, '"');
+	}
+	if (c2 < 0) {
+		c2 = length(s2);
+	}
+	let sw2 = trim(substr(s2, 0, c2));
+	return decHex2(sw1) + decHex2(sw2);
+}
+
+/* 在 hex 串里找 <tag> 的值（BER-TLV，只认短格式长度）。找不到返回 null。 */
+function tlvVal(hex, tag) {
+	if (hex == null) {
+		return null;
+	}
+	let n = length(hex);
+	let i = 0;
+	while (i + 4 <= n) {
+		if (substr(hex, i, 2) == tag) {
+			let lb = hexPairVal(hex, i + 2);
+			if (lb > 0 && i + 4 + lb * 2 <= n) {
+				return substr(hex, i + 4, lb * 2);
+			}
+		}
+		i = i + 2;
+	}
+	return null;
+}
+
+const ASCII_VISIBLE = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+
+/* hex → 可打印 ASCII。★ 遇到**第一个**不可打印字节就停（不猜 UCS2/其它编码）。 */
+function hexAscii(hex) {
+	if (hex == null) {
+		return '';
+	}
+	let out = '';
+	for (let i = 0; i + 2 <= length(hex); i = i + 2) {
+		let v = hexPairVal(hex, i);
+		if (v < 32 || v > 126) {
+			return out;
+		}
+		out = out + substr(ASCII_VISIBLE, v - 32, 1);
+	}
+	return out;
+}
+
+/* AID → 应用类型。★ 只认 3GPP 定义的两个前缀，别的如实说「其它」。 */
+function appKind(aid) {
+	if (aid == null || length(aid) < 14) {
+		return 'other';
+	}
+	if (substr(aid, 0, 12) == 'A00000008710') {
+		let k = substr(aid, 12, 2);
+		if (k == '02') {
+			return 'USIM';
+		}
+		if (k == '04') {
+			return 'ISIM';
+		}
+	}
+	return 'other';
+}
+
+/*
+ * 卡上装了哪些应用（EF_DIR 逐条读记录）。
+ * ★ 结束条件只有两个：读到 6 条，或者状态字不是 9000（6A83＝记录不存在＝读完了）。
+ *   其它状态字同样停 —— 不猜「再读一条也许就有了」。
+ */
+function efDirApps() {
+	let apps = [];
+	for (let rec = 1; rec <= EF_DIR_MAX_REC; rec++) {
+		let r = rpcCall('at', {
+			cmd: 'AT+CRSM=178,' + EF_DIR_ID + ',' + rec + ',4,0,,"' + EF_DIR_PATH + '"',
+			fresh: true
+		});
+		if (r == null || !r.success || r.data == null) {
+			break;
+		}
+		if (crsmSw(r.data) != '9000') {
+			break;
+		}
+		let hex = crsmHex(r.data);
+		if (hex == null) {
+			break;
+		}
+		let aid = tlvVal(hex, '4F');
+		/* 这条记录没 AID（空记录/别的东西）：跳过继续读下一条，不当成结束 */
+		if (aid != null) {
+			apps[length(apps)] = {
+				aid: aid,
+				kind: appKind(aid),
+				label: hexAscii(tlvVal(hex, '50'))
+			};
+		}
+	}
+	return apps;
+}
+
+function isimOf(apps) {
+	for (let i = 0; i < length(apps); i++) {
+		if (apps[i].kind == 'ISIM') {
+			return apps[i];
+		}
+	}
+	return null;
+}
+
+/* MNC 补成三位（TS 23.003 的域名里 MNC 恒三位，不足补前导零） */
+function mnc3Of(mnc) {
+	if (mnc == null || length(mnc) == 0 || length(mnc) > 3) {
+		return '';
+	}
+	if (length(mnc) == 3) {
+		return mnc;
+	}
+	return '0' + mnc;
+}
+
+/* IMPI 派生式（TS 23.003 §13.3）。参数不全就返回空串，不拼半个出来。 */
+function deriveImpi(imsi, mcc, mnc3) {
+	if (imsi == '' || length(mcc) != 3 || length(mnc3) != 3) {
+		return '';
+	}
+	return imsi + '@ims.mnc' + mnc3 + '.mcc' + mcc + '.3gppnetwork.org';
+}
+
+/* 本模组能不能真的发一次 USIM AUTHENTICATE（见 CSIM_MAX_HEX 的实测注释） */
+function akaProbeSupported() {
+	return AKA_AUTH_HEX <= CSIM_MAX_HEX;
+}
+
+/* AT^IMSSWITCH? 的第一个值：LTE 上的 IMS 业务开关（1=开）。读不到返回 null。 */
+function imsswitchStat() {
+	let r = rpcCall('at', { cmd: 'AT^IMSSWITCH?', fresh: true });
+	if (r == null || !r.success || r.data == null) {
+		return null;
+	}
+	let k = index(r.data, '^IMSSWITCH:');
+	if (k < 0) {
+		return null;
+	}
+	let s = trim(substr(r.data, k + length('^IMSSWITCH:')));
+	if (length(s) == 0) {
+		return null;
+	}
+	return substr(s, 0, 1);
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * VoWiFi 编排：把上面这些事实**按顺序过五道门**
+ * ---------------------------------------------------------------------------
+ *
+ * ★ 参考 VoCat orchestrator 的编排思想（Enable 的迁移条件逐条独立判定）：
+ *   SIM 身份 → IMS 身份（IMPI）→ AKA 就绪 → ePDG 发布 → IMS 已注册。
+ *   **「已请求/已启用」不是状态**（VoCat types.go 的注释），所以这里没有
+ *   「开了 VoWiFi 就算 ready」这种说法；每一门的 ok 只由实测事实决定，
+ *   不做「前面过了所以后面也应该过」的推理。
+ *
+ * ★ 与参考项目的**刻意差异**（CPE 不是手机）：
+ *   VoCat 在启用时会先关蜂窝射频（CFUN=4），因为手机是把 Wi-Fi 当替代承载。
+ *   这台设备的蜂窝是**唯一上行**，关射频＝断网，所以这里**全程只读**，
+ *   一条会改动模组状态的命令都不发（也不发 AT+CCHO，见 akaEvidence 的注释）。
+ */
+function vowifiTraceId(iccid) {
+	let tail = (iccid != null && length(iccid) >= 4) ? substr(iccid, length(iccid) - 4) : '0000';
+	return 'vw-' + time() + '-' + tail;
+}
+
+function vowifiFacts() {
+	let ep = epdgFacts();
+	if (ep == null || !ep.success) {
+		return { success: false, error: (ep == null ? 'ePDG 探测返回空' : ep.error) };
+	}
+
+	let apps = efDirApps();
+	let isim = isimOf(apps);
+	let mnc3 = mnc3Of(ep.mnc);
+	let impi = deriveImpi(ep.imsi, ep.mcc, mnc3);
+	let imsDomain = (length(mnc3) == 3 && length(ep.mcc) == 3)
+		? 'ims.mnc' + mnc3 + '.mcc' + ep.mcc + '.3gppnetwork.org' : '';
+	let imssw = imsswitchStat();
+
+	let simOk = (ep.imsi != '' && ep.mcc != '' && ep.mnc != '' && ep.mncSource != 'ambiguous');
+	let akaOk = (ep.aka != null && ep.aka.ready);
+	let epdgOk = (ep.verdict == 'available');
+	let imsOk = (ep.ims.stat != null && ep.ims.stat == '1');
+
+	let stages = [
+		{
+			key: 'sim',
+			label: '卡身份（MCC/MNC）',
+			ok: simOk,
+			detail: 'IMSI ' + ep.imsi + ' · MCC ' + ep.mcc + ' / MNC ' + ep.mnc
+				+ '（' + (ep.mncSource == 'ef_ad' ? 'EF_AD 定长'
+					: (ep.mncSource == 'ehplmn' ? 'EF_EHPLMN 兜底' : '未定长，两种都查')) + '）'
+		},
+		{
+			key: 'identity',
+			label: 'IMS 身份（IMPI）',
+			ok: (impi != ''),
+			detail: (impi == '' ? 'IMSI/MCC/MNC 不全，无法构造 IMPI'
+				: impi + '（派生；本模组读不到 ISIM 下的 EF_IMPI，见 efDirApps 注释）')
+		},
+		{
+			key: 'aka',
+			label: '卡上有 USIM/ISIM 应用',
+			ok: akaOk,
+			detail: (ep.aka.aid == null ? '没读到 AKA 应用 AID（' + ep.aka.how + '）'
+				: (ep.aka.app + ' ' + ep.aka.aid + ' · 卡上 FCI 自报；'
+					+ 'AUTHENTICATE 实测：' + (akaProbeSupported() ? '可发' : '本模组发不出去')))
+		},
+		{
+			key: 'epdg',
+			label: '运营商发布 ePDG',
+			ok: epdgOk,
+			detail: (epdgOk ? '已解析到 ePDG 地址'
+				: (ep.verdict == 'not_published' ? '公网查不到该运营商的 ePDG'
+					: (ep.verdict == 'polluted' ? 'DNS 通配污染，拿到的不是真地址'
+						: '两条解析链路都没给出确定结论')))
+		},
+		{
+			key: 'ims',
+			label: 'IMS 已注册',
+			ok: imsOk,
+			detail: (ep.ims.stat == null ? 'AT+CIREG? 读不到'
+				: '+CIREG stat=' + ep.ims.stat + (imsOk ? '（已注册）' : '（未注册）')
+					+ ' · ^IMSSWITCH=' + (imssw == null ? '读不到' : imssw))
+		}
+	];
+
+	/*
+	 * 阻断清单 —— 「没过哪几道门」必须能逐条点名（参考 VoCat 前端的
+	 * 「{items} 未就绪」），只给一个「不可用」用户不知道该换卡还是该等运营商。
+	 */
+	let blockers = [];
+	if (!simOk) {
+		blockers[length(blockers)] = (ep.mncSource == 'ambiguous') ? 'mnc_ambiguous' : 'sim_unread';
+	}
+	if (impi == '') {
+		blockers[length(blockers)] = 'no_impi';
+	}
+	if (!akaOk) {
+		blockers[length(blockers)] = 'no_usim_isim';
+	}
+	if (!epdgOk) {
+		blockers[length(blockers)] = 'epdg_' + ep.verdict;
+	}
+	if (!imsOk) {
+		blockers[length(blockers)] = 'ims_not_registered';
+	}
+
+	const PHASE_BY_STAGE = ['sim_ready', 'identity_ready', 'aka_ready', 'access_ready', 'ims_ready'];
+	let phase = 'blocked';
+	for (let i = 0; i < length(stages); i++) {
+		if (stages[i].ok) {
+			phase = PHASE_BY_STAGE[i];
+		}
+	}
+
+	/* 总判定：五门全过才叫「这条路通」；ePDG 无法判定时不许说「不通」。 */
+	let verdict = 'blocked';
+	if (length(blockers) == 0) {
+		verdict = 'capable';
+	} else if (ep.verdict == 'unknown') {
+		verdict = 'unknown';
+	}
+
+	return {
+		success: true,
+		traceId: vowifiTraceId(ep.iccid),
+		at: time(),
+		imsi: ep.imsi,
+		iccid: ep.iccid,
+		mcc: ep.mcc,
+		mnc: ep.mnc,
+		mncLen: ep.mncLen,
+		mncSource: ep.mncSource,
+		identity: {
+			impi: impi,
+			impiSource: 'derived',
+			imsDomain: imsDomain,
+			isim: (isim == null ? null : { aid: isim.aid, label: isim.label }),
+			apps: apps
+		},
+		aka: {
+			ready: akaOk,
+			app: ep.aka.app,
+			aid: ep.aka.aid,
+			evidence: ep.aka.how,
+			probe: {
+				supported: akaProbeSupported(),
+				apduHex: AKA_AUTH_HEX,
+				maxHex: CSIM_MAX_HEX
+			}
+		},
+		epdg: {
+			verdict: ep.verdict,
+			items: ep.items,
+			posCtl: ep.posCtl,
+			negCtl: ep.negCtl
+		},
+		ims: {
+			stat: ep.ims.stat,
+			registered: imsOk,
+			imsswitch: imssw,
+			smsc: ep.smsc
+		},
+		stages: stages,
+		blockers: blockers,
+		phase: phase,
+		verdict: verdict
 	};
 }
 
@@ -2015,15 +2365,16 @@ return {
 			}
 		},
 		/*
-		 * ePDG 探测：回答「这张卡能不能走 VoWiFi（Wi-Fi 通话）」。
+		 * VoWiFi 能力评估：按顺序过五道门（卡身份 / IMS 身份 / AKA / ePDG / IMS 注册）。
 		 * 无参数 —— 域名由后端从 IMSI 自己拼，DNS 与对照域名都是常量。
-		 * 返回 { success, imsi, mcc, mnc, items[], posCtl, negCtl, verdict }，
-		 * 只给事实与四态结论，文案与排版在前端。
+		 * 返回 { success, traceId, identity, aka, epdg, ims, stages[], blockers[], phase, verdict }，
+		 * 只给事实与逐门结论，文案与排版在前端。
+		 * ★ 全程只读：这台设备的蜂窝是唯一上行，任何关射频 / 停数据的动作都是断网。
 		 */
-		epdg: {
+		vowifi: {
 			args: {},
 			call: function (req) {
-				return epdgFacts();
+				return vowifiFacts();
 			}
 		},
 		es9p: {
