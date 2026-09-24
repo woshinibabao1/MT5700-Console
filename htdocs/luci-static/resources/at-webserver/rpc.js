@@ -103,6 +103,20 @@ var rpcExitIp = L.rpc.declare({
 	expect: {}
 });
 
+/*
+ * ePDG 探测（VoWiFi / Wi-Fi 通话的第一道门）。
+ *
+ * ★ 无参数是有意为之：域名由后端从 AT+CIMI 读到的 IMSI 自己拼，DNS 服务器与
+ *   对照域名都是写死常量。这里一旦开放「传个域名进来查查」，这条通道就变成
+ *   登录用户借路由器做任意 DNS 探测的接口 —— 不开这个口子。
+ */
+var rpcEpdg = L.rpc.declare({
+	object: 'mt5700',
+	method: 'epdg',
+	params: [],
+	expect: {}
+});
+
 function withTimeout(p, ms, msg) {
 	/*
 	 * ★ P11（2026-09-19 会审）：竞速胜出后清掉另一路的定时器。
@@ -1367,12 +1381,35 @@ function fetchExitIp(bind) {
 		});
 }
 
+/*
+ * ePDG 探测：返回 Promise<{success, imsi, mcc, mnc, items[], posCtl, negCtl, verdict} | {success:false, error}>。
+ *
+ * 后端已经把域名解析成「四态结论」（available / polluted / not_published / unknown），
+ * 这里只做传输与失败兜底，不重新判定 —— 判定规则只有一处，改起来才不会两边打架。
+ *
+ * 超时给 45s：后端最多 4 个域名 × 2 个 DNS × 6s。正常情况（NXDOMAIN 秒回）远小于此，
+ * 只有 DNS 服务器整个不可达才会跑满，那时如实报超时比让用户干等强。
+ */
+function fetchEpdg() {
+	return withTimeout(rpcEpdg(), 45000, 'ePDG 探测超时')
+		.then(function (resp) {
+			if (!resp || resp.success === false) {
+				return { success: false, error: (resp && resp.error) || 'rpcd 没有 mt5700.epdg 方法（后端未升级）' };
+			}
+			return resp;
+		})
+		.catch(function (err) {
+			return { success: false, error: (err && err.message) || 'ePDG 探测失败' };
+		});
+}
+
 var AtWs = {
 	client: atClient(),
 	netRate: fetchNetRate,
 	sysDiag: fetchSysDiag,
 	es9p: es9pPost,
 	exitIp: fetchExitIp,
+	epdg: fetchEpdg,
 	es9pAvailable: es9pAvailable,
 	extractATData: extractATData,
 	extractATDataMultiline: extractATDataMultiline,

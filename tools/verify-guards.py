@@ -66,6 +66,13 @@ TARGETS = {
     #   与 single-source-contract）→ 变异生效但没人判红 → 比没守卫更危险（红线 16b）。
     "parsejs3": ATWB / "parse.js",
     "smssetjs2": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
+    # ★ 再挂三个键（2026-09-24）：ePDG / VoWiFi 判定的守卫在自己的 epdg-contract 里。
+    #   复用 uc / rpcjs / msjs 会**跑错测试**（它们分别固定跑 exitip-contract、
+    #   single-source-contract、device-control-contract）→ 变异生效却没人判红
+    #   → 比没守卫更危险（红线 16b）。
+    "uc2": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
+    "rpcjs2": ATWB / "rpc.js",
+    "nsjs": ATWB.parent / "view" / "at-webserver" / "network_status.js",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -93,6 +100,9 @@ TARGET_TEST = {
     "parsejs2": ROOT / "tests" / "exitip-contract.test.js",
     "parsejs3": ROOT / "tests" / "sms-reachability-contract.test.js",
     "smssetjs2": ROOT / "tests" / "sms-reachability-contract.test.js",
+    "uc2": ROOT / "tests" / "epdg-contract.test.js",
+    "rpcjs2": ROOT / "tests" / "epdg-contract.test.js",
+    "nsjs": ROOT / "tests" / "epdg-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -181,6 +191,56 @@ MUTATIONS = [
         "registered: r.stat === 1 || r.stat === 5",
         "registered: r.stat === 1",
         "stat=5（已注册漫游）→ registered",
+    ),
+    (
+        # ★★ 锚点唯一性已核：mt5700.uc 里 `} else if (posCtl.state != 'available') {`
+        #   只出现 1 次（epdgFacts 的总判定处）。
+        #   这一条是本功能最容易被写歪的地方：本机 DNS 坏了也会被判成「运营商没发布」。
+        "ePDG 丢掉阳性对照门禁（本机 DNS 故障被算到运营商头上）",
+        "uc2",
+        "\t} else if (posCtl.state != 'available') {",
+        "\t} else if (false) {",
+        "阳性对照查不到时，verdict 必须退回 unknown",
+    ),
+    (
+        # ★ 锚点唯一性已核：`{ cmd: 'AT+CIMI', fresh: true }` 只出现 1 次。
+        #   AT+CIMI 在 STATIC_READS 里缓存 300s，不 fresh 就会拿上一张卡的 IMSI
+        #   去拼上一张卡的 ePDG 域名（红线 24 的同型事故）。
+        "ePDG 读 IMSI 不 fresh（换卡后 300 秒内拼出上一张卡的 ePDG 域名）",
+        "uc2",
+        "rpcCall('at', { cmd: 'AT+CIMI', fresh: true })",
+        "rpcCall('at', { cmd: 'AT+CIMI' })",
+        "AT+CIMI 走 fresh",
+    ),
+    (
+        # ★ 锚点唯一性已核：EPDG_PREFIX 前缀校验只出现 1 次（safeEpdgFqdn 内）。
+        "ePDG 域名不校验前缀就拼进命令行（命令注入面）",
+        "uc2",
+        "\tif (substr(s, 0, length(EPDG_PREFIX)) != EPDG_PREFIX) {",
+        "\tif (false) {",
+        "前缀不对但长度合规",
+    ),
+    (
+        # ★ 锚点唯一性已核：EPDG_SUFFIX 后缀校验只出现 1 次（safeEpdgFqdn 内）。
+        "ePDG 域名只校验前缀不校验后缀（.attacker.example.com 之类能混进命令行）",
+        "uc2",
+        "\tif (substr(s, length(s) - length(EPDG_SUFFIX)) != EPDG_SUFFIX) {",
+        "\tif (false) {",
+        "后缀不对但长度合规",
+    ),
+    (
+        # ★★ 真机真踩过这一条（2026-09-24）：去掉这道门禁后，busybox nslookup 开头的
+        #   Server/Address 两行（223.5.5.5:53）会被当成解析结果 —— 连必然不存在的
+        #   mnc999 都「解析到了地址」，总判定恒为 available，最关键的结论被反过来说。
+        # ★ 锚点唯一性已核：`if (!seenName) {` 只出现 1 次（nsPickAddrs 内）。
+        #   ★ 变异点选在**过滤条件**上而不是 seenName 门禁上：门禁之外还有一道
+        #     `v != dns + ':53'` 的兜底，单独拆门禁会被兜底接住 → 变异判不出来
+        #     （实测放过过一次）。真正的最后一道是这个条件本身。
+        "nslookup 输出不过滤 Server 段（DNS 服务器自己被当成结果 → 任何域名都判「解析到了」）",
+        "uc2",
+        "\t\t\t\tif (v != '' && v != dns && v != dns + ':53') {",
+        "\t\t\t\tif (v != '') {",
+        "NXDOMAIN 输出（真机格式）一个地址都不产生",
     ),
     (
         "去掉时间窗（退化成只靠轮数上限）",

@@ -798,6 +798,21 @@ function exitIpOnce(url, bind) {
 	return substr(body, 0, EXITIP_MAX_BODY);
 }
 
+function es9pToolAvailable() {
+	let p;
+	try {
+		p = fs.popen('command -v curl', 'r');
+	} catch (e) {
+		return false;
+	}
+	if (!p) {
+		return false;
+	}
+	let s = p.read('line');
+	p.close();
+	return (s != null && length(trim(s)) > 0);
+}
+
 function exitIpFacts(bind) {
 	if (!es9pToolAvailable()) {
 		return { success: false, error: '设备上没有 curl，无法探测出口 IP' };
@@ -810,6 +825,933 @@ function exitIpFacts(bind) {
 		}
 	}
 	return { success: false, error: '三个回显服务都没返回内容（可能没网，或 DNS 未解析）' };
+}
+
+/*
+ * ================= ePDG 探测（VoWiFi / Wi-Fi 通话的第一道门） =================
+ *
+ * VoWiFi 走的是「非 3GPP 接入 → ePDG → IMS」这条路，第一道门是：
+ * **运营商在公网发布 ePDG 了吗**。直接查本运营商的 ePDG 域名，拿到 NXDOMAIN
+ * 只能说明「这个域名查不到」，分不清三种完全不同的情况：
+ *   ① 运营商压根没在公网发布 ePDG（国内三家实测就是这种）；
+ *   ② 本机 / 链路的 DNS 坏了 —— 那 NXDOMAIN 是自己的问题，不是运营商的；
+ *   ③ DNS 通配污染 —— 不存在的域名也返回一个假地址（实测 127.0.0.1），
+ *      看着「解析到了」，其实那个地址根本不是 ePDG。
+ * ★ 所以必须同时查两组对照（红线 49：判「不通」必须带对照组）：
+ *     阳性对照 —— 境外已商用、长期稳定可解析的 ePDG（T-Mobile US）。
+ *                 它都查不到 = 本机 DNS 有问题，此时**不许**下「运营商没发布」的结论；
+ *     阴性对照 —— 必然不存在的 mnc999。它若跟本运营商域名返回同一个值，
+ *                 就证明是通配污染，那个地址不是真 ePDG。
+ *
+ * ★ 安全：域名全部由后端从 AT+CIMI 读到的 IMSI 自己拼，DNS 服务器与对照域名都是
+ *   写死常量，方法不接受任何入参（args 为空）→ 没有命令注入面。
+ */
+const EPDG_DNS = ['223.5.5.5', '114.114.114.114'];
+/* 单个 nslookup 的限时：查不到时要能及时放弃（rpcd 一个调用占一个工作线程）。
+   NXDOMAIN 是秒回的，跑满这个值只发生在 DNS 服务器整个不可达的时候。 */
+const EPDG_TIMEOUT = 6;
+const EPDG_PREFIX = 'epdg.epc.';
+const EPDG_SUFFIX = '.pub.3gppnetwork.org';
+/*
+ * 阳性对照：AT&T US（MCC 310 / MNC 280），境外已商用 Wi-Fi Calling。
+ * ★ 选它是因为**实测过**：它经 DoH 能解析出真实公网地址 107.122.31.31，
+ *   不是靠"听说它开了 VoWiFi"。它解析不出来 = 这条 DNS 链路有问题，
+ *   此时不许下「运营商没发布 ePDG」的结论（否则就是把环境的锅甩给运营商）。
+ */
+const EPDG_POS_FQDN = 'epdg.epc.mnc280.mcc310.pub.3gppnetwork.org';
+
+/*
+ * ---- 身份链：MNC 到底是 2 位还是 3 位，由卡自己说了算 ----
+ * IMSI 里看不出 MNC 长度（460009711127691 既可读成 460/00 也可读成 460/000）。
+ * 参考 VoCat 的 readExplicitMNCLength：读 EF_AD（0x6FAD）第 4 字节低 4 位。
+ * 读不到就如实标注 "ambiguous"（两种写法都查，不挑一个当真）。
+ * ★ 不猜：猜出来的 MNC 会拼出一个错的域名，而错的域名必然 NXDOMAIN，
+ *   那会把"我拼错了"误报成"运营商没发布"。
+ * ★ 本机实测（2026-09-24）：AT+CRSM=176,28589,0,0,4 -> +CRSM: 144,0,"00000002"
+ *   -> 低 4 位 = 2 -> MNC = 00（2 位），canonical 补零成 000。
+ *   （EF_EHPLMN 0x6F19 兜底分支保留：本机实测 success=false，走不到；换一张能读
+ *     出来的卡时它才有意义。读不到一律按 ambiguous 处理，不猜。）
+ */
+const EF_AD_ID = 28589;       /* 0x6FAD */
+const EF_EHPLMN_ID = 28441;   /* 0x6F19 */
+
+/*
+ * ---- DNS 的第二条路：DoH + EDNS Client Subnet ----
+ * 参考 VoCat 的 resolveEPDG：系统 DNS 拿不到可用地址时，不直接判死，
+ * 而是换一条解析链路（DoH）再问一次，并带上归属国的 EDNS Client Subnet ——
+ * ePDG 的权威 DNS 常常只对归属国的解析器返回地址。
+ * 端点选阿里是因为**实测可达**（cloudflare-dns / dns.google 在本网连不上）。
+ */
+const EPDG_DOH = 'https://dns.alidns.com/resolve';
+const EPDG_ECS = '223.5.5.0/24';
+const DOH_TIMEOUT = 8;
+
+/* 3GPP TS 23.003 定义的 ePDG FQDN 格式 */
+function epdgFqdn(mcc, mnc3) {
+	return EPDG_PREFIX + 'mnc' + mnc3 + '.mcc' + mcc + EPDG_SUFFIX;
+}
+
+/* 只放行 epdg.epc.mncNNN.mccNNN.pub.3gppnetwork.org 这一种形状。
+   IMSI 来自模组，不该有脏字符；但拼进 shell 命令行前一律再过一遍。 */
+function safeEpdgFqdn(s) {
+	if (s == null || length(s) < 32 || length(s) > 80) {
+		return null;
+	}
+	if (substr(s, 0, length(EPDG_PREFIX)) != EPDG_PREFIX) {
+		return null;
+	}
+	if (substr(s, length(s) - length(EPDG_SUFFIX)) != EPDG_SUFFIX) {
+		return null;
+	}
+	for (let i = 0; i < length(s); i++) {
+		let c = substr(s, i, 1);
+		if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.') {
+			continue;
+		}
+		return null;
+	}
+	return s;
+}
+
+/* 从 AT 应答里抠出第一段够长的数字串（IMSI 是 15 位，模组应答里还夹着 OK） */
+function extractImsi(s) {
+	if (s == null) {
+		return '';
+	}
+	let best = '';
+	let cur = '';
+	for (let i = 0; i < length(s); i++) {
+		let c = substr(s, i, 1);
+		if (c >= '0' && c <= '9') {
+			cur = cur + c;
+			if (length(cur) > length(best)) {
+				best = cur;
+			}
+		} else {
+			cur = '';
+		}
+	}
+	if (length(best) < 6 || length(best) > 15) {
+		return '';
+	}
+	return best;
+}
+
+/* ---------- 身份链：从卡上读，不猜 ---------- */
+
+const HEX_UP = '0123456789ABCDEF';
+const HEX_LO = '0123456789abcdef';
+
+/* 单个 hex 字符的数值，非 hex 返回 -1（只依赖 index()，不用 ord()） */
+function hexDigit(c) {
+	if (c == null || length(c) != 1) {
+		return -1;
+	}
+	let k = index(HEX_UP, c);
+	if (k >= 0) {
+		return k;
+	}
+	return index(HEX_LO, c);
+}
+
+/* hex 串第 i 个「字符位置」起的两个字符组成的字节值 */
+function hexPairVal(hex, i) {
+	if (hex == null || i < 0 || i + 2 > length(hex)) {
+		return -1;
+	}
+	let a = hexDigit(substr(hex, i, 1));
+	let b = hexDigit(substr(hex, i + 1, 1));
+	if (a < 0 || b < 0) {
+		return -1;
+	}
+	return a * 16 + b;
+}
+
+/*
+ * 从 AT+CRSM 的应答里取出 <response> 的 hex 串，并且**只在成功状态字下才认**。
+ * 应答形如：+CRSM: 144,0,"00000002"   （144,0 就是 sw1=0x90 sw2=0x00 的十进制写法）
+ * ★ 状态字不对时返回 null，绝不把错误应答里的数据当内容（红线 23：
+ *   「读不出来」必须和「有，但是空的」分开）。
+ */
+function crsmHex(data) {
+	if (data == null) {
+		return null;
+	}
+	let k = index(data, '+CRSM:');
+	if (k < 0) {
+		return null;
+	}
+	let s = substr(data, k + length('+CRSM:'));
+	let q1 = index(s, '"');
+	if (q1 < 0) {
+		return null;
+	}
+	let rest = substr(s, q1 + 1);
+	let q2 = index(rest, '"');
+	if (q2 < 0) {
+		return null;
+	}
+	return substr(rest, 0, q2);
+}
+
+/* 状态字是不是 90 00（十进制 144,0）。CRSM 用十进制回 sw1,sw2。 */
+function crsmOk(data) {
+	if (data == null) {
+		return false;
+	}
+	let k = index(data, '+CRSM:');
+	if (k < 0) {
+		return false;
+	}
+	let s = substr(data, k + length('+CRSM:'));
+	let c = index(s, ',');
+	if (c < 0) {
+		return false;
+	}
+	let sw1 = trim(substr(s, 0, c));
+	let s2 = substr(s, c + 1);
+	let c2 = index(s2, ',');
+	if (c2 < 0) {
+		c2 = index(s2, '"');
+	}
+	if (c2 < 0) {
+		c2 = length(s2);
+	}
+	let sw2 = trim(substr(s2, 0, c2));
+	return (sw1 == '144' && sw2 == '0') || (sw1 == '0x90' && sw2 == '0x00');
+}
+
+/*
+ * MNC 长度（2 或 3）—— EF_AD（0x6FAD）第 4 字节的低 4 位。
+ * 参考 VoCat 的 readExplicitMNCLength，取不到就返回 null，由调用方决定兜底。
+ */
+function readMncLength() {
+	let r = rpcCall('at', { cmd: 'AT+CRSM=176,' + EF_AD_ID + ',0,0,4', fresh: true });
+	if (r == null || !r.success) {
+		return null;
+	}
+	if (!crsmOk(r.data)) {
+		return null;
+	}
+	let hex = crsmHex(r.data);
+	if (hex == null || length(hex) < 8) {
+		return null;
+	}
+	/* data[3] & 0x0f —— 用取模，避免依赖位运算 */
+	let n = hexPairVal(hex, 6) % 16;
+	if (n == 2 || n == 3) {
+		return n;
+	}
+	return null;
+}
+
+/*
+ * 兜底：EF_EHPLMN（0x6F19）里第一个 PLMN 的 MNC 位数。
+ * PLMN 是 3 字节 BCD：MNC 第三位为 F 表示 MNC 只有 2 位。
+ */
+function readEhplmnMnc() {
+	let r = rpcCall('at', { cmd: 'AT+CRSM=176,' + EF_EHPLMN_ID + ',0,0,12', fresh: true });
+	if (r == null || !r.success || !crsmOk(r.data)) {
+		return '';
+	}
+	let hex = crsmHex(r.data);
+	if (hex == null || length(hex) < 6) {
+		return '';
+	}
+	/* 字节 0/1 拼 MCC 三位，字节 1 高半字节 + 字节 2 拼 MNC */
+	let b0 = hexPairVal(hex, 0);
+	let b1 = hexPairVal(hex, 2);
+	let b2 = hexPairVal(hex, 4);
+	if (b0 < 0 || b1 < 0 || b2 < 0) {
+		return '';
+	}
+	let mcc = '' + (b0 % 16) + ((b0 / 16) % 16) + (b1 % 16);
+	let mnc3 = (b1 / 16) % 16;
+	let mnc = '' + (b2 % 16) + ((b2 / 16) % 16);
+	if (mnc3 <= 9) {
+		mnc = mnc + '' + mnc3;
+	}
+	if (length(mcc) != 3 || length(mnc) < 2 || length(mnc) > 3) {
+		return '';
+	}
+	return mcc + ',' + mnc;
+}
+
+/*
+ * UICC 上能做 AKA 的应用 AID。
+ * ★ 取法是 AT+CRSM=242（STATUS）读当前目录的 FCI，再按 TLV 取 tag 84（AID），
+ *   **不是**逐个 AID 去试 —— 盲扫未定义对象会把 AT 通道搞死（红线 27）。
+ * 取到后还要过 USIM/ISIM 前缀校验（A0000000871002 / 04），防止命中的是别的数据。
+ */
+function uiccAkaAid() {
+	let r = rpcCall('at', { cmd: 'AT+CRSM=242', fresh: true });
+	if (r == null || !r.success || !crsmOk(r.data)) {
+		return { aid: null, app: '', how: 'status-unavailable' };
+	}
+	let hex = crsmHex(r.data);
+	if (hex == null) {
+		return { aid: null, app: '', how: 'status-nodata' };
+	}
+	let n = length(hex);
+	let i = 0;
+	while (i + 4 <= n) {
+		if (substr(hex, i, 2) == '84') {
+			let lenByte = hexPairVal(hex, i + 2);
+			if (lenByte >= 5 && lenByte <= 16 && i + 4 + lenByte * 2 <= n) {
+				let aid = substr(hex, i + 4, lenByte * 2);
+				if (substr(aid, 0, 12) == 'A00000008710') {
+					let kind = substr(aid, 12, 2);
+					if (kind == '02') {
+						return { aid: aid, app: 'USIM', how: 'fci' };
+					}
+					if (kind == '04') {
+						return { aid: aid, app: 'ISIM', how: 'fci' };
+					}
+				}
+			}
+		}
+		i = i + 2;
+	}
+	return { aid: null, app: '', how: 'fci-no-usim-isim' };
+}
+
+/*
+ * AKA 就绪证据 —— **只读，不开逻辑通道**。
+ *
+ * ★★ 真机事故（2026-09-24，本机）：用 AT+CCHO 开逻辑通道做「能不能鉴权」的验证，
+ *   连开两次之后再 CCHO 一律 `+CME ERROR: missing resource`，而 **AT+CCHC 关不掉**
+ *   （对已开的 session 一律回 `+CME ERROR: SIM failure`，其它 session id 同样无效）。
+ *   也就是说：逻辑通道一旦占上就**无法回收**，只能重启模组才恢复。
+ *
+ *   参考实现（VoCat 的 CheckReady）确实会开一次通道，但它是**独占串口的单进程
+ *   服务**，全生命周期只开一次；而这里是一个 LuCI 页面，用户可以反复点、页面可能被
+ *   强杀 —— 每次点击都去占一份不可回收的卡资源，是红线 22 那类副作用常驻事故。
+ *   ★ 结论：本设备不做开通道验证。
+ *
+ * ★ 替代证据（同样来自卡自己）：AT+CRSM=242 的 FCI 里 tag 84 报上来的 AID，
+ *   过 USIM/ISIM 前缀校验。卡自己说「我有这个应用」——够用来判断「有没有 AKA 的料」，
+ *   只是不能证明「此刻一定能做一次 AUTHENTICATE」。两者在返回里如实区分。
+ */
+function akaEvidence(aidInfo) {
+	if (aidInfo == null || aidInfo.aid == null || aidInfo.aid == '') {
+		return { ready: false, app: '', aid: null, how: (aidInfo == null ? 'no-aid' : aidInfo.how), verified: 'none' };
+	}
+	return {
+		ready: true,
+		app: aidInfo.app,
+		aid: aidInfo.aid,
+		how: aidInfo.how,
+		/* fci = 卡上报的 AID（未开通道实测）；none = 连 AID 都没读到 */
+		verified: 'fci'
+	};
+}
+
+/*
+ * ICCID（AT^ICCID?）。只认 18~20 位大写十六进制串 —— ICCID 末位可能是 F，
+ * 所以**不能**用只收数字的 atFirstNumber。
+ * 参考 VoCat：ICCID 用于和 IMSI 推出来的 HPLMN 交叉核对（换卡后对不上就是异常）。
+ */
+function readIccid() {
+	let r = rpcCall('at', { cmd: 'AT^ICCID?', fresh: true });
+	if (r == null || !r.success || r.data == null) {
+		return '';
+	}
+	let k = index(r.data, '^ICCID:');
+	if (k < 0) {
+		return '';
+	}
+	let s = substr(r.data, k + length('^ICCID:'));
+	let cur = '';
+	let best = '';
+	for (let i = 0; i < length(s); i++) {
+		let c = substr(s, i, 1);
+		if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) {
+			cur = cur + c;
+			if (length(cur) > length(best)) {
+				best = cur;
+			}
+		} else {
+			cur = '';
+		}
+	}
+	if (length(best) < 18 || length(best) > 20) {
+		return '';
+	}
+	return best;
+}
+
+/* SMSC 与 IMS 状态（身份链的最后两项） */
+
+/* 短信中心号码（SMS-over-IMS 提交时要用到）—— 只在引号里取值，取不到返回空串 */
+function readSmsc() {
+	let r = rpcCall('at', { cmd: 'AT+CSCA?', fresh: true });
+	if (r == null || !r.success || r.data == null) {
+		return '';
+	}
+	let k = index(r.data, '+CSCA:');
+	if (k < 0) {
+		return '';
+	}
+	let s = substr(r.data, k + length('+CSCA:'));
+	let q1 = index(s, '"');
+	if (q1 < 0) {
+		return '';
+	}
+	let rest = substr(s, q1 + 1);
+	let q2 = index(rest, '"');
+	if (q2 < 0) {
+		return '';
+	}
+	return substr(rest, 0, q2);
+}
+
+/*
+ * IMS 注册状态（AT+CIREG? 的第二个值）。
+ * ★ 只如实上报：n=1 时不带 ext_info，拿不到就不倒推（前端那边也是这个口径）。
+ */
+function ciregStat() {
+	let r = rpcCall('at', { cmd: 'AT+CIREG?', fresh: true });
+	if (r == null || !r.success || r.data == null) {
+		return null;
+	}
+	let k = index(r.data, '+CIREG:');
+	if (k < 0) {
+		return null;
+	}
+	let s = substr(r.data, k + length('+CIREG:'));
+	let c = index(s, ',');
+	if (c < 0) {
+		return null;
+	}
+	let t = trim(substr(s, c + 1));
+	if (length(t) == 0) {
+		return null;
+	}
+	return substr(t, 0, 1);
+}
+
+/* ---------- DNS 的第二条路：DoH（+ EDNS Client Subnet） ---------- */
+
+function looksLikeIp(v) {
+	if (v == null || length(v) == 0) {
+		return false;
+	}
+	for (let i = 0; i < length(v); i++) {
+		let c = substr(v, i, 1);
+		if ((c >= '0' && c <= '9') || c == '.' || c == ':') {
+			continue;
+		}
+		return false;
+	}
+	return true;
+}
+
+/*
+ * DoH 应答里所有 "data":"..." 的值，只留长得像 IP 的（CNAME 之类的杂项丢掉）。
+ * 不引 JSON 解析器 —— 这里只需要两个字段，字符串扫就够了，也少一个依赖。
+ */
+function dohAddrs(txt) {
+	let addrs = [];
+	if (txt == null) {
+		return addrs;
+	}
+	let pat = '"data":"';
+	let from = 0;
+	for (let guard = 0; guard < 40; guard++) {
+		let k = index(substr(txt, from), pat);
+		if (k < 0) {
+			break;
+		}
+		let start = from + k + length(pat);
+		let rest = substr(txt, start);
+		let q = index(rest, '"');
+		if (q < 0) {
+			break;
+		}
+		let v = substr(rest, 0, q);
+		if (looksLikeIp(v) && length(v) > 3) {
+			addrs[length(addrs)] = v;
+		}
+		from = start + q + 1;
+	}
+	return addrs;
+}
+
+/* DoH 应答里的数字字段（Status）。返回**字符串**，省掉一次类型转换。 */
+function dohNumField(txt, key) {
+	if (txt == null) {
+		return null;
+	}
+	let pat = '"' + key + '":';
+	let k = index(txt, pat);
+	if (k < 0) {
+		return null;
+	}
+	let i = k + length(pat);
+	let d = '';
+	while (i < length(txt)) {
+		let c = substr(txt, i, 1);
+		if (c == '-' || (c >= '0' && c <= '9')) {
+			d = d + c;
+			i = i + 1;
+			continue;
+		}
+		break;
+	}
+	if (length(d) == 0) {
+		return null;
+	}
+	return d;
+}
+
+/*
+ * 一条 DoH 查询。fqdn 必须已经过 safeEpdgFqdn（否则不许拼进命令行）。
+ * 返回 { addrs, nx, status }；**读不出来返回 null**（不是空结果）——
+ * 这个区别决定了后面是「无法判定」还是「查不到」。
+ */
+function dohLookup(fqdn, ecs) {
+	if (fqdn == null) {
+		return null;
+	}
+	let url = EPDG_DOH + '?name=' + fqdn + '&type=A';
+	if (ecs != null && ecs != '') {
+		url = url + '&edns_client_subnet=' + ecs;
+	}
+	let p;
+	try {
+		p = fs.popen('timeout ' + DOH_TIMEOUT + ' curl -s -m ' + DOH_TIMEOUT
+			+ ' -H "accept: application/dns-json" "' + url + '" 2>&1', 'r');
+	} catch (e) {
+		return null;
+	}
+	if (!p) {
+		return null;
+	}
+	let txt = '';
+	for (let i = 0; i < 20; i++) {
+		let line = p.read('line');
+		if (line == null) {
+			break;
+		}
+		txt = txt + line;
+	}
+	p.close();
+	let status = dohNumField(txt, 'Status');
+	if (status == null) {
+		return null;
+	}
+	return { addrs: dohAddrs(txt), nx: (status == '3'), status: status };
+}
+
+/*
+ * 从 nslookup 的输出行里挑出**真正的解析结果**。
+ *
+ * ★★ 真机踩到的坑（2026-09-24）：busybox nslookup 的输出是
+ *      Server:		223.5.5.5
+ *      Address:	223.5.5.5:53      ← ★ 带端口！
+ *
+ *      Name:		epdg.epc.mnc260.mcc310.pub.3gppnetwork.org
+ *      Address 1:	208.54.5.195
+ *   开头那两行是**输入**（DNS 服务器自己），不是结果。而且它是 "223.5.5.5:53"，
+ *   跟传入的 dns 常量并不相等 —— 原来用「值 != dns」过滤**根本滤不掉它**。
+ *   后果是灾难性的：任何一个域名（哪怕是必然不存在的 mnc999）都会「解析到地址」，
+ *   总判定恒为 available，等于把最关键的结论反过来说。
+ *
+ * 正解：以 "Name:" 行为界，只收它**之后**的 Address 行。NXDOMAIN 的输出压根
+ *   没有 Name: 段，自然一个地址都收不到 —— 与「查不到」自洽。
+ *   （另留一道 `!= dns + ':53'` 的兜底，防止将来输出格式又变。）
+ */
+function nsPickAddrs(lines, dns) {
+	let addrs = [];
+	let seenName = false;
+	for (let i = 0; i < length(lines); i++) {
+		let line = lines[i];
+		if (index(line, 'Name:') == 0) {
+			seenName = true;
+			continue;
+		}
+		if (!seenName) {
+			continue;
+		}
+		if (index(line, 'Address') == 0) {
+			let k = index(line, ':');
+			if (k >= 0) {
+				let v = trim(substr(line, k + 1));
+				if (v != '' && v != dns && v != dns + ':53') {
+					addrs[length(addrs)] = v;
+				}
+			}
+		}
+	}
+	return addrs;
+}
+
+function nsLookup(fqdn, dns) {
+	let p;
+	try {
+		p = fs.popen('timeout ' + EPDG_TIMEOUT + ' nslookup ' + fqdn + ' ' + dns + ' 2>&1', 'r');
+	} catch (e) {
+		return null;
+	}
+	if (!p) {
+		return null;
+	}
+	let lines = [];
+	let nx = false;
+	let cname = '';
+	for (let i = 0; i < 40; i++) {
+		let line = p.read('line');
+		if (line == null) {
+			break;
+		}
+		if (index(line, 'NXDOMAIN') >= 0) {
+			nx = true;
+		}
+		if (index(line, 'canonical name') >= 0) {
+			let k = index(line, '=');
+			if (k >= 0) {
+				cname = trim(substr(line, k + 1));
+			}
+		}
+		lines[length(lines)] = line;
+	}
+	p.close();
+	return { addrs: nsPickAddrs(lines, dns), nx: nx, cname: cname };
+}
+
+/* 环回地址＝通配污染的特征值（真 ePDG 不可能是 127.x / ::1） */
+function isLoopbackAddr(v) {
+	if (v == '::1') {
+		return true;
+	}
+	return substr(v, 0, 4) == '127.';
+}
+
+/*
+ * 单个域名的结论，四态 —— 「读不出来」单独一态，不许并进「没有」
+ * （红线 23：无差别兜底会把「读不出来」伪装成「没有」）：
+ *   available      解析到非环回地址
+ *   polluted       只解析到环回地址 → 通配污染，不是真 ePDG
+ *   not_published  NXDOMAIN
+ *   unknown        没有确定结论（DNS 不通 / nslookup 不可用 / 超时）
+ */
+function epdgState(r) {
+	if (r == null) {
+		return 'unknown';
+	}
+	if (length(r.addrs) > 0) {
+		let real = 0;
+		for (let i = 0; i < length(r.addrs); i++) {
+			if (!isLoopbackAddr(r.addrs[i])) {
+				real++;
+			}
+		}
+		if (real > 0) {
+			return 'available';
+		}
+		return 'polluted';
+	}
+	if (r.nx) {
+		return 'not_published';
+	}
+	return 'unknown';
+}
+
+/*
+ * 单个域名走**系统 DNS** 的结论：逐个 DNS 试，拿到确定结论就停。
+ *
+ * ★ 这里只管系统 DNS 这一条路。换链路（DoH + ECS）那一层在 epdgProbe 里，
+ *   而且它把两条路的结果**分开保存**（r 是系统 DNS、r.doh 是 DoH）——
+ *   合在一个字段里就没法回答「两条路说的一样吗」了，而那个对比正是判污染的根据。
+ *   （曾经两个函数各查一次 DoH，同一个域名被问两遍，耗时翻倍且结论互相覆盖。）
+ */
+function epdgResolve(fqdn) {
+	let last = null;
+	let lastDns = EPDG_DNS[length(EPDG_DNS) - 1];
+	for (let i = 0; i < length(EPDG_DNS); i++) {
+		last = nsLookup(fqdn, EPDG_DNS[i]);
+		lastDns = EPDG_DNS[i];
+		if (last == null) {
+			last = { addrs: [], nx: false, cname: '' };
+			continue;
+		}
+		let st = epdgState(last);
+		if (st != 'unknown') {
+			return {
+				fqdn: fqdn, dns: EPDG_DNS[i], via: 'system',
+				addrs: last.addrs, cname: last.cname, state: st
+			};
+		}
+	}
+	if (last == null) {
+		last = { addrs: [], nx: false, cname: '' };
+	}
+	return {
+		fqdn: fqdn, dns: lastDns, via: 'system',
+		addrs: last.addrs, cname: last.cname, state: 'unknown'
+	};
+}
+
+/*
+ * 一个域名的最终结论：系统 DNS 先查，拿不到可用地址就**换一条链路**再问一次。
+ *
+ * ★ 参考 VoCat resolveEPDG 的两段式（系统 DNS -> DoH + ECS 地理回退）。
+ *   真机实测（2026-09-24）：本机系统 DNS 对 *.3gppnetwork.org 有通配污染 ——
+ *   必然不存在的 mnc999 也返回 127.0.0.1。于是「解析到了」可能是假的，
+ *   「NXDOMAIN」也可能只是本地递归服务器的行为。只看一条路，结论可能正好说反。
+ *
+ * ★ 只有 DoH 给出**更确定**的结论时才覆盖系统 DNS 的结果（unknown 不覆盖）：
+ *   换链路是为了纠偏，不是为了替换。
+ * ★ 对照组也走同一个函数：对照与被测必须同链路才有可比性。
+ */
+function epdgProbe(fqdn) {
+	let r = epdgResolve(fqdn);
+	r.via = 'sys';
+	r.doh = null;
+	/*
+	 * ★ 系统 DNS 的原结论要**单独留一份**：下面一旦被 DoH 覆盖，前端就只能看到
+	 *   「最终结论」，看不到「两条路各说了什么」—— 而「系统 DNS 说污染、DoH 说
+	 *   NXDOMAIN」这种不一致本身正是判污染的依据，丢掉等于把证据扔了。
+	 */
+	r.sysState = r.state;
+	r.sysAddrs = r.addrs;
+	if (r.state == 'available') {
+		return r;
+	}
+	let d = dohLookup(fqdn, EPDG_ECS);
+	if (d == null) {
+		return r;
+	}
+	r.doh = { addrs: d.addrs, nx: d.nx, status: d.status, state: epdgState(d) };
+	if (r.doh.state == 'unknown') {
+		return r;
+	}
+	r.state = r.doh.state;
+	r.addrs = d.addrs;
+	r.via = 'doh';
+	return r;
+}
+function epdgFacts() {
+	/*
+	 * ★ 必须 fresh：AT+CIMI 在 STATIC_READS 里（缓存 300 秒）。换完卡立刻点探测会
+	 *   拿到上一张卡的 IMSI，进而拼出上一张卡的 ePDG 域名 —— 与红线 24（旧卡身份
+	 *   带给新卡）是同一类事故。
+	 */
+	let resp = rpcCall('at', { cmd: 'AT+CIMI', fresh: true });
+	if (resp == null || !resp.success) {
+		return { success: false, error: '读不到 IMSI（AT+CIMI 失败），无法判断 ePDG' };
+	}
+	let imsi = extractImsi(resp.data);
+	if (imsi == '') {
+		return { success: false, error: 'AT+CIMI 的应答里没有 IMSI' };
+	}
+	/*
+	 * ★ ICCID 也必须 fresh 且与 IMSI 同一次取：换卡后两者若来自不同时刻，
+	 *   就会出现「新卡的 IMSI + 旧卡的 ICCID」——红线 24 的同款事故。
+	 */
+	let iccid = readIccid();
+	let mcc = substr(imsi, 0, 3);
+
+	/*
+	 * MNC 长度：先问卡（EF_AD），再问 EHPLMN，都问不出来才两种都试。
+	 * ★ 不猜 —— 猜错会拼出一个必然 NXDOMAIN 的域名，那等于把「我拼错了」
+	 *   报成「运营商没发布」。
+	 */
+	let mncLen = readMncLength();
+	let mncSource = '';
+	let mnc = '';
+	let eh = readEhplmnMnc();
+	let ehMcc = '';
+	let ehMnc = '';
+	if (eh != '') {
+		let c = index(eh, ',');
+		if (c > 0) {
+			ehMcc = substr(eh, 0, c);
+			ehMnc = substr(eh, c + 1);
+		}
+	}
+	if (mncLen != null) {
+		mncSource = 'ef_ad';
+		mnc = substr(imsi, 3, mncLen);
+	} else if (ehMnc != '' && ehMcc == mcc) {
+		mncSource = 'ehplmn';
+		mncLen = length(ehMnc);
+		mnc = ehMnc;
+	} else {
+		mncSource = 'ambiguous';
+		mnc = substr(imsi, 3, 2);
+	}
+
+	/*
+	 * 候选域名：3GPP 标准写法是 MNC 补零到三位（mnc000）；
+	 * 若补出来的三位带前导零，有些运营商实际发布的是两位写法（mnc00）——
+	 * 两种都查（参考 VoCat 的 alternate3GPPHostname）。
+	 */
+	let items = [];
+	if (mncLen == null) {
+		/* 长度没定下来：两种解读都构造 */
+		let m2 = substr(imsi, 3, 2);
+		let m3 = substr(imsi, 3, 3);
+		let g2 = safeEpdgFqdn(epdgFqdn(mcc, '0' + m2));
+		let g3 = safeEpdgFqdn(epdgFqdn(mcc, m3));
+		if (g2 != null) {
+			let r = epdgProbe(g2);
+			r.mnc = m2;
+			r.label = 'MNC 按 2 位（mnc' + ('0' + m2) + '）';
+			items[length(items)] = r;
+		}
+		if (g3 != null && g3 != g2) {
+			let r = epdgProbe(g3);
+			r.mnc = m3;
+			r.label = 'MNC 按 3 位（mnc' + m3 + '）';
+			items[length(items)] = r;
+		}
+	} else {
+		let m3 = mnc;
+		if (length(m3) == 2) {
+			m3 = '0' + m3;
+		}
+		let fc = safeEpdgFqdn(epdgFqdn(mcc, m3));
+		if (fc != null) {
+			let r = epdgProbe(fc);
+			r.mnc = m3;
+			r.label = '标准写法（mnc' + m3 + '）';
+			r.canonical = true;
+			items[length(items)] = r;
+		}
+		if (substr(m3, 0, 1) == '0') {
+			let fa = safeEpdgFqdn(epdgFqdn(mcc, substr(m3, 1)));
+			if (fa != null && fa != fc) {
+				let r = epdgProbe(fa);
+				r.mnc = substr(m3, 1);
+				r.label = '两位变体（mnc' + substr(m3, 1) + '）';
+				items[length(items)] = r;
+			}
+		}
+	}
+
+	/* AKA 就绪：AID 从 FCI 里解，不挨个试；**不开逻辑通道**（见 akaEvidence 注释） */
+	let aidInfo = uiccAkaAid();
+	let aka = akaEvidence(aidInfo);
+	let smsc = readSmsc();
+	let imsStat = ciregStat();
+
+	let posCtl = epdgProbe(safeEpdgFqdn(EPDG_POS_FQDN));
+	let negFqdn = safeEpdgFqdn(epdgFqdn(mcc, '999'));
+	let negCtl = null;
+	if (negFqdn != null) {
+		negCtl = epdgProbe(negFqdn);
+	}
+
+	let verdict = 'unknown';
+	let hit = false;
+	for (let i = 0; i < length(items); i++) {
+		if (items[i].state == 'available') {
+			hit = true;
+		}
+	}
+	if (hit) {
+		verdict = 'available';
+	} else if (posCtl.state != 'available') {
+		/* 阳性对照都查不到：说明本机 DNS 这条链路有问题，不是运营商没发布。
+		   此时必须退回「无法判定」，不许把锅甩给运营商。 */
+		verdict = 'unknown';
+	} else {
+		let allGone = true;
+		let allPolluted = true;
+		for (let i = 0; i < length(items); i++) {
+			if (items[i].state != 'not_published') {
+				allGone = false;
+			}
+			if (items[i].state != 'polluted') {
+				allPolluted = false;
+			}
+		}
+		/*
+		 * ★ canonical（由 EF_AD 定长推出来的标准写法）是**唯一可信的那一个**，
+		 *   它的结论优先。真机（2026-09-24 本机）：mnc000 明确 NXDOMAIN，
+		 *   而两位变体 mnc00 返回 127.0.0.1 —— 那个值跟「必然不存在的 mnc999」
+		 *   一模一样，是通配污染，**不是证据**。若不这么判，就会被污染的变体
+		 *   把「运营商明确没发布」搅成「无法判定」。
+		 */
+		let canon = null;
+		for (let i = 0; i < length(items); i++) {
+			if (items[i].canonical) {
+				canon = items[i];
+			}
+		}
+		if (canon != null && canon.state == 'not_published') {
+			verdict = 'not_published';
+		} else if (allGone) {
+			verdict = 'not_published';
+		} else if (allPolluted) {
+			verdict = 'polluted';
+		} else {
+			verdict = 'unknown';
+		}
+	}
+
+	/*
+	 * 阶段链 —— 参考 VoCat 的 State（SIMReady / AccessReady / TunnelReady / IMSReady）：
+	 * 每一阶段是**独立的一道门**，前一门没过不等于后一门没过，
+	 * 也不等于整条路不通。分开报，用户才知道卡在哪一步。
+	 * ★ ok 只由实测事实决定，不做「前面过了所以后面也应该过」的推理。
+	 */
+	let stages = [
+		{
+			key: 'sim',
+			label: '卡身份（MCC/MNC）',
+			ok: (imsi != '' && mcc != '' && mnc != ''),
+			detail: 'IMSI ' + imsi + ' · MCC ' + mcc + ' / MNC ' + mnc
+				+ '（' + (mncSource == 'ef_ad' ? 'EF_AD 定长'
+					: (mncSource == 'ehplmn' ? 'EF_EHPLMN 兜底' : '未定长，两种都查')) + '）'
+		},
+		{
+			key: 'aka',
+			label: '卡上有 USIM/ISIM 应用',
+			ok: (aka != null && aka.ready),
+			detail: (aka.aid == null ? '没读到 AKA 应用 AID（' + aka.how + '）'
+				: (aka.app + ' ' + aka.aid + ' · 来自卡上 FCI；'
+					+ '未开逻辑通道实测（通道占上后不可回收，见 akaEvidence 注释）'))
+		},
+		{
+			key: 'epdg',
+			label: '运营商发布 ePDG',
+			ok: (verdict == 'available'),
+			detail: (verdict == 'available' ? '已解析到 ePDG 地址'
+				: (verdict == 'not_published' ? '公网查不到该运营商的 ePDG'
+					: (verdict == 'polluted' ? 'DNS 通配污染，拿到的不是真地址'
+						: '两条解析链路都没给出确定结论')))
+		},
+		{
+			key: 'ims',
+			label: 'IMS 已注册',
+			ok: (imsStat != null && imsStat == '1'),
+			detail: (imsStat == null ? 'AT+CIREG? 读不到'
+				: '+CIREG stat=' + imsStat + (imsStat == '1' ? '（已注册）' : '（未注册）'))
+		}
+	];
+
+	return {
+		success: true,
+		imsi: imsi,
+		iccid: iccid,
+		mcc: mcc,
+		mnc: mnc,
+		mncLen: mncLen,
+		mncSource: mncSource,
+		aid: aidInfo.aid,
+		app: aidInfo.app,
+		aka: aka,
+		smsc: smsc,
+		ims: { stat: imsStat, registered: (imsStat != null && imsStat == '1') },
+		items: items,
+		posCtl: posCtl,
+		negCtl: negCtl,
+		verdict: verdict,
+		stages: stages,
+		at: time()
+	};
 }
 
 function es9pMktemp() {
@@ -912,21 +1854,6 @@ function es9pCaDone(ca) {
 	if (ca != null && ca.temp != null) {
 		es9pUnlink(ca.temp);
 	}
-}
-
-function es9pToolAvailable() {
-	let p;
-	try {
-		p = fs.popen('command -v curl', 'r');
-	} catch (e) {
-		return false;
-	}
-	if (!p) {
-		return false;
-	}
-	let s = p.read('line');
-	p.close();
-	return (s != null && length(trim(s)) > 0);
 }
 
 function es9pPost(host, path, body) {
@@ -1085,6 +2012,18 @@ return {
 					return { success: false, error: 'bind 不是合法 IPv4 地址' };
 				}
 				return exitIpFacts(bind);
+			}
+		},
+		/*
+		 * ePDG 探测：回答「这张卡能不能走 VoWiFi（Wi-Fi 通话）」。
+		 * 无参数 —— 域名由后端从 IMSI 自己拼，DNS 与对照域名都是常量。
+		 * 返回 { success, imsi, mcc, mnc, items[], posCtl, negCtl, verdict }，
+		 * 只给事实与四态结论，文案与排版在前端。
+		 */
+		epdg: {
+			args: {},
+			call: function (req) {
+				return epdgFacts();
 			}
 		},
 		es9p: {

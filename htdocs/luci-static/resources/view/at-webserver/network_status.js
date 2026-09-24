@@ -85,6 +85,23 @@ return L.view.extend({
 		var flowGrid = E('div', { 'class': 'mt5700-metrics mt5700-metrics-flow mt5700-mt-md' });
 		rateCard._body.appendChild(flowGrid);
 
+		/* ⑦ VoWiFi（Wi-Fi 通话）：ePDG 可达性判定。
+		 *
+		 * VoWiFi＝「非 3GPP 接入 → ePDG → IMS」。第一道门是**运营商有没有在公网发布
+		 * ePDG** —— 这一维不取决于本机怎么配，只取决于插的是什么卡，所以这里做的是
+		 * 「判定」而不是「开关」。
+		 *
+		 * ★ 判定必须带对照（红线 49）：只查本运营商域名拿到 NXDOMAIN，分不清是
+		 *   ①运营商没发布、②本机 DNS 坏了、还是③DNS 通配污染（不存在的域名也返回
+		 *   127.0.0.1，看着像解析到了）。所以同时查阳性对照（境外已商用、稳定可解析
+		 *   的 ePDG）与阴性对照（必然不存在的 mnc999）两组。阳性对照都查不到时，
+		 *   结论必须是「无法判定」，不许把锅甩给运营商。
+		 *
+		 * ★ 尺寸固定：最多 4 行域名 + 1 行 PLMN + 1 行结论，不随结果多少撑开。 */
+		var vowifiCard = Mt5700.card('VoWiFi（Wi-Fi 通话）', 'ePDG 可达性判定');
+		var vowifiBody = E('div');
+		vowifiCard._body.appendChild(vowifiBody);
+
 		/* ⑤ SIM 与设备：SIM 卡、模块标识与 5G 模块温度（同一张表铺开，不跳转、不重复） */
 		var devCard = Mt5700.card('SIM 与设备', 'SIM、模块标识与模块温度');
 		var devBody = E('div');
@@ -134,6 +151,7 @@ return L.view.extend({
 		duo.appendChild(duoRight);
 		body.appendChild(duo);
 		body.appendChild(rateCard);
+		body.appendChild(vowifiCard);
 		body.insertBefore(carrierCard, signalCard);
 
 		/* ---------- 状态 ---------- */
@@ -150,7 +168,10 @@ return L.view.extend({
 			tools: {
 				/* 断网排查：atSteps = L1 的 AT 逐步结果，items = L2/L3 由系统事实判定的结果。
 				   facts 是后端 diag-probe.sh 回的 key=value，factsErr 非空说明后端没升级。 */
-				diag: { busy: false, ran: false, at: 0, atSteps: [], items: [], facts: {}, factsErr: '' }
+				diag: { busy: false, ran: false, at: 0, atSteps: [], items: [], facts: {}, factsErr: '' },
+				/* ePDG 探测（VoWiFi）：data 是后端回的整包，err 非空说明后端没升级或读不到 IMSI。
+				   ★ 手动触发、不做轮询 —— 换卡才变的东西，没有自动刷新的理由。 */
+				epdg: { busy: false, ran: false, data: null, err: '' }
 			},
 			/* 12 路传感器温度，键名与 Parse.parseCHIPTEMP 的返回严格一一对应
 			   （手册 17.1：sub3G/sub6G/MIMO/TCXO/peri1/peri2/ap1/ap2/modem1/modem2/bbp1/bbp2）。
@@ -455,11 +476,167 @@ return L.view.extend({
 		   ★ 2026-09-19：明细恒为展开态 —— 折叠/展开那套开关（入口按钮）已整体删除。 */
 		var diagLayer = 'L1';
 
+		/* ---------- ⑦ VoWiFi（Wi-Fi 通话）：ePDG 可达性判定 ----------
+		 *
+		 * 这一格只回答**一道门**：运营商在公网发布 ePDG 了吗。过不了这道门，
+		 * 后面 IKEv2/EAP-AKA 隧道与 IMS 客户端做得再完整也连不上 —— 所以先判它。
+		 */
+
+		/* 单域名四态，与 ucode 的 epdgState() 返回值一一对应（加一种要两边一起加）。 */
+		var EPDG_STATE = {
+			available: '解析到地址',
+			polluted: '只有环回地址（通配污染，不是真 ePDG）',
+			not_published: '查不到（NXDOMAIN）',
+			unknown: '无法判定'
+		};
+
+		/* 阶段链四段，与 ucode stages[].key 一一对应 */
+		var EPDG_STAGE_LABEL = {
+			sim: '卡身份',
+			aka: 'USIM/ISIM',
+			epdg: '运营商 ePDG',
+			ims: 'IMS 注册'
+		};
+
+		function epdgStageNode(st) {
+			var wrap = E('span', { 'class': 'mt5700-mono' });
+			wrap.appendChild(E('span', {
+				'class': 'mt5700-carrier-badge' + (st.ok ? ' is-on' : '')
+			}, st.ok ? '通过' : '未通过'));
+			if (st.detail) {
+				wrap.appendChild(E('span', { 'class': 'mt5700-hint' }, ' ' + st.detail));
+			}
+			return wrap;
+		}
+
+		/*
+		 * 两条解析链路各说了什么 —— **不一致本身就是判污染的根据**，必须都显示出来。
+		 * 真机（2026-09-24）：系统 DNS 说「解析到 127.0.0.1」，DoH+ECS 说 NXDOMAIN，
+		 *   只看一条就会得出相反结论。
+		 */
+		function epdgViaNode(it) {
+			if (!it) return '—';
+			var sys = EPDG_STATE[it.sysState] || '—';
+			var doh = (it.doh && EPDG_STATE[it.doh.state]) || '未走 DoH（系统 DNS 已给结论）';
+			var box = E('span', { 'class': 'mt5700-mono' }, '系统 DNS：' + sys + '　/　DoH+ECS：' + doh);
+			if (it.state === 'available' && it.addrs && it.addrs.length) {
+				box.appendChild(E('span', { 'class': 'mt5700-hint' }, ' → ' + it.addrs.join(' / ')));
+			}
+			if (it.cname) {
+				box.appendChild(E('span', { 'class': 'mt5700-hint' }, '（CNAME ' + it.cname + '）'));
+			}
+			return box;
+		}
+
+		/* 总判定 */
+		var EPDG_VERDICT = {
+			available: '运营商发布了 ePDG —— VoWiFi 这条路通',
+			not_published: '运营商未在公网发布 ePDG —— VoWiFi 不成立',
+			polluted: 'DNS 通配污染，拿到的不是真 ePDG',
+			unknown: '无法判定'
+		};
+
+		var EPDG_VERDICT_HINT = {
+			available: '这道门过了，下一步才是 IKEv2/EAP-AKA 隧道与 IMS 客户端 —— 本页只判这一道门。',
+			not_published: '标准写法（由卡上 EF_AD 定的 MNC 长度推出）明确查不到。'
+				+ '这不取决于设备怎么配：ePDG 是运营商侧的网元，只能换一张其运营商发布了 ePDG 的卡。'
+				+ '两位变体即便返回地址，若与「必然不存在的 mnc999」同值，那是通配污染不是证据。',
+			polluted: '本网 DNS 把 *.3gppnetwork.org 做了通配解析，任何不存在的子域都会返回一个假地址。',
+			unknown: '阳性对照（境外已商用的 ePDG）也没解析出来 —— 是本机的 DNS 链路有问题，'
+				+ '不是运营商没发布。先恢复上网与 DNS，再探测一次。'
+		};
+
+		function renderVowifi() {
+			if (!vowifiBody) return;
+			var t = state.tools.epdg;
+			vowifiBody.innerHTML = '';
+
+			var bar = E('div', { 'class': 'mt5700-toolbar' });
+			bar.appendChild(Mt5700.ghostButton(t.busy ? '探测中…' : '探测 ePDG', runEpdg));
+			var on = t.ran && t.data && t.data.verdict === 'available';
+			bar.appendChild(E('span', { 'class': 'mt5700-carrier-badge' + (on ? ' is-on' : '') },
+				t.ran ? (EPDG_VERDICT[t.data.verdict] || '无法判定') : '未探测'));
+			vowifiBody.appendChild(bar);
+
+			if (t.err) {
+				vowifiBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' }, t.err));
+				return;
+			}
+			if (!t.ran || !t.data) {
+				vowifiBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'点「探测」：后端从卡上读 IMSI / ICCID / EF_AD（MNC 长度由卡定，不猜），'
+					+ '拼出 3GPP 标准 ePDG 域名，走系统 DNS 与 DoH+ECS 两条链路各查一次，'
+					+ '并用一正一负两组对照判断这张卡能不能走 VoWiFi。全程只读。'));
+				return;
+			}
+
+			var d = t.data;
+
+			/*
+			 * 四道门分开报（参考 VoCat 的 State）：前一门没过不代表后面没过，
+			 * 也不做「前面过了所以后面也应该过」的推理 —— 用户要的是卡在哪一步。
+			 */
+			if (d.stages && d.stages.length) {
+				var srows = [];
+				for (var s = 0; s < d.stages.length; s++) {
+					var st = d.stages[s];
+					srows.push([
+						E('span', { 'class': 'mt5700-badge ' + (st.ok ? 'mt5700-badge-success' : 'mt5700-badge-danger') },
+							st.ok ? '通过' : '未过'),
+						st.label,
+						st.detail
+					]);
+				}
+				vowifiBody.appendChild(Mt5700.table(['', '这道门', '实测'], srows, { striped: true }));
+			}
+
+			var rows = [];
+			if (d.iccid) rows.push(['ICCID', d.iccid, '']);
+			for (var i = 0; i < d.items.length; i++) {
+				var it = d.items[i];
+				/* label 由后端按 EF_AD 定长结果给出（标准写法 / 两位变体），不在这里猜 */
+				rows.push([it.label || '本卡 ePDG', it.fqdn, epdgResultNode(it, true)]);
+			}
+			if (d.posCtl) rows.push(['阳性对照（境外已商用）', d.posCtl.fqdn, epdgResultNode(d.posCtl, true)]);
+			if (d.negCtl) rows.push(['阴性对照（必然不存在）', d.negCtl.fqdn, epdgResultNode(d.negCtl, true)]);
+			vowifiBody.appendChild(Mt5700.table(['条目', '域名', '结果'], rows, { striped: true }));
+
+			vowifiBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+				EPDG_VERDICT_HINT[d.verdict] || ''));
+		}
+
+		/* 手动触发：换卡才变的东西，不做自动轮询（也不该在页面加载时偷偷联网）。 */
+		function runEpdg() {
+			var t = state.tools.epdg;
+			if (t.busy) return;
+			if (!AtWs.epdg) {
+				t.ran = true;
+				t.err = '后端未升级：rpcd 没有 mt5700.epdg 方法';
+				renderVowifi();
+				return;
+			}
+			t.busy = true;
+			t.err = '';
+			renderVowifi();
+			AtWs.epdg().then(function (r) {
+				t.busy = false;
+				t.ran = true;
+				if (!r || r.success === false) {
+					t.data = null;
+					t.err = (r && r.error) || 'ePDG 探测失败';
+				} else {
+					t.data = r;
+				}
+				if (!disposed) renderVowifi();
+			});
+		}
+
 		function renderTools() {
 			if (!diagBody) return;
 			diagBody.innerHTML = '';
 			diagBody.appendChild(buildDiagBlock());
 			renderDiagDetail();   /* 卡内明细容器跟着一起重绘 */
+			renderVowifi();       /* VoWiFi 卡跟着一起出初始态（未探测时不发任何请求） */
 		}
 
 		/* ---------- ② L1：模组与空口（AT 只读命令） ----------

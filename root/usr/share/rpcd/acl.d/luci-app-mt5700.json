@@ -25,9 +25,10 @@
 					"events",
 					"logs",
 					"netrate",
-					"sysdiag",
+						"sysdiag",
 					"es9p",
-					"exitip"
+					"exitip",
+					"epdg"
 				],
 				"service": [
 					"list",
@@ -101,7 +102,8 @@
 					"at",
 					"events",
 					"es9p",
-					"exitip"
+					"exitip",
+					"epdg"
 				],
 				"service": [
 					"set",

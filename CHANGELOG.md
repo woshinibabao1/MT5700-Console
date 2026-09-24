@@ -5,6 +5,68 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.47] - 2026-09-24
+
+### Added（VoWiFi / ePDG 体检：按参考项目的判定链重写）
+
+参考 `1239t/vohive` 与 `MengMengCode/VoCat` 的实现，把「运营商到底发没发布 ePDG」
+这道门做成一条**有对照、可复核**的判定链，而不是查一次 DNS 就下结论：
+
+- **身份链：MNC 是 2 位还是 3 位，由卡自己说了算**。读 EF_AD（`AT+CRSM=176,28589,0,0,4`）
+  第 4 字节低 4 位（参考 VoCat `readExplicitMNCLength`），读不到退 EF_EHPLMN，
+  再读不到才标 `ambiguous` 两种写法都查 —— **不猜**。猜错会拼出必然 NXDOMAIN 的域名，
+  那等于把「我拼错了」报成「运营商没发布」。
+- **域名两种写法都查**：3GPP 标准写法（MNC 补零到三位）+ 另一位数的变体
+  （参考 VoCat `alternate3GPPHostname`）。
+- **DNS 两条路**：系统 DNS 先查，拿不到可用地址就换 **DoH + EDNS Client Subnet**
+  再问一次（参考 VoCat `resolveEPDG` 的地理回退）。真机上这两条路结论会相反。
+- **四阶段结论**（参考 VoCat `State` 的证据链）：卡身份 / USIM-ISIM 应用 /
+  运营商发布 ePDG / IMS 已注册，**分开报**，前一门没过不代表后面没过。
+- AID 从 `AT+CRSM=242` 的 FCI 里解 tag 84，**不挨个试**（红线 27）。
+- 补 SMSC（`AT+CSCA?`）与 ICCID（`AT^ICCID?`），与 IMSI 同一次 `fresh` 取
+  （不许新 IMSI 配旧 ICCID，红线 24）。
+
+### Fixed
+
+- **★★ 修 ucode「函数定义在调用之后」导致的运行时崩溃**：ucode **不做函数提升**，
+  `ucode -c` 编译能过、真跑才炸 `left-hand side is not a function`，rpcd 只回
+  `Unknown error`。本次修掉 `atFirstNumber`、`es9pToolAvailable` 两处
+  （后者意味着**出口 IP 探测在真机上一直是坏的**），并新增脚本自动扫这类问题。
+- **判定不再被污染项绑架**：权威域名（由 EF_AD 定长推出）说 NXDOMAIN 时，
+  两位变体返回的 `127.0.0.1` 与「必然不存在的 mnc999」同值 —— 那是通配污染，
+  不是证据。原先会被它把「运营商明确没发布」搅成「无法判定」。
+- 阳性对照改成 **AT&T（310/280）**：原用 T-Mobile（310/260），实测它在本网被污染成
+  `127.0.0.1`，等于用一个假对照去否定结论。**新对照是真机验证过能解析出真地址**的
+  （`107.122.31.x`）。
+- 前端改用后端给的 `label` / `via` / `stages`，四阶段结论与「这条结论来自系统 DNS
+  还是 DoH」都能看见。
+
+### Changed（体检不再开 UICC 逻辑通道）
+
+`AT+CCHO` 开的是**卡上的有限资源**：真机实测连开两次之后一律
+`+CME ERROR: missing resource`，且 `AT+CCHC` 关不回去、重启服务也放不出来，
+只能等卡复位。参考实现（VoCat `CheckReady`）确实会开一次通道，但它是独占串口的
+单进程服务、全生命周期只开一次；这里是个 LuCI 页面，用户能反复点、页面可能被强杀。
+→ 改为只读证据（FCI 里的 AID + USIM/ISIM 前缀校验），证据等级如实标 `fci`
+（「卡上有这个应用」），**不标成已实测可鉴权**。
+
+### 真机结论（中国移动卡，2026-09-24）
+
+```
+IMSI 460009711127691   EF_AD -> MNC 长度 2 -> MNC=00
+epdg.epc.mnc000.mcc460.pub.3gppnetwork.org  -> NXDOMAIN（DoH 复核）  权威写法
+epdg.epc.mnc00.mcc460.pub.3gppnetwork.org   -> 127.0.0.1            污染（与 mnc999 同值）
+阳性对照 AT&T                                -> 107.122.31.x         通路可信
++CIREG: 1,1                                  -> 蜂窝 IMS 已注册
+=> verdict = not_published：国内运营商不在公网发布 ePDG，VoWiFi 不成立
+```
+
+### Added（测试）
+
+- `tests/epdg-contract.test.js` 扩到 **62 项**：EF_AD 定长不猜、两种域名写法、
+  DoH 两段式（只有更确定才覆盖、unknown 不覆盖）、canonical 优先、AKA 证据等级、
+  **全程不许发 `AT+CCHO`**、ACL 两段放行、前端四态齐全。
+
 ## [2.3.46] - 2026-09-24
 
 ### Fixed（短信可达性：把「按假设告警」改成「按实测交叉判定」）
