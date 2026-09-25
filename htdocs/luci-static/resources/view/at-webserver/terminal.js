@@ -271,18 +271,9 @@ return L.view.extend({
 		renderSaved();
 		renderConsole();
 
-		AtWs.client.connect().catch(function (err) {
-			if (err && err.message === 'REQUIRE_AUTH_KEY') {
-				Ui.promptModal('连接密钥', [{ key: 'key', label: '连接密钥', type: 'password' }], function (values) {
-					if (values.key) {
-						AtWs.client.connect(values.key).catch(function (e) {
-							Mt5700.error((e && e.message) || '认证失败');
-						});
-					}
-				});
-				return;
-			}
-		});
+		/* 终端页不需要「连上就拉数据」：命令由用户手动下发，
+		   这里只保证 AT 服务已连接（同时也点亮页内的连接状态卡）。 */
+		Mt5700.connectThen();
 
 		return page;
 	}

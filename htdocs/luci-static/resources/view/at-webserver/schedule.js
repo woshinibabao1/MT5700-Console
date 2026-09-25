@@ -1,9 +1,8 @@
 'use strict';
 'require at-webserver/rpc';
 'require at-webserver/parse';
-'require at-webserver/ui';
 'require at-webserver/mt5700';
-/* global L, AtWs, Parse, Ui, Mt5700 */
+/* global L, AtWs, Parse, Mt5700 */
 
 /**
  * 定时锁频编排 - 新 UI 视觉 + 基准 v1.3.4 功能
@@ -363,14 +362,7 @@ return L.view.extend({
 
 		/* ---------- 初始化 ---------- */
 
-		AtWs.client.connect().catch(function (err) {
-			if (err && err.message === 'REQUIRE_AUTH_KEY') {
-				Ui.promptModal('连接密钥', [{ key: 'key', label: '连接密钥', type: 'password' }], function (values) {
-					if (values.key) AtWs.client.connect(values.key).catch(function (e) { Mt5700.error((e && e.message) || '认证失败'); });
-				});
-				return;
-			}
-		}).then(function () {
+		Mt5700.connectThen(function () {
 			// 读取总开关（UCI）后再加载状态
 			return L.uci.load('at-webserver').catch(function () {});
 		}).then(function () {

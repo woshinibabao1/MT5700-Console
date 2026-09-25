@@ -1924,24 +1924,8 @@ return L.view.extend({
 			});
 		}
 
-		/* ---------- 连接钩子（照抄 modem_settings：先 connect 再加载） ---------- */
-		AtWs.client.connect().catch(function (err) {
-			if (err && err.message === 'REQUIRE_AUTH_KEY') {
-				Ui.promptModal('连接密钥', [{ key: 'key', label: '连接密钥', type: 'password' }], function (values) {
-					if (values.key) {
-						/* ★ 认证成功后必须自己重渲染一次：外层那个 .then(render)
-						   在认证弹窗弹出时就已经跑过了（跑在未认证状态下，
-						   探测必然失败），不补这一次页面会一直停在错误态。 */
-						AtWs.client.connect(values.key).then(function () {
-							render();
-						}).catch(function (e) {
-							Mt5700.error((e && e.message) || '认证失败');
-						});
-					}
-				});
-				return;
-			}
-		}).then(function () {
+		/* ---------- 连接钩子：先 connect 成功，再拉 profile 列表 ---------- */
+		Mt5700.connectThen(function () {
 			render();
 		});
 

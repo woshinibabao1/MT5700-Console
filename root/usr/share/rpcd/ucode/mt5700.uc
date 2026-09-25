@@ -9,6 +9,13 @@
 const fs = require('fs');
 const uci = require('uci');
 
+/*
+ * 后端每个请求都会校验 UCI 里的 websocket_auth_key（见 src/rust/src/rpcserver.rs
+ * 的认证分支），不一致时逐请求回这个错误码 —— **没有任何前置握手**。
+ * 所以「认证失败」的表现是页面几十处同时报同一句话，而原因只有一个地方。
+ */
+const RPC_ERR_AUTH_FAILED = -32001;
+
 function readRpcConfig() {
 	const cursor = uci.cursor();
 	const port = int(cursor.get('at-webserver', 'config', 'websocket_port')) || 8765;
@@ -365,6 +372,20 @@ function rpcCall(method, params) {
 			let msg = 'RPC 错误';
 			if (resp.error.message) {
 				msg = resp.error.message;
+			}
+			/*
+			 * ★ 认证失败必须带上处置指引。
+			 *   后端只回四个字「认证失败」，而它其实是「UCI 里的 websocket_auth_key
+			 *   与后端不一致」这一个原因 —— 页面里有几十个读数入口会同时报同一句
+			 *   话，却没有一处说清该去哪改。翻译成本地可行动的文案后就一次到位。
+			 *
+			 * ★ 这是原来每个页面各写一遍的「弹输入框补密钥」唯一真正抵达用户的
+			 *   对应物：那条路依赖 connect() 抛 REQUIRE_AUTH_KEY，而 RPC 模式下
+			 *   它永远不 reject（rpc.js 的 ATClient.connect），等于没有。
+			 *   （前缀保持「认证失败」，避免下游按原文匹配的逻辑失效。）
+			 */
+			if (resp.error.code == RPC_ERR_AUTH_FAILED) {
+				msg = '认证失败：UCI 的 websocket_auth_key 与后端不一致，请到「服务配置」核对';
 			}
 			return { success: false, error: msg };
 		}

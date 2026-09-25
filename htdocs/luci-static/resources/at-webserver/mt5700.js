@@ -527,6 +527,32 @@ var Mt5700 = (function () {
 		return card;
 	};
 
+	/* ================= 页面引导（全局单一真源） ================= */
+
+	/*
+	 * 页面初始化：连上 AT 服务之后跑一次 onReady。
+	 *
+	 * ★ 以前 10 个页面各自抄了一遍这段（dial / esim / modem_settings /
+	 *   network_settings / network_status / schedule / sms_center /
+	 *   sms_settings / terminal / upgrade），现在收口到这里 ——
+	 *   连接语义以后只动这一处。
+	 *
+	 * ★★ 这里**没有**「弹密钥输入框重连」的分支，是刻意的，别再加回来：
+	 *   那一套依赖 ATClient.connect() 抛 REQUIRE_AUTH_KEY，而 RPC 模式下
+	 *   它**永远不会 reject**（rpc.js 的 connect：configReady 恒 resolve、
+	 *   authenticated 恒为 true、状态回调本身还包了 try/catch），全仓也再没有
+	 *   任何抛这个错误的生产方 —— 那 10 个弹窗分支全是走不到的死代码。
+	 *
+	 *   真正的认证失败是后端**逐请求**回 -32001（rpcserver.rs），由 mt5700.uc
+	 *   的 rpcCall 翻译成带处置指引的文案统一透出，不需要每个页面各实现一遍。
+	 *   （此处刻意留白是为了让后来者少走一遍这条死路。）
+	 */
+	api.connectThen = function (onReady) {
+		return AtWs.client.connect().then(function () {
+			if (typeof onReady === 'function') onReady();
+		});
+	};
+
 	/* ================= 模态框 ================= */
 
 	/*

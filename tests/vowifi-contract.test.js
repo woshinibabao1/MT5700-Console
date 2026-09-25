@@ -583,7 +583,7 @@ ok('★ 评估中重复点击要挡住（并发会占满 rpcd 工作线程）',
  *      其它卡一起拖住。只断言「有调用」是不够的，顺序同样是契约。
  */
 ok('★★ 进页面自动取一次 VoWiFi（挂在连接成功之后）',
-	/\}\)\.then\(function \(\) \{\s*\n\s*loadAll\(\);\s*\n\s*\}\)\.then\(function \(\) \{[\s\S]{0,400}?runVowifi\(\);/.test(viewSrc));
+	/Mt5700\.connectThen\(function \(\) \{\s*\n\s*loadAll\(\);\s*\n\s*\}\)\.then\(function \(\) \{[\s\S]{0,700}?runVowifi\(\);/.test(viewSrc));
 ok('★★ 自动取数排在 loadAll 之后（不拖慢首屏其它卡）',
 	viewSrc.indexOf('loadAll();') < viewSrc.indexOf('runVowifi();', viewSrc.indexOf('loadAll();')));
 ok('★ 刷新按钮也重取 VoWiFi（与首屏顺序一致：先其它卡，再五道门）',

@@ -260,21 +260,31 @@ for (const st of [40, 50]) {
 		'FOTA 指南 5 章：^FOTAOEMDL 需在 ^FOTASTATE:10 时下发；卡住时先 AT^FOTADL=0 复位');
 }
 
-/* ---------- 连接密钥与进度查询的兜底（2026-09-17 全仓审查补） ---------- */
+/* ---------- 页面引导收口与认证失败可行动（2026-09-25 全量审计改写） ---------- */
 {
 	/*
-	 * ① 密钥认证必须弹输入框。旧实现拿到 REQUIRE_AUTH_KEY 只 Mt5700.error() 就
-	 *    return 了 —— 密钥填错时升级页**永久锁死**（刷新也不会再问第二次）。
-	 *    其余 7 个页面都是 promptModal 写法，这里对齐。
-	 * ② 进度查询（AT^FOTADLQ）必须 catch：没有就是 unhandled rejection，
-	 *    界面停在上一次进度数字上，看着像下载卡死。
+	 * ★★ 这组守卫原来钉的是「拿到 REQUIRE_AUTH_KEY 就 Ui.promptModal 补密钥」，
+	 *    2026-09-25 全量审计时整体改写了。改写理由必须留档：
+	 *
+	 *    RPC 模式下 `ATClient.connect()` **永远不会 reject** —— rpc.js 里它的
+	 *    configReady 尾部有 catch（恒 resolve）、authenticated 恒为 true、状态
+	 *    回调本身还包了 try/catch；而全仓 `REQUIRE_AUTH_KEY` 这个字面量只出现在
+	 *    消费方，一个生产方都没有。结论：那 10 个页面里的弹窗分支全是走不到的
+	 *    死代码，断言它们等于把死代码钉成契约（与当初的 EPDG_VERDICT 同类）。
+	 *
+	 *    但**原意图是对的**（"密钥填错时不能让页面永久锁死却说不清原因"），
+	 *    所以改钉真正可达的两条路径：
+	 *      ① 页面引导    → Mt5700.connectThen（mt5700.js，全站单一真源，10→1）
+	 *      ② 失败可行动  → mt5700.uc 把后端的 -32001 翻成带处置指引的文案
+	 *
+	 * ★ FOTA 进度查询的 catch 是另一件事（真会出现），原样保留。
 	 */
-	ok('升级页声明了对 at-webserver/ui 的依赖（要用 Ui.promptModal）',
-		/'require at-webserver\/ui'/.test(src));
-	ok('global 注释里声明了 Ui（避免被当成未定义变量）', /\/\* global [^\n]*\bUi\b/.test(src));
-	ok('★ REQUIRE_AUTH_KEY 时弹密钥输入框，而不是只报错',
-		/REQUIRE_AUTH_KEY[\s\S]{0,400}Ui\.promptModal/.test(code),
-		'只报错会让密钥填错时升级页永久锁死');
+	ok('★ 升级页走全局单一真源的引导入口（Mt5700.connectThen）',
+		/Mt5700\.connectThen\(/.test(code));
+	ok('★ 不许再出现 REQUIRE_AUTH_KEY 弹窗分支（该错误在 RPC 模式下无人抛出）',
+		!/REQUIRE_AUTH_KEY/.test(code));
+	ok('升级页不再依赖 Ui.promptModal（依赖已随死分支一并删除）',
+		!/'require at-webserver\/ui'/.test(src));
 	ok('★ AT^FOTADLQ 进度查询有 catch（否则 unhandled rejection + 进度假卡死）',
 		/AT\^FOTADLQ'\)[\s\S]{0,1200}\}\)\.catch/.test(code));
 }

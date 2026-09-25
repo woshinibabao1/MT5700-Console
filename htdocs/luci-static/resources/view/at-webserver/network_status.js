@@ -2717,17 +2717,7 @@ return L.view.extend({
 		   ACL 不含 network 时静默降级为只读，不影响上面任何渲染。 */
 		loadDnsConfig().then(renderConnDetail);
 
-		AtWs.client.connect().catch(function (err) {
-			if (err && err.message === 'REQUIRE_AUTH_KEY') {
-				Ui.promptModal('连接密钥', [
-					{ key: 'key', label: '连接密钥', type: 'password', hint: '该密钥保存在 UCI at-webserver.websocket.auth_key' }
-				], function (values) {
-					if (!values.key) return;
-					AtWs.client.connect(values.key).catch(function (e) { Mt5700.error((e && e.message) || '认证失败'); });
-				});
-				return;
-			}
-		}).then(function () {
+		Mt5700.connectThen(function () {
 			refreshAll();
 			/* ★ 2026-09-19：排查**不再进页面自动跑**，只在用户点「一键排查」时才走。
 			   这条链是 9 条 AT + 一次系统侧采集（后端含 3 次 ICMP / DNS / TCP 握手，

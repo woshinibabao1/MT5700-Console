@@ -79,6 +79,14 @@ TARGETS = {
     "vowifijs": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
     # 「调用了未定义的函数」守卫（tests/undefined-fn-contract.test.js）也按文件变异。
     "undeffnjs": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
+    # ★ 再挂三个键（2026-09-25 全量审计）：引导收口契约（tests/bootstrap-contract.test.js）
+    #   同时守着 mt5700.js 的 connectThen 定义、某个 view 页的用法、以及 ucode 的
+    #   -32001 翻译。★ 复用 mt5700js / upgjs / uc2 会**跑错测试**（它们分别跑
+    #   esim-contract、read-command-fresh-contract、vowifi-contract）
+    #   → 变异生效却没人判红（红线 16b）。
+    "corejs": ATWB / "mt5700.js",
+    "dialjs": ATWB.parent / "view" / "at-webserver" / "dial.js",
+    "uc3": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -110,6 +118,9 @@ TARGET_TEST = {
     "rpcjs2": ROOT / "tests" / "vowifi-contract.test.js",
     "vowifijs": ROOT / "tests" / "vowifi-contract.test.js",
     "undeffnjs": ROOT / "tests" / "undefined-fn-contract.test.js",
+    "corejs": ROOT / "tests" / "bootstrap-contract.test.js",
+    "dialjs": ROOT / "tests" / "bootstrap-contract.test.js",
+    "uc3": ROOT / "tests" / "bootstrap-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -959,6 +970,42 @@ MUTATIONS = [
         "self.hub.bus.since(since, EVENT_FRAME_BUDGET)",
         "self.hub.bus.since(since, 0)",
         "events 调用点传入 EVENT_FRAME_BUDGET",
+    ),
+    (
+        # ★★ 2026-09-25 全量审计：这段代码在 10 个页面里各抄过一遍，而它依赖的
+        #   REQUIRE_AUTH_KEY **永远不会被抛出**（RPC 模式 connect() 不 reject）。
+        #   守卫要防的是「有人照抄老页面把它带回来」，所以变异＝注入死分支。
+        "某个页面里加回 REQUIRE_AUTH_KEY 弹窗分支（该错误 RPC 模式下无人抛出）",
+        "dialjs",
+        "\t\tMt5700.connectThen(function () {\n\t\t\tloadAll();\n\t\t});",
+        "\t\tAtWs.client.connect().catch(function (err) {\n"
+        "\t\t\tif (err && err.message === 'REQUIRE_AUTH_KEY') {\n"
+        "\t\t\t\tUi.promptModal('连接密钥', [{ key: 'key', label: '连接密钥', type: 'password' }], function (v) { });\n"
+        "\t\t\t\treturn;\n\t\t\t}\n"
+        "\t\t}).then(function () {\n\t\t\tloadAll();\n\t\t});",
+        "REQUIRE_AUTH_KEY",
+    ),
+    (
+        # ★ 不等连接成功就跑回调＝没连上就发，必然失败。这条守的是「先等」的语义。
+        "connectThen 不再等连接成功就跑回调",
+        "corejs",
+        "\t\treturn AtWs.client.connect().then(function () {\n"
+        "\t\t\tif (typeof onReady === 'function') onReady();\n"
+        "\t\t});",
+        "\t\tif (typeof onReady === 'function') onReady();\n"
+        "\t\treturn AtWs.client.connect();",
+        "connectThen",
+    ),
+    (
+        # ★ 后端只回四个字「认证失败」，页面上几十个入口会同时复读，
+        #   没有这句翻译用户完全不知道是密钥错了、该去哪儿改。
+        "ucode 不再把 -32001 翻成带处置指引的文案（认证失败又只剩四个字）",
+        "uc3",
+        "\t\t\tif (resp.error.code == RPC_ERR_AUTH_FAILED) {\n"
+        "\t\t\t\tmsg = '认证失败：UCI 的 websocket_auth_key 与后端不一致，请到「服务配置」核对';\n"
+        "\t\t\t}\n",
+        "",
+        "-32001",
     ),
 ]
 

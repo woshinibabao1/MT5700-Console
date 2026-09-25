@@ -5,6 +5,54 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.51] - 2026-09-25
+
+### Fixed（十份「弹密钥补认证」分支全是走不到的死代码）
+
+「连上 AT 服务之后跑一次刷新」这段引导，被 10 个页面各抄了一遍，每段里带着
+一个「拿到 `REQUIRE_AUTH_KEY` 就弹输入框补密钥」的分支。而那个分支**永远不会
+执行**：
+
+- `ATClient.connect()`（`rpc.js`）在 RPC 模式下没有 reject 路径 ——
+  `configReady` 尾部有 catch（恒 resolve）、`authenticated` 恒为 `true`、
+  状态回调本身还包了 try/catch；
+- 全仓 `REQUIRE_AUTH_KEY` 这个字面量**只出现在消费方**，没有任何生产方。
+
+→ 这 10 个页面**从未**为用户弹过密钥输入框。
+
+### Added（把真正可达的认证失败提示补上）
+
+后端的密钥校验是**逐请求**的（`rpcserver.rs` 的认证分支），不一致时回 `-32001`，
+没有任何前置握手；ucode 原来只把它转成四个字「认证失败」。页面上有几十个读数
+入口会同时复读这四个字，却没有一处说清是哪儿配错了。
+
+现在 `mt5700.uc` 的 `rpcCall` 统一把它翻译成：
+
+```
+认证失败：UCI 的 websocket_auth_key 与后端不一致，请到「服务配置」核对
+```
+
+前缀保留「认证失败」，下游若按原文匹配不会失效。
+
+### Changed（引导收口成全局单一真源）
+
+- 新增 `Mt5700.connectThen(onReady)`（`mt5700.js`），10 份副本收口成 1 份，
+  回调可选（终端页连上即可，没有要拉的初始数据）。
+- 「服务配置」页本来就提供 `websocket_auth_key` 输入框 —— 删掉的弹窗不是功能
+  损失，那条路径从来都是死的。
+- `upgrade.js` / `schedule.js` 删掉随之成为孤儿的 `at-webserver/ui` 依赖。
+
+### Added（守卫）
+
+- 新增 `tests/bootstrap-contract.test.js`（33 项）：守「引导单一真源」与
+  「认证失败有处置指引」，并对每个页面做反向断言 —— 不许再把 `REQUIRE_AUTH_KEY`
+  分支抄回来。**已用缺陷样例验证它能报红**（3/3，还原逐字节一致）。
+- `tests/upgrade-poll.test.js` 里原本有一条断言专门钉住
+  `/REQUIRE_AUTH_KEY…Ui\.promptModal/` 必须存在 —— 那等于把死代码钉成契约
+  （与当初的 `EPDG_VERDICT` 同类），删死代码反而会红。已改写为钉真正可达的两条
+  路径，原意图（"密钥填错不能让页面锁死又不说原因"）转移到 `-32001` 翻译上。
+- `tools/verify-guards.py` 新增 3 条变异（累计 98 条，全数检出）。
+
 ## [2.3.50] - 2026-09-24
 
 ### Changed（VoWiFi 迁到「模组设置」，并改成进页面就取数）
