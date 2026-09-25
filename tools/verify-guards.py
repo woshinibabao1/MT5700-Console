@@ -84,6 +84,15 @@ TARGETS = {
     #   -32001 翻译。★ 复用 mt5700js / upgjs / uc2 会**跑错测试**（它们分别跑
     #   esim-contract、read-command-fresh-contract、vowifi-contract）
     #   → 变异生效却没人判红（红线 16b）。
+    # ★★ 2026-09-25 性能专项的三份新契约，各自跑自己的测试文件（红线 16b）：
+    #   复用 rpcjs / rpcjs2 / nsjs(旧) 都会跑错测试 → 变异生效却没人判红。
+    #   · rpcjs3  守「失败命令自适应降级」（retry-backoff-contract）
+    #   · warmjs  守「批量预热」的 rpc.js 侧行为（warm-cache-contract）
+    #   · nsjs    守「慢档真的接了预热」（同一个 warm-cache-contract 的静态断言）
+    "rpcjs3": ATWB / "rpc.js",
+    "warmjs": ATWB / "rpc.js",
+    "nsjs": ATWB.parent / "view" / "at-webserver" / "network_status.js",
+    "uc4": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
     "corejs": ATWB / "mt5700.js",
     "dialjs": ATWB.parent / "view" / "at-webserver" / "dial.js",
     "uc3": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
@@ -121,6 +130,10 @@ TARGET_TEST = {
     "corejs": ROOT / "tests" / "bootstrap-contract.test.js",
     "dialjs": ROOT / "tests" / "bootstrap-contract.test.js",
     "uc3": ROOT / "tests" / "bootstrap-contract.test.js",
+    "rpcjs3": ROOT / "tests" / "retry-backoff-contract.test.js",
+    "warmjs": ROOT / "tests" / "warm-cache-contract.test.js",
+    "nsjs": ROOT / "tests" / "warm-cache-contract.test.js",
+    "uc4": ROOT / "tests" / "at-batch-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -1006,6 +1019,54 @@ MUTATIONS = [
         "\t\t\t}\n",
         "",
         "-32001",
+    ),
+    # ---------------- 2026-09-25 性能专项 ----------------
+    (
+        # ★ 锚点唯一性已核：这段三元表达式在 rpc.js 里只出现 1 次（就在 sendCommand 里）。
+        #   去掉降级后，注定了要失败的命令会回到「三次重试 + 600ms 退避」，
+        #   这正是本机每轮慢档被拖长好几秒的原因。
+        "失败命令取消自适应降级（回到固定三次重试）",
+        "rpcjs3",
+        "\t\t\t: (self._currentFailStreak(command) >= RETRY_DOWNGRADE_STREAK\n"
+        "\t\t\t\t? 1\n"
+        "\t\t\t\t: RETRY_ATTEMPTS_DEFAULT));",
+        "\t\t\t: RETRY_ATTEMPTS_DEFAULT);",
+        "连续两轮失败之后降级为只发一次",
+    ),
+    (
+        # ★ 锚点唯一性已核：`self._cachePut(it.cmd, { success: true, data: it.data });`
+        #   在 rpc.js 里只出现在 warmCache 里。
+        #   预热不写缓存 = 整轮还是一条一条HttpRequest，实测收益归零。
+        "预热取回的结果不写进读缓存（提速彻底失效）",
+        "warmjs",
+        "\t\t\t\tself._cachePut(it.cmd, { success: true, data: it.data });",
+        "\t\t\t\t/* 变异：不写缓存 */",
+        # ★ 关键词必须写**真的会报出来的那条断言名**：
+        #   warmCache 的返回值只是「成功应答有几条」，光判返回值的话，
+        #   「压根不写缓存」这种变异会不红 —— 真正会红的是「同一轮还要再下发」。
+        "预热之后同一轮的查询不再打串口",
+    ),
+    (
+        "慢档不再以预热开头（实现了却不用）",
+        "nsjs",
+        "\t\t\tvar chain = AtWs.client.warmCache(SLOW_WARM);",
+        "\t\t\tvar chain = Promise.resolve();",
+        "慢档以预热开头",
+    ),
+    (
+        # ★ 多行锚点：mt5700.uc 里 `return false;` 不止一处，必须带上它前面那整个
+        #   BARE_READS 循环，才能锁到 batchReadable 的最后一句。
+        "batchReadable 改成兜底放行（at_batch 从此能下发写命令）",
+        "uc4",
+        "\tfor (i = 0; i < length(BARE_READS); i++) {\n"
+        "\t\tif (BARE_READS[i] == cmd) { return true; }\n"
+        "\t}\n"
+        "\treturn false;",
+        "\tfor (i = 0; i < length(BARE_READS); i++) {\n"
+        "\t\tif (BARE_READS[i] == cmd) { return true; }\n"
+        "\t}\n"
+        "\treturn true;",
+        "batchReadable 的兜底是拒绝",
     ),
 ]
 

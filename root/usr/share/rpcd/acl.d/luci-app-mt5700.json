@@ -22,6 +22,7 @@
 				],
 				"mt5700": [
 					"at",
+					"at_batch",
 					"events",
 					"logs",
 					"netrate",
@@ -101,6 +102,7 @@
 				],
 				"mt5700": [
 					"at",
+					"at_batch",
 					"events",
 					"es9p",
 					"exitip",

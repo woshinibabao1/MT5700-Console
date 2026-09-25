@@ -576,6 +576,35 @@ function atCallCached(cmdRaw) {
 	return rpcCall('at', { cmd: cmd });
 }
 
+/* 一次 at_batch 最多几条：既要能装下「网络状态页慢档那一轮」，
+   又不能让人用一条请求把串口占上几十秒。 */
+const AT_BATCH_MAX = 40;
+
+/* 单条命令长度上限：与 at 方法同一口径（见 at args 的注释） */
+const AT_BATCH_CMD_MAX = 4096;
+
+/*
+ * 「是不是只读查询」的服务端判据。
+ *
+ * 为什么这里是白名单而不是黑名单：
+ * at_batch 一次请求就能下发几十条命令，一旦放进一条写命令（哪怕是
+ * AT^RESET / AT+CFUN=0），代价就不是「多打一次串口」而是整个设备失控。
+ * 所以这里只允许**明确认识形态**的查询——以 ? 结尾且不含 =、
+ * 或在不带问号的只读名单里——认不出的形态一律拒绝。
+ */
+function batchReadable(cmd) {
+	if (cmd == 'AT' || cmd == 'ATI') { return true; }
+	if (substr(cmd, length(cmd) - 1, 1) == '?' && index(cmd, '=') < 0) { return true; }
+	let i;
+	for (i = 0; i < length(STATIC_READS); i++) {
+		if (STATIC_READS[i] == cmd) { return true; }
+	}
+	for (i = 0; i < length(BARE_READS); i++) {
+		if (BARE_READS[i] == cmd) { return true; }
+	}
+	return false;
+}
+
 
 /*
  * ================= ES9+ 转发（eSIM profile 下载） =================
@@ -2479,6 +2508,90 @@ return {
 					return { success: false, error: 'AT 命令过长（上限 4096 字节）' };
 				}
 				return atCallCached(cmd);
+			}
+		},
+		/*
+		 * 批量只读查询（2026-09-25 P20 性能专项）。
+		 *
+		 * 起因：一条 AT 从浏览器到模组再回来约 100ms，而其中绝大部分**不在串口上**——
+		 * 是 HTTP / rpcd / ucode / `nc 127.0.0.1` 这一路的固定开销。网络状态页一轮
+		 * 三十余次调用，实测串行 20 条就要 2150ms，而同样的 20 条在本机 ubus 里
+		 * 逐条跑只要约 800ms（这里每一条仍是同一个 atCallCached，没有新通道）。
+		 * 于是把「一轮里要问的那些只读命令」合成一次 HTTP 请求，只是在 ucode 内部
+		 * 逐条转发，省掉的就是那部分重复的路费。
+		 *
+		 * ★ 三条边界（这是它能被放心用的前提）：
+		 *   ① **只放行只读查询**（batchReadable），写命令一律原样退回并计数；
+		 *   ② 有上限：条数 AT_BATCH_MAX、单条长度 AT_BATCH_CMD_MAX（与 at 同口径）；
+		 *   ③ 逐条独立：某条失败不影响其它条，结果按**入参顺序**返回，每条都带
+		 *      自己的 cmd，前端可以据此核对有没有错位。
+		 */
+		at_batch: {
+			args: { cmds: [] },
+			call: function (req) {
+				let a = req.args;
+				let list = (a != null) ? a.cmds : null;
+				if (list == null) {
+					return { success: false, error: '缺少参数 cmds（字符串数组）' };
+				}
+				let n = length(list);
+				if (n == 0) {
+					return { success: false, error: '参数 cmds 为空' };
+				}
+				if (n > AT_BATCH_MAX) {
+					return {
+						success: false,
+						error: '一次最多 ' + AT_BATCH_MAX + ' 条（收到 ' + n + ' 条）'
+					};
+				}
+				let results = [];
+				let refused = 0;
+				for (let i = 0; i < n; i++) {
+					let raw = list[i];
+					let item = null;
+					/*
+					 * ★★ 判类型只能用 type()：**本固件的 ucode 里 typeof 返回的是
+					 *   值本身，不是类型名**（实测 `typeof 'AT'` → `AT`，
+					 *   `typeof [1]` → 数组的字面量），拿它做 `'string'` 比较会
+					 *   把**每一条**都判成「不是字符串」—— 2026-09-25 部署后
+					 *   20 条命令全部被拒就是这么来的。
+					 *   另：`typeof x != 'string'` 还额外触发语法错误（Expecting ')'）。
+					 */
+					if (raw == null || type(raw) != 'string') {
+						item = { cmd: '', success: false, error: '第 ' + (i + 1) + ' 项不是字符串' };
+						refused++;
+					} else {
+						let cmd = trimCmd(raw);
+						if (cmd == '') {
+							item = { cmd: cmd, success: false, error: '第 ' + (i + 1) + ' 项为空' };
+							refused++;
+						} else if (length(cmd) > AT_BATCH_CMD_MAX) {
+							item = { cmd: cmd, success: false, error: '第 ' + (i + 1) + ' 项过长' };
+							refused++;
+						} else if (!batchReadable(cmd)) {
+							item = { cmd: cmd, success: false, error: '第 ' + (i + 1) + ' 项不是只读查询，已拒绝下发' };
+							refused++;
+						} else {
+							let r = atCallCached(cmd);
+							if (r == null) {
+								item = { cmd: cmd, success: false, error: '后端无应答' };
+							} else {
+								item = {
+									cmd: cmd,
+									success: r.success === true,
+									data: r.data,
+									error: r.error,
+									cached: r.cached === true
+								};
+							}
+						}
+					}
+					results[length(results)] = item;
+				}
+				if (refused == n) {
+					return { success: false, results: results, error: '全部 ' + n + ' 条都被拒绝下发' };
+				}
+				return { success: true, at: time(), count: n, refused: refused, results: results };
 			}
 		},
 		events: {

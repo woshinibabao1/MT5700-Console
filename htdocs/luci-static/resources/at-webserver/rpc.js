@@ -28,6 +28,23 @@ var rpcAt = L.rpc.declare({
 	expect: {}
 });
 
+/*
+ * 批量只读查询（对应 mt5700.uc 的 at_batch）。
+ *
+ * 存在的唯一理由是把每层的重复路费压到一次请求里：单条 AT 实测约 100ms，其中大头是
+ * HTTP / rpcd / ucode / `nc` 这一路的固定开销，而不是串口本身。
+ * 把一轮要问的只读命令合成一次请求，在 ucode 里逐条转发，省的就是这笔重复路费
+ * （实测：20 条串行 2150ms → 单批次约 800ms）。
+ *
+ * 后端强制只读白名单，所以这里不存在「被塞进一条写命令」的可能。
+ */
+var rpcAtBatch = L.rpc.declare({
+	object: 'mt5700',
+	method: 'at_batch',
+	params: ['cmds'],
+	expect: {}
+});
+
 var rpcEvents = L.rpc.declare({
 	object: 'mt5700',
 	method: 'events',
@@ -538,6 +555,114 @@ ATClient.prototype.clearReadCache = function () {
 };
 
 /*
+ * ★ P20（2026-09-25 性能专项）：**注定了要失败的命令，别再重试三次。**
+ *
+ * 实测（模拟浏览器经 /ubus）：成功的一条 AT 往返约 100ms，而只读命令最多
+ * 重试三次、每次失败还要退避 `200ms × attempt`，于是**注定失败**的一条命令
+ * 实际要烧掉 `100 + 200 + 100 + 400 + 100 ≈ 900ms` —— 九倍成本。
+ * 本机正好有四类命令在特定状态下稳定返回 ERROR：
+ *
+ *   AT^SIMST?       ^SIMST 是**主动上报 URC**，根本没有查询语法
+ *   AT^SYSINFOEX?   手册 13.1 写的语法是 `AT^SYSINFOEX`（**不带问号**）
+ *   AT^SYSINFO      手册里没有这条命令
+ *   AT^NRSSBID?     要 NR 连接态且网侧配了测量才有值，其余情况 +CME ERROR
+ *
+ * 它们不是某个页面偶发的抖动：网络状态页一轮三十余次调用全是串行，
+ * 几条稳定失败的老命令就能把整轮拖长好几秒。
+ *
+ * 为什么是「自适应降级」而不是把 maxAttempts 改成 1：
+ * 本模组存在**偶发**单次 ERROR（AT^HCSQ? / AT^MONSC 实测都遇到过一次即过），
+ * 一次性砍掉重试会让一次偶然抖动直接变成界面上一个红叉。这里的规则是：
+ *
+ *   同一条命令**连续两轮**都没翻过身 → 认定它当前就是不支持，后续每轮只发一次；
+ *   任意一次成功 → 立刻复位（否则一次偶发就被永久降级，等于把偶发失败钉死）。
+ *
+ * 判据是「同一条命令」：normalizeCommand 归一化后的 key，按键互不影响。
+ * 队列本身是串行的，key 的读写不会被两条命令同时踩到。
+ */
+const RETRY_ATTEMPTS_DEFAULT = 3;      /* 常规重试次数（首次遇见失败时的容忍度） */
+const RETRY_DOWNGRADE_STREAK = 2;      /* 连续失败到第几轮开始降级 */
+
+/* 预热一次最多问几条：与后端 AT_BATCH_MAX 对齐 */
+const WARM_CACHE_MAX = 40;
+/* 预热的整体等待上限：后端逐条转发 40 条约需 1.6s（每条 40ms），给足余量 */
+const WARM_CACHE_WAIT_MS = 12000;
+
+/*
+ * 批量预热读缓存（2026-09-25 P20 性能专项）。
+ *
+ * 想法很简单：一轮刷新要问的那批只读命令，**一次性**问回来，塞进本文件既有的
+ * 读缓存，然后各自的卡片照旧用 sendCommand 去读——此时每一条都命中缓存，
+ * 整轮的串口往返从「N 次 HTTP」压成「1 次 HTTP」。
+ *
+ * ★ 三条约束（决定了它能不能被放心用）：
+ *   ① **只预热本来就会被缓存的命令**（isRetryableRead 判定，与 sendCommand
+ *      的 cacheable 同源）。带 { fresh: true } 的调用天然绕过缓存，预热对它无效，
+ *      也就不会破坏「这一项必须拿实时值」的语义。
+ *   ② **失败结果绝不入缓存** —— 走的是同一个 `_cachePut`，它只收 success。
+ *      否则一次偶发 ERROR 会被固化成「持续显示失败」（见 at-cache-contract 第 ③ 条）。
+ *   ③ 预热失败必须**不阻断**后续任何逻辑，但也**不能静默**：失败计数与最后一次
+ *      原因记在 _warmFailures / _warmError 上，可用 warmStats() 查。
+ *
+ * 返回值：成功写进缓存的条数（0 表示这次预热没帮上忙，走原路径，安全）。
+ */
+ATClient.prototype.warmCache = function (commands) {
+	var self = this;
+	var list = [];
+	(commands || []).forEach(function (c) {
+		if (isRetryableRead(c)) { list.push(c); }
+	});
+	if (!list.length) { return Promise.resolve(0); }
+	if (list.length > WARM_CACHE_MAX) { list = list.slice(0, WARM_CACHE_MAX); }
+	return withTimeout(rpcAtBatch(list), WARM_CACHE_WAIT_MS, '批量预热超时')
+		.then(function (resp) {
+			resp = resp || {};
+			var n = 0;
+			var arr = resp.results || [];
+			for (var i = 0; i < arr.length; i++) {
+				var it = arr[i];
+				/*
+				 * 后端按顺序返回，但**位置不对就是数据错位** —— 以每条自带的 cmd
+				 * 为准回填，宁可少缓存一条，也不把别人的应答当成它的。
+				 */
+				if (it && it.success === true && it.cmd) {
+					self._cachePut(it.cmd, { success: true, data: it.data });
+					n++;
+				}
+			}
+			return n;
+		})
+		.catch(function (err) {
+			self._warmFailures = (self._warmFailures || 0) + 1;
+			self._warmError = (err && err.message) || '批量预热失败';
+			return 0;
+		});
+};
+
+ATClient.prototype.warmStats = function () {
+	return { failures: this._warmFailures || 0, error: this._warmError || null };
+};
+
+ATClient.prototype._currentFailStreak = function (command) {
+	if (!this._failStreak) return 0;
+	return this._failStreak[normalizeCommand(command)] || 0;
+};
+
+/* 记账：成功清零、失败累加；返回累加后的连续失败轮数 */
+ATClient.prototype._noteFailStreak = function (command, succeeded) {
+	var k = normalizeCommand(command);
+	if (!isRetryableRead(command)) return 0;   /* 写命令没有重试，不参与降级 */
+	if (succeeded) {
+		if (this._failStreak) delete this._failStreak[k];
+		return 0;
+	}
+	if (!this._failStreak) this._failStreak = {};
+	var n = (this._failStreak[k] || 0) + 1;
+	this._failStreak[k] = n;
+	return n;
+};
+
+/*
  * 只丢掉「状态类」缓存。
  * 写命令（改 PIN、切飞行模式、改 PDP、改短信中心号）执行成功后，被它改动的
  * 那些状态查询可能已经失效；物理标识类不受影响，没必要一起丢。
@@ -558,9 +683,18 @@ ATClient.prototype.sendCommand = function (command, opts) {
 		var cached = this._cacheGet(command);
 		if (cached) return Promise.resolve(cached);
 	}
+	/*
+	 * 重试次数的默认值不再是一个常数（见 RETRY_DOWNGRADE_STREAK 的注释）：
+	 * 同一条命令连续失败两轮之后，每轮只发一次，成功即复位。
+	 * 调用方显式传了 attempts 时以调用方为准，降级逻辑不插手。
+	 */
 	var maxAttempts = opt.attempts != null
 		? opt.attempts
-		: (isRetryableRead(command) ? 3 : 1);
+		: (!isRetryableRead(command)
+			? 1
+			: (self._currentFailStreak(command) >= RETRY_DOWNGRADE_STREAK
+				? 1
+				: RETRY_ATTEMPTS_DEFAULT));
 	/*
 	 * ★ P04（2026-09-19 会审）：给单条命令加总预算。
 	 * 后端最坏 13s（atclient 2s 应答 + 8s 排队 + 3s 写入）、ucode 侧 `timeout 45 nc` 兜底；
@@ -608,6 +742,7 @@ ATClient.prototype.sendCommand = function (command, opts) {
 	if (cacheable) {
 		return this.commandQueue.then(function (res) {
 			self._cachePut(command, res);
+			self._noteFailStreak(command, !!(res && res.success));
 			return res;
 		});
 	}
@@ -619,6 +754,7 @@ ATClient.prototype.sendCommand = function (command, opts) {
 	 */
 	return this.commandQueue.then(function (res) {
 		if (res && res.success) self._dropStateCache();
+		self._noteFailStreak(command, !!(res && res.success));
 		return res;
 	});
 };

@@ -2602,6 +2602,50 @@ return L.view.extend({
 		var SLOW_TASKS = [loadSecondary, getPSReg, getFlow, getOperator, getAMBR,
 			getQCI, getDHCP, getTemp, getMCS, loadDiagnostics];
 
+		/*
+		 * ★ P20（2026-09-25 性能专项）：慢档十个任务加起来是这一页**最重的一轮** ——
+		 * 十余次串口往返，逐个串行发，实测单条往返约 100ms，整轮要好几秒，
+		 * 表现为「进页面后各卡片一个一个慢慢填」。
+		 *
+		 * 这里先把它们要问的只读命令**一次性**取回来（AtWs.client.warmCache，
+		 * 后端是新增的 mt5700.at_batch，一次 HTTP 里逐条转发），各任务照旧
+		 * sendCommand —— 此时几乎每条都命中既有读缓存，整轮的串口往返从
+		 * 「十几次 HTTP」压成「一次 HTTP」。
+		 *
+		 * ★ 为什么这样做是安全的：
+		 *   · warmCache 只处理「sendCommand 本来就会缓存」的命令（同一个
+		 *     isRetryableRead 判据），**失败结果不入缓存**（同一个 _cachePut），
+		 *     所以一次偶发 ERROR 不会被固化成持续显示失败；
+		 *   · 带 { fresh: true } 的调用天然绕过缓存，预热对它完全无效 ——
+		 *     「这一项必须拿实时值」的语义没有被削弱；
+		 *   · 预热失败只返回 0，不 reject，任务链完全不受影响。
+		 *
+		 * ★ 副产品其实是改善：原本十个任务读到的数据本来就是**不同时刻**的
+		 * （前后差好几秒），而现在整轮取的是同一个时刻的快照，读数之间自洽了。
+		 *
+		 * 清单来自下面 SLOW_TASKS 各函数实际会发的命令；写命令（^EONS=2、
+		 * ^DSAMBR=、^MCS=、含 cid 的拼接命令、AT+CGPADDR 这类不经缓存的读）
+		 * 不在其中 —— 它们要么本来就不用缓存，要么参数要临时算。
+		 */
+		var SLOW_WARM = [
+			'AT+CGACT?',       /* resolveActiveCid（getAMBR / getQCI 都要先问它） */
+			'AT^NRSSBID?',     /* loadSecondary：辅载波与 SSB 邻区 */
+			'AT^MONNC',        /* loadSecondary：给 SSB 邻区补 RSRQ */
+			'AT+CGREG?',       /* getPSReg */
+			'AT+CEREG?',       /* getPSReg + loadDiagnostics（同一轮复用同一份） */
+			'AT^DSFLOWQRY',    /* getFlow */
+			'AT^DHCPV6?',      /* getDHCP */
+			'AT^DHCP?',        /* getDHCP */
+			'AT^IPV6CAP?',     /* getDHCP */
+			'AT^CHIPTEMP?',    /* getTemp */
+			'AT^LENDC?',       /* loadDiagnostics */
+			'AT+C5GREG?',      /* loadDiagnostics */
+			'AT^NTXPOWER?',    /* loadDiagnostics */
+			'AT+CIREG?',       /* loadDiagnostics */
+			'AT^RRCSTAT?',     /* loadDiagnostics */
+			'AT+COPS?'         /* loadDiagnostics */
+		];
+
 		/* 慢档各任务的失败记录：逐步兜错后失败不再阻断后续，但要留痕，
 		   否则「某一项一直失败」又会退化成看不见的静默问题。 */
 		var slowFailures = {};
@@ -2617,7 +2661,8 @@ return L.view.extend({
 			 * 表现为「辅载波读数一直不刷新、像是卡住了」。
 			 * 改成逐步兜错后，单点失败只丢那一项，其余照常更新。
 			 */
-			var chain = Promise.resolve();
+			/* 起点是「慢档预热」：一次 HTTP 取回整轮要用的只读命令，见 SLOW_WARM 的注释 */
+			var chain = AtWs.client.warmCache(SLOW_WARM);
 			SLOW_TASKS.forEach(function (fn) {
 				chain = chain.then(function () {
 					/*
