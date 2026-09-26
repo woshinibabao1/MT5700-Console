@@ -39,7 +39,7 @@ const mtSrc = fs.readFileSync(path.join(__dirname, '..', 'htdocs', 'luci-static'
 	'resources', 'at-webserver', 'mt5700.js'), 'utf8').replace(/\r\n/g, '\n');
 
 /* 同款正则 eval 加载 euicc.js（与 euicc-download-contract.test.js:23 一致） */
-const m = euiccSrc.match(/var Euicc = \((function[\s\S]*?)\)\(\);/);
+const m = euiccSrc.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/);
 if (!m) {
 	console.error('无法从 euicc.js 提取模块');
 	process.exit(1);

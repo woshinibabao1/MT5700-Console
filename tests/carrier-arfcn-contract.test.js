@@ -29,7 +29,7 @@ const nsSrc = fs.readFileSync(NS, 'utf8');
 const pSrc = fs.readFileSync(PARSE, 'utf8');
 const rSrc = fs.readFileSync(RPC, 'utf8');
 
-const Parse = eval('(' + pSrc.match(/var Parse = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+const Parse = eval('(' + pSrc.match(/var Parse = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 
 function grab(name, src) {
 	const i = src.indexOf('function ' + name + '(');

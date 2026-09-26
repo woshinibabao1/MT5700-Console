@@ -16,7 +16,7 @@ const path = require('path');
 const EUICC_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at-webserver', 'euicc.js');
 const src = fs.readFileSync(EUICC_JS, 'utf8');
 
-const m = src.match(/var Euicc = \((function[\s\S]*?)\)\(\);/);
+const m = src.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/);
 if (!m) {
 	console.error('无法从 euicc.js 提取模块');
 	process.exit(1);
@@ -647,7 +647,7 @@ ok('★ P01 反向：兜底那一处若改回 fatal 则 6A86 不再是 error',
 		var j = head.lastIndexOf("level: 'error'");
 		if (j < 0) return false;
 		var s = head.slice(0, j) + "level: 'fatal'" + head.slice(j + "level: 'error'".length) + src.slice(i);
-		return eval('(' + s.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')().swInfo('6A86').level !== 'error';
+		return eval('(' + s.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')().swInfo('6A86').level !== 'error';
 	})());
 
 /* ---------- P07：ES10 结果码 → 中文人话 ---------- */
@@ -672,7 +672,7 @@ ok('P07 es10ResultText(999) 不编造、直接回显码号', Euicc.es10ResultTex
 ok('★ P07 反向：删掉缺省回显分支则 es10ResultText(999) 不再含码号',
 	(function () {
 		var s = src.split("'ES10 结果码 ' + code").join("'x'");
-		return eval('(' + s.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')().es10ResultText(999) !== 'ES10 结果码 999';
+		return eval('(' + s.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')().es10ResultText(999) !== 'ES10 结果码 999';
 	})());
 
 /* ---------- P08：probe 复用探活 EID，BF3E 只下发一次 ---------- */
@@ -704,7 +704,7 @@ asyncTests.push((function () {
 	var eid = '89086030202200000026000173326959';
 	var negSrc = src.split('pingInfo && pingInfo.eid').join('false');
 	if (negSrc === src) { fails.push('P08 反向用例未打中源码（替换失效）'); return Promise.resolve(); }
-	var neg = eval('(' + negSrc.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+	var neg = eval('(' + negSrc.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 	var counter = [];
 	var send = mockSend({
 		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },
@@ -850,7 +850,7 @@ ok('6999 点出「SIM 被复位」这一层病因（不是卡不支持下载）'
  * 删掉该分支后必须退化成通用兜底文案「未知卡片错误 SW=6999」，证明它不是恒绿摆设。 */
 (function () {
 	var stripped = eval('(' + src.replace(/if \(sw === '6999'\) \{[\s\S]*?\n\t\t\}\n/, '').match(
-		/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+		/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 	eq('★ 反向：删掉 6999 分支 → 退化成通用兜底文案（守卫不恒绿）',
 		stripped.swInfo('6999').text, '未知卡片错误 SW=6999');
 })();

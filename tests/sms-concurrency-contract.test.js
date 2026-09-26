@@ -80,7 +80,7 @@ has('批量删除弹窗可被卸载清理', /openMask/.test(SMS) && /removeChild
 /* ------------------------------------------------------------------ */
 console.log('== C. AT 命令注入防护（安全） ==');
 
-const m = PARSE.match(/var Parse = \((function[\s\S]*?)\)\(\);/);
+const m = PARSE.match(/var Parse = \((function[\s\S]*?\n\})\)\(\);/);
 if (!m) { no('提取 Parse 模块', 'parse.js 结构变了'); }
 else {
 	/* eslint-disable no-eval */

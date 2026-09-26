@@ -23,7 +23,7 @@ const path = require('path');
 
 const SRC = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at-webserver', 'smsEncode.js');
 const src = fs.readFileSync(SRC, 'utf8');
-const m = src.match(/var SmsEncode = \((function[\s\S]*?)\)\(\);/);
+const m = src.match(/var SmsEncode = \((function[\s\S]*?\n\})\)\(\);/);
 if (!m) {
 	console.error('无法从 smsEncode.js 中提取编码模块');
 	process.exit(1);

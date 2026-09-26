@@ -20,7 +20,7 @@ const path = require('path');
 
 const EUICC_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at-webserver', 'euicc.js');
 const src = fs.readFileSync(EUICC_JS, 'utf8');
-const m = src.match(/var Euicc = \((function[\s\S]*?)\)\(\);/);
+const m = src.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/);
 if (!m) {
 	console.error('无法从 euicc.js 提取模块');
 	process.exit(1);
@@ -293,7 +293,7 @@ const negSrc = src
 	.join("segs.push({ hex: bppHex.slice(a1.start, a1.end), label: 'A1 整块' });");
 ok('★ 反向：改回整块下发 → 拼接不再等于原包（守卫不恒绿）', (function () {
 	if (negSrc === src) return false;   /* 替换没打中 → 反向用例本身失效 */
-	const neg = eval('(' + negSrc.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+	const neg = eval('(' + negSrc.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 	return neg.splitBoundProfilePackage(BPP_BODY).map(function (s) { return s.hex; })
 		.join('') !== BPP_BODY;
 })(), '替换未生效或断言恒绿');
@@ -780,14 +780,14 @@ ok('反向：把 LATE_MAX_POLLS 改成 1 后 policy 必须跟着变（防止断�
 	(function () {
 		const neg = src.split('LATE_MAX_POLLS = 400').join('LATE_MAX_POLLS = 1');
 		if (neg === src) return false;   /* 替换没打中 → 反向用例本身失效 */
-		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 		return m.lateCapturePolicy.maxPolls === 1;
 	})(), '替换未生效或断言恒绿');
 ok('反向：把 LATE_WINDOW_MS 改成 1 后 policy.windowMs 必须跟着变（防止断言恒绿）',
 	(function () {
 		const neg = src.split('LATE_WINDOW_MS = 30000').join('LATE_WINDOW_MS = 1');
 		if (neg === src) return false;
-		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 		return m.lateCapturePolicy.windowMs === 1;
 	})(), '替换未生效或断言恒绿');
 
@@ -906,7 +906,7 @@ asyncTests.push((function () {
 		fails.push('反向用例没打中源码（收尾那行可能被改名了），检查已失效');
 		return Promise.resolve();
 	}
-	const Neg = eval('(' + noCleanup.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+	const Neg = eval('(' + noCleanup.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 	const card = makeCard({ prepareSw: '6985' });
 	const srv = makeServer();
 	return Neg.downloadProfile(card.send, srv.es9p, { activation: { smdp: 'rsp.example.com' } })
@@ -1014,7 +1014,7 @@ ok('反向：把查找的 tag 从 5A 换掉后，上面的 ICCID 提取必须失
 	(function () {
 		const neg = src.split("tlvFindHex(hex, '5A', 0)").join("tlvFindHex(hex, '99', 0)");
 		if (neg === src) return false;   /* 替换没打中 → 反向用例本身失效 */
-		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+		const m = eval('(' + neg.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 		return m.iccidFromProfileMetadata(PM_B64) === '';
 	})(), '换 tag 后仍取到值，说明这条断言没在读 tag');
 ok('tlvFindHex 对截断的 TLV 返回空（绝不拿残片当值）',

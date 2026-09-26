@@ -158,11 +158,28 @@ ok('手册原名保留在 SRV_DOMAIN_CODE 里（不丢排障信息）',
 /*
  * 简化 label 要治的是「选项太啰嗦」，不是「抹掉排障信息」。频段是位图，
  * 十六进制码正是拿去对 AT 手册 13.2.3 的唯一依据 —— 它移到 hint 里可以，
- * 但整个文件里必须还留着这些码（作为选项 value），否则排障时无从下手。
+ * 但源码里必须还留着这些码，否则排障时无从下手。
+ *
+ * ★ 2026-09-26 收口：两个「全部频段」的码由页面内联升级成 parse.js 的命名常量
+ *   （BAND_ALL_MASK / LTE_BAND_ALL_MASK）—— 保存流程要拿它们跟写后回读值比对，
+ *   页面与解析层各写一份必然失配。所以「码还在不在」按**发货的前端源码整体**
+ *   判定：只盯 modem_settings.js 会把这次正当的集中搬移误判成「码被抹了」。
  */
+const parseJsSrc = fs.readFileSync(path.join(RES, 'at-webserver', 'parse.js'), 'utf8');
+const shippedJs = modemJs + '\n' + parseJsSrc;
 ['00680380', '2000000680380', '3FFFFFFF', '1E200000095', '7FFFFFFFFFFFFFFF'].forEach((code) => {
-	ok('频段预设码 ' + code + ' 仍在源码里（未因简化被抹掉）', modemJs.indexOf(code) >= 0);
+	ok('频段预设码 ' + code + ' 仍在前端源码里（未因简化或搬移被抹掉）',
+		shippedJs.indexOf(code) >= 0);
 });
+/*
+ * 反向断言：搬走之后页面必须**引用**那两个常量，不能再内联一份字面量 ——
+ * 否则「页面一份 + parse.js 一份」会各自漂移，写后校验拿到的就不是界面下发的那个值。
+ */
+ok('「全部频段」取值来自 parse.js 的单一来源，页面不得再内联字面量',
+	modemJs.indexOf('Parse.BAND_ALL_MASK') >= 0
+	&& modemJs.indexOf('Parse.LTE_BAND_ALL_MASK') >= 0
+	&& !/value: '(?:3FFFFFFF|7FFFFFFFFFFFFFFF)'/.test(modemJs),
+	'页面仍在内联频段字面量');
 ok('频段 label 不再把十六进制码塞进文案（码移出 label）',
 	!/label: '[0-9A-F]{8,} · /.test(modemJs),
 	'仍有形如「00680380 · 自动」的选项文案');

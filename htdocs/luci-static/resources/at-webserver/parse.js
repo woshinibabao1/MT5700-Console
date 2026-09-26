@@ -541,6 +541,73 @@ var Parse = (function () {
 			+ num(c.roam, 1) + ',' + num(c.srvdomain, 2) + ',' + String(c.lteband || '') + ',,';
 	};
 
+	var SYSCFG_FIELDS = [
+		{ key: 'acqorder', label: '网络接入顺序', bitmap: false },
+		{ key: 'band', label: '2G / 3G 频段', bitmap: true },
+		{ key: 'roam', label: '漫游', bitmap: false },
+		{ key: 'srvdomain', label: '服务域', bitmap: false },
+		{ key: 'lteband', label: '4G / LTE 频段', bitmap: true }
+	];
+
+	/* 十六进制归一化到大写无前导零；不是合法十六进制返回空（无法按位判定） */
+	function normHexForCompare(v) {
+		var t = String(v == null ? '' : v).trim().toUpperCase();
+		if (!/^[0-9A-F]+$/.test(t)) return '';
+		t = t.replace(/^0+/, '');
+		return t || '0';
+	}
+
+	/* got ⊆ want ? 在十六进制串上逐位测，不受 2^53 限制 */
+	function hexMaskSubset(wantHex, gotHex) {
+		var w = normHexForCompare(wantHex), g = normHexForCompare(gotHex);
+		if (!w || !g) return false;
+		for (var i = 0; i < g.length * 4; i++) {
+			if (hexBit(g, i) && !hexBit(w, i)) return false;
+		}
+		return true;
+	}
+
+	/*
+	 * 写后校验：列出「本次真的下发了」的每个字段及其生效情况。
+	 *
+	 * ★★ 存在的理由 —— 本机实测 AT 回 OK 并不代表写进去了：
+	 *   ① <band> 下发 ANY(3FFFFFFF) → 回 OK，NV 一字不改
+	 *   ② <lteband> 下发 ALL → 回 OK，被硬件能力掩码裁剪成较小的集合
+	 *   只看 result.success 会把 ① 报成成功，把 ② 报成失败，两者都是骗人。
+	 *
+	 * state 语义：
+	 *   exact    完全一致
+	 *   clipped  回读是下发值的子集 —— **已生效**，只是能力不支持的位被裁掉了
+	 *   rejected 回读既不等于下发值、也不是它的子集 —— 模组没接受
+	 *   unknown  回读不到，不臆断，交给调用方另做提示
+	 *
+	 * 值为空（界面上的「不修改」）的字段没有下发，不参与校验。
+	 */
+	api.sysCfgApplyCheck = function (wanted, actual) {
+		var w = wanted || {}, a = actual || {}, out = [];
+		SYSCFG_FIELDS.forEach(function (f) {
+			var wv = String(w[f.key] == null ? '' : w[f.key]).trim();
+			if (!wv) return;                       /* 没下发就不算账 */
+			var av = String(a[f.key] == null ? '' : a[f.key]).trim();
+			var row = { key: f.key, label: f.label, want: wv, got: av, state: 'unknown' };
+			if (!av) {
+				row.state = 'unknown';
+			} else if (f.bitmap) {
+				if (normHexForCompare(wv) === normHexForCompare(av)) row.state = 'exact';
+				else if (hexMaskSubset(wv, av)) row.state = 'clipped';
+				else row.state = 'rejected';
+			} else {
+				/* 非位图字段严格相等：命令里的 1 与回读的 "1" 是同一个值，
+				   但 '080302' 绝不能被当成 '0803' 的某种变体 —— 那正是要报出来的。 */
+				if (wv.toUpperCase() === av.toUpperCase()
+					|| String(Number(wv)) === String(Number(av))) row.state = 'exact';
+				else row.state = 'rejected';
+			}
+			out.push(row);
+		});
+		return out;
+	};
+
 	/* ================= NR 能力（NRRCCAPQRY，手册 13.26） =================
 	 * 真机语法只有 AT^NRRCCAPQRY=<mode>（带 ? 的形式恒回 ERROR，实测 0/3）。
 	 * 应答形如 `^NRRCCAPQRY: <mode>,<para1>,<para2>,…`，取第 1 个参数即为该能力开关。
@@ -578,10 +645,27 @@ var Parse = (function () {
 		[7, 'GSM 1800'], [8, 'GSM 900(EGSM)'], [9, 'GSM 900(PGSM)'],
 		[19, 'GSM 850'], [20, 'GSM 900(铁路)'], [21, 'GSM 1900'],
 		[22, 'WCDMA I (2100)'], [23, 'WCDMA II (1900)'],
+		[25, 'WCDMA IX (1700/AWS)'],
 		[26, 'WCDMA V (850)'], [27, 'WCDMA VI (800)'],
 		[49, 'WCDMA VIII (900)'], [50, 'WCDMA IX (1700)'],
 		[60, 'WCDMA XIX (850)']
 	];
+
+	/*
+	 * <band> 的「全部频段」取值 —— **必须是逐个单值的位叠加，不能是 ANY**。
+	 *
+	 * ★★ 实测证据（2026-09-26，本机 MT5700M-CN 固件 V200R001C20B025）：
+	 *   下发 AT^SYSCFGEX="080302",3FFFFFFF,1,2,1E200000095,, 模组**回 OK**，
+	 *   但回读 NV 一字未改；为进一步排除「裁剪后恰好等于原值」，先把 band 压成
+	 *   别的值再发 ANY，回读**依旧纹丝不动** —— 即 MANUAL ANY 这条分支在该固件
+	 *   上 request 收下了但没写 NV。改成本函数算出的叠加值后，14 个位一次全落盘。
+	 *
+	 * ★ 不能写死字面量：由 BAND_BITS 推导，改位表即改取值，不会失配。
+	 * ★ 也不能用 Number 累加后 toString(16)：bit7..bit60 跨 54 位，超过双精度
+	 *   53 位安全范围会丢低位 —— 一律走 hexFromBits 按 nibble 拼串。
+	 */
+	api.BAND_ALL_MASK = hexFromBits(BAND_BITS.map(function (b) { return b[0]; })).toUpperCase();
+
 	api.decodeBandMask = function (s) {
 		var t = String(s == null ? '' : s).trim();
 		if (!t) return '未设置';
@@ -606,6 +690,16 @@ var Parse = (function () {
 		if (unknown.length) names.push('未识别位 0x' + hexFromBits(unknown).toUpperCase());
 		return names.length ? names.join(' · ') : '未设置';
 	};
+
+	/*
+	 * <lteband> 的「全部频段」沿用手册 magic value 0x7FFFFFFFFFFFFFFF —— 与 <band>
+	 * **故意不同**，因为本机实测这一条是**生效**的：先把 lteband 压到 1（仅 BC1）
+	 * 再下发该值，回读被撑回 1E200000095（BC1/3/5/8/34/38/39/40/41），即模组只是
+	 * 按硬件能力掩码做了按位与。后果是本机日常就处在能力全集上，保存后看不出变化
+	 * —— 那是「已经最大」，不是「没写进去」，写后校验要用位图子集判定（见
+	 * sysCfgApplyCheck），不能靠字符串相等，否则会把正常裁剪误报成失败。
+	 */
+	api.LTE_BAND_ALL_MASK = '7FFFFFFFFFFFFFFF';
 
 	/* <lteband>：位掩码，第 n 位 = LTE B(n+1)（手册 13.2.3 逐条列出，与位序一致） */
 	api.decodeLteBandMask = function (s) {

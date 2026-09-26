@@ -37,7 +37,7 @@ const nsSrc = fs.readFileSync(NS_JS, 'utf8');
 const setSrc = fs.readFileSync(SET_JS, 'utf8');
 const cssSrc = fs.readFileSync(CSS, 'utf8');
 
-const pm = parseSrc.match(/var Parse = \((function[\s\S]*?)\)\(\);/);
+const pm = parseSrc.match(/var Parse = \((function[\s\S]*?\n\})\)\(\);/);
 if (!pm) { console.error('无法从 parse.js 提取模块'); process.exit(1); }
 /* eslint-disable no-eval */
 const Parse = eval('(' + pm[1] + ')')();

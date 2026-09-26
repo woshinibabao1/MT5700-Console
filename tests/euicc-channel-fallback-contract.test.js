@@ -25,7 +25,7 @@ const path = require('path');
 
 const EUICC_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at-webserver', 'euicc.js');
 const src = fs.readFileSync(EUICC_JS, 'utf8');
-const m = src.match(/var Euicc = \((function[\s\S]*?)\)\(\);/);
+const m = src.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/);
 if (!m) {
 	console.error('无法从 euicc.js 提取模块');
 	process.exit(1);

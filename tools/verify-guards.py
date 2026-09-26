@@ -96,6 +96,15 @@ TARGETS = {
     "corejs": ATWB / "mt5700.js",
     "dialjs": ATWB.parent / "view" / "at-webserver" / "dial.js",
     "uc3": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
+    # ★ 频段「改不了」修复（2026-09-26）：同一批文件再挂键。
+    #   modem_settings.js 已有 "msjs"（跑 device-control-contract）、
+    #   parse.js 已有 "parsejs"/"parsejs2"/"parsejs3"（各跑自己的测试）——
+    #   都跑错测试，所以另开：msjs2 / parsejs4（band 契约）、
+    #   parsejs5（模块提取锚点）、test3（测试文件自身的提取正则）。
+    "msjs2": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
+    "parsejs4": ATWB / "parse.js",
+    "parsejs5": ATWB / "parse.js",
+    "test3": ROOT / "tests" / "parse-contract.test.js",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -134,6 +143,15 @@ TARGET_TEST = {
     "warmjs": ROOT / "tests" / "warm-cache-contract.test.js",
     "nsjs": ROOT / "tests" / "warm-cache-contract.test.js",
     "uc4": ROOT / "tests" / "at-batch-contract.test.js",
+    # ★ 再挂四个键（2026-09-26 频段「改不了」修复）：
+    #   · "msjs" / "parsejs" 等旧键固定跑它们各自的测试，复用会**跑错测试**
+    #     （变异生效却没人判红，比没守卫更危险 —— 红线 16b），所以另开键。
+    #   · msjs2 / parsejs4 → syscfg-band-contract（全部频段取值 + 写后校验）
+    #   · parsejs5 / test3 → module-extract-anchor（模块提取锚点）
+    "msjs2": ROOT / "tests" / "syscfg-band-contract.test.js",
+    "parsejs4": ROOT / "tests" / "syscfg-band-contract.test.js",
+    "parsejs5": ROOT / "tests" / "module-extract-anchor.test.js",
+    "test3": ROOT / "tests" / "module-extract-anchor.test.js",
 }
 
 def _resolve_node() -> str:
@@ -1067,6 +1085,64 @@ MUTATIONS = [
         "\t}\n"
         "\treturn true;",
         "batchReadable 的兜底是拒绝",
+    ),
+
+    # ================= 频段「改不了」（2026-09-26） =================
+
+    (
+        # ★ 锚点唯一性已核：modem_settings.js 里 `var rows = Parse.sysCfgApplyCheck(`
+        #   只出现 1 次。改成空数组 → 保存流程只看 res.success 就报成功，
+        #   「回 OK 但没写进 NV」会再次被报成成功 —— 正是本次故障的表象。
+        "保存流程不做写后校验（AT 回 OK 就报成功）",
+        "msjs2",
+        "\t\t\t\t\t\tvar rows = Parse.sysCfgApplyCheck(wanted, got);",
+        "\t\t\t\t\t\tvar rows = [];",
+        "写后校验",
+    ),
+    (
+        # ★ 锚点唯一性已核：`{ value: Parse.BAND_ALL_MASK, label: '全部频段' }` 只 1 处。
+        "「全部频段」改回手册 ANY magic value（本机固件回 OK 但不写入）",
+        "msjs2",
+        "\t\t\t{ value: Parse.BAND_ALL_MASK, label: '全部频段' }",
+        "\t\t\t{ value: '3FFFFFFF', label: '全部频段' }",
+        # ★ 关键词要写**真会报出来的那条断言名**：这条变异动的是页面选项，
+        #   parse.js 里的 BAND_ALL_MASK 没变，所以红的不是 A2（"不是 ANY magic
+        #   value"），而是 F2（"选项引用 Parse.BAND_ALL_MASK"）与 F3（反向断言）。
+        "引用 Parse.BAND_ALL_MASK",
+    ),
+    (
+        # ★ 锚点唯一性已核：parse.js 里 `hexMaskSubset(wv, av)` 只出现 1 次。
+        #   去掉子集判定 → LTE ALL 被能力掩码裁剪会被误报成 rejected（把正常说成失败）。
+        "写后校验不再按位图子集判定（正常裁剪被误报成未生效）",
+        "parsejs4",
+        "\t\t\t\telse if (hexMaskSubset(wv, av)) row.state = 'clipped';",
+        "\t\t\t\telse if (false) row.state = 'clipped';",
+        "被裁剪判定为 clipped",
+    ),
+    (
+        # ★ 锚点唯一性已核：`api.BAND_ALL_MASK = hexFromBits(` 只出现 1 次。
+        "BAND_ALL_MASK 改成手写字面量 ANY（位叠加失效，复发）",
+        "parsejs4",
+        "\tapi.BAND_ALL_MASK = hexFromBits(BAND_BITS.map(function (b) { return b[0]; })).toUpperCase();",
+        "\tapi.BAND_ALL_MASK = '3FFFFFFF';",
+        "ANY magic value 3FFFFFFF",
+    ),
+    (
+        # ★ 锚点唯一性已核：parse.js 里顶格 `})();` 只有模块收尾这一处（内部 IIFE 都带缩进）。
+        #   给它加一层缩进 → 锚定提取正则再也匹配不到，23 处测试一起崩。
+        "模块收尾不再是顶格（锚定提取正则失配）",
+        "parsejs5",
+        "\n})();\n",
+        "\n\t})();\n",
+        "能取到完整函数体",
+    ),
+    (
+        # ★ 锚点唯一性已核：parse-contract.test.js 里这条提取正则只出现 1 次。
+        "测试里的提取正则退回未加锚的脆弱版（内部 IIFE 会截断它）",
+        "test3",
+        "/var Parse = \\((function[\\s\\S]*?\\n\\})\\)\\(\\);/",
+        "/var Parse = \\((function[\\s\\S]*?)\\)\\(\\);/",
+        "未加锚的模块提取正则",
     ),
 ]
 

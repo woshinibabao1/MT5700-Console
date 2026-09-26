@@ -36,7 +36,7 @@ const SMS = path.join(ROOT, 'htdocs', 'luci-static', 'resources', 'view', 'at-we
 const pSrc = fs.readFileSync(PARSE, 'utf8');
 const smsSrc = fs.readFileSync(SMS, 'utf8');
 
-const Parse = eval('(' + pSrc.match(/var Parse = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+const Parse = eval('(' + pSrc.match(/var Parse = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 
 let pass = 0;
 const fails = [];

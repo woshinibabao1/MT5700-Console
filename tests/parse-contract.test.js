@@ -15,7 +15,7 @@ const path = require('path');
 const PARSE_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at-webserver', 'parse.js');
 const RPC_JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at-webserver', 'rpc.js');
 const src = fs.readFileSync(PARSE_JS, 'utf8');
-const m = src.match(/var Parse = \((function[\s\S]*?)\)\(\);/);
+const m = src.match(/var Parse = \((function[\s\S]*?\n\})\)\(\);/);
 if (!m) {
 	console.error('无法从 parse.js 中提取解析模块');
 	process.exit(1);

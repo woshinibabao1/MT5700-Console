@@ -36,7 +36,7 @@ const rpcSrc = fs.readFileSync(RPC, 'utf8');
 const pSrc = fs.readFileSync(PARSE, 'utf8');
 const esimSrc = fs.readFileSync(ESIM, 'utf8');
 
-const Parse = eval('(' + pSrc.match(/var Parse = \((function[\s\S]*?)\)\(\);/)[1] + ')')();
+const Parse = eval('(' + pSrc.match(/var Parse = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
 
 let pass = 0;
 const fails = [];

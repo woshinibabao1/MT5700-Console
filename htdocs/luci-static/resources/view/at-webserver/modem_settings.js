@@ -1018,20 +1018,32 @@ return L.view.extend({
 		 * 在选中后的 hint 里带出（码是拿去对 AT 手册 13.2.3 的唯一依据，不能丢）。
 		 * 频段名不再手编 —— 交给 Parse.decodeBandMask 按位拆，避免把「+ WCDMA 900」
 		 * 误写成「+ WCDMA 1700」这类靠肉眼对位图必然会犯的错。 */
+		/*
+		 * ★★ 「全部频段」为什么取 Parse.BAND_ALL_MASK 而不是手册的 ANY(3FFFFFFF)：
+		 *   本机实测下发 ANY 模组回 OK 但 NV 一字不改（先把值压成别的再发 ANY 依然
+		 *   不变，已排除"裁剪后恰好相等"）。改用手册逐个单值的位叠加后立刻落盘。
+		 *   细节与复现记录在 parse.js 的 BAND_ALL_MASK 注释里。
+		 */
 		var BAND_OPTIONS = [
 			{ value: '', label: '不修改' },
 			{ value: '00680380', label: '自动（推荐）' },
 			{ value: '2000000680380', label: '自动 + WCDMA 900' },
-			{ value: '3FFFFFFF', label: '全部频段' }
+			{ value: Parse.BAND_ALL_MASK, label: '全部频段' }
 		];
 		var bandSel = Mt5700.select(BAND_OPTIONS, '');
 		var bandHint = E('div', { 'class': 'mt5700-hint' });
 		function paintBand() {
 			sysCfg.band = bandSel.value;
-			bandHint.textContent = bandSel.value
-				? '码 ' + bandSel.value + ' · ' + Parse.decodeBandMask(bandSel.value)
-					+ '（位图，改动前先记下卡片底部的只读原始值）'
-				: '保持模组当前设置，本项不下发';
+			if (!bandSel.value) {
+				bandHint.textContent = '保持模组当前设置，本项不下发';
+				return;
+		}
+			/* ANY(3FFFFFFF) 在本机固件上回 OK 但不写入，带一句说明，省得下次有人再填回来 */
+			var bandNote = (bandSel.value === Parse.BAND_ALL_MASK)
+				? '（本机固件不吃 ANY 值 3FFFFFFF，此处改用逐频段的位叠加，实测可落盘）'
+				: '（位图，改动前先记下卡片底部的只读原始值）';
+			bandHint.textContent = '码 ' + bandSel.value + ' · '
+				+ Parse.decodeBandMask(bandSel.value) + bandNote;
 		}
 		bandSel.addEventListener('change', paintBand);
 		sysBody.appendChild(Mt5700.formGroup('2G / 3G 频段', bandSel,
@@ -1043,16 +1055,27 @@ return L.view.extend({
 		var LTE_OPTIONS = [
 			{ value: '', label: '不修改' },
 			{ value: '1E200000095', label: '常用（国内三家全覆盖）' },
-			{ value: '7FFFFFFFFFFFFFFF', label: '全部频段' }
+			{ value: Parse.LTE_BAND_ALL_MASK, label: '全部频段' }
 		];
 		var lteSel = Mt5700.select(LTE_OPTIONS, '');
 		var lteHint = E('div', { 'class': 'mt5700-hint' });
 		function paintLte() {
 			sysCfg.lteband = lteSel.value;
-			lteHint.textContent = lteSel.value
-				? '码 ' + lteSel.value + ' · ' + Parse.decodeLteBandMask(lteSel.value)
-					+ (lteSel.value === '7FFFFFFFFFFFFFFF' ? '（会明显增加搜网时间）' : '')
-				: '保持模组当前设置，本项不下发';
+			if (!lteSel.value) {
+				lteHint.textContent = '保持模组当前设置，本项不下发';
+				return;
+		}
+			/*
+			 * ALL 会被本机硬件能力掩码裁剪 —— 这是**生效**不是失败。但正因为如此，
+			 * 本机常驻在能力全集上时保存完看不出任何变化，容易被当成"改不了"，
+			 * 所以这里提前讲清，保存后的校验也只按位图子集判定。
+			 */
+			var lteNote = (lteSel.value === Parse.LTE_BAND_ALL_MASK)
+				? '（模组会按本机硬件能力掩码裁剪；若保存后回读仍是当前值，'
+					+ '说明已经是能力全集，而非没生效）'
+				: '';
+			lteHint.textContent = '码 ' + lteSel.value + ' · '
+				+ Parse.decodeLteBandMask(lteSel.value) + lteNote;
 		}
 		lteSel.addEventListener('change', paintLte);
 		sysBody.appendChild(Mt5700.formGroup('4G / LTE 频段', lteSel,
@@ -1139,12 +1162,51 @@ return L.view.extend({
 					Mt5700.error('尚未读回模组当前参数，请刷新页面后重试');
 					return;
 				}
-				send(Parse.buildSysCfgCommand(sysCfg)).then(function (res) {
-					if (res.success) {
+				/* 快照式保存目标：下发后拿它跟回读值比对，不能被后续界面重绘改写 */
+				var wanted = {
+					acqorder: sysCfg.acqorder, band: sysCfg.band, roam: sysCfg.roam,
+					srvdomain: sysCfg.srvdomain, lteband: sysCfg.lteband
+				};
+				send(Parse.buildSysCfgCommand(wanted)).then(function (res) {
+					if (!res.success) { Mt5700.error('网络系统配置更新失败'); return; }
+					/*
+					 * ★★ AT 回 OK ≠ 写进去了。本机实测两种「假成功」：
+					 *   ① <band> 下发 ANY(3FFFFFFF) → 回 OK，NV 一字不改
+					 *   ② <lteband> 下发 ALL       → 回 OK，被硬件能力掩码裁剪
+					 * 只看 result.success 会把 ① 报成成功、把 ② 报成失败。用户看到的
+					 * 就只有"已更新"三个字和悄悄跳回原值的下拉，永远不知道发生了什么。
+					 */
+					return readSysCfg().then(function (got) {
+						applySysCfg(got);          /* 先把界面拉回模组的真实状态 */
+						if (!got) {
+							Mt5700.error('保存后回读失败，无法确认是否生效，请刷新页面核对');
+							return;
+						}
+						var rows = Parse.sysCfgApplyCheck(wanted, got);
+						var rejected = rows.filter(function (r) { return r.state === 'rejected'; });
+						var clipped = rows.filter(function (r) { return r.state === 'clipped'; });
+						var unclear = rows.filter(function (r) { return r.state === 'unknown'; });
+						if (!rejected.length && !clipped.length && !unclear.length) {
 						Mt5700.success('网络系统配置已更新，模组将重新搜网');
-						return fetchSysCfg();
+							return;
 					}
-					Mt5700.error('网络系统配置更新失败');
+						if (rejected.length) {
+							Mt5700.warning('模组未接受：' + rejected.map(function (r) {
+								return r.label + '（下发 ' + r.want + '，实际仍是 ' + r.got + '）';
+							}).join('；') + ' —— 该取值本机不支持，请改选其他项');
+						}
+						/* 裁剪是**已生效**：只是本机硬件撑不到那么宽，讲清楚避免误判成失败 */
+						if (clipped.length) {
+							Mt5700.info(clipped.map(function (r) {
+								return r.label + '已生效，本机硬件只支持到 ' + r.got;
+							}).join('；'));
+						}
+						if (unclear.length) {
+							Mt5700.error('保存后读不回来：' + unclear.map(function (r) {
+								return r.label;
+							}).join('、') + '，请刷新页面核对');
+						}
+					});
 				}).catch(function () { Mt5700.error('网络系统配置更新失败'); });
 			})
 		));
@@ -1165,30 +1227,47 @@ return L.view.extend({
 			sel.value = value;
 		}
 
-		function fetchSysCfg() {
+		/*
+		 * 纯读：只负责把 AT^SYSCFGEX? 的应答解成 cfg，**不碰界面**。
+		 * 保存流程要靠它做写后校验（不能顺手重绘 UI，那样会把下拉改回模组值，
+		 * 用户正在选的东西就没了）。
+		 */
+		function readSysCfg() {
 			return send('AT^SYSCFGEX?').then(function (res) {
-				var cfg = res.success ? Parse.parseSysCfg(atText(res)) : null;
-				if (!cfg) return;                 // 读不到就不放行保存，避免把空值写进模组
-				sysCfg = cfg;
-				sysCfgReady = true;
-				ensureOption(acqSel, sysCfg.acqorder, '');
-				ensureOption(bandSel, sysCfg.band, '');
-				ensureOption(lteSel, sysCfg.lteband, '');
-				ensureOption(roamSel, String(sysCfg.roam), '');
-				/* 服务域同样要补项：模组被手工写过 5 之类范围外的值时，
-				   直接 sel.value = '5' 在只有 0-4 的下拉里会**静默失败**，
-				   界面显示 2 而实际下发 5，等于骗了用户一次。 */
-				ensureOption(srvSel, String(sysCfg.srvdomain), '');
-				paintAcq();
-				paintBand();
-				paintLte();
-				paintSrv();
-				paintRoam();
-				sysRaw.textContent = '模组当前值：acqorder=' + sysCfg.acqorder
-					+ '，band=' + sysCfg.band + '，roam=' + sysCfg.roam
-					+ '，srvdomain=' + sysCfg.srvdomain + '，lteband=' + sysCfg.lteband;
+				return res.success ? Parse.parseSysCfg(atText(res)) : null;
+			});
+		}
+
+		/*
+		 * 把读回的值刷到界面。读不到就**不放行保存** —— SYSCFGEX 是一次性下发整组
+		 * 参数，把空值写下去等于让模组不搜任何网络。
+		 */
+		function applySysCfg(cfg) {
+			if (!cfg) return;
+			sysCfg = cfg;
+			sysCfgReady = true;
+			ensureOption(acqSel, sysCfg.acqorder, '');
+			ensureOption(bandSel, sysCfg.band, '');
+			ensureOption(lteSel, sysCfg.lteband, '');
+			ensureOption(roamSel, String(sysCfg.roam), '');
+			/* 服务域同样要补项：模组被手工写过 5 之类范围外的值时，
+			   直接 sel.value = '5' 在只有 0-4 的下拉里会**静默失败**，
+			   界面显示 2 而实际下发 5，等于骗了用户一次。 */
+			ensureOption(srvSel, String(sysCfg.srvdomain), '');
+			paintAcq();
+			paintBand();
+			paintLte();
+			paintSrv();
+			paintRoam();
+			sysRaw.textContent = '模组当前值：acqorder=' + sysCfg.acqorder
+				+ '，band=' + sysCfg.band + '，roam=' + sysCfg.roam
+				+ '，srvdomain=' + sysCfg.srvdomain + '，lteband=' + sysCfg.lteband;
+		}
+
+		function fetchSysCfg() {
+			return readSysCfg().then(applySysCfg)
 				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
-			}).catch(function () {});
+				.catch(function () {});
 		}
 
 		/*
