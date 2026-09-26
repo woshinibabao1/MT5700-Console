@@ -91,7 +91,16 @@ function newClient(mod) {
 }
 
 const READS = ['AT+CSQ', 'AT^HCSQ?', 'AT+CEREG?'];   /* 都是 isRetryableRead 认定的只读查询 */
-const BARE = 'AT+CGPADDR';   /* 不带 ? 又不在只读名单：前端本就不缓存它 */
+/*
+ * 样本命令：必须是 isRetryableRead 认定为**非只读**的一条。
+ *
+ * ★ 2026-09-26 更换样本。原来用的是 `AT+CGPADDR`，注释写「不带 ? 又不在只读名单」——
+ *   那是**当时的（错的）分类**：对照手册 7.8「AT+CGPADDR-查询 PDP 地址」，
+ *   它本来就是查询，现已归入只读名单（见 tests/at-read-classification-contract.test.js）。
+ *   本守卫要钉的性质是「预热准入与 sendCommand 同源」，与具体用哪条命令无关，
+ *   所以把样本换成一条真正的写命令；下面再补一条自检，防样本以后又失效。
+ */
+const BARE = 'AT+CGDCONT=1,"IP","cmnet"';
 
 /* ---------- ①⑤ 成功应答进缓存，后续不再下发 ---------- */
 function scenarioWarmHit() {
@@ -105,6 +114,8 @@ function scenarioWarmHit() {
 	}, false);
 	const c = newClient(box.mod);
 	return c.warmCache(READS.concat([BARE])).then(function (n) {
+		ok('① 样本命令确实不是只读（否则本条守卫在测空气）',
+			box.mod.isRetryableRead(BARE) === false, BARE);
 		ok('① 预热把成功应答写进缓存（条数与长度一致）',
 			n === READS.length, '实际 ' + n + ' / ' + READS.length);
 		ok('① 预热准入与 sendCommand 的缓存判定同源（不缓存的命令也不预热）',

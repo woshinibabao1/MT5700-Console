@@ -442,8 +442,19 @@ const STATIC_READS = [
 	'AT^PHYNUM?', 'AT^VERSION?'
 ];
 
-/* 无问号但属只读的查询（默认不启用缓存，留给 read_cache_ttl>0 时用） */
-const BARE_READS = ['AT^DSFLOWQRY', 'AT^MONNC', 'AT^MONSC', 'AT^MONSSC'];
+/* 无问号但属只读的查询（默认不启用缓存，留给 read_cache_ttl>0 时用）
+ *
+ * ★ 2026-09-26：补上 AT+CGPADDR / AT+CNUM / AT+CGEQOSRDP 三条。
+ *   它们在前端 `NON_QUESTION_READS` 里已经按只读处理，这里不跟上的话，
+ *   两侧对「什么算只读」的判断就不一致 —— 前端会把它们塞进 at_batch，
+ *   后端按旧名单一律拒（表现为白跑一趟 + refused 计数虚高）。
+ *   手册依据：CGPADDR 7.8 查询 PDP 地址｜CNUM 5.26 查询本机号码｜
+ *   CGEQOSRDP 13.30 读取 EPS QoS 参数（三条语法都带可选参数，不带参即查询）。
+ *   ★ 它们**不进 STATIC_READS**：PDP 地址/QoS 会随网络重配变化，不是「永不变」的标识。 */
+const BARE_READS = [
+	'AT^DSFLOWQRY', 'AT^MONNC', 'AT^MONSC', 'AT^MONSSC',
+	'AT+CGPADDR', 'AT+CNUM', 'AT+CGEQOSRDP'
+];
 
 /* 后端自己维护状态：**永不缓存** */
 /*
@@ -579,6 +590,38 @@ function atCallCached(cmdRaw) {
 /* 一次 at_batch 最多几条：既要能装下「网络状态页慢档那一轮」，
    又不能让人用一条请求把串口占上几十秒。 */
 const AT_BATCH_MAX = 40;
+
+/*
+ * 「通道忙」文案前缀。
+ * ============================================================================
+ * 生产方在 Rust 侧：
+ *   · `等待空闲通道超时（8s）…`            atclient.rs（QUEUE_WAIT_TIMEOUT 的报错）
+ *   · `模组正在发送短信，请稍候再试`          rpcserver.rs
+ *   · `正在扫频，模组暂时无法响应其它命令…`    rpcserver.rs
+ * 前端 rpc.js 的 BUSY_PATTERNS 是同一份语义（它据此做快速失败 + 熔断）。
+ * ★★ 这三处必须同步；tests/busy-fastfail-contract.test.js 会拦不同步。
+ *
+ * 为什么 at_batch 里必须认识它（2026-09-26 全局反省的产物）：
+ *   batch 是**逐条**调 atCallCached，而一条命令撞上忙态要等满 QUEUE_WAIT_TIMEOUT(8s)
+ *   才回错。原本 N 条就是 **N×8 秒全在一次 ucode 调用里跑完**，而 rpcd 是**单线程**、
+ *   ucode 插件跑在它进程内 —— 这段时间整个 LuCI（含**新加载的页面**）全部冻结。
+ *   实测对照：单次阻塞就能把轻量 ubus 调用从 32ms 放大到 3606ms（111×）。
+ *   → 所以撞到忙就立即收尾，剩余条按同一原因标记 skipped，最坏从 N×8s 降到 ~8s。
+ */
+const BUSY_PREFIXES = [
+	'等待空闲通道超时',
+	'模组正在发送短信',
+	'正在扫频，模组暂时无法响应其它命令'
+];
+
+function isBusyText(msg) {
+	if (msg == null) { return false; }
+	let s = '' + msg;
+	for (let i = 0; i < length(BUSY_PREFIXES); i++) {
+		if (index(s, BUSY_PREFIXES[i]) >= 0) { return true; }
+	}
+	return false;
+}
 
 /* 单条命令长度上限：与 at 方法同一口径（见 at args 的注释） */
 const AT_BATCH_CMD_MAX = 4096;
@@ -2546,6 +2589,17 @@ return {
 				}
 				let results = [];
 				let refused = 0;
+				let skipped = 0;
+				/*
+				 * ★★ 一旦某条撞上「通道忙」，后面所有条都不必再撞 ——
+				 *   后端等空闲通道要 8 秒才回错，N 条就是 N×8 秒，
+				 *   而这段全在**一次 ucode 调用**里、rpcd 又是单线程，
+				 *   于是整个 LuCI（含新加载的页面）一起冻结。
+				 *   见 BUSY_PREFIXES 的注释与 tests/busy-fastfail-contract.test.js。
+				 *   注意：剩余条**仍按入参顺序占位**并带上自己的 cmd，
+				 *   前端按 cmd 回填，不会错位（at-batch-contract 在守这条）。
+				 */
+				let busyReason = null;
 				for (let i = 0; i < n; i++) {
 					let raw = list[i];
 					let item = null;
@@ -2571,6 +2625,10 @@ return {
 						} else if (!batchReadable(cmd)) {
 							item = { cmd: cmd, success: false, error: '第 ' + (i + 1) + ' 项不是只读查询，已拒绝下发' };
 							refused++;
+						} else if (busyReason != null) {
+							/* 已经确认通道忙：不再消耗 8 秒去撞第二次 */
+							item = { cmd: cmd, success: false, error: busyReason, skipped: true };
+							skipped++;
 						} else {
 							let r = atCallCached(cmd);
 							if (r == null) {
@@ -2583,6 +2641,9 @@ return {
 									error: r.error,
 									cached: r.cached === true
 								};
+								if (item.success != true && isBusyText(item.error)) {
+									busyReason = item.error;
+								}
 							}
 						}
 					}
@@ -2590,6 +2651,18 @@ return {
 				}
 				if (refused == n) {
 					return { success: false, results: results, error: '全部 ' + n + ' 条都被拒绝下发' };
+				}
+				if (busyReason != null) {
+					/*
+					 * 明确告诉前端「这一轮是因为通道忙提前收尾的」，
+					 * 前端据此开熔断窗口（rpc.js 的 _noteBusy），
+					 * 而不是把「没取到」当成「没有」。
+					 */
+					return {
+						success: true, at: time(), count: n, refused: refused,
+						skipped: skipped, busy: true, busy_reason: busyReason,
+						results: results
+					};
 				}
 				return { success: true, at: time(), count: n, refused: refused, results: results };
 			}

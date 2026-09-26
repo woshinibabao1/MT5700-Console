@@ -115,6 +115,14 @@ TARGETS = {
     "rsrust2": ROOT / "src" / "rust" / "src" / "rpcserver.rs",
     "cfg1": ROOT / "root" / "etc" / "config" / "at-webserver",
     "po1": ROOT / "po" / "zh_Hans" / "luci-app-mt5700.po",
+    # ★ 再挂四个键（2026-09-26「通道忙快速失败 + 读命令分类」）：
+    #   · rpcjs5 / uc6 → busy-fastfail-contract（前端熔断行为 + ucode 提前收尾）
+    #   · rpcjs6 / uc7 → at-read-classification-contract（读命令分类与手册一致）
+    #   ★ 复用 rpcjs3/rpcjs4/uc4/uc5 都会**跑错测试**（红线 16b）。
+    "rpcjs5": ATWB / "rpc.js",
+    "rpcjs6": ATWB / "rpc.js",
+    "uc6": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
+    "uc7": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -168,6 +176,11 @@ TARGET_TEST = {
     "rsrust2": ROOT / "tests" / "cellscan-removed-contract.test.js",
     "cfg1": ROOT / "tests" / "cellscan-removed-contract.test.js",
     "po1": ROOT / "tests" / "cellscan-removed-contract.test.js",
+    # ★ 忙态快速失败 + 读命令分类
+    "rpcjs5": ROOT / "tests" / "busy-fastfail-contract.test.js",
+    "uc6": ROOT / "tests" / "busy-fastfail-contract.test.js",
+    "rpcjs6": ROOT / "tests" / "at-read-classification-contract.test.js",
+    "uc7": ROOT / "tests" / "at-read-classification-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -1208,6 +1221,45 @@ MUTATIONS = [
         'msgid "网络状态"',
         'msgid "全网扫频"\nmsgstr "全网扫频"\n\nmsgid "网络状态"',
         "po 里不再有",
+    ),
+    # ---------- 通道忙快速失败 + 读命令分类（2026-09-26） ----------
+    (
+        # ★ 锚点唯一性已核：出队时那次检查用的是 `self._busyUntil`，
+        #   入队时那次用 `this._busyUntil`、warmCache 也用 `this._busyUntil`。
+        #   去掉它 → 同一 tick 并发排队的一整轮命令又会各自去撞 8 秒
+        #   （浏览器 A/B 实测：忙态下发从 12 次回到 30 次）。
+        "去掉出队时的熔断检查（同 tick 排队的一整轮又会撞满 8 秒）",
+        "rpcjs5",
+        "\t\tif (readOnly && !opt.fresh && Date.now() < self._busyUntil) {",
+        "\t\tif (false) {",
+        "同一 tick",
+    ),
+    (
+        # ★ 锚点唯一性已核：`skipped++;` 在 mt5700.uc 里只出现 1 次。
+        #   去掉它 → 撞到忙的收尾计数丢失（静态结构检查会报红）。
+        "ucode 撞到忙不再逐步收尾（skipped 计数丢失）",
+        "uc6",
+        "\t\t\t\t\t\t\tskipped++;",
+        "",
+        "提前收尾",
+    ),
+    (
+        # ★ 锚点唯一性已核：'AT+CGPADDR' 在 NON_QUESTION_READS 里只出现 1 次。
+        "把 AT+CGPADDR 从只读名单里删掉（手册 7.8 明确是查询）",
+        "rpcjs6",
+        "'AT+CGPADDR', 'AT+CNUM', 'AT+CGEQOSRDP', 'AT+CGMI'",
+        "'AT+CNUM', 'AT+CGEQOSRDP', 'AT+CGMI'",
+        "AT+CGPADDR",
+    ),
+    (
+        # ★ 锚点唯一性已核：ucode BARE_READS 里的这一行只出现 1 次。
+        #   只删 ucode 那一侧 → 前后端对「什么算只读」不一致
+        #   （前端塞进 batch、后端一律拒）。
+        "只删 ucode BARE_READS 里的 AT+CGPADDR（前后端不一致）",
+        "uc7",
+        "\t'AT^DSFLOWQRY', 'AT^MONNC', 'AT^MONSC', 'AT^MONSSC',\n\t'AT+CGPADDR', 'AT+CNUM', 'AT+CGEQOSRDP'",
+        "\t'AT^DSFLOWQRY', 'AT^MONNC', 'AT^MONSC', 'AT^MONSSC',\n\t'AT+CNUM', 'AT+CGEQOSRDP'",
+        "前后端一致",
     ),
 ]
 

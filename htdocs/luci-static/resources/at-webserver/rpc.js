@@ -366,9 +366,26 @@ ATClient.prototype.handlePush = function (ev) {
  * 结果 IMEI / IMSI / 型号 / 固件（AT+CGSN / AT+CIMI / AT+CGMM / AT+CGMR）只进了
  * 缓存名单、没进重试名单，于是它们既拿不到 10 分钟缓存，还会走 sendCommand 的
  * 写命令分支 —— 每查一次 IMEI 就把状态类缓存全清一遍，分档等于白做。
+ *
+ * ★ 2026-09-26 补漏（`tools/audit-at-reads.py` 扫出来的，逐条对照技术手册）：
+ *   一次性漏了四条**明确是查询**的命令，它们被当成写命令，于是
+ *     ① 不缓存（每次刷新都打串口）② 不重试（偶发 ERROR 直接变红叉）
+ *     ③ 不受忙态熔断保护（通道忙时一条条去撞 8 秒）
+ *     ④ **成功后 `_dropStateCache()` 把状态类缓存整片清掉**——这条最隐蔽：
+ *        AT+CNUM 每轮刷新都被调一次，等于把 CPIN?/SIMSQ?/CFUN?/CGDCONT? 的缓存全部作废。
+ *   手册依据（《MT5700M-CN 5G系列模组AT命令手册》）：
+ *     · AT+CGPADDR    7.8  查询 PDP 地址（语法 `AT+CGPADDR=[<cid>[,…]]`，参数可选）
+ *     · AT+CNUM       5.26 查询本机号码
+ *     · AT+CGEQOSRDP  13.30 读取 EPS QoS 参数（语法同样带可选参数）
+ *     · AT+CGMI       3.7  查询制造商信息（ucode 的静态缓存名单里**本来就有它**，
+ *                          前端却没有 —— 两边对同一条命令的判断不一致）
+ *   真机复核（2026-09-26，只读）：CGPADDR/CGMI/CGEQOSRDP 均正常返回；
+ *   CNUM 回 `+CME ERROR: not found`（卡上没写 MSISDN）—— 属**稳定失败**的查询，
+ *   靠既有的「自适应降级」在连续两轮后收敛成单次下发，不需要为它开特例。
  */
 var NON_QUESTION_READS = [
-	'AT+CSQ', 'AT^MONSC', 'AT^MONNC', 'AT^MONSSC', 'AT^DSFLOWQRY'
+	'AT+CSQ', 'AT^MONSC', 'AT^MONNC', 'AT^MONSSC', 'AT^DSFLOWQRY',
+	'AT+CGPADDR', 'AT+CNUM', 'AT+CGEQOSRDP', 'AT+CGMI'
 ];
 
 /* 判断一条命令是否「可安全重试」，同时决定它是否可缓存（见 sendCommand）。 */
@@ -424,6 +441,71 @@ function isErrorText(data) {
 	var txt = String(data);
 	return /(^|[\r\n])[ \t]*(ERROR|\+CME ERROR|\+CMS ERROR)(:[^\r\n]*)?[ \t]*(?=[\r\n]|$)/.test(txt);
 }
+
+/*
+ * 通道忙（busy）类失败 —— 前端必须认识它们，且**绝不能重试**
+ * ============================================================================
+ * 后端有三条「忙」应答，共同点：**重试毫无意义，只会排到更长的队尾**。
+ *   · `等待空闲通道超时（8s）：模组正忙或正在重连，请稍后重试`
+ *       出处 src/rust/src/atclient.rs（QUEUE_WAIT_TIMEOUT 的报错）
+ *   · `模组正在发送短信，请稍候再试`        出处 rpcserver.rs
+ *   · `正在扫频，模组暂时无法响应其它命令，请先取消扫频`  出处 rpcserver.rs
+ *
+ * 为什么必须特殊处理（真机 + 源码双重取证，2026-09-26）：
+ *   后端**自己**早就为这类情况定了范式（rpcserver.rs:430-443）：忙时**立即失败返回**，
+ *   注释原话「否则每个查询都要等满排队预算，一页十几个查询叠加起来就是『界面加载不出来』」。
+ *   但前端原来一条都不认识 → 走普通失败 → `isRetryableRead()` 让 `?` 结尾的查询**重试 3 次**，
+ *   而每次重试都要重新 `cmd_mu.lock()` 排队 8 秒 → 单条命令最坏烧掉 20 秒（预算上限），
+ *   且 `commandQueue` 是**全局单链**：这 20 秒里本页其它命令、其它页面全部排队等待。
+ *   → 用户看到「一片空白 / 新加载一个页面加载不出来」。
+ *
+ * 判据用「文案前缀」而不是全等：后端带格式化参数（`（{}s）`）。
+ * ★ 改动后端文案时必须同步这里 —— tests/busy-fastfail-contract.test.js 会拦。
+ */
+var BUSY_PATTERNS = [
+	'等待空闲通道超时',
+	'模组正在发送短信',
+	'正在扫频，模组暂时无法响应其它命令'
+];
+
+function isBusyError(msg) {
+	if (msg == null) return false;
+	var s = String(msg);
+	if (!s) return false;
+	for (var i = 0; i < BUSY_PATTERNS.length; i++) {
+		if (s.indexOf(BUSY_PATTERNS[i]) >= 0) return true;
+	}
+	return false;
+}
+
+/*
+ * 忙态熔断窗口。
+ *
+ * 取 8 秒 = 与后端 QUEUE_WAIT_TIMEOUT 同量级：后端等不到空闲通道要 8 秒才回错，
+ * 在它给出下一个错误之前，前端再发多少次都是白排。所以窗口内**只读查询**
+ * 直接快速失败（不发请求），页面立刻渲染出「模组正忙」而不是干等一片空白。
+ *
+ * 只作用于只读查询：**写命令照常下发**（读不到 ≠ 不许保存，熔断不能拦掉用户的操作），
+ * `{fresh:true}` 同样放行（调用方明确要新值）。
+ *
+ * 窗口过期**自动半开放行一条探针**（不需要额外状态机）：
+ *   · 探针成功 → 立刻解除熔断（不必再等一个窗口）；
+ *   · 探针仍失败 → 重新武装（不会变成无限探针风暴）。
+ */
+const BUSY_COOLDOWN_MS = 8000;
+ATClient.prototype._busyUntil = 0;
+ATClient.prototype._busyReason = '';
+
+ATClient.prototype._noteBusy = function (msg) {
+	this._busyUntil = Date.now() + BUSY_COOLDOWN_MS;
+	this._busyReason = msg || '';
+};
+
+/* 供页面显示「模组忙」提示用；不忙时返回 null。 */
+ATClient.prototype.busyState = function () {
+	if (Date.now() >= this._busyUntil) return null;
+	return { reason: this._busyReason, until: this._busyUntil };
+};
 
 function delayMs(ms) {
 	return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -624,9 +706,30 @@ ATClient.prototype.warmCache = function (commands) {
 	});
 	if (!list.length) { return Promise.resolve(0); }
 	if (list.length > WARM_CACHE_MAX) { list = list.slice(0, WARM_CACHE_MAX); }
+	/*
+	 * ★ 忙态时不要发批次（2026-09-26）。
+	 * batch 在 ucode 里是**逐条**转发的：撞上忙态时后端每条都要等满 8 秒，
+	 * 而这一整段跑在**一次** ucode 调用里、rpcd 又是单线程 —— 整个 LuCI
+	 * （含新加载的页面）会跟着冻结。后端的 at_batch 已经会在撞到忙时提前收尾，
+	 * 但更省事的是**根本别发**：直接返回 0，让各卡片走自己的 sendCommand
+	 * （那时会命中 sendCommand 里的忙态快速失败，同样是瞬时的）。
+	 */
+	if (Date.now() < this._busyUntil) {
+		this._warmFailures = (this._warmFailures || 0) + 1;
+		this._warmError = this._busyReason || '模组正忙，跳过本轮预热';
+		return Promise.resolve(0);
+	}
 	return withTimeout(rpcAtBatch(list), WARM_CACHE_WAIT_MS, '批量预热超时')
 		.then(function (resp) {
 			resp = resp || {};
+			/*
+			 * 后端在撞到忙态时会提前收尾并带 busy 标记（见 mt5700.uc 的 BUSY_PREFIXES）。
+			 * 这里据此开熔断窗口，让本轮剩下的卡片直接快速失败，
+			 * 而不是各自再去撞一次 8 秒。
+			 */
+			if (resp.busy === true) {
+				self._noteBusy(resp.busy_reason || '模组正忙，请稍后重试');
+			}
 			var n = 0;
 			var arr = resp.results || [];
 			for (var i = 0; i < arr.length; i++) {
@@ -694,6 +797,21 @@ ATClient.prototype.sendCommand = function (command, opts) {
 		if (cached) return Promise.resolve(cached);
 	}
 	/*
+	 * ★ 忙态快速失败（见 BUSY_COOLDOWN_MS 的注释）。
+	 * 位置放在**缓存命中之后**：熔断期间手里已有的旧值仍然照给，
+	 * 比「因为忙就什么都不给」对用户更有用，也没有任何陈旧风险上的变化
+	 * （缓存本来就有自己的 TTL）。
+	 */
+	var readOnly = isRetryableRead(command);
+	if (readOnly && !opt.fresh && Date.now() < this._busyUntil) {
+		return Promise.resolve({
+			success: false,
+			error: this._busyReason || '模组正忙，请稍后重试',
+			busy: true,
+			quickFail: true
+		});
+	}
+	/*
 	 * 重试次数的默认值不再是一个常数（见 RETRY_DOWNGRADE_STREAK 的注释）：
 	 * 同一条命令连续失败两轮之后，每轮只发一次，成功即复位。
 	 * 调用方显式传了 attempts 时以调用方为准，降级逻辑不插手。
@@ -720,6 +838,24 @@ ATClient.prototype.sendCommand = function (command, opts) {
 
 	this.commandQueue = this.commandQueue.then(function () {
 		var attempt = 0;
+		/*
+		 * ★ 出队时**再查一次**熔断（2026-09-26，浏览器 A/B 实测补的）。
+		 *
+		 * 入队时的那次检查挡不住「同一条 `Promise.all` 里已经排好队的命令」：
+		 * 一页十几条命令几乎都是同一 tick 里并发排进来的，它们**全部**通过了入队检查，
+		 * 等轮到自己执行时通道早已被判忙 —— 于是照样一条条去撞 8 秒。
+		 * 实测（真机浏览器 + 网络层中间人注入忙态，12 秒窗口）：
+		 *   只做入队检查 → 忙态下仍下发 12 次；补上出队检查后才收敛到个位数。
+		 * 命令一旦被判失败就立刻返回，等于把「排队等死」变成「排到才知道，且瞬间知道」。
+		 */
+		if (readOnly && !opt.fresh && Date.now() < self._busyUntil) {
+			return {
+				success: false,
+				error: self._busyReason || '模组正忙，请稍后重试',
+				busy: true,
+				quickFail: true
+			};
+		}
 		var attemptOnce = function () {
 			attempt++;
 			if (!self.connected) return { success: false, error: '未连接到调制解调器' };
@@ -733,14 +869,31 @@ ATClient.prototype.sendCommand = function (command, opts) {
 				'命令执行超时（模组可能正忙或正在重连，请稍后重试）').then(function (resp) {
 				resp = resp || {};
 				if (resp.success === false || isErrorText(resp.data)) {
+					var emsg = resp.error || '命令执行失败';
+					/*
+					 * ★ 忙态：**不重试**（见 BUSY_PATTERNS 的注释）。重试只是重新排 8 秒的队，
+					 * 而全局 commandQueue 会把这 8 秒×N 转嫁给整页与其它页面。
+					 */
+					if (isBusyError(emsg)) {
+						self._noteBusy(emsg);
+						return { success: false, error: emsg, busy: true };
+					}
 					if (attempt < maxAttempts) {
 						return delayMs(200 * attempt).then(attemptOnce);
 					}
-					return { success: false, error: resp.error || '命令执行失败' };
+					return { success: false, error: emsg };
 				}
+				/* 通道确实通了 —— 解除熔断（探针成功即恢复） */
+				self._busyUntil = 0;
+				self._busyReason = '';
 				return { success: true, data: resp.data };
 			}).catch(function (err) {
 				var msg = (err && err.message) || '命令执行失败';
+				/* 前端侧超时文案里也带「模组可能正忙…」，同样按忙态处理 */
+				if (isBusyError(msg)) {
+					self._noteBusy(msg);
+					return { success: false, error: msg, busy: true };
+				}
 				if (attempt < maxAttempts) {
 					return delayMs(200 * attempt).then(attemptOnce);
 				}
