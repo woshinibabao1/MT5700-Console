@@ -22,13 +22,18 @@ config at-webserver 'config'
 	option websocket_allow_wan '0'          # 1=RPC 监听 0.0.0.0 可被外部访问（建议同时设置 auth_key）
 	option websocket_bind ''               # 可选：覆盖监听地址，如 0.0.0.0 或 192.168.10.1
 	option websocket_auth_key ''            # RPC 访问密钥（留空则不验证；LuCI 登录态由 rpcd 会话保证）
-	option cellscan_timeout '180'           # 一次 ^CELLSCAN 全网扫频允许运行的秒数（下限 10）
+	# ★ 全网扫频**页面**已于 2.3.x 下线（视图/菜单/解析段全部移除），本项不再是
+	#   页面功能的一部分。它如今只作用于 Rust 后端保留的「终端级安全网」：
+	#   有人在 AT 调试终端里手敲 AT^CELLSCAN 时，后端会拦截它并套上超时上限，
+	#   避免整网扫频无上限地独占串口（该命令可占满几分钟，期间其余命令全部排队超时）。
+	#   保留而非删除的理由与边界见 CHANGELOG 与 tests/cellscan-removed-contract.test.js。
+	option cellscan_timeout '180'           # 仅用于终端误发 AT^CELLSCAN 时的超时上限（秒，下限 10）
 	# 只读缓存（秒）：只缓存「不变类」身份数据（型号/固件/IMEI/ICCID…），状态类默认关闭——
 	# 我们的 Rust 后端有常驻串口与命令队列，扛得住实时轮询，不必用陈旧数据换速度。
-	# read_cache_static_ttl 管不变类（默认 300），read_cache_ttl 管状态类（默认 0=不缓存）。
-	# 任何写命令都会清空缓存，所以「保存后读回」永远是新的。设 0 关闭缓存。
+	# read_cache_static_ttl 管不变类（默认 300，0=关闭全部缓存），read_cache_ttl 管状态类（默认 0=不缓存）。
+	# 任何写命令都会清空缓存，所以「保存后读回」永远是新的。
 	option read_cache_ttl '0'
-	option read_cache_static_ttl '300'           # 一次 ^CELLSCAN 全网扫频允许运行的秒数（下限 10）
+	option read_cache_static_ttl '300'           # 不变类只读结果的缓存秒数（0=关闭全部缓存）
 
 	# 通知配置
 	option wechat_webhook ''

@@ -5,6 +5,80 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.54] - 2026-09-26
+
+### Fixed（功能下线后的「半截引用」：扫频删了页面，周围没跟着删）
+
+用户追问：「我不是已经删除全网扫频了么？为什么不删干净」。查下来确实留了三类
+半截引用 —— 且都不是「多一行注释」那么轻：
+
+| # | 位置 | 性质 |
+|---|---|---|
+| 1 | `root/etc/config/at-webserver` | `read_cache_static_ttl` 的注释被**复制粘贴成了扫频那一句**（张冠李戴）；`cellscan_timeout` 的注释仍把已下线功能描述成活功能 |
+| 2 | `rpc.js` 的 `handlePush` 名单 | 仍认 `cellscan` 与 `memory_full`：前者全站两个订阅者（urc_data / new_sms）都不消费，后者后端**从不发**这个事件 → 两条死分支 |
+| 3 | `po/{zh_Hans,templates}` | 11 条翻译只在历史记录里还活着（`保存配置` / `总开关与默认参数` / `网络连接（TCP）` … 真实 UI 语料里一处都没有） |
+
+**处置**
+
+1. **配置注释改成诚实口径**：`cellscan_timeout` 现在写明它只服务「终端级安全网」，
+   旁边 `read_cache_static_ttl` 的错误注释改回它自己的语义。
+2. **前端死事件分支删除**：`handlePush` 名单收敛为
+   `incoming_call / new_sms / pdcp_data / urc_data`，并在注释里写清每个类型的
+   生产方与消费方（`urc_data` 是**本模块自己**用 `emitPush` 造的，不是后端推的）。
+3. **11 条孤儿翻译清除**（po / pot 各一次）。
+
+### 刻意不改（并加了守卫钉住，免得以后被「顺手删掉」）
+
+Rust 后端仍拦截 `AT^CELLSCAN`（伪命令 + 超时 + ABORT 打断）。**这不是残留，是安全网**：
+一旦去掉拦截，用户在 AT 调试终端里手敲 `AT^CELLSCAN` 就会原样下发到模组，变成一次
+**无上限**的整网扫频、独占串口好几分钟（实测该命令可占满数分钟，期间其余命令全部
+排队超时）。因此
+
+```
+Rust 拦截        ←→  ucode NEVER_CACHE  ←→  配置 cellscan_timeout
+```
+
+三者必须**同时在场或同时缺席**，不许只删其中一处。`tests/cellscan-removed-contract.test.js`
+把这条耦合（以及「页面确已下线」的五层事实）一起钉住。
+
+> 说明：Rust 二进制随包交叉编译，本机无工具链，所以本地无法验证任何 Rust 行为改动。
+> 真要拆掉这套安全网，必须走一次完整出包 + 刷机验证，不能顺手改。
+
+### Added
+
+- **`tools/find-orphans.py`** —— 「孤儿与残留」常驻扫描器，六个面各带**反向自证**
+  （喂已知缺陷必须报红，否则该检查恒空、结论是假的）：
+  A UCI 配置双向对账 · B ubus 三方（ucode 方法表 ↔ ACL ↔ 前端 declare）·
+  C i18n 孤儿 · D 下线功能关键词 · E 前端事件 ↔ 后端推送 · F CSS 未使用类。
+- **`tests/cellscan-removed-contract.test.js`**（22 项，含 7 条反向断言）。
+
+### 建扫描器时踩到的六个「假阳性 / 假阴性」来源（都写进了工具注释）
+
+静态对账最容易出的不是漏报而是**误报**，这次逐一撞过：
+
+1. **字符类漏字符** —— 前端方法名写成 `[a-z_]+`，于是 `es9p`（含数字 9）
+   被判成「前端从不调用」。
+2. **只认一种读取写法** —— 漏了 `config_get_bool`（init.d 读 UCI 的标准写法），
+   于是 `network_allow_wan` / `network_restrict_access` 被误判成死配置。
+3. **漏掉无扩展名的文件** —— `root/etc/init.d/at-webserver` 没有后缀，按扩展名
+   过滤时整个文件没进扫描（同上一条的两个键就是这么漏的）。
+4. **看不见动态构造** —— `schedconfig.rs:293` 用 `format!("{prefix}_{kind}_bands")`
+   拼键，静态正则永远看不到，整族 `schedule_night_*` / `schedule_day_*` 被误报。
+5. **语料范围两头错** —— 太窄则菜单名/包描述（在 `menu.d`、`Makefile`）被误报；
+   太宽（把 `CHANGELOG.md` 也算进来）则**恒绿**：只在历史记录里活着的字符串
+   会被判成「仍在使用」，检查等于没做。
+6. **子串匹配把注释算成使用** —— 本工具**自己**写进 `rpc.js` 的一句说明里含
+   「全网扫频」，当场把第 3 类的那条 po 孤儿洗白了。判定必须要求
+   **字符串字面量形态**（`'文案'` / `"文案"`）。
+
+### Changed
+
+- `tools/verify-guards.py`：变异表 108 → **113** 条，全部判红、字节级还原一致；
+  新增 5 个 TARGET 键（`rpcjs4` / `uc5` / `rsrust2` / `cfg1` / `po1`，
+  ★ 复用旧键会跑错测试，见红线 16b）。
+- `syntax_ok()` 兜底改成「只有 `.js` 才做 JS 预检」——新增的非 JS 目标
+  （UCI 配置、po 文件）此前会落到 `new Function` 分支被误判成「语法非法」。
+
 ## [2.3.53] - 2026-09-26
 
 ### Fixed（频段「改不了」：模组回 OK 其实一个字都没写进 NV）

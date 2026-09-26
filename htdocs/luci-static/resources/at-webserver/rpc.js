@@ -14,8 +14,18 @@
  *
  * 语义兼容：
  * - sendCommand(cmd) → {success,data,error}，保持 FIFO 顺序（RPC 逐条应答，前端仍串行化）
- * - subscribe/unsubscribe：事件轮询拉取增量（RPC 为请求-响应模型），推送类型与原 WS 一致：
- *   raw_data / new_sms / incoming_call / pdcp_data / memory_full / cellscan / urc_data
+ * - subscribe/unsubscribe：事件轮询拉取增量（RPC 为请求-响应模型）。
+ *   前端认的事件类型与「谁产生」必须一一对得上，名单见 handlePush：
+ *   raw_data / new_sms / incoming_call / pdcp_data / urc_data（其中 urc_data 是
+ *   **本模块自己**在 dispatchRawData 里用 emitPush 造的，不是后端推的）。
+ *
+ *   ★ 2026-09-26：名单里原有的 `memory_full` 与 `cellscan` 已删除。
+ *     · `memory_full`：后端只把它交给通知通道（日志/企微），**从不**发 WS 事件，
+ *       前端这条分支从来收不到东西 —— 死分支。
+ *     · `cellscan`：产生方是 Rust 后端为「全网扫频」保留的伪命令通路，而该功能
+ *       页面已于 2.3.x 下线、无任何消费方（两个订阅者只处理 urc_data / new_sms）。
+ *       后端仍会推，前端不再认，属于按预期丢弃。
+ *     两处都见 tests/cellscan-removed-contract.test.js 的钉桩。
  * - 认证：LuCI 登录态由 rpcd 会话/ACL 保证；UCI websocket_auth_key 由 ucode 代理附加，
  *   页面无需输入密钥（原有密钥配置保持兼容）
  */
@@ -325,7 +335,7 @@ ATClient.prototype.handlePush = function (ev) {
 		this.dispatchRawData(ev.data);
 		return;
 	}
-	if (['incoming_call', 'new_sms', 'pdcp_data', 'memory_full', 'cellscan', 'urc_data'].indexOf(ev.type) >= 0) {
+	if (['incoming_call', 'new_sms', 'pdcp_data', 'urc_data'].indexOf(ev.type) >= 0) {
 		this.emitPush({ success: true, type: ev.type, data: ev.data });
 	}
 };

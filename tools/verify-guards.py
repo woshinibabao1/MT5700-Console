@@ -105,6 +105,16 @@ TARGETS = {
     "parsejs4": ATWB / "parse.js",
     "parsejs5": ATWB / "parse.js",
     "test3": ROOT / "tests" / "parse-contract.test.js",
+    # ★ 再挂五个键（2026-09-26 用户追问「全网扫频为什么不删干净」）：
+    #   下线残留守卫在 tests/cellscan-removed-contract.test.js，它横跨
+    #   前端事件名单 / 配置注释 / ucode 黑名单 / Rust 拦截 / i18n 五处。
+    #   ★ 复用 rpcjs3 / uc4 / rsrust 都会**跑错测试**（它们分别固定跑
+    #   retry-backoff、at-batch、single-source）→ 变异生效却没人判红（红线 16b）。
+    "rpcjs4": ATWB / "rpc.js",
+    "uc5": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
+    "rsrust2": ROOT / "src" / "rust" / "src" / "rpcserver.rs",
+    "cfg1": ROOT / "root" / "etc" / "config" / "at-webserver",
+    "po1": ROOT / "po" / "zh_Hans" / "luci-app-mt5700.po",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -152,6 +162,12 @@ TARGET_TEST = {
     "parsejs4": ROOT / "tests" / "syscfg-band-contract.test.js",
     "parsejs5": ROOT / "tests" / "module-extract-anchor.test.js",
     "test3": ROOT / "tests" / "module-extract-anchor.test.js",
+    # ★ 全网扫频下线残留守卫（五个键都跑它）
+    "rpcjs4": ROOT / "tests" / "cellscan-removed-contract.test.js",
+    "uc5": ROOT / "tests" / "cellscan-removed-contract.test.js",
+    "rsrust2": ROOT / "tests" / "cellscan-removed-contract.test.js",
+    "cfg1": ROOT / "tests" / "cellscan-removed-contract.test.js",
+    "po1": ROOT / "tests" / "cellscan-removed-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -1144,6 +1160,55 @@ MUTATIONS = [
         "/var Parse = \\((function[\\s\\S]*?)\\)\\(\\);/",
         "未加锚的模块提取正则",
     ),
+    # ---------- 全网扫频下线残留（2026-09-26 用户追问「为什么不删干净」） ----------
+    (
+        # ★ 锚点唯一性已核：事件名单这一行在 rpc.js 里只出现 1 次。
+        #   把已无消费方的 cellscan 放回名单 → 守卫必须判红。
+        "把没有消费方的 cellscan 放回前端事件名单",
+        "rpcjs4",
+        "\tif (['incoming_call', 'new_sms', 'pdcp_data', 'urc_data'].indexOf(ev.type) >= 0) {",
+        "\tif (['incoming_call', 'new_sms', 'pdcp_data', 'cellscan', 'urc_data'].indexOf(ev.type) >= 0) {",
+        "不再认 cellscan",
+    ),
+    (
+        # ★ 锚点唯一性已核：cellscan_timeout 那一行在配置文件里只出现 1 次。
+        #   把注释退回「一次 ^CELLSCAN 全网扫频允许运行的秒数」的旧口径
+        #   （把已下线功能描述成活的）→ 守卫必须判红。
+        "配置里把已下线的扫频描述成活功能（旧注释口径回流）",
+        "cfg1",
+        "\toption cellscan_timeout '180'           # 仅用于终端误发 AT^CELLSCAN 时的超时上限（秒，下限 10）",
+        "\toption cellscan_timeout '180'           # 一次 ^CELLSCAN 全网扫频允许运行的秒数（下限 10）",
+        "旧的错误口径",
+    ),
+    (
+        # ★ 锚点唯一性已核：NEVER_CACHE 定义在 mt5700.uc 里只有 1 处。
+        #   只拆掉「三处耦合」中的 ucode 这一条 → 守卫必须判红。
+        "只拆掉 ucode 永不缓存名单里的 AT^CELLSCAN（三处耦合失衡）",
+        "uc5",
+        "const NEVER_CACHE = ['AT^CELLSCAN', ",
+        "const NEVER_CACHE = [",
+        "三者必须同步",
+    ),
+    (
+        # ★ 锚点唯一性已核：这一句 starts_with 在 rpcserver.rs 里只有 1 处
+        #   （ABORT / STATE 用的是 eq_ignore_ascii_case）。
+        #   拆掉 Rust 的拦截 → 守卫必须判红（并在人看的时候提示：
+        #   真删拦截会让终端直发变成无上限扫频）。
+        "拆掉 Rust 侧 AT^CELLSCAN 拦截（三处耦合失衡）",
+        "rsrust2",
+        'starts_with("AT^CELLSCAN")',
+        'starts_with("AT^NOPE")',
+        "三者必须同步",
+    ),
+    (
+        # ★ 锚点唯一性已核：msgid "网络状态" 在 po 里只出现 1 次。
+        #   把已清除的孤儿翻译放回 → 守卫必须判红。
+        "把已清除的「全网扫频」孤儿翻译放回 po",
+        "po1",
+        'msgid "网络状态"',
+        'msgid "全网扫频"\nmsgstr "全网扫频"\n\nmsgid "网络状态"',
+        "po 里不再有",
+    ),
 ]
 
 
@@ -1180,6 +1245,14 @@ def syntax_ok(path):
     # ucode 的顶层写法（对象常量、纯声明式结构）可能误报语法错误。
     # 这些变异只改一个表达式/一个分支，语法上必然仍合法。
     if path.suffix == ".uc":
+        return True
+    # ★ 兜底：只有 .js 才做 JS 预检。
+    #   2026-09-26 踩到：新加了两个非 JS 目标（`root/etc/config/at-webserver` 是无扩展名
+    #   的 UCI 配置、`po/zh_Hans/*.po` 是翻译表），它们既不是 .css/.sh/.rs/.uc，
+    #   又带非空后缀，于是落到下面的 `new Function` 分支 → 必然「语法非法」，
+    #   变异被归因成「无法归因」，看着像守卫没生效。用白名单方向写死，以后加
+    #   任何新类型都不会再撞。
+    if path.suffix != ".js":
         return True
     if "tests" in path.parts:
         args = [NODE, "--check", str(path)]
