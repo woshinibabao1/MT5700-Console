@@ -161,6 +161,31 @@ fn decode_address(data: &[u8], digits: usize, toa: u8) -> String {
     decode_number(data, digits)
 }
 
+/// 从 DCS 推出用户数据的编码：0 = GSM7、1 = 8bit、2 = UCS2。
+///
+/// ★ 与前端 `parse.js` 的 `dcsEncoding` 对齐（2026-09-28）。
+///
+///   原先这里直接写 `(dcs >> 2) & 0x03` —— 那只在 **0x0–0xB 组**成立：
+///   · `0xC / 0xD / 0xE` 组（GSM7 / 8bit / UCS2 的扩展组）要看 **bit3**
+///     决定是 8bit 还是 UCS2；
+///   · `0xF` 组（**数据编码 / 消息类别组**）的 bit3-2 是**消息类别，不是编码**，
+///     必须固定按 GSM7 处理。
+///
+///   前端早就按这个口径修好了，并在注释里记着「已按 256 个 DCS 全量自检：
+///   差异只落在 0xF 组，常见 DCS 完全等价」；**后端当时漏改**，于是同一条 PDU
+///   走前端解码与走后端解码会得到不同的正文。分歧点举例：`DCS = 0xF4`
+///   → 旧算式 `(0xF4 >> 2) & 0x03 == 1`（当成 8bit），正确结果是 0（GSM7）。
+fn dcs_encoding(dcs: u8) -> u8 {
+    let group = dcs >> 4;
+    if group == 0xC || group == 0xD || group == 0xE {
+        return if dcs & 0x08 != 0 { 2 } else { 0 };
+    }
+    if group == 0xF {
+        return 0;
+    }
+    (dcs >> 2) & 0x03
+}
+
 pub fn decode_incoming_pdu(pdu_hex: &str) -> Result<Sms, String> {
     let raw = hex::decode(pdu_hex.trim()).map_err(|_| "PDU 不是合法的十六进制".to_string())?;
 
@@ -191,8 +216,8 @@ pub fn decode_incoming_pdu(pdu_hex: &str) -> Result<Sms, String> {
     let udl = cut(&raw, &mut pos, 1)?[0] as usize;
     let ud = &raw[pos..];
 
-    // DCS bit3-2 选编码：00=GSM7 01=8bit 10=UCS2
-    let encoding = (dcs >> 2) & 0x03;
+    // DCS → 编码。见 dcs_encoding 的说明：不能只写 (dcs >> 2) & 0x03。
+    let encoding = dcs_encoding(dcs);
 
     let mut udh_len = 0usize;
     let mut partial: Option<PartialInfo> = None;
@@ -297,6 +322,32 @@ mod tests {
         assert_eq!(v[0x7F], 'à');
         // 缓存版本与直接收集必须一致
         assert_eq!(gsm7_alphabet(), &v[..]);
+    }
+
+    /// DCS → 编码的口径必须与前端 `parse.js` 的 `dcsEncoding` **逐值一致**。
+    ///
+    /// 这条契约此前只有前端一侧在守（前端注释里写着"已按 256 个 DCS 全量自检"），
+    /// 后端漏改了 `0xC/0xD/0xE` 与 `0xF` 两组，于是同一条 PDU 两侧可能解出不同正文。
+    #[test]
+    fn dcs_encoding_与前端口径一致() {
+        // 常见 DCS
+        assert_eq!(dcs_encoding(0x00), 0, "GSM7（默认）");
+        assert_eq!(dcs_encoding(0x04), 1, "8bit");
+        assert_eq!(dcs_encoding(0x08), 2, "UCS2");
+
+        // 0xC / 0xD / 0xE 组：看 bit3 决定 8bit 还是 UCS2（不是看 bit3-2）
+        for &d in &[0xC0u8, 0xD0, 0xE0] {
+            assert_eq!(dcs_encoding(d), 0, "{d:#04X}：bit3=0 → GSM7");
+            assert_eq!(dcs_encoding(d | 0x08), 2, "{d:#04X}：bit3=1 → UCS2");
+        }
+
+        // ★ 0xF 组：bit3-2 是消息类别，不是编码 → 一律 GSM7
+        for d in 0xF0u8..=0xFF {
+            assert_eq!(dcs_encoding(d), 0, "{d:#04X} 属 0xF 组，必须按 GSM7 处理");
+        }
+
+        // 把分歧点钉死：旧算式在这里给 1（8bit），正是漏改的后果
+        assert_eq!((0xF4u8 >> 2) & 0x03, 1, "旧式算式在 0xF4 上是 1 —— 所以必须走 dcs_encoding");
     }
 
     #[test]
