@@ -705,14 +705,25 @@ var Parse = (function () {
 	api.decodeLteBandMask = function (s) {
 		var t = String(s == null ? '' : s).trim();
 		if (!t) return '未设置';
-		var v = parseInt(t, 16);
-		if (isNaN(v)) return '无法解析（应为十六进制）';
-		if (String(t).toUpperCase().replace(/^0+/, '') === '7FFFFFFFFFFFFFFF') return '任何频段（不限制）';
+		/*
+		 * ★ 与上面的 decodeBandMask 同构：先归一化十六进制串，位测试一律走 hexBit。
+		 *
+		 * 这里原先用 `parseInt(t,16)` + `Math.floor(v/2)` 逐位取。而本文件上方的
+		 * 注释已经写明「掩码值一旦超过 2^53 就装不进双精度……这类测位会在存在
+		 * 低位时判丢」—— lteband 的「全部频段」宏值 0x7FFFFFFFFFFFFFFF 有 63 位
+		 * 有效位，早超出安全范围：实测 '7FFFFFFFFFFFFFF0' 只解出 B64（低位成片
+		 * 被吞）。<band> 那侧已经改成逐字符取位，<lteband> 当时漏改。
+		 *
+		 * 全频段判据也必须拿**归一化后**的 h 去比：拿原始 t 比时，前导零会让它
+		 * 失配（'07FFFFFFFFFFFFFF' 落进 parseInt 分支 → 只解出 B60）。
+		 */
+		var h = t.replace(/^0+/, '').toUpperCase();
+		if (!h) h = '0';
+		if (!/^[0-9A-F]+$/.test(h)) return '无法解析（应为十六进制）';
+		if (h === '7FFFFFFFFFFFFFFF') return '任何频段（不限制）';
 		var out = [];
-		for (var i = 0; i <= 63; i++) {
-			if (v <= 0) break;
-			if (v % 2 === 1) out.push('B' + (i + 1));
-			v = Math.floor(v / 2);
+		for (var i = 0; i < h.length * 4; i++) {
+			if (hexBit(h, i)) out.push('B' + (i + 1));
 		}
 		return out.length ? out.join(', ') : '未设置';
 	};

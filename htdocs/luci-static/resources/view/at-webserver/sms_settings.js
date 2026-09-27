@@ -421,14 +421,24 @@ return L.view.extend({
 				['AT+CEUS=1', 1000, '开启 CEUS'],
 				['AT^IMSSWITCH=1,0,0', 2000, '开启 IMS'],
 				['AT+CFUN=1', 2000, '恢复射频'],
-				['AT+CGDCONT=5,"IPV4V6","","",0,0,0,0,1,1,1,,,,,,0,,0,0,0,0', 1000, '配置数据承载'],
-				['AT+CSCA="' + Parse.sanitizeAtParam(centerInput.value || '') + '"', 0, '配置中心号码']
+				['AT+CGDCONT=5,"IPV4V6","","",0,0,0,0,1,1,1,,,,,,0,,0,0,0,0', 1000, '配置数据承载']
 			] : [
 				['AT+CEUS=0', 500, '关闭 CEUS'],
 				['AT^IMSSWITCH=0,0,0', 500, '关闭 IMS'],
 				['AT+CFUN=0', 500, '关闭射频'],
 				['AT+CMGD=1,4', 0, '清空短信']
 			];
+			/*
+			 * ★ 中心号码为空时**不下发** `AT+CSCA=""` —— 那会把模组里的短信中心号
+			 *   直接清掉，之后短信发不出去，而界面还报「已开启」。
+			 *   本页 stageCenter 早就有这条守卫（「不暂存空值：否则会下发
+			 *   AT+CSCA=""，把中心号码直接清掉」），只有这个开关序列绕过了它。
+			 *   留空表示「不动模组当前的配置」，不等于「清空」。
+			 */
+			var centerNumber = Parse.sanitizeAtParam(centerInput.value || '');
+			if (enable && centerNumber) {
+				steps.push(['AT+CSCA="' + centerNumber + '"', 0, '配置中心号码']);
+			}
 			var warnings = [];
 			steps.forEach(function (s) {
 				if (!s[0]) return;

@@ -1544,7 +1544,14 @@ function parseHFREQINFO(data) {
 		var f = lines[i].split(',').map(function (s) { return s.trim().replace(/^"|"$/g, ''); });
 		if (f.length < 3) continue;
 		var sysMode = HFREQ_SYS_MODE[Number(f[1])] || ('模式 ' + f[1]);
-		var rest = f.slice(2).filter(function (x) { return x !== ''; });
+		/*
+		 * ★ 不能把空字段 filter 掉再分组：每载波固定 7 个字段、**位置即语义**
+		 * （手册 13.16.3：band/dl_fcn/dl_freq/dl_bw/ul_fcn/ul_freq/ul_bw）。
+		 * 删掉一个空字段会让后面整体左移（把 dl_bw 当 ul_fcn、把 ul_bw 当 band），
+		 * 更直接的是长度落到 6 时 `Math.floor(6/7) === 0` —— **整个载波一个都不
+		 * 输出**，界面上载波数变成 0。空值交给下面的 int() 归 0，位置必须保留。
+		 */
+		var rest = f.slice(2);
 		var n = Math.floor(rest.length / 7);
 		for (var k = 0; k < n; k++) {
 			var c = rest.slice(k * 7, k * 7 + 7);

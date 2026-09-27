@@ -15,16 +15,34 @@ const PARTIAL_SMS_TTL: Duration = Duration::from_secs(3600);
 const MAX_PARTIAL_SMS: usize = 100;
 
 // ============= 信号换算（边界值逐一对齐前端 rpc.js 的 convertRsrp/Rsrq/Sinr/Rssi） =============
-// 这些函数与前端共用同一套换算口径，改动任一侧都要同步另一侧（见 tests/hcsq-contract.test.js）。
+// 这些函数与前端共用同一套换算口径，改动任一侧都要同步另一侧
+// （见 tests/lte-signal-contract.test.js 的「⑤ 浮点尾数」段）。
+//
+// ★ 接线现状（别看漏）：目前只有 convert_rsrp / convert_rssi 走在生产路径上
+//   （handle_signal 的 ^HCSQ 分支，且只用 rsrp 做信号变化通知）。
+//   convert_rsrq / convert_sinr 尚无生产调用点 —— 但它们**不是**可以放任的残留：
+//   它们是「后端若自己换算就必须与前端同口径」的契约载具，各有一条
+//   `*_边界对齐_rpcjs` 测试守着。2.3.43 前端给 convertSinr 补了一位小数收尾
+//   （round1），后端当时没跟上，于是这条契约一直是红的 —— 只是 CI 只跑
+//   `cargo check`（不跑 `cargo test`），所以没人发现（见 CHANGELOG 2.3.43）。
 fn convert_rsrp(raw: f64) -> f64 {
     if raw == 0.0 { -140.0 } else if raw >= 97.0 { -44.0 } else { -140.0 + raw }
 }
 fn convert_rsrq(raw: f64) -> f64 {
     if raw == 0.0 { -19.5 } else if raw >= 34.0 { -3.0 } else { -19.5 + raw * 0.5 }
 }
+/// 收到一位小数 —— 与前端 rpc.js 的 `round1` 同义、同适用范围。
+///
+/// SINR 步进 0.2 dB，而 0.2 不是二进制有限小数：`-20 + 236 × 0.2` 在 f64 里是
+/// 27.200000000000003，直接进 JSON 就是一条带尾数的读数。RSRP / RSSI 是整数步进、
+/// RSRQ 是 0.5 步进，二进制都能精确表示，所以只有 SINR 需要这一步 ——
+/// 与前端「只给 convertSinr 加 round1」的范围完全一致。
+fn round1(v: f64) -> f64 {
+    (v * 10.0).round() / 10.0
+}
 fn convert_sinr(raw: f64) -> f64 {
     let v = if raw == 0.0 { -20.0 } else if raw >= 251.0 { 30.0 } else { -20.0 + raw * 0.2 };
-    v.min(30.0).max(-20.0)
+    round1(v.min(30.0).max(-20.0))
 }
 fn convert_rssi(raw: f64) -> f64 {
     if raw == 0.0 { -120.0 } else if raw >= 96.0 { -25.0 } else { -121.0 + raw }
@@ -785,6 +803,12 @@ mod tests {
         assert_eq!(convert_sinr(236.0), 27.2);
         assert_eq!(convert_sinr(300.0), 30.0); // 超上限被夹回 30
         assert_eq!(convert_sinr(20.0), -16.0);
+        // ★ 浮点尾数（前端 2.3.43 修的就是这个数）：`-20 + 146 × 0.2` 在 f64 里是
+        //   9.200000000000003，界面上曾直接拼成 "9.200000000000003 dB"。前端已在
+        //   换算出口用 round1 收尾，后端必须同口径 —— 否则同一条 ^HCSQ，经 URC
+        //   推送与经 AT 轮询会给出两个不同的读数。
+        assert_eq!(convert_sinr(146.0), 9.2);
+        assert_eq!(convert_sinr(106.0), 1.2); // 同一事故里 106 那档的形态
     }
 
     #[test]

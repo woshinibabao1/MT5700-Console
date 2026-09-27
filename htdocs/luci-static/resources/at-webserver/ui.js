@@ -3,7 +3,12 @@
 'require at-webserver/compat';
 'require at-webserver/rpc';
 'require at-webserver/parse';
-/* global L, AtWs, Parse, baseclass */
+/* ★ 必须显式 require mt5700：本文件的 promptModal 用 E() 构造 DOM，而 E 全站
+   只有 mt5700.js 一份实现（经 api.E 导出）。此前缺这一行，promptModal 每次调用
+   都抛 `ReferenceError: E is not defined` —— 改 IMEI / PUK 解锁 / eSIM 重命名 /
+   eSIM 删除 / 新增 PDP / 新短信 / 保存 AT 命令这 7 处弹窗入口全部点不开。 */
+'require at-webserver/mt5700';
+/* global L, AtWs, Parse, baseclass, Mt5700 */
 
 /**
  * LuCI 页面公共 UI 辅助。
@@ -19,6 +24,10 @@
 
 var Ui = (function () {
 	var api = {};
+
+	/* DOM 构造 helper 取自 mt5700.js（全站唯一实现，经 api.E 导出）。
+	   取一次赋给局部 E，下面所有 E(...) 调用写法不变，也不必再引入第二份实现。 */
+	var E = Mt5700.E;
 
 	// 所有按钮都经由此卡口创建。cls 接收视图传入的 cbi-button-* 变体，
 	// 通过映射附加 at-btn-* 系列类：外观完全由 mt5700.css 决定，不受 LuCI 主题影响。

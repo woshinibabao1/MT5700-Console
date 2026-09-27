@@ -104,6 +104,30 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 /// 连接断开后，等待初始化任务收尾的最长时间（超过就放弃，直接进入重连）。
 const INIT_JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// 单行是否为 AT 错误结束码。
+///
+/// 判据形状与前端 rpc.js 的 `isErrorText` 等价（那边用正则做行锚定）：
+/// 行首（允许前导空白）恰为 `ERROR`，或 `+CME ERROR` / `+CMS ERROR` 且其后
+/// 紧接冒号或行尾。用 `get(..n)` 而不是切片索引，避免多字节字符落在字符边界
+/// 之外 panic —— 本 crate 的 release 是 `panic = "abort"`。
+fn is_error_line(line: &str) -> bool {
+    let t = line.trim();
+    if t.eq_ignore_ascii_case("ERROR") {
+        return true;
+    }
+    for prefix in ["+CME ERROR", "+CMS ERROR"] {
+        if let Some(head) = t.get(..prefix.len()) {
+            if head.eq_ignore_ascii_case(prefix) {
+                let rest = &t[prefix.len()..];
+                if rest.is_empty() || rest.starts_with(':') {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone)]
 pub struct AtResponse {
     pub lines: Vec<String>,
@@ -116,8 +140,22 @@ impl AtResponse {
     pub fn ok(&self) -> bool {
         self.lines.iter().any(|l| l == "OK")
     }
+    /// 应答里是否含 AT 错误结束码（`ERROR` / `+CME ERROR[: …]` / `+CMS ERROR[: …]`）。
+    ///
+    /// ★ 必须**逐行判定**，不能对整份应答做 `contains("ERROR")`。
+    ///   原实现是 `self.text().to_uppercase().contains("ERROR")` —— 正文里任意位置
+    ///   出现这个词就判失败。同一个事故前端已经踩过并修好（rpc.js 的 isErrorText
+    ///   改成了行锚定判据，注释里记着现场）：Text 模式（CMGF=1）下 `AT+CMGL` 返回
+    ///   的短信正文含 "error" 时，整份列表被判成「命令失败」，界面一片空白，而
+    ///   日志里什么错误都查不到。后端这两条路径（普通命令与扫频的成败判定）
+    ///   此前一直是宽匹配，与前端不一致。
+    ///
+    ///   模组的错误结束码按 3GPP TS 27.007 独占一行（`ERROR` / `+CME ERROR: <err>` /
+    ///   `+CMS ERROR: <err>`），所以按行判定既不会误伤正文，也不会漏掉真错误。
+    ///   大小写仍保持旧实现的宽容度（ASCII 不敏感）：这次只收紧「位置」，
+    ///   不额外收紧大小写，免得把某个固件的小写 `error` 变成漏判。
     pub fn has_error(&self) -> bool {
-        self.text().to_uppercase().contains("ERROR")
+        self.lines.iter().any(|l| is_error_line(l))
     }
     pub fn contains(&self, sub: &str) -> bool {
         self.text().contains(sub)
@@ -939,6 +977,41 @@ mod tests {
         assert_eq!(urc.line, "^HCSQ: 1,2,3,4");
         assert!(urc.broadcast);
         handle.abort();
+    }
+
+    /* ---------- 错误结束码判定（对应前端 isErrorText 的同款修复） ---------- */
+
+    fn resp_of(s: &str) -> AtResponse {
+        AtResponse { lines: s.split("\r\n").map(|l| l.to_string()).collect() }
+    }
+
+    /// 正文里出现 "error" 不算失败；真错误结束码必须逐行识别。
+    /// 样本与前端 tests/at-error-text-contract.test.js 同源。
+    #[test]
+    fn has_error_只认整行的错误结束码() {
+        // 误判面：这个词出现在正文 / 数据里，行首不是错误码
+        assert!(!resp_of("+CMGL: 1,1,,,\"My network error again\"\r\nOK").has_error());
+        assert!(!resp_of("^HFREQINFO: 0,7,41,528960,2644800\r\nOK").has_error());
+        assert!(!resp_of("+CSQ: 12,0\r\nOK").has_error());
+
+        // 真错误：三种结束码都要认（含不带错误码、带说明文字的形态）
+        assert!(resp_of("ERROR").has_error());
+        assert!(resp_of("\r\nERROR\r\n").has_error());
+        assert!(resp_of("+CME ERROR: 10").has_error());
+        assert!(resp_of("+CMS ERROR: 500").has_error());
+        assert!(resp_of("+CME ERROR").has_error());
+        assert!(resp_of("+CME ERROR: not found").has_error());
+
+        // 形状必须是「行首 + 冒号或行尾」：+CME ERRORX 不是结束码，
+        // 出现在行中间的同样不算
+        assert!(!resp_of("+CME ERRORX").has_error());
+        assert!(!resp_of("回显里提到 +CME ERROR 但不在行首").has_error());
+    }
+
+    #[test]
+    fn ok_只认整行_ok() {
+        assert!(resp_of("+CSQ: 12,0\r\nOK").ok());
+        assert!(!resp_of("+CMGL: 1,1,,,\"NOT OK\"").ok());
     }
 
     /* ---------- 自动拨号状态解析（对应「接口拿不到 IP」修复） ---------- */

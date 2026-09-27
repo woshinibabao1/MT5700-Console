@@ -817,7 +817,6 @@ pub fn err_response(msg: &str) -> AtCommandResponse {
     AtCommandResponse { success: false, data: None, error: Some(msg.to_string()) }
 }
 
-/// 修补前端发来的 AT^SYSCFGEX：把频段参数重新加上引号，并补齐末尾两个空参数。
 /// 判断是否为「短信数据命令」：`AT+CMGS` / `AT+CMGW`。
 ///
 /// 这两条命令在 PDU 模式下需要先把 PDU 数据交给模组，再由模组提交到网络侧，
@@ -840,6 +839,10 @@ fn is_sms_data_command(command: &str) -> bool {
         && payload.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// 修补前端发来的 AT^SYSCFGEX：把频段参数重新加上引号，并补齐末尾两个空参数。
+///
+/// （这行说明原先挂在了 is_sms_data_command 头上 —— 函数与文档错位，
+///  normalize_syscfgex 自己反而一句说明都没有。）
 fn normalize_syscfgex(command: &str) -> String {
     // 大小写不敏感：is_cell_scan 同样按大写判定，小写 at^syscfgex 不该绕过规范化。
     if !command.to_uppercase().starts_with("AT^SYSCFGEX") {

@@ -29,7 +29,13 @@ return L.view.extend({
 
 		try {
 			var raw = localStorage.getItem('savedAtCommands');
-			if (raw) saved = JSON.parse(raw);
+			/*
+			 * ★ 解析成功不等于形状正确：旧版本格式或手改过的值可能是对象 / 数字 /
+			 * 字符串，那样的 saved 没有 forEach / filter，会在本页渲染时抛 TypeError
+			 * 并把整个视图带崩（LuCI 表现为白屏）。这里只认数组，非数组一律当空。
+			 */
+			var parsed = raw ? JSON.parse(raw) : null;
+			if (Array.isArray(parsed)) saved = parsed;
 		} catch (e) { /* ignore */ }
 
 		/* ---------- 终端主体 ---------- */

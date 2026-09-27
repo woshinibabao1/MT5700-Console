@@ -1128,6 +1128,20 @@ var Mt5700 = (function () {
 		return box;
 	};
 
+	/*
+	 * DOM 构造 helper 外露。
+	 *
+	 * 本文件是全站唯一的 E() 实现，但此前它只在本 IIFE 内可见，而 ui.js 的
+	 * promptModal 也直接调 E(...) —— 于是每一次弹窗都抛
+	 * `ReferenceError: E is not defined`：改 IMEI / PUK 解锁 / eSIM 重命名 /
+	 * eSIM 删除 / 新增 PDP / 新短信 / 保存 AT 命令，这 7 处入口全部点不开。
+	 *
+	 * 这里外露一份、由 ui.js 复用它，而不是让 ui.js 再抄一份实现：
+	 * 同一 helper 多份实现正是「改了 A 处，B 处纹丝不动」那类问题的来源
+	 * （见 ui.js 里那段死代码清理说明）。
+	 */
+	api.E = E;
+
 	return api;
 })();
 

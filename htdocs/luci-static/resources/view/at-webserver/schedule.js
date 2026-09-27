@@ -197,12 +197,24 @@ return L.view.extend({
 			checkIntervalInput.addEventListener('input', function () {
 				draft.check_interval = Math.max(10, parseInt(checkIntervalInput.value, 10) || 10);
 			});
+			/* ★ 失焦时把钳后的值写回控件 —— 与 ui.js 的既定标准同一条：
+			   「用户填 1 得到 2，界面必须写 2，否则界面在说谎」。只钳 draft 不回填，
+			   输入框会一直显示那个（不会生效的）1。
+			   回填只能放 blur，不能放 input：输 "15" 时第一下 "1" 就会被改写成
+			   "10"，用户再也输不进 15。 */
+			checkIntervalInput.addEventListener('blur', function () {
+				checkIntervalInput.value = String(draft.check_interval);
+			});
 			formBody.appendChild(Mt5700.formGroup('检测间隔（秒）', checkIntervalInput, '多久检查一次当前时段'));
 
 			var timeoutInput = Mt5700.input('number', '30', String(draft.timeout));
 			timeoutInput.min = 30;
 			timeoutInput.addEventListener('input', function () {
 				draft.timeout = Math.max(30, parseInt(timeoutInput.value, 10) || 30);
+			});
+			/* 同「检测间隔」：失焦回填，避免界面显示一个不会下发的值。 */
+			timeoutInput.addEventListener('blur', function () {
+				timeoutInput.value = String(draft.timeout);
 			});
 			formBody.appendChild(Mt5700.formGroup('无服务超时（秒）', timeoutInput, '模组无服务超过此时长自动解锁'));
 

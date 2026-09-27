@@ -1579,10 +1579,20 @@ MUTATIONS = [
 ]
 
 
+# 单个测试文件的执行上限。正常的契约测试都在数秒内结束，这里纯粹是兜底：
+# 没有它，一个永不退出的测试进程会把 CI 拖到 GitHub 默认的 6 小时上限。
+TEST_TIMEOUT = 300
+
+
 def run_test(tgt):
     test = TARGET_TEST[tgt]
-    p = subprocess.run([NODE, str(test)], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+    # timeout 是兜底、不是预算：契约测试正常都在几秒内结束。它只防「某个测试进程
+    # 永不退出」把 CI 空转到 GitHub 默认的 6 小时上限。
+    try:
+        p = subprocess.run([NODE, str(test)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=TEST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 1, "测试超时（>%ds）：%s" % (TEST_TIMEOUT, test)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
@@ -1646,36 +1656,48 @@ def main():
             return 1
 
     bad = 0
-    for i, (name, tgt, old, new, key) in enumerate(MUTATIONS, 1):
-        path = TARGETS[tgt]
-        text = ORIG[tgt].decode("utf-8")
-        if text.count(old) != 1:
-            print(f"[{i}] ✗ 变异锚点不唯一/找不到（出现 {text.count(old)} 次）：{name}")
-            bad += 1
-            continue
-        path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="")
-        # ↑ newline="" 是关键：Windows 上 write_text 默认把 \n 翻成 \r\n，
-        #   会把整个文件变成 CRLF。仓库约定 LF，而测试全靠「读源码 + 假设 LF 的正则」，
-        #   一旦变 CRLF，那种正则静默匹配不上、反向守卫直接失效
-        #   （2026-09-20 真踩过，见 tests/line-endings-contract.test.js）。
-        # 先确认变异本身语法合法 —— 否则"判红"可能只是崩了
-        if not syntax_ok(path):
-            print(f"[{i}] ✗ 变异后语法非法，无法归因：{name}")
-            restore_all()
-            bad += 1
-            continue
-        rc, out = run_test(tgt)
-        hit = key in out
-        if rc != 0 and hit and "异步用例异常" not in out:
-            # ★ 统计口径（2026-09-24 修正）：全仓测试统一用 `'  ✗ '` 前缀输出失败项。
-            #   原先这里写 `'\n  ✗'`，会把**第一行**失败漏掉（首行前面没有 '\n'）→
-            #   「只被 1 条断言抓住」的变异会显示「判红 0 处」，看着像守卫没生效，
-            #   实际是 off-by-one。去掉 '\n' 约束即可；`'  ✗'` 仍足以与汇总行区分
-            #   （汇总行是无前导空格的 `'\n✗ N 项断言失败'`）。
-            print(f"[{i}] ✓ 变异被断言检出：{name}（判红 {out.count('  ✗')} 处）")
-        else:
-            print(f"[{i}] ✗ 变异被放过：{name}（rc={rc}, 关键词命中={hit}）")
-            bad += 1
+    try:
+        for i, (name, tgt, old, new, key) in enumerate(MUTATIONS, 1):
+            path = TARGETS[tgt]
+            text = ORIG[tgt].decode("utf-8")
+            if text.count(old) != 1:
+                print(f"[{i}] ✗ 变异锚点不唯一/找不到（出现 {text.count(old)} 次）：{name}")
+                bad += 1
+                continue
+            path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="")
+            # ↑ newline="" 是关键：Windows 上 write_text 默认把 \n 翻成 \r\n，
+            #   会把整个文件变成 CRLF。仓库约定 LF，而测试全靠「读源码 + 假设 LF 的正则」，
+            #   一旦变 CRLF，那种正则静默匹配不上、反向守卫直接失效
+            #   （2026-09-20 真踩过，见 tests/line-endings-contract.test.js）。
+            try:
+                # 先确认变异本身语法合法 —— 否则"判红"可能只是崩了
+                if not syntax_ok(path):
+                    print(f"[{i}] ✗ 变异后语法非法，无法归因：{name}")
+                    bad += 1
+                    continue
+                rc, out = run_test(tgt)
+                hit = key in out
+                if rc != 0 and hit and "异步用例异常" not in out:
+                    # ★ 统计口径（2026-09-24 修正）：全仓测试统一用 `'  ✗ '` 前缀输出失败项。
+                    #   原先这里写 `'\n  ✗'`，会把**第一行**失败漏掉（首行前面没有 '\n'）→
+                    #   「只被 1 条断言抓住」的变异会显示「判红 0 处」，看着像守卫没生效，
+                    #   实际是 off-by-one。去掉 '\n' 约束即可；`'  ✗'` 仍足以与汇总行区分
+                    #   （汇总行是无前导空格的 `'\n✗ N 项断言失败'`）。
+                    print(f"[{i}] ✓ 变异被断言检出：{name}（判红 {out.count('  ✗')} 处）")
+                else:
+                    print(f"[{i}] ✗ 变异被放过：{name}（rc={rc}, 关键词命中={hit}）")
+                    bad += 1
+            finally:
+                # ★ 还原必须放 finally：本工具会**改仓库源码**，只要有一条异常路径
+                #   跳过还原（Ctrl-C、CI 取消、node 被杀、TARGET_TEST 缺键、甚至
+                #   下面 print 里的 ✓ 在 GBK 控制台上抛 UnicodeEncodeError），
+                #   故意改坏的 euicc.js / mt5700.uc 就会留在工作区里。
+                #   2026-09-28 真踩过：一次 UnicodeEncodeError 崩在 print 上，
+                #   把 euicc.js 的变异留了下来，下一次运行于是误报「基线红！」——
+                #   查了半天才发现基线根本没坏，是上一轮的残留。
+                restore_all()
+    finally:
+        # 外层再兜一次：循环本身抛异常（例如 MUTATIONS 结构不对）时同样要还原。
         restore_all()
 
     same = all(TARGETS[k].read_bytes() == ORIG[k] for k in TARGETS)
@@ -1686,4 +1708,15 @@ def main():
 
 
 if __name__ == "__main__":
+    # ★ Windows 控制台默认是 GBK，而本脚本要打印 ✓ / ✗ —— Python 会抛
+    #   UnicodeEncodeError 并**中断整个流程**（不是只丢一行输出）。
+    #   2026-09-28 真踩过：崩在 print(f"... ✓ ...") 上，那一轮的 restore_all()
+    #   被跳过，euicc.js 的变异留在了工作区，下一次运行便误报「基线红！」。
+    #   这里把两个流强制成 UTF-8，并容错无法编码的字符：即便某个控制台仍不支持，
+    #   也只会显示成 ?，不会再中断流程。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     sys.exit(main())

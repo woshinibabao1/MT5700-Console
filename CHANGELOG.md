@@ -5,6 +5,168 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.60] - 2026-09-28
+
+全仓审计（逻辑 / 性能 / 可读性 / 安全 / 可维护性五个角度）后的修复批。
+**范围克制**：没有动并发模型、ACL 授权面、eSIM 协议栈与任何产品语义 ——
+只修「确证 + 低风险 + 有既有依据」的项，其余（H1/H2/H3/H6/H10/H14 等）保持原状。
+
+★ 本轮首次在本机跑通 `cargo test`（此前无 Rust 工具链），并因此发现：
+`convert_sinr_边界对齐_rpcjs` 这条**契约已经红了 5 个版本**，
+而 CI 的 rust-check 只跑 `cargo check`（不跑 test），所以一直没人看见。
+
+### Fixed（真实缺陷）
+
+**1. `ui.js` 的 `E()` 未定义 —— 7 处弹窗全部点不开（严重）**
+
+全仓 `E()` 只有一份实现，在 `mt5700.js` 的 IIFE 内部；而 `ui.js` 既没 require 它，
+也没自己定义，于是 `Ui.promptModal` 每次调用都抛
+`ReferenceError: E is not defined`。真实入口有 7 处：
+
+| 页面 | 入口 |
+| :-- | :-- |
+| 模组设置 | 修改 IMEI、使用 PUK 码解锁 |
+| eSIM 管理 | 重命名 Profile、确认删除 |
+| 拨号设置 | 新增 / 编辑 PDP 上下文 |
+| 短信中心 | 新短信 |
+| AT 终端 | 保存 AT 命令 |
+
+修法：`mt5700.js` 导出 `api.E`，`ui.js` require 之后取一份（`var E = Mt5700.E`）——
+**不外抄第二份实现**，否则就是 ui.js 文件头那段「死代码清理」刚收拾过的同类问题。
+
+**2. `convert_sinr` 与前端 `convertSinr` 口径不一致（契约已红）**
+
+前端 2.3.43 给 `convertSinr` 加了 `round1` 收尾（SINR 步进 0.2 dB 不是二进制有限小数），
+后端当时**没跟上** —— 而 `urc.rs` 的注释写的正是「改动任一侧都要同步另一侧」。
+真机实测把这条坐实了：
+
+```
+AT^HCSQ?  →  ^HCSQ: "NR",64,181,30
+-20 + 181 × 0.2  =  16.200000000000003   ← 尾数，界面上会原样显示
+```
+
+修法：后端加一个与前端同义的 `round1`，只作用于 SINR（RSRP / RSSI 是整数步进、
+RSRQ 是 0.5 步进，二进制都能精确表示 —— 与前端范围一致）。同时修掉该注释里引用的
+**不存在的测试文件名**（`hcsq-contract.test.js` → 实为 `lte-signal-contract.test.js`）。
+
+> 诚实标注：后端**当前只把 rsrp 接在生产路径上**（`handle_signal` 的信号变化通知），
+> `convert_sinr` / `convert_rsrq` 尚无生产调用点。所以这条修复的**当下用户影响为 0**，
+> 它修的是「契约坏了没人知道」以及「将来接线必踩」这两件事。
+
+**3. `AtResponse::has_error()` 用宽匹配判 AT 失败**
+
+原实现 `self.text().to_uppercase().contains("ERROR")`：正文任意位置出现这个词就判失败。
+**同一个事故前端已经踩过并修好**（`rpc.js` 的 `isErrorText` 改成行锚定判据，注释里记着
+「Text 模式下短信正文含 error，整份列表被判成命令失败」），后端这两条路径
+（普通命令与扫频的成败判定）一直是宽匹配 —— 两家判据不一致。
+
+改为逐行判定（`ERROR` / `+CME ERROR:` / `+CMS ERROR:` 独占一行，符合 3GPP TS 27.007）。
+大小写仍保持旧实现的宽容度：这次只收紧「位置」，不额外收紧大小写。
+
+**4. `<lteband>` 掩码用双精度做位运算，低位成片被吞**
+
+`parse.js` 的 `decodeBandMask` 早就改成了 `hexBit()` 逐字符取位，注释也写明
+「超过 2^53 会丢低位」—— **`decodeLteBandMask` 漏改**：
+
+```
+decodeLteBandMask('7FFFFFFFFFFFFFF0')  →  "B64"     （应为 B1..B64）
+```
+
+全频段判据同样要拿**归一化后**的串去比（拿原始串比时前导零会让它失配）。现与
+`decodeBandMask` 同构。
+
+**5. `parseHFREQINFO` 先过滤空字段再分组 → 整个载波静默消失**
+
+每载波固定 7 个字段、**位置即语义**。原实现 `filter(x => x !== '')` 后再
+`Math.floor(len / 7)`：删掉一个空字段会让后面整体左移，长度落到 6 时
+`Math.floor(6/7) === 0` —— **一个载波都不输出**，界面载波数变 0。
+空值交给 `int()` 归 0，位置必须保留。
+
+**6. FOTA 只放行 `http://`，把更安全的协议挡在门外**
+
+手册 15.7.3 明确「**支持 HTTP、HTTPS 协议类型**」，15.7.5 还给出 https 举例
+（`AT^FOTAOEMDL="https://10.14.10.153:443/OnlineUpdate/files/"` → OK）。
+而原判据是 `url.indexOf('http://') !== 0` —— `'https://'.indexOf('http://') === -1`，
+**https 一律被拒**，用户只能明文下载固件（该链路无校验和 / 签名校验）。
+现放行 `http` 与 `https`；输入框占位与提示文案同步。
+
+**7. 开启短信功能时空中心号码会清掉 SMSC**
+
+`toggleSMS` 的开启链里那条 `AT+CSCA=""` 在输入框为空时会把模组里的短信中心号清掉，
+之后短信发不出去，界面还报「已开启」。同文件 `stageCenter` 早就有这条守卫
+（「不暂存空值：否则会下发 AT+CSCA=""，把中心号码直接清掉」）—— 只有开关链绕过了它。
+现改为：中心号为空时**不下发**该步（留空 = 不动模组当前配置）。
+
+**8. 定时锁频的输入框「在说谎」**
+
+`check_interval` / `timeout` 只把钳后的值写进 `draft`，不回填控件：用户填 `1`，
+下发的是 `10`，输入框却一直显示 `1`。这与 `ui.js` 的既定标准直接冲突
+（「用户填 1 得到 2，界面必须写 2，否则界面在说谎」）。
+现于 **blur** 时回填 —— 不能放 `input`：输 `15` 时第一下 `1` 就会被改写成 `10`，
+用户再也输不进 15。
+
+**9. AT 终端：`localStorage` 里非数组 JSON 会让整页崩掉**
+
+`JSON.parse` 成功但结果不是数组时（旧格式 / 手改过），`saved.forEach` 会抛 TypeError
+并把整个视图带崩（LuCI 表现为白屏）。现只认数组。
+
+**10. 定时锁频落盘的 `uci` 调用没有超时**
+
+`config.rs` 的 `uci show` 有 5s 超时并写了理由，`schedconfig.rs` 的 `uci set`/`commit`
+漏了。不加超时不是「慢」而是「卡死」：`uci` 争用 `/var/lock/uci`、commit 还要写 flash，
+任一处挂住，这条 RPC 的 `handle_connection` 任务就永远停住，同一连接上后续所有请求
+（含前端每 1.5s 一次的 events 轮询）全部堵在它后面。
+现抽出 `uci_run()`：5s 超时 + `kill_on_drop(true)`（超时只 drop future 不会杀子进程，
+那个 uci 可能稍后拿到锁真的写下去 → 「报超时却真改了」）。
+
+**11. `rpcserver.rs` 文档注释挂错函数**
+
+`normalize_syscfgex` 的说明粘在 `is_sms_data_command` 头上，导致前者反而没有说明。
+
+**12. `tools/verify-guards.py`：崩溃会把改坏的源码留在工作区**
+
+这个工具**会写仓库源文件**，但变异循环没有 `try/finally`，且 `print("... ✓ ...")`
+在 Windows 的 GBK 控制台上会抛 `UnicodeEncodeError` —— 本轮真踩到：崩在 print 上，
+`restore_all()` 被跳过，`euicc.js` 的变异留了下来，下一次运行便误报「基线红！」，
+查了半天才发现基线根本没坏。
+现：变异-测试-还原包进 `try/finally`、stdout/stderr 强制 UTF-8 并容错、
+`subprocess` 加 300s 兜底超时（防 CI 空转到 6 小时上限）。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cd src/rust && cargo test --all-targets` | **31 passed / 0 failed / 0 warning**（改前 28 passed / **1 failed**） |
+| `node tests/run-all.js` | **61 个测试文件全部通过**（含 ui-contract 270 项、version-consistency 13 项） |
+| `node tests/syntax-check.js` | 语法错误 **0** 个 |
+| `python tools/verify-guards.py` | **151 条变异全部判红**，还原逐字节一致、还原后基线绿色 |
+| 真机只读核对 | `luci-app-mt5700-2.3.59-r1`（ImmortalWrt SNAPSHOT / aarch64 / mediatek-filogic）；`AT^HCSQ?` 实测值见上；`ubus call mt5700 logs` 可用 |
+
+**新增守卫**：`atclient.rs` 补 `has_error_只认整行的错误结束码`（12 项断言）
+与 `ok_只认整行_ok`；`urc.rs` 的 SINR 用例补入真机取到的 `146 → 9.2`、`106 → 1.2`。
+
+**诚实边界**：
+
+1. **本机是 Windows + `x86_64-pc-windows-gnu` 工具链**，而 `serial_linux` /
+   `serialdetect` 两个模块是 `#[cfg(target_os = "linux")]` —— 它们**根本没参与本机编译**。
+   也就是说这次 `cargo test` 覆盖的是除这两个模块之外的代码。
+   要给 CI 的 rust-check 加 `cargo test`（补上 H8 那个缺口），请在 Linux 上先跑一遍；
+   本条**没有**改 CI，正是因为无法在本机验证那两个模块。
+2. **未上机验证的修复**：`ui.js` 的弹窗属浏览器行为、FOTA 的 https 属真机写命令，
+   两者都只做了静态与测试级验证（红线：不向真机下发写命令、不部署未验证版本）。
+3. 本轮**确实没有修**的已知项（不是漏项，是有意留给决策）：H1（关短信链的
+   `CFUN=0`/`CMGD=1,4`）、H2（ACL 过宽）、H3（改拨号方式顺带开自动拨号）、
+   H6/H10/H14（并发与刷新竞态）、H17（密钥明文输入框）、H23 的「无校验和」部分、
+   H24（空 catch）、H25（`parseFastdorm` 死代码）、R-C/R-J（渲染性能）、
+   `verify-guards.py` 里硬编码本机 node 路径那条。
+
+### 顺带记录的过时注释（本轮未改）
+
+- `mt5700.uc` 文件头声称「无 ===/模板字符串」，正文却大量使用 `===`。
+- `logs.js` 的注释称「当前后端只暴露 at/events/netrate/es9p，现网每台设备都取不到 logs」，
+  而真机 `ubus call mt5700 logs` 正常返回（`mt5700.uc` 确有 `logs` 代理）—— 注释已过时，
+  但「默认不选模组拨号 Tab」是产品取舍，本轮不动它，只记事实。
+
 ## [2.3.59] - 2026-09-28
 
 ### Changed（保存入口统一化：不再每个小功能一个保存按钮）

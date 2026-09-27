@@ -11,6 +11,9 @@ pub const SCHED_QUERY_COMMAND: &str = "AT+SCHED?";
 pub const SCHED_SET_PREFIX: &str = "AT+SCHED=";
 pub const SCHED_RESPONSE_PREFIX: &str = "+SCHED: ";
 
+/// 单次 `uci` 调用的超时，与 config.rs 的 `uci show` 保持同一口径。
+const UCI_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BandLockDto {
     #[serde(rename = "type")]
@@ -313,18 +316,55 @@ impl SchedConfigDto {
 pub async fn write_schedule_uci(d: &SchedConfigDto) -> Result<(), String> {
     for (k, v) in d.uci_entries() {
         let arg = format!("at-webserver.config.{k}={v}");
-        let out = tokio::process::Command::new("uci").args(["set", &arg]).output().await.map_err(|e| e.to_string())?;
+        let out = match uci_run(&["set", &arg]).await {
+            Ok(out) => out,
+            Err(e) => {
+                revert_schedule_uci().await;
+                return Err(format!("写入 {k} 失败: {e}"));
+            }
+        };
         if !out.status.success() {
             revert_schedule_uci().await;
             return Err(format!("写入 {k} 失败: {}", String::from_utf8_lossy(&out.stderr)));
         }
     }
-    let out = tokio::process::Command::new("uci").args(["commit", "at-webserver"]).output().await.map_err(|e| e.to_string())?;
+    let out = match uci_run(&["commit", "at-webserver"]).await {
+        Ok(out) => out,
+        Err(e) => {
+            revert_schedule_uci().await;
+            return Err(format!("提交配置失败: {e}"));
+        }
+    };
     if !out.status.success() {
         revert_schedule_uci().await;
         return Err(format!("提交配置失败: {}", String::from_utf8_lossy(&out.stderr)));
     }
     Ok(())
+}
+
+/// 跑一次 `uci` 子进程，带 5 秒超时 —— 与 config.rs 的 `uci show` 同一口径。
+///
+/// 不加超时的后果不是「慢」而是「卡死」：`uci` 会争用 `/var/lock/uci`，commit 还要
+/// 写 flash。任一处挂住，这条 RPC 的 handle_connection 任务就永远停在
+/// `.output().await` 上，而同一连接上后续所有请求（含前端每 1.5s 一次的 events
+/// 轮询）会全部堵在它后面 —— 用户看到的是「点了保存之后这个页面再也不刷新」。
+///
+/// `kill_on_drop(true)` 是必需的：超时只是 drop 掉 future，并不会杀掉子进程；
+/// 那个 uci 可能稍后才拿到锁、并把 staging 真的提交下去，于是出现「接口报超时、
+/// 配置却被改了」的不一致。让它随 future 一起结束，失败就是干净的失败。
+async fn uci_run(args: &[&str]) -> Result<std::process::Output, String> {
+    let mut cmd = tokio::process::Command::new("uci");
+    cmd.args(args);
+    cmd.kill_on_drop(true);
+    match tokio::time::timeout(UCI_TIMEOUT, cmd.output()).await {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!(
+            "uci {} 超时（{}s）",
+            args.first().copied().unwrap_or(""),
+            UCI_TIMEOUT.as_secs()
+        )),
+    }
 }
 
 /// 回滚本服务在 UCI staging 里的未提交改动。失败只丢弃 staging，不影响已落盘配置。

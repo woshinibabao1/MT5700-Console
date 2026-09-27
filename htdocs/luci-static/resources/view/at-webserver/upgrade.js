@@ -118,7 +118,7 @@ return L.view.extend({
 		upgradeCard._body.appendChild(upgradeBody);
 		body.appendChild(upgradeCard);
 
-		var urlInput = Mt5700.input('text', 'http://fota.example.com/path/');
+		var urlInput = Mt5700.input('text', 'https://fota.example.com/path/');
 		urlInput.style.width = '100%';
 
 		var startBtn = Mt5700.primaryButton('开始升级', function () { start(); });
@@ -188,7 +188,7 @@ return L.view.extend({
 					upgradeBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 						'请先阅读并同意免责声明，然后填写 FOTA 服务器地址。'));
 				}
-				upgradeBody.appendChild(Mt5700.formGroup('FOTA 服务器地址', urlInput, '仅支持 http 协议，结尾自动补 /'));
+				upgradeBody.appendChild(Mt5700.formGroup('FOTA 服务器地址', urlInput, '支持 http / https 协议，结尾自动补 /'));
 				upgradeBody.appendChild(Mt5700.panelActions(startBtn));
 			}
 
@@ -510,7 +510,19 @@ return L.view.extend({
 			if (pollKeep || pollBusy) { Mt5700.info('升级流程已在运行中'); return; }
 			var url = (urlInput.value || '').trim();
 			if (!url) { Mt5700.error('请设置 FOTA 服务器地址'); return; }
-			if (url.indexOf('http://') !== 0) { Mt5700.error('仅支持 http 协议'); return; }
+			/*
+			 * 协议白名单：http 与 https 都放行。
+			 *
+			 * 手册 15.7.3《AT^FOTAOEMDL》明确写着「支持 HTTP、HTTPS 协议类型」，
+			 * 15.7.5 还给出了 https 举例：
+			 *   AT^FOTAOEMDL="https://10.14.10.153:443/OnlineUpdate/files/" → OK
+			 *
+			 * 原先只放行 `http://` 前缀，而 `'https://'.indexOf('http://') === -1` ——
+			 * 于是**更安全的那个协议反而被挡在门外**，用户只能用明文下载固件
+			 * （固件地址交给模组自己去取，链路上谁替换了镜像都会被装进设备，
+			 * 而这条链路此前没有任何校验和/签名校验）。
+			 */
+			if (!/^https?:\/\//i.test(url)) { Mt5700.error('仅支持 http / https 协议'); return; }
 			var formatted = url.charAt(url.length - 1) === '/' ? url : url + '/';
 
 			upgrading = true;
