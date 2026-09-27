@@ -1079,7 +1079,23 @@ var Parse = (function () {
 		if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60) {
 			return new Date();
 		}
-		return new Date(year, month - 1, day, hour, minute, second);
+		var d = new Date(year, month - 1, day, hour, minute, second);
+		/*
+		 * ★ JS 的 Date 构造函数会**自动进位**（2026-02-31 → 2026-03-03），
+		 *   而 SCTS 是「年月日时分秒」的**字面**字段 —— 进位会把一条畸形时间戳
+		 *   渲染成一个看似合理的错误日期，比显示"取不到"更容易误导。
+		 *
+		 *   上面那道检查只看每个字段的**独立**范围（月 1-12、日 1-31…），
+		 *   但「日」的合法上限取决于月份 —— 2 月 31 日能过它，却不是真实日期。
+		 *   这里回读三个日期分量，做与后端相同的"越界即回落"：`pdu.rs` 的
+		 *   `decode_timestamp` 走 chrono 的 `with_ymd_and_hms`，越界返回 None 并
+		 *   回落到当前时间。两侧口径必须一致，否则同一条短信在前端列表与后端通知
+		 *   （企业微信推送）里会显示**不同的收信时间**。
+		 */
+		if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) {
+			return new Date();
+		}
+		return d;
 	}
 
 	function decodeAddress(raw, offset) {
