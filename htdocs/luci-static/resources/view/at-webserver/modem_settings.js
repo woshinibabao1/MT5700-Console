@@ -1393,7 +1393,28 @@ return L.view.extend({
 		thermBody.appendChild(Mt5700.formGroup('温度保护功能', thermSwitch));
 		var thermChk = thermSwitch.querySelector('input');
 
-		var thermCaSwitch = makeSwitch(function () {});
+		/*
+		 * ★ 2026-09-28 修：这个开关原来是**空回调** `makeSwitch(function () {})`。
+		 *
+		 * 后果正是用户报的「部分功能存在修改无法保存的状态」：拨它只改界面上的勾，
+		 * 一条命令都不下发；只有当用户**再动一下**同一张卡的另外两个控件
+		 * （温度保护主开关、检测间隔输入框）时，那两个回调里的 thermCmd() 才会
+		 * 顺手把它一起带出去。也就是说 —— 单独拨它，看上去生效了，其实什么都没发生，
+		 * 而且切页重进/刷新后勾就自己变回去了。
+		 *
+		 * 它本来就是 AT^THERMAUTOFUN 三个参数里的第二个（见 thermCmd），
+		 * 与主开关共用同一条命令，直接下发即可，不必也不该另造一条。
+		 * 失败要显式回滚勾选（与主开关同一写法），否则界面会停在一个没生效的状态上。
+		 */
+		var thermCaSwitch = makeSwitch(function (checked, input) {
+			send(thermCmd()).then(function (res) {
+				if (res.success) Mt5700.success((checked ? '开启' : '关闭') + '高温时关闭 CA/MIMO 成功');
+				else {
+					Mt5700.error((checked ? '开启' : '关闭') + '高温时关闭 CA/MIMO 失败');
+					input.checked = !checked;
+				}
+			}).catch(function () { Mt5700.error('高温时关闭 CA/MIMO 设置失败'); input.checked = !checked; });
+		});
 		thermBody.appendChild(Mt5700.formGroup('高温时关闭 CA/MIMO', thermCaSwitch));
 		var thermCaChk = thermCaSwitch.querySelector('input');
 

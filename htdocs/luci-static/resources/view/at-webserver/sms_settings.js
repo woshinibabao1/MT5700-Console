@@ -43,6 +43,63 @@ return L.view.extend({
 			return wrap;
 		}
 
+		/* ============================================================================
+		 * 页面级「保存并应用 / 撤销更改」—— 复用全站同一套 Mt5700.staged
+		 * ----------------------------------------------------------------------------
+		 * 此前这一页给每个小功能各挂一个保存按钮（「保存中心号码」「保存存储位置」），
+		 * 而「拨号设置」「模组设置 · 设备控制」早就是「改完先暂存 → 页面底部一次应用」
+		 * （见 dial.js 的 staged）。同一件事两套交互，用户得逐卡片找按钮，也就有了
+		 * 「改完不知道该点哪个 / 以为改好了其实没存」。
+		 *
+		 * 现在统一到后者：本页所有**掉电保存的配置类 AT 写命令**集中到一条悬浮条上，
+		 * 逐项显示未保存条数，并给「撤销更改」。
+		 *
+		 * ★ 哪些**不**走暂存（特殊情况，保持即时生效，这是有意的）：
+		 *   · IMS 短信开关、短信功能总开关 —— 后者一步下发 5 条命令、含 AT+CFUN=0/1
+		 *     （动射频会断网）且带确认框，推迟到某个「保存」按钮后面只会更容易误操作；
+		 *   · 「清空全部短信」—— 一次性破坏性动作，带自己的确认框；
+		 *   · 「已发记录」的导出/导入/清空 —— 那是设备上的记录文件，不是配置。
+		 *
+		 * ★ 为什么这两项可以合并：AT+CSCA（中心号码）与 AT+CPMS（存储位置）都是
+		 *   掉电保存的独立配置，彼此无依赖，成组下发不产生顺序语义。
+		 * ========================================================================== */
+		var staged = Mt5700.staged({ onChanged: function () { loadAll(); } });
+
+		function stageCenter(raw) {
+			var num = String(raw || '').trim();
+			if (!num) {
+				/* 不暂存空值：否则会下发 AT+CSCA=""，把中心号码直接清掉 */
+				Mt5700.error('短信中心号码不能为空');
+				return;
+			}
+			staged.set('csca', '短信中心号码：' + num, function () {
+				return AtWs.client.sendCommand('AT+CSCA="' + Parse.sanitizeAtParam(num) + '"')
+					.then(function (res) {
+						/* 失败必须抛出去：staged 会把它记成「这一项失败」并留在暂存列表里；
+						   吞掉就是把「没写进去」伪装成「写进去了」（红线 23）。*/
+						if (!res.success) throw new Error(Ui.atErrorText(res, '中心号码保存失败'));
+					});
+			});
+		}
+
+		/*
+		 * 形参名用 mem 而不是 loc：AT+CPMS 的三个参数在手册 9.3 里就叫 <mem1>/<mem2>/<mem3>，
+		 * 与命令本身对齐，比另起一个词更不容易读错。
+		 */
+		function stageStorage(mem) {
+			if (!mem) return;
+			staged.set('cpms', '存储位置：' + storageLabel(mem), function () {
+				return AtWs.client.sendCommand('AT+CPMS="' + mem + '","' + mem + '","' + mem + '"')
+					.then(function (res) {
+						if (!res.success) {
+							/* 本机实测 MT 不被支持，把模组原话带上，用户才知道该换一个 */
+							throw new Error(mem + ' 可能不被支持（'
+								+ ((res && res.error) ? res.error : '模组未返回 OK') + '）');
+						}
+					});
+			});
+		}
+
 		/*
 		 * IMS 开关回读（P06）。
 		 *
@@ -137,17 +194,13 @@ return L.view.extend({
 
 		var centerInput = Mt5700.input('text', '+8613800755500', '');
 		centerInput.addEventListener('input', function () { state.centerNumber = centerInput.value; });
-		centerBody.appendChild(Mt5700.formGroup('中心号码', centerInput));
-		centerBody.appendChild(Mt5700.panelActions(
-			Mt5700.primaryButton('保存中心号码', function () {
-				var num = centerInput.value.trim();
-				if (!num) { Mt5700.error('请输入短信中心号码'); return; }
-				AtWs.client.sendCommand('AT+CSCA="' + Parse.sanitizeAtParam(num) + '"').then(function (res) {
-					if (res.success) Mt5700.success('短信中心号码已保存');
-					else Mt5700.error('保存失败');
-				}).catch(function () { Mt5700.error('保存失败'); });
-			})
-		));
+		/*
+		 * 暂存挂在 change（失焦 / 回车）而不是 input：input 每敲一个字符都会重刷
+		 * 悬浮条上的条目文案（「短信中心号码：+861…」），既闪又看不出停在哪一位。
+		 */
+		centerInput.addEventListener('change', function () { stageCenter(centerInput.value); });
+		centerBody.appendChild(Mt5700.formGroup('中心号码', centerInput,
+			'改完点页面底部「保存并应用」下发（AT+CSCA）'));
 
 		/* ---------- 存储管理 ---------- */
 		var storeCard = Mt5700.card('存储管理', 'SIM 卡短信存储');
@@ -196,32 +249,13 @@ return L.view.extend({
 
 		var locSel = Mt5700.select([], '');
 		var locHint = E('div', { 'class': 'mt5700-hint' }, '读取中…');
-		storeBody.appendChild(Mt5700.formGroup('存储位置', locSel));
+		storeBody.appendChild(Mt5700.formGroup('存储位置', locSel,
+			'改完点页面底部「保存并应用」下发（AT+CPMS）'));
 		storeBody.appendChild(locHint);
+		/* 选中即暂存，不再另挂「保存存储位置」按钮 —— 见文件上方 staged 的说明 */
+		locSel.addEventListener('change', function () { stageStorage(locSel.value); });
 
 		storeBody.appendChild(Mt5700.panelActions(
-			Mt5700.primaryButton('保存存储位置', function () {
-				var loc = locSel.value;
-				if (!loc) { Mt5700.error('请先选择存储位置'); return; }
-				AtWs.client.sendCommand('AT+CPMS="' + loc + '","' + loc + '","' + loc + '"')
-					.then(function (res) {
-						if (res.success) {
-							Mt5700.success('存储位置已保存：' + storageLabel(loc));
-						} else {
-							/*
-							 * 只弹「保存失败」等于什么都没说：本机实测 MT 不被支持，
-							 * 但界面看不出来是「这个选项不行」还是「功能坏了」。
-							 * 把模组原话带上，用户才知道该换一个。
-							 */
-							Mt5700.error('保存失败：' + loc + ' 可能不被支持（'
-								+ ((res && res.error) ? res.error : '模组未返回 OK') + '）');
-						}
-						return loadStorage();
-					})
-					.catch(function (e) {
-						Mt5700.error('保存失败：' + ((e && e.message) || e || '未知错误'));
-					});
-			}),
 			Mt5700.dangerButton('清空全部短信', function () {
 				Mt5700.confirm('确定清空全部短信？此操作不可恢复。', function () {
 					AtWs.client.sendCommand('AT+CPMS?').then(function (res) {
@@ -688,6 +722,12 @@ return L.view.extend({
 		Mt5700.connectThen(function () {
 			loadAll();
 		});
+
+		/*
+		 * 悬浮条放在**最后**追加：它是 position: sticky + bottom，只有排在全部卡片
+		 * 之后才会贴住视口底部（提前追加会停在页面中间，见 dial.js 同一写法）。
+		 */
+		body.appendChild(staged.el);
 
 		renderStorage();
 		refreshCacheCount();

@@ -2599,6 +2599,13 @@ return L.view.extend({
 		 * 首屏进入页面时辅载波读数要空等一轮，表现为「显示缓慢」。
 		 * 它只依赖快档已取到的 state.carriers，没有前置依赖，放前面是安全的。
 		 */
+		/*
+		 * 头段任务数 = 6：「连接状态」卡（网络状态 / APN / QCI / 签约速率）与
+		 * 「载波与聚合」卡直接依赖这几个，必须最先拿到值。
+		 * 尾段是地址与 DNS、温度、MCS、连接诊断 —— 它们在页面上更靠下，
+		 * 晚一拍出来对观感没有影响。
+		 */
+		var SLOW_HEAD_COUNT = 6;
 		var SLOW_TASKS = [loadSecondary, getPSReg, getFlow, getOperator, getAMBR,
 			getQCI, getDHCP, getTemp, getMCS, loadDiagnostics];
 
@@ -2607,10 +2614,9 @@ return L.view.extend({
 		 * 十余次串口往返，逐个串行发，实测单条往返约 100ms，整轮要好几秒，
 		 * 表现为「进页面后各卡片一个一个慢慢填」。
 		 *
-		 * 这里先把它们要问的只读命令**一次性**取回来（AtWs.client.warmCache，
-		 * 后端是新增的 mt5700.at_batch，一次 HTTP 里逐条转发），各任务照旧
-		 * sendCommand —— 此时几乎每条都命中既有读缓存，整轮的串口往返从
-		 * 「十几次 HTTP」压成「一次 HTTP」。
+		 * 这里先把它们要问的只读命令取回来（AtWs.client.warmCache，后端是
+		 * mt5700.at_batch，一次 HTTP 里逐条转发），各任务照旧 sendCommand ——
+		 * 此时几乎每条都命中既有读缓存，串口往返次数不变，但 HTTP 往返被压掉。
 		 *
 		 * ★ 为什么这样做是安全的：
 		 *   · warmCache 只处理「sendCommand 本来就会缓存」的命令（同一个
@@ -2626,6 +2632,31 @@ return L.view.extend({
 		 * 清单来自下面 SLOW_TASKS 各函数实际会发的命令；写命令（^EONS=2、
 		 * ^DSAMBR=、^MCS=、含 cid 的拼接命令、AT+CGPADDR 这类不经缓存的读）
 		 * 不在其中 —— 它们要么本来就不用缓存，要么参数要临时算。
+		 *
+		 * ==========================================================================
+		 * ★★ 2026-09-28：清单**按「谁先用」切成两段**（SLOW_WARM / SLOW_WARM_REST）
+		 * --------------------------------------------------------------------------
+		 * 起因：用户反馈「连接状态这些读取信息速度不是很快」。
+		 *
+		 * 真机实测（经 LuCI /ubus，与前端同一条链路）：
+		 *   · 一条 AT 往返 ≈ 100ms，而轻量 ubus（netray 那种不占串口的）只要 2ms
+		 *     → 时间几乎全在**独占串口**上，串口是串行的，批量化并不能让它变快：
+		 *       16 条逐条发 = 1680ms；同样 16 条一次 at_batch = 1670ms（同一批数据）
+		 *   · 所以「预热」省的是 HTTP 往返（每条约 3ms），**不是**串口时间。
+		 *
+		 * 那真正的浪费在哪？—— **预热的整批是串行跑的，而且挡在第一个任务前面**：
+		 *   旧顺序 = 预热 16 条（实测 1670ms）→ 才开始 loadSecondary
+		 *   而「连接状态」只要 6 条命令（CGACT? / NRSSBID? / MONNC / CGREG? /
+		 *   CEREG? / DSFLOWQRY），其余 10 条是页面更靠下的「地址与 DNS / 诊断」
+		 *   才要用的。为了给靠下的卡片省 3ms/条的 HTTP，把最上面的卡整体推迟了
+		 *   1.6 秒 —— 这才是「连接状态出得慢」的直接原因。
+		 *
+		 * 切两段后（头段预热 6 条 → 跑头段 6 个任务 → 再预热尾段 10 条 → 跑尾段）：
+		 *   连接状态出值  ≈1.9s → ≈0.8s（−58%）
+		 *   其余卡片      ≈2.07s → ≈2.06s（不变）
+		 *   **串口总条数一条没少**（6 + 10 + 4 条不进缓存的写/参数化命令 = 20 条，
+		 *   与旧实现完全相同）—— 改的只是先后次序，不是「少问模组」。
+		 * ==========================================================================
 		 */
 		var SLOW_WARM = [
 			'AT+CGACT?',       /* resolveActiveCid（getAMBR / getQCI 都要先问它） */
@@ -2633,7 +2664,9 @@ return L.view.extend({
 			'AT^MONNC',        /* loadSecondary：给 SSB 邻区补 RSRQ */
 			'AT+CGREG?',       /* getPSReg */
 			'AT+CEREG?',       /* getPSReg + loadDiagnostics（同一轮复用同一份） */
-			'AT^DSFLOWQRY',    /* getFlow */
+			'AT^DSFLOWQRY'     /* getFlow */
+		];
+		var SLOW_WARM_REST = [
 			'AT^DHCPV6?',      /* getDHCP */
 			'AT^DHCP?',        /* getDHCP */
 			'AT^IPV6CAP?',     /* getDHCP */
@@ -2661,9 +2694,10 @@ return L.view.extend({
 			 * 表现为「辅载波读数一直不刷新、像是卡住了」。
 			 * 改成逐步兜错后，单点失败只丢那一项，其余照常更新。
 			 */
-			/* 起点是「慢档预热」：一次 HTTP 取回整轮要用的只读命令，见 SLOW_WARM 的注释 */
+			/* 起点是「头段预热」：先取回**连接状态卡要用的那 6 条**，
+			   让最上面那张卡不必等尾段 10 条命令占完串口。见 SLOW_WARM 的注释。 */
 			var chain = AtWs.client.warmCache(SLOW_WARM);
-			SLOW_TASKS.forEach(function (fn) {
+			SLOW_TASKS.forEach(function (fn, idx) {
 				chain = chain.then(function () {
 					/*
 					 * ★ P12（2026-09-19 会审）：切页之后，已在飞的链不再继续打串口。
@@ -2676,6 +2710,19 @@ return L.view.extend({
 						.then(fn)
 						.catch(function (err) { slowFailures[fn.name || '匿名任务'] = err; });
 				});
+				/*
+				 * 头段任务跑完 → 预热尾段 → 再继续。插在这里（而不是一开始就
+				 * 把 16 条预热完）是这次提速的关键，理由见 SLOW_WARM 上方的注释。
+				 * 用 idx 判断而不是拆成两个数组：SLOW_TASKS 的**顺序本身就是契约**
+				 * （neighbor-contract 钉着 loadSecondary 必须在首位），
+				 * 拆数组会让「任务顺序」和「预热何时发生」两处各说一套。
+				 */
+				if (idx === SLOW_HEAD_COUNT - 1) {
+					chain = chain.then(function () {
+						if (disposed) return null;
+						return AtWs.client.warmCache(SLOW_WARM_REST);
+					});
+				}
 			});
 			slowRunning = chain.then(function () {
 				slowRefreshing = false;

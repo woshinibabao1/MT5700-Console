@@ -137,6 +137,15 @@ TARGETS = {
     "smsencjs": ATWB / "smsEncode.js",
     # ACL 是无扩展名之外的 .json：syntax_ok 对非 .js 一律放行，变异只改一个字符串。
     "acljson": ROOT / "root" / "usr" / "share" / "rpcd" / "acl.d" / "luci-app-mt5700.json",
+    # ★ 再挂三个键（2026-09-28「统一保存 + 连接状态读取提速」）：
+    #   · smssetjs4 → 短信设置页改用页面级 staged（去掉两个卡片级保存按钮）
+    #   · msjs3     → 模组设置「高温时关闭 CA/MIMO」原本是空回调（改了存不下来）
+    #   · nsjs2     → 网络状态慢档按「谁先用」拆两段预热
+    #   ★ 复用 smssetjs / smssetjs2 / smssetjs3 / msjs / msjs2 / nsjs / warmjs
+    #     都会**跑错测试**（红线 16b：变异生效却没人判红）。
+    "smssetjs4": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
+    "msjs3": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
+    "nsjs2": ATWB.parent / "view" / "at-webserver" / "network_status.js",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -203,6 +212,10 @@ TARGET_TEST = {
     "uc8": ROOT / "tests" / "sms-sent-log-contract.test.js",
     "smsencjs": ROOT / "tests" / "sms-sent-log-contract.test.js",
     "acljson": ROOT / "tests" / "sms-sent-log-contract.test.js",
+    # ★ UI 一致性与读取时序（2026-09-28）
+    "smssetjs4": ROOT / "tests" / "ui-consistency-contract.test.js",
+    "msjs3": ROOT / "tests" / "ui-consistency-contract.test.js",
+    "nsjs2": ROOT / "tests" / "ui-consistency-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -1484,6 +1497,84 @@ MUTATIONS = [
         "\t\t\t\t\t\"events\",\n\t\t\t\t\t\"es9p\",\n\t\t\t\t\t\"exitip\",\n\t\t\t\t\t\"vowifi\",\n\t\t\t\t\t\"vowifi_set\",\n\t\t\t\t\t\"smslog\"",
         "\t\t\t\t\t\"events\",\n\t\t\t\t\t\"es9p\",\n\t\t\t\t\t\"exitip\",\n\t\t\t\t\t\"vowifi\",\n\t\t\t\t\t\"vowifi_set\"",
         "ACL 的 write 允许 mt5700.smslog",
+    ),
+
+    # ============ UI 一致性与读取时序（2026-09-28） ============
+    # ★ 锚点唯一性已逐条核（每条各出现 1 次）。
+    (
+        "应用/撤销后不重新加载（界面停在假状态，应用失败也看不出来）",
+        "smssetjs4",
+        "var staged = Mt5700.staged({ onChanged: function () { loadAll(); } });",
+        "var staged = Mt5700.staged({ onChanged: function () { } });",
+        "应用/撤销后回到模组真实状态",
+    ),
+    (
+        "暂存项失败被吞掉（没写进去却当成写进去了）",
+        "smssetjs4",
+        "if (!res.success) throw new Error(Ui.atErrorText(res, '中心号码保存失败'));",
+        "if (!res.success) return;",
+        "暂存项失败必须抛出去",
+    ),
+    (
+        "中心号码不接暂存（改了没有任何保存入口 —— 用户报的就是这个）",
+        "smssetjs4",
+        "centerInput.addEventListener('change', function () { stageCenter(centerInput.value); });",
+        "centerInput.addEventListener('change', function () { });",
+        "中心号码改动走暂存",
+    ),
+    (
+        "悬浮条不挂到页面（有暂存却没有任何「保存并应用」入口）",
+        "smssetjs4",
+        "\t\tbody.appendChild(staged.el);",
+        "\t\tstaged.el;",
+        "悬浮条只挂一次",
+    ),
+    (
+        "空中心号码也暂存（会下发 AT+CSCA=\"\" 把中心号清掉）",
+        "smssetjs4",
+        "if (!num) {",
+        "if (num) {",
+        "空中心号码不暂存",
+    ),
+    (
+        # ★ 「空回调」扫描是**源码文本级**判据，所以这里喂的缺陷样例必须真的把
+        #   `makeSwitch(function () {})` 这个形态写进源码 —— 直接把原回调整体换成
+        #   空回调会让花括号失衡（变异后语法非法，无法归因），故改为在紧邻处补一行
+        #   同形态的控件：判据看的是「文件里还有没有空回调控件」，这正是它的语义。
+        "页面里重新出现空回调控件（界面变了、命令一条不发）",
+        "msjs3",
+        "\t\tvar thermCaChk = thermCaSwitch.querySelector('input');",
+        "\t\tvar thermCaChk = thermCaSwitch.querySelector('input');\n"
+        "\t\tvar _probeEmptyHandler = makeSwitch(function () {});",
+        "全站页面里没有「空回调」的可编辑控件",
+    ),
+    (
+        "回调在但不下发命令（同样存不下来）",
+        "msjs3",
+        "\t\tvar thermCaSwitch = makeSwitch(function (checked, input) {\n\t\t\tsend(thermCmd()).then(function (res) {",
+        "\t\tvar thermCaSwitch = makeSwitch(function (checked, input) {\n\t\t\tPromise.resolve({ success: true }).then(function (res) {",
+        "高温时关闭 CA/MIMO 开关会真的下发命令",
+    ),
+    (
+        "尾段预热不插在头段任务之后（连接状态又被整批预热挡住 1.6 秒）",
+        "nsjs2",
+        "if (idx === SLOW_HEAD_COUNT - 1) {",
+        "if (idx === -1) {",
+        "尾段预热插在头段任务之后",
+    ),
+    (
+        "拆清单时尾段漏抄一条（少问一次模组，那一项读数永远为空）",
+        "nsjs2",
+        "\t\t\t'AT+COPS?'         /* loadDiagnostics */\n\t\t];",
+        "\t\t];",
+        "两段合起来仍是完整 16 条",
+    ),
+    (
+        "拆清单时把一条抄进两段（每条多打一次串口，把优化反着做）",
+        "nsjs2",
+        "'AT^DSFLOWQRY'     /* getFlow */",
+        "'AT+COPS?'         /* getFlow */",
+        "头段＝连接状态与载波表要用的那 6 条",
     ),
 ]
 
