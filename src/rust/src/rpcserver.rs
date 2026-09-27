@@ -197,6 +197,17 @@ struct RpcRequest {
     params: serde_json::Value,
 }
 
+/// 每次连接只克隆句柄、不复制状态。
+///
+/// ★ 2026-09-28：原先是一个手写的 `shallow_clone()`，逐字段复制。那是 `Clone` 的
+///   手工版本，**给本结构体加字段时必须记得同步改它** —— 漏掉的那个字段会静默沿用
+///   旧值（或根本编译不过），属于典型的 Shotgun Surgery。改成 derive 后不可能漏。
+///
+///   `Clone` 在这里的语义就是「浅克隆」：全部字段都是 `Arc` / 可廉价复制的句柄
+///   （`Hub` 内含 `Arc<EventBus>`，`watch::Receiver` 是句柄），所以克隆出来的是
+///   **同一个**客户端、同一条事件总线、同一把扫频锁 —— 正是 RPC 每连接一份
+///   `RpcServer` 所需要的。
+#[derive(Clone)]
 pub struct RpcServer {
     client: Arc<AtClient>,
     auth_key: String,
@@ -232,19 +243,6 @@ impl RpcServer {
         self.hub.clone()
     }
 
-    fn shallow_clone(&self) -> RpcServer {
-        RpcServer {
-            client: self.client.clone(),
-            auth_key: self.auth_key.clone(),
-            sched: self.sched.clone(),
-            hub: self.hub.clone(),
-            scan: self.scan.clone(),
-            scan_timeout: self.scan_timeout,
-            ctx: self.ctx.clone(),
-            sms: self.sms.clone(),
-        }
-    }
-
     pub fn set_scan_timeout(&mut self, d: Duration) {
         if !d.is_zero() {
             self.scan_timeout = d;
@@ -271,7 +269,7 @@ impl RpcServer {
                             continue;
                         }
                     };
-                    let conn_server = self.shallow_clone();
+                    let conn_server = self.clone();
                     tokio::spawn(async move {
                         if let Err(e) = conn_server.handle_connection(stream).await {
                             log_debug!("RPC 连接结束: {} ({})", addr, e);
@@ -646,7 +644,7 @@ impl RpcServer {
     // ============= 小区扫频 =============
 
     fn is_cell_scan(command: &str) -> bool {
-        command.trim().to_uppercase().starts_with("AT^CELLSCAN")
+        starts_with_ignore_ascii_case(command.trim(), "AT^CELLSCAN")
     }
 
     fn is_cell_scan_abort(command: &str) -> bool {
@@ -817,6 +815,27 @@ pub fn err_response(msg: &str) -> AtCommandResponse {
     AtCommandResponse { success: false, data: None, error: Some(msg.to_string()) }
 }
 
+/// 大小写不敏感的**前缀**比较，零分配。
+///
+/// ★ 原先写作 `command.trim().to_uppercase().starts_with("AT^CELLSCAN")`。
+///   这类判据走在 `run_command` 的**每条命令**路径上（见那里 437 / 445 行的调用序），
+///   而 `to_uppercase()` 是 Unicode 大写转换 —— 它要为**整条**命令分配一个新 String
+///   （eSIM 的 `AT+CSIM=…` 可以长到几百字节），可我们只需要比较开头 11 个字符。
+///   `eq_ignore_ascii_case` 是逐字节比较，AT 命令又全是 ASCII，语义等价而零分配。
+///
+/// 用 `get(..n)` 而不是 `&s[..n]`：后者在多字节字符上会 panic，而本 crate
+/// 的 release 是 `panic = "abort"`（同 is_apdu_command 的理由）。
+fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
+    s.get(..prefix.len()).map_or(false, |h| h.eq_ignore_ascii_case(prefix))
+}
+
+/// 大小写不敏感的**后缀**比较，零分配（理由同上）。
+/// 同样用 `get(..)`：`&s[s.len() - n..]` 在 s 以多字节字符结尾时会 panic。
+fn ends_with_ignore_ascii_case(s: &str, suffix: &str) -> bool {
+    s.len() >= suffix.len()
+        && s.get(s.len() - suffix.len()..).map_or(false, |t| t.eq_ignore_ascii_case(suffix))
+}
+
 /// 判断是否为「短信数据命令」：`AT+CMGS` / `AT+CMGW`。
 ///
 /// 这两条命令在 PDU 模式下需要先把 PDU 数据交给模组，再由模组提交到网络侧，
@@ -824,9 +843,9 @@ pub fn err_response(msg: &str) -> AtCommandResponse {
 /// 同时兼容两步下发：第二步只发一串十六进制 PDU 数据（不带 `AT` 前缀）。
 fn is_sms_data_command(command: &str) -> bool {
     let head = command.trim_start();
+    // 只比前 7 个字符，不必为它专门分配一个 String（原先走的 to_ascii_uppercase）
     if let Some(prefix) = head.get(..7) {
-        let upper = prefix.to_ascii_uppercase();
-        if upper == "AT+CMGS" || upper == "AT+CMGW" {
+        if prefix.eq_ignore_ascii_case("AT+CMGS") || prefix.eq_ignore_ascii_case("AT+CMGW") {
             return true;
         }
     }
@@ -845,14 +864,15 @@ fn is_sms_data_command(command: &str) -> bool {
 ///  normalize_syscfgex 自己反而一句说明都没有。）
 fn normalize_syscfgex(command: &str) -> String {
     // 大小写不敏感：is_cell_scan 同样按大写判定，小写 at^syscfgex 不该绕过规范化。
-    if !command.to_uppercase().starts_with("AT^SYSCFGEX") {
+    // （用零分配的前缀比较，这条判据在每条命令的路径上 —— 见 helper 的说明。）
+    if !starts_with_ignore_ascii_case(command, "AT^SYSCFGEX") {
         return command.to_string();
     }
     let mut cleaned = command.replace('\r', "").replace('\n', "");
     // 只剥掉末尾的 OK —— 原先的 replace("OK", "") 是全局删除，会把参数里
     // 合法出现的 "OK" 一并抹掉，命令因此被改写。
     let trimmed = cleaned.trim_end();
-    if trimmed.to_uppercase().ends_with("OK") {
+    if ends_with_ignore_ascii_case(trimmed, "OK") {
         // "OK" 是两个 ASCII 字节，此处切片一定落在字符边界上。
         cleaned = trimmed[..trimmed.len() - 2].to_string();
     }
@@ -897,4 +917,55 @@ where
         }
     }
     Ok(Some((String::from_utf8_lossy(&raw).into_owned(), overlong)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 零分配前缀/后缀比较的边界：不得 panic，且与旧的 `to_uppercase()` 写法等价。
+    ///
+    /// 本 crate 的 release 是 `panic = "abort"`，一次越界切片就是进程退出 ——
+    /// 这也正是它们坚持用 `get(..)` 而不是 `&s[..n]` 的原因。
+    #[test]
+    fn case_insensitive_prefix_suffix_are_safe() {
+        // 前缀：命中 / 大小写 / 太短 / 内容不同
+        assert!(starts_with_ignore_ascii_case("AT^CELLSCAN=1", "AT^CELLSCAN"));
+        assert!(starts_with_ignore_ascii_case("at^cellscan=1", "AT^CELLSCAN"));
+        assert!(!starts_with_ignore_ascii_case("AT^CELL", "AT^CELLSCAN"));
+        assert!(!starts_with_ignore_ascii_case("", "AT^CELLSCAN"));
+        assert!(!starts_with_ignore_ascii_case("AT^SYSCFGEX", "AT^CELLSCAN"));
+        // 多字节字符落在比较窗口内：必须返回 false，而不是 panic
+        assert!(!starts_with_ignore_ascii_case("中^CELLSCAN", "AT^CELLSCAN"));
+        assert!(!starts_with_ignore_ascii_case("A中^CELLSCA", "AT^CELLSCAN"));
+
+        // 后缀
+        assert!(ends_with_ignore_ascii_case("AT+CSQ OK", "OK"));
+        assert!(ends_with_ignore_ascii_case("at+csq ok", "OK"));
+        assert!(!ends_with_ignore_ascii_case("AT+CSQ O", "OK"));
+        assert!(!ends_with_ignore_ascii_case("", "OK"));
+        // 多字节结尾：`&s[s.len() - 2..]` 那种写法正是在这里 panic
+        assert!(!ends_with_ignore_ascii_case("AT+CSQ 中", "OK"));
+    }
+
+    /// 规范化必须仍然认得**小写**形态 —— 那正是这条判据当初加大小写不敏感的原因。
+    #[test]
+    fn normalize_syscfgex_still_matches_lowercase() {
+        let out = normalize_syscfgex("at^syscfgex=1,2,3,4,\"1\",\"\",\"\"");
+        assert!(out.starts_with("at^syscfgex"), "小写形态也要被规范化：{out}");
+        assert!(out.ends_with("\"\",\"\""), "{out}");
+        // 不是这条命令时原样返回
+        assert_eq!(normalize_syscfgex("AT+CSQ"), "AT+CSQ");
+        assert_eq!(normalize_syscfgex(""), "");
+    }
+
+    /// 短信数据命令：两步下发的第二步（整行十六进制）也要认。
+    #[test]
+    fn sms_data_command_forms() {
+        assert!(is_sms_data_command("AT+CMGS=20"));
+        assert!(is_sms_data_command("at+cmgw=20"));
+        assert!(is_sms_data_command("0011000B916800000000F00008AA0CE8329BFD06"));
+        assert!(!is_sms_data_command("AT+CSQ"));
+        assert!(!is_sms_data_command(""));
+    }
 }

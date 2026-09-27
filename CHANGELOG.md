@@ -5,6 +5,69 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.64] - 2026-09-28
+
+第三轮通读继续。这一批落在**性能**与**可维护性**两个角度 —— 前几批修的都是正确性问题，
+这两条是「代码质量」本身的。
+
+### Performance
+
+**9. `rpcserver.rs`：热路径上的 Unicode 大写转换（每条 RPC 命令两处）**
+
+`run_command` 对**每条**命令都会走到这两条判据：
+
+```rust
+// is_cell_scan（在 437 行的调用序列里）
+command.trim().to_uppercase().starts_with("AT^CELLSCAN")
+// normalize_syscfgex（在 445 行的调用序列里）
+command.to_uppercase().starts_with("AT^SYSCFGEX")
+```
+
+`to_uppercase()` 是 **Unicode** 大写转换 —— 它要为**整条**命令分配一个新 `String`
+（eSIM 的 `AT+CSIM=…` 可以长到几百字节），可我们只需要比较开头 11 个字符。
+页面一次刷新就是十几条命令，两条判据各来一次。
+
+改为两个零分配的 helper（`starts_with_ignore_ascii_case` / `ends_with_ignore_ascii_case`）；
+`is_sms_data_command` 里那个"只比 7 个字符却仍 `to_ascii_uppercase()` 分配一个 String"
+的写法一并改成 `eq_ignore_ascii_case`。
+
+**关键细节：这两个 helper 用 `get(..n)` 而不是 `&s[..n]`** —— 后者在 `s` 以多字节字符结尾
+（或前缀窗口跨字符边界）时会 panic，而本 crate 的 release 是 `panic = "abort"`（同
+`is_apdu_command` 与 `is_error_line` 的理由）。新增 3 个测试覆盖这些边界：多字节落在比较
+窗口内、空串、太短、内容不同。
+
+### Maintainability
+
+**10. `rpcserver.rs`：`shallow_clone()` 是 `Clone` 的手工版本**
+
+它逐字段复制 `RpcServer`。那意味着**给结构体加字段时必须记得同步改它** —— 漏掉的那个
+字段会静默沿用旧值，属于典型的 Shotgun Surgery。改成 `#[derive(Clone)]` 后不可能漏。
+
+同时补了文档说明这里的 `Clone` 语义就是浅克隆：全部字段都是 `Arc` 或廉价句柄
+（`Hub` 内含 `Arc<EventBus>`、`watch::Receiver` 是句柄），克隆出来的是**同一个**客户端、
+同一条事件总线、同一把扫频锁 —— 正是"每个连接一份 `RpcServer`"所需要的。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **35 passed / 0 failed**（32 → 35：新增 3 个边界测试） |
+| `cargo check --all-targets` | 0 warning |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 151 条变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- 第 9 项是**纯粹的热路径分配削减，没有做基准测量**。收益量级是"每条命令省两个 `String`
+  分配（其中一个正比于命令长度）"，在路由器 CPU 上属于可忽略到轻微之间。它**不改变任何
+  行为**（对 ASCII 输入，`eq_ignore_ascii_case` 与 `to_uppercase().starts_with` 等价）。
+  之所以仍然做：这是"算法性能"角度唯一一处**明确的**无谓分配，且顺手消除了一个 `panic`
+  隐患（多字节结尾时的越界切片）。
+- 通读覆盖：本轮读完了 **`rpcserver.rs` 全 900 行**。仍未通读：`schedule.rs` /
+  `schedconfig.rs` / `notify.rs` / `pdu.rs` / `smsclean.rs` / `serial_linux.rs`、
+  前端共享模块（`parse.js` / `mt5700.js` / `ui.js` / `smsEncode.js` / `compat.js` /
+  `euicc.js`）、12 个视图层文件、ucode 插件。
+
 ## [2.3.63] - 2026-09-28
 
 第三轮通读继续。这一批是两条「同类问题只做了一半」——两条都**已经在仓库里写下了正确
