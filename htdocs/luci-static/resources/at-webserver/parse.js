@@ -134,7 +134,7 @@ var Parse = (function () {
 
 	// AT^LENDC?
 	api.parseLendc = function (text) {
-		var match = text.match(/\^LENDC:\s*([\d,\s]+)/);
+		var match = String(text == null ? '' : text).match(/\^LENDC:\s*([\d,\s]+)/);
 		if (!match) return null;
 		var f = match[1].split(',').map(function (v) { return Number(v.trim()); })
 			.filter(function (v) { return isFinite(v); });
@@ -163,7 +163,7 @@ var Parse = (function () {
 
 	// AT^TXPOWER?
 	api.parseNrTxPower = function (text) {
-		var match = text.match(/\^NTXPOWER:\s*(.+)/);
+		var match = String(text == null ? '' : text).match(/\^NTXPOWER:\s*(.+)/);
 		if (!match) return [];
 		var f = match[1].split(',').map(function (s) { return s.trim(); });
 		var carriers = [];
@@ -189,7 +189,7 @@ var Parse = (function () {
 
 	// AT+C5GREG?
 	api.parseC5greg = function (text) {
-		var match = text.match(/\+C5GREG:\s*(.+)/);
+		var match = String(text == null ? '' : text).match(/\+C5GREG:\s*(.+)/);
 		if (!match) return null;
 		var f = match[1].split(',').map(function (s) { return s.trim().replace(/^"|"$/g, ''); });
 		if (f.length < 2) return null;
@@ -236,7 +236,7 @@ var Parse = (function () {
 
 	// AT+CGPADDR
 	api.parseCgpaddr = function (text) {
-		return text.split(/\r?\n/)
+		return String(text == null ? '' : text).split(/\r?\n/)
 			.map(function (line) { return line.match(/\+CGPADDR:\s*(\d+),?\s*"?([^"\r\n]*)"?/); })
 			.filter(function (m) { return m !== null && m[2].trim() !== ''; })
 			.map(function (m) {
@@ -412,7 +412,17 @@ var Parse = (function () {
 
 	// AT^CHIPTEMP?
 	api.parseCHIPTEMP = function (text) {
-		var match = text.match(/\^CHIPTEMP:\s*(.+)/);
+		/*
+		 * ★ 先包一层 String(text == null ? '' : text) —— 与同文件的 parseCgsms /
+		 *   parseCsDomain / parseC5greg 等保持一致。
+		 *
+		 *   本函数唯一的调用点是 `network_status.js` 的
+		 *   `Parse.parseCHIPTEMP(res.data)`，而 `res.data` 在请求失败时可能是
+		 *   null / undefined（同一文件其它地方普遍写成 `String(r && r.data ? r.data : '')`
+		 *   正是因为它可空）。原写法直接 `text.match(...)`，传 null 会抛 TypeError
+		 *   并带崩那一块渲染；解析不出来本该是「读不到」，不是「崩掉」。
+		 */
+		var match = String(text == null ? '' : text).match(/\^CHIPTEMP:\s*(.+)/);
 		if (!match) return null;
 		var f = match[1].split(',').map(function (s) { return s.trim(); });
 		var g = function (i) { return f[i] !== undefined ? AtWs.parseTemperature(f[i]) : 0; };
@@ -443,7 +453,7 @@ var Parse = (function () {
 	 * MCS 有效值域 0-31，超出（如 255）视为无效，回退 null。
 	 */
 	api.parseMCS = function (text) {
-		var match = text.match(/\^MCS:\s*(.+)/);
+		var match = String(text == null ? '' : text).match(/\^MCS:\s*(.+)/);
 		if (!match) return null;
 		var f = match[1].split(',').map(function (s) { return s.trim(); });
 		var mcs = f[3] !== undefined ? parseInt(f[3], 10) : NaN;

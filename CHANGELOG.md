@@ -5,6 +5,59 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.85] - 2026-09-28
+
+按用户要求**攒批推送**。本批 6 处**同一形态**：导出的解析 API 直接对入参调方法，没防 null。
+
+### Fixed
+
+**34. 6 个导出解析 API 直接 `text.match(...)` / `text.split(...)`，传 null 会抛 TypeError**
+
+它们都是导出的（`api.parseXxx`），调用方可传任意值；而同文件**本来就有**统一写法
+`String(text == null ? '' : text)`。这一次是把漏掉的补齐：
+
+| 行 | 函数 | 调用方是否可能传空 |
+| :-- | :-- | :-- |
+| 137 | `parseLendc` | 可能（同 `res.data` 模式） |
+| 166 | `parseNrTxPower` | 可能 |
+| 192 | `parseC5greg` | 可能 |
+| 239 | `parseCgpaddr` | 可能 |
+| 456 | `parseMCS` | 可能 |
+| 414 | `parseCHIPTEMP` | **已确证**：唯一调用点是 `network_status.js:2271` 的 `Parse.parseCHIPTEMP(res.data)`，而 `res.data` 可空（同文件其它地方普遍写 `String(r && r.data ? r.data : '')`） |
+
+`parseCMGL`（1305 行）**不在此列**：它前面已有 `if (typeof text !== 'string') return sms;` 前置防护。
+
+**症状**：传 null 时 `null.match` 抛 TypeError，把那一块渲染带崩 —— 而"解析不出来"本该
+表现为"读不到"，不是"崩掉"。
+
+### 这处是怎么找出来的（值得记）
+
+它**不是**逐行读发现的 —— `parseC5greg` 我在第 28 轮**逐行读过**（连它的注释都读了），
+当时**没看出来**。这次做"按类别全局扫描"时，用一句正则
+`(?<!String\()\btext\.(match|split|replace)\(` 一次把 6 处全捞了出来。
+
+**结论**：对这类"同一惯用法漏了一处"的问题，**按类别扫比逐行读有效得多** ——
+逐行读靠的是"当时想起来对照"，而扫靠的是"机制上不可能漏"。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| 扫描复查 | 替换后全文件已无「未包装即对 `text` 调方法」的代码（仅存注释与 `parseCMGL` 的已防护处） |
+| 无重复包装 | `String(String(` 出现 **0** 次 |
+| 行为 | 7 个 API 传 `null` 与 `undefined` **全部不抛异常**，返回 `null` / `[]`（语义正确） |
+| `parse.js` 语法 | 通过 |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `cargo test --all-targets` | 44 passed / 0 failed（未改 Rust） |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- 6 处都是**加固**：现有调用方大多传 `res.data` 且有 `String(...)` 兜底，所以线上**未必**
+  触发过；只有 `parseCHIPTEMP` 那处有明确的可空调用路径。
+- 同批仍未改（依据不足，在交接清单候选区）：`normalizePhoneNumber` 无条件剥离开头 `86`。
+
+
 ## [2.3.84] - 2026-09-28
 
 继续通读 `parse.js` 未读段，并对**同一类问题做了一次针对性全局扫描**。本批 3 项**都是加固**
