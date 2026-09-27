@@ -5,6 +5,71 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.67] - 2026-09-28
+
+通读 `pdu.rs`（短信 PDU 编解码）。这一批是**优化 + 验证**双收：既去掉了一处热路径分配，
+又把一张**手抄常量表**钉死。
+
+### Performance
+
+**14. `septets_to_string` 每次解码都重新收集一遍 GSM7 字母表**
+
+```rust
+let alphabet: Vec<char> = GSM7_ALPHABET.chars().collect();   // 128 个元素，每次调用
+```
+
+它是**每条短信**解码的必经路径（`decode_address` 的字母数字发送方分支与正文解码都走它）。
+表本身是编译期常量，收集一次就够 —— 改为 `OnceLock` 缓存（`gsm7_alphabet()`）。
+与上一批"热路径零分配"是同一类问题，只是这里分配的是 128 元素的 `Vec`。
+
+### Added（守卫）
+
+**GSM 03.38 默认字母表是手抄的常量，必须断言钉住**
+
+`GSM7_ALPHABET` 是**按码位直接索引**的（`alphabet[c as usize]`），
+所以它必须**恰好 128 个字符**（0x00–0x7F）—— 多一个或少一个都会让**整张表错位**：
+收到的每个字母都是错的，而且**不会报任何错**（越界的码位只是落到 `'?'` 或被静默错位）。
+
+我最初想用脚本核验，写出来的 Python 解析反而算成 93 个字符并报错位 ——
+原因是它没有正确处理 Rust 的 `\x1b` / `\n` / `\"` 转义。**这种事不该靠外部脚本猜**，
+所以改成在 Rust 里断言，让语言自己给答案：
+
+```rust
+assert_eq!(v.len(), 128);
+assert_eq!(v[0x00], '@');  assert_eq!(v[0x0A], '\n');  assert_eq!(v[0x0D], '\r');
+assert_eq!(v[0x1B], '\u{1b}');  assert_eq!(v[0x20], ' ');
+assert_eq!(v[0x24], '\u{00A4}');   // 0x24 是 ¤ 而不是 $
+assert_eq!(v[0x30], '0');  assert_eq!(v[0x3F], '?');  assert_eq!(v[0x40], '¡');
+assert_eq!(v[0x41], 'A');  assert_eq!(v[0x5A], 'Z');
+assert_eq!(v[0x61], 'a');  assert_eq!(v[0x7A], 'z');  assert_eq!(v[0x7F], 'à');
+assert_eq!(gsm7_alphabet(), &v[..]);   // 缓存版与直接收集一致
+```
+
+**结果：表是对的**（128 个、锚点全中）—— 我的脚本才是错的。这条断言留了下来，
+因为它是这张表唯一的机械保障：将来任何人动它，`cargo test` 会立刻判红，
+而不是等用户发现"收到的短信全是乱码"。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **38 passed / 0 failed**（37 → 38） |
+| `cargo check --all-targets` | 0 warning |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- 我**没能用外部脚本独立复核**这张表：自写的 Python 解析因转义处理不完整而给出错误结论
+  （93 字符）。最终结论完全来自 Rust 自身的 `chars().count()` 与逐位断言 —— 这也更可靠，
+  因为那就是运行时真正使用的那份数据。
+- `pdu.rs` 其余部分本轮读完（`unpack_septets` 的填充位处理、`decode_timestamp` 的范围
+  校验、`decode_number` 的 BCD 尽力解码、`parse_udh_concat` 的 IEI 边界），**未发现新缺陷**。
+  其中 `decode_number` 在遇到无效 BCD 半字节时会跳过该位（不报错），与注释声明的
+  「逻辑与 Go 实现逐项一致」相符，属既有设计而非本轮引入的问题，故未改动。
+- 通读覆盖：`pdu.rs`(326) 已读完。仍未通读：`schedule.rs`(665) / `smsclean.rs`(216) /
+  `serial_linux.rs`(197) / `urc.rs` 其余部分、前端共享模块、12 个视图层文件、ucode 插件。
+
 ## [2.3.66] - 2026-09-28
 
 通读 `schedconfig.rs` 时发现的一处「原则已写下、未贯彻到第二处」，而**顺着它做的全局排查

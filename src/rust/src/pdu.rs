@@ -66,9 +66,19 @@ fn unpack_septets(data: &[u8], count: usize) -> Vec<u8> {
     out
 }
 
+/// GSM 03.38 默认字母表，按码位索引（**恰好 128 个**）。
+///
+/// ★ 缓存成 `OnceLock`：`septets_to_string` 是**每条短信**解码的必经路径，而
+///   `GSM7_ALPHABET.chars().collect()` 每次调用都会新分配一个 128 元素的 `Vec`。
+///   表本身是编译期常量，收集一次就够（原先每次解码都收集一遍）。
+fn gsm7_alphabet() -> &'static [char] {
+    static TABLE: std::sync::OnceLock<Vec<char>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| GSM7_ALPHABET.chars().collect())
+}
+
 fn septets_to_string(septets: &[u8]) -> String {
     let mut sb = String::new();
-    let alphabet: Vec<char> = GSM7_ALPHABET.chars().collect();
+    let alphabet = gsm7_alphabet();
     let mut i = 0;
     while i < septets.len() {
         let c = septets[i];
@@ -262,6 +272,32 @@ mod tests {
 
     // 同一个头，DCS=00，GSM 7-bit 正文 "hello"。
     const GSM7_PDU: &str = "00040B913108108300F000005280522100002305E8329BFD06";
+
+    /// GSM 03.38 默认字母表的**长度与关键锚点** —— 这张表按码位直接索引，
+    /// 多一个或少一个字符都会让**整表错位**（收到的每个字母都是错的，而且不会报错）。
+    /// 它是手抄的常量，所以必须有断言钉住，不能靠目测。
+    #[test]
+    fn gsm7_alphabet_is_exactly_128_chars() {
+        let v: Vec<char> = GSM7_ALPHABET.chars().collect();
+        assert_eq!(v.len(), 128, "GSM 03.38 默认字母表必须恰好 128 个码位（0x00-0x7F）");
+        // 关键锚点（GSM 03.38 表）：起点、控制位、以及 0x20 起的可打印区
+        assert_eq!(v[0x00], '@');
+        assert_eq!(v[0x0A], '\n');
+        assert_eq!(v[0x0D], '\r');
+        assert_eq!(v[0x1B], '\u{1b}', "0x1B 是转义前导（扩展表用）");
+        assert_eq!(v[0x20], ' ');
+        assert_eq!(v[0x24], '\u{00A4}', "0x24 是 ¤ 而不是 $");
+        assert_eq!(v[0x30], '0');
+        assert_eq!(v[0x3F], '?');
+        assert_eq!(v[0x40], '¡');
+        assert_eq!(v[0x41], 'A');
+        assert_eq!(v[0x5A], 'Z');
+        assert_eq!(v[0x61], 'a');
+        assert_eq!(v[0x7A], 'z');
+        assert_eq!(v[0x7F], 'à');
+        // 缓存版本与直接收集必须一致
+        assert_eq!(gsm7_alphabet(), &v[..]);
+    }
 
     #[test]
     fn test_decode_ucs2_pdu() {
