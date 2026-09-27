@@ -264,8 +264,31 @@ for (let i = 0; i < 200; i++) {
 ok('缓存条目不超过上限 64',
 	c5.cacheStats().entries <= 64, '实际 ' + c5.cacheStats().entries);
 
-/* ---------- 汇总 ---------- */
+/*
+ * ★ 2026-09-28：IPV6CAP 必须是「物理标识类」（10 分钟档）。
+ *   手册 16.7.2 自己写着「后台启动时，调用此 AT 查询当前 MT 的 IPV6 能力」，
+ *   16.7.1 说明它「由 NV 项定制」—— 是**能力**不是状态，会话内不会变。
+ *   它曾落在默认 2.5 秒档，而慢档轮询间隔是 30 秒（2.5s < 30s ⇒ 缓存等于不存在），
+ *   等于每轮白搭一条串口往返（实测 ≈100ms，每小时 120 条）。
+ *   ★ 对照：AT^DHCPV6? 是**状态**（随拨号变化），**不得**进这一档。
+ */
+ok('★ AT^IPV6CAP? 在物理标识档（NV 定制的能力，不必每轮问）',
+	cacheTtlFor('AT^IPV6CAP?') === R.CACHE_TTL_IDENTIFIER,
+	'实际 TTL ' + cacheTtlFor('AT^IPV6CAP?'));
+ok('★ AT^DHCPV6? 不在物理标识档（它是状态，会随拨号变化）',
+	cacheTtlFor('AT^DHCPV6?') !== R.CACHE_TTL_IDENTIFIER,
+	'实际 TTL ' + cacheTtlFor('AT^DHCPV6?'));
 
+/*
+ * ---------- 汇总（★ 必须在文件最末尾）----------
+ * ★ 2026-09-28 修：这个汇总块原先在文件**中间**（第 269 行附近），
+ *   而它下面还有断言（本次新增的 IPV6CAP 两条）。
+ *   后果：汇总之后的断言一旦失败 —— **既不打印、也不影响退出码**
+ *   （`process.exit(1)` 也在汇总块里），于是这个测试文件对"后半段的失败"
+ *   恒绿，CI 永远看不到。实测：把 `AT^IPV6CAP?` 从 ID 档移出后
+ *   仍打印「通过 58 项，失败 0 项」并退出 0。
+ *   全仓扫过一遍，只有本文件有这个问题（其余测试的汇总都在末尾）。
+ */
 if (fails.length) {
 	console.error('失败 ' + fails.length + ' 项：');
 	fails.forEach(function (f) { console.error('  ✗ ' + f); });
