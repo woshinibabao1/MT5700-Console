@@ -224,6 +224,131 @@ has('非 PDU 模式跳过而非强切', /非 PDU 模式/.test(RUST), 'AT+CMGF �
 has('每条删除都查应答', /r\.ok\(\) => deleted \+= 1/.test(RUST), '被拒不能计入删除条数');
 
 /* ------------------------------------------------------------------ */
+console.log('== H. 收件箱归并：同一条短信不能同时来自两个来源各留一份（真机 BUG） ==');
+
+/*
+ * 现象：10086 的流量短信在会话里出现两条一模一样的，刷新页面后只剩一条。
+ *
+ * 取证：
+ *   - 模组里那条短信是 4 段长短信（AT+CMGL=4 实读：index 4/5/7/8，同一拼接引用号），
+ *     合并后应当是**一条**；
+ *   - 通知日志里这一时刻只有一条记录（notify.rs 不去重），说明服务端只推了一次 new_sms；
+ *   所以第二条不是网络重传，是「列表一份 + 推送一份」在页面里各留了一份：
+ *   两条路各自 concat 拼数组，谁也不知道对方已经把这条画出来了。
+ *
+ * 契约：两条记录「是不是同一条」只能有一个归属地（buildContacts 里归一次），
+ * 判定规则本身要能被拿出来单测 —— 下面是纯行为断言，不依赖 DOM。
+ */
+
+const H_START = SMS.indexOf('var SAME_SMS_WINDOW_MS');
+const H_END = SMS.indexOf('function buildContacts');
+has('归并区块可定位（身份判定 + 归并策略）', H_START > 0 && H_END > H_START,
+	'找不到「SAME_SMS_WINDOW_MS … buildContacts」这一段');
+
+if (H_START > 0 && H_END > H_START) {
+	const H_SRC = SMS.slice(H_START, H_END);
+	const pm = PARSE.match(/var Parse = \((function[\s\S]*?\n\})\)\(\);/);
+	let H = null;
+	if (!pm) {
+		no('提取 Parse 供归并使用', 'parse.js 结构变了');
+	} else {
+		/* eslint-disable no-eval */
+		const parseApi = eval('(' + pm[1] + ')')();
+		/*
+		 * new Function 而不是 eval：这段源码里有函数声明，eval 在严格模式下会把它们
+		 * 关进自己的作用域，外面取不到；包一层 Function 显式 return 出来才测得着。
+		 */
+		const factory = new Function('Parse', 'normalizeNumber', H_SRC +
+			'\n; return { mergeSmsDuplicates: mergeSmsDuplicates, isSameSms: isSameSms, partIndicesOf: partIndicesOf, keepRicher: keepRicher };');
+		try {
+			H = factory(parseApi, function (n) { return parseApi.normalizePhoneNumber(n); });
+		} catch (e) {
+			no('归并能独立求值', String(e && e.message));
+		}
+	}
+
+	if (H) {
+		const TRAFFIC = '尊敬的客户，截止2026年09月27日21点33分，您的流量使用情况如下：\n当月流量总量917GB【中国移动】';
+		// 来源 A：AT+CMGL 列表里那条（长短信合并后带 partIndices，删得掉）
+		const fromList = {
+			index: 5, partIndices: [4, 5, 7, 8], content: TRAFFIC,
+			number: '10086', time: '26/09/27,21:33:13', type: 'received', unread: false
+		};
+		// 来源 B：new_sms 推送那条（长短信不带槽位，index 是负数占位）
+		const fromPush = {
+			index: -1699999999999, content: TRAFFIC,
+			number: '10086', time: '2026-09-27 21:33:13', type: 'received', unread: true
+		};
+
+		const m1 = H.mergeSmsDuplicates([fromList, fromPush]);
+		has('列表一份 + 推送一份 → 只剩一条', m1.length === 1, '得到 ' + m1.length + ' 条');
+		/*
+		 * 留谁有讲究：推送那条没有物理槽位，留它的话「删除」会落到已发缓存分支，
+		 * 提示删除成功而模组上的短信还在（这条旧账已经记过一次）。
+		 */
+		has('保留的是能删的那条（带存储槽位）',
+			m1.length === 1 && m1[0].partIndices && m1[0].partIndices.length === 4,
+			JSON.stringify(m1.map((x) => x && x.partIndices)));
+		has('归并不得丢掉未读（推送那份标了未读）', m1.length === 1 && m1[0].unread === true,
+			'丢掉就会「新短信来了却不显示未读」');
+		const m2 = H.mergeSmsDuplicates([fromPush, fromList]);
+		has('推送先到、列表后到也是一条', m2.length === 1, '得到 ' + m2.length + ' 条');
+		has('不论先后都留能删的那条', m2.length === 1 && !!m2[0].partIndices, '顺序不同结果就该不同，不对');
+
+		/*
+		 * 只差 3 秒也算两条 —— 这条单独钉「槽位优先」那条规则：
+		 * 离开了它，时间窗也会把这两条判成同一条，于是这条规则自己被架空，
+		 * 变异到它身上时不判红（两条防线互为冗余时，一条失效另一条还挡着）。
+		 */
+		const nearA = { index: 4, content: TRAFFIC, number: '10086', time: '26/09/27,21:33:13', type: 'received' };
+		const nearB = { index: 6, content: TRAFFIC, number: '10086', time: '26/09/27,21:33:16', type: 'received' };
+		has('槽位不同时，内容相同且只隔 3 秒也是两条', H.mergeSmsDuplicates([nearA, nearB]).length === 2,
+			'两条都占着各自的槽位 → 是两条物理短信，并掉就等于删不干净');
+		// 两条真的短信（槽位不同、内容碰巧一样）不能被并掉 —— 并掉就是漏短信
+		const realA = { index: 4, content: TRAFFIC, number: '10086', time: '26/09/27,21:33:13', type: 'received' };
+		const realB = { index: 9, content: TRAFFIC, number: '10086', time: '26/09/27,22:10:05', type: 'received' };
+		has('两条落在不同槽位的短信保持两条', H.mergeSmsDuplicates([realA, realB]).length === 2,
+			'槽位会被复用，只比内容会把两条真短信并成一条');
+		// 都没有槽位时靠时间窗区分：过了 19 分钟肯定是另一条，不是同一个来源的两个拷贝
+		const pushA = { index: -1, content: TRAFFIC, number: '10086', time: '26/09/27,21:33:13', type: 'received' };
+		const pushB = { index: -2, content: TRAFFIC, number: '10086', time: '26/09/27,21:52:41', type: 'received' };
+		has('无槽位时按时间窗区分，隔 19 分钟是两条', H.mergeSmsDuplicates([pushA, pushB]).length === 2,
+			'时间窗开太大就会吞掉重复收到的真短信');
+		// 内容不同 → 一定不是同一条
+		const other = { index: -3, content: TRAFFIC + '（另外一条）', number: '10086', time: '26/09/27,21:33:13', type: 'received' };
+		has('内容不同不会并成一条', H.mergeSmsDuplicates([pushA, other]).length === 2, '内容不同就该是两条');
+		// 号码不同 → 一定不是同一条（哪怕内容和时间都一样）
+		const someone = { index: -4, content: TRAFFIC, number: '10010', time: '26/09/27,21:33:13', type: 'received' };
+		has('号码不同不会并成一条', H.mergeSmsDuplicates([pushA, someone]).length === 2, '不同号码不能混');
+		// 已发短信不参与归并（它们只来自本地缓存，重复是另一回事）
+		const sent1 = { index: -5, content: '已发', number: '10086', time: '26/09/27,21:00:00', type: 'sent' };
+		const sent2 = { index: -6, content: '已发', number: '10086', time: '26/09/27,21:00:00', type: 'sent' };
+		has('已发短信不参与归并', H.mergeSmsDuplicates([sent1, sent2]).length === 2, '收到的才会两个来源并存');
+	}
+}
+
+/*
+ * 静态：归并必须只有一个入口。判据分散到各个调用点就又会各漂移一份，
+ * 这正是这次 BUG 的形状 —— 所以它不是一个「写好了就行」的补丁，而是个位置契约。
+ */
+has('buildContacts 第一步就归并',
+	/function buildContacts\(list\) \{\s*\n\s*list = mergeSmsDuplicates\(mergeConcatenated\(list\)\);/.test(SMS),
+	'必须在拼 grouping 之前归并，否则两个来源还会有各自的认定');
+has('归并只有一个调用点（消除岔路后再各自漂移）',
+	SMS.split('mergeSmsDuplicates(').length - 1 === 2,
+	'出现 ' + (SMS.split('mergeSmsDuplicates(').length - 1) + ' 次，应为「定义 1 + 调用 1」');
+
+/* 推送侧的两个诱因：时间口径不一致、观看中的会话被重复标未读 */
+has('推送时间换算成与列表同一种写法',
+	/Parse\.formatPDUTime\(Parse\.parseMessageTime\(d\.time\)\)/.test(SMS),
+	'推送是 2026-09-27 21:33:13、列表是 26/09/27,21:33:13，不归一看着就像两条短信');
+has('正在看的会话不再标未读',
+	/var watching = /.test(SMS) && /if \(!watching\) markUnread\(msg\.number\);/.test(SMS),
+	'当面落下来的短信标未读 = 刚看完又冒红点');
+has('会话里逐条标出未读', /if \(m\.unread\) \{[\s\S]{0,120}Mt5700\.badge\('未读'/.test(SMS),
+	'此前只有左侧有个总数，打开会话看不出哪几条是新的');
+
+/* ------------------------------------------------------------------ */
 console.log('');
 if (fail === 0) {
 	console.log('PASS 全部通过（' + pass + ' 项）');

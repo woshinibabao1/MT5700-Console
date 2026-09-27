@@ -241,8 +241,12 @@ return L.view.extend({
 				var numEl = E('div', { 'class': 'mt5700-sms-item-number' }, c.number);
 				if (c.unread) {
 					numEl.appendChild(document.createTextNode(' '));
+					/*
+					 * 未读取 danger（红）而不是 info（蓝）：蓝底在这套配色里和状态标签
+					 * 容易混，而「有没看过的短信」是要一眼看见的那类信息。
+					 */
 					numEl.appendChild(Mt5700.badge(
-						c.unreadCount > 1 ? ('未读 ' + c.unreadCount) : '未读', 'info'));
+						c.unreadCount > 1 ? ('未读 ' + c.unreadCount) : '未读', 'danger'));
 				}
 				item.appendChild(numEl);
 				item.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' }, c.lastMessage || ''));
@@ -267,7 +271,16 @@ return L.view.extend({
 				var isSent = m.type === 'sent';
 				var bubble = E('div', { 'class': 'mt5700-sms-bubble ' + (isSent ? 'mt5700-sms-bubble-sent' : 'mt5700-sms-bubble-recv') });
 				bubble.appendChild(E('div', {}, m.content || '(空消息)'));
-				bubble.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' }, m.time || ''));
+				/*
+				 * 未读标记挂到具体那一条上。此前只有左侧联系人列表有个总数，
+				 * 打开会话后看不出哪几条是新的。
+				 */
+				var meta = E('div', { 'class': 'mt5700-sms-item-preview' }, m.time || '');
+				if (m.unread) {
+					meta.appendChild(document.createTextNode(' '));
+					meta.appendChild(Mt5700.badge('未读', 'danger'));
+				}
+				bubble.appendChild(meta);
 				if (m.partsExpected != null && m.partsCount != null && m.partsCount < m.partsExpected) {
 					bubble.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' },
 						'长短信已合并 ' + m.partsCount + '/' + m.partsExpected + ' 段（部分缺失）'));
@@ -355,8 +368,108 @@ return L.view.extend({
 			});
 		}
 
+		/*
+		 * ============ 收件箱归并（唯一收口） ============
+		 *
+		 * 同一条短信会从两条路进到这里：
+		 *   A. AT+CMGL=4 拉回的存储列表 —— 长短信在这里由 mergeConcatenated 拼成一条，
+		 *      带 index / partIndices；
+		 *   B. new_sms 推送里服务端拼好的那条 —— 拼出来的完整消息不带 index。
+		 *
+		 * 此前两路在**各自的调用点**拼数组（还各自处理一遍残缺项），谁也不知道对方已经
+		 * 把这条画出来了，于是同一个内容出现两个气泡；而刷新页面只走 A，一刷新就只剩
+		 * 一条 —— 现象看着像偶发时序，根子其实是「哪两条记录算同一条」没有归属地。
+		 *
+		 * 所以把身份判定收在这里：不管来源是几个、怎么组合，都先归并一次再往下走。
+		 * 删除这段会怎样？判定会重新散回各个调用点各自漂移 —— 这就是删除测试的答案。
+		 */
+
+		/*
+		 * 内容逐字相同时允许的时间偏差。
+		 * 同一条短信的两个来源，时间口径可能不一致（一边是短信中心时间 SCTS，
+		 * 一边是本地时钟兜底），给一个窗吸收这种差；运营商真连着发两条一模一样的短信，
+		 * 落地间隔不会只有几秒，所以这个窗不会把两条真短信并成一条。
+		 */
+		var SAME_SMS_WINDOW_MS = 5000;
+
+		function partIndicesOf(m) {
+			if (!m) return [];
+			if (m.partIndices && m.partIndices.length) return m.partIndices;
+			return (m.index != null && m.index >= 0) ? [m.index] : [];
+		}
+
+		function smsTextKey(m) {
+			return String((m && m.content) || '').replace(/\s+/g, '');
+		}
+
+		function smsTimeMs(m) {
+			if (!m || !m.time) return NaN;
+			var t = Parse.parseMessageTime(m.time).getTime();
+			return isFinite(t) ? t : NaN;
+		}
+
+		function isSameSms(a, b) {
+			if (!a || !b) return false;
+			if (normalizeNumber(a.number) !== normalizeNumber(b.number)) return false;
+			var ia = partIndicesOf(a), ib = partIndicesOf(b);
+			if (ia.length && ib.length) {
+				/*
+				 * 两边都落在存储槽位上：以槽位为准，逐段全等才算同一条。
+				 * 槽位会被复用（删掉旧短信后新短信填同一个位置），只比内容会把
+				 * 到达时间不同、内容恰好相同的两条真短信并掉 —— 那就漏短信了。
+				 */
+				if (ia.length !== ib.length) return false;
+				for (var i = 0; i < ia.length; i++) if (ib.indexOf(ia[i]) < 0) return false;
+				return true;
+			}
+			/* 至少一边只有内容、没有槽位（推送拼出的长短信正是这种）：退回内容 + 时间窗 */
+			var ka = smsTextKey(a), kb = smsTextKey(b);
+			if (!ka || ka !== kb) return false;
+			var ta = smsTimeMs(a), tb = smsTimeMs(b);
+			/* 有一边取不到时间：内容已逐字相同，按同一条处理 */
+			if (isNaN(ta) || isNaN(tb)) return true;
+			return Math.abs(ta - tb) <= SAME_SMS_WINDOW_MS;
+		}
+
+		function copySms(m) {
+			var o = {};
+			for (var k in m) if (Object.prototype.hasOwnProperty.call(m, k)) o[k] = m[k];
+			return o;
+		}
+
+		/*
+		 * 留下信息更全的一条：带物理槽位的一条才删得掉（AT+CMGD 要拿 index，
+		 * 推送来的那条没有），所以有槽位的一方赢。
+		 * 未读取「或」：任一路认为用户还没看过，就算没看过 —— 否则推送标的那次
+		 * 未读会在归并里被丢掉，表现为「新短信来了却不显示未读」。
+		 */
+		function keepRicher(cur, next) {
+			var keep = partIndicesOf(cur).length ? cur : (partIndicesOf(next).length ? next : cur);
+			var drop = (keep === cur) ? next : cur;
+			var merged = copySms(keep);
+			if (!merged.time && drop.time) merged.time = drop.time;
+			if (drop.unread) merged.unread = true;
+			if (!partIndicesOf(merged).length && partIndicesOf(drop).length) merged.partIndices = partIndicesOf(drop);
+			return merged;
+		}
+
+		function mergeSmsDuplicates(list) {
+			var out = [];
+			for (var i = 0; i < list.length; i++) {
+				var m = list[i];
+				if (!m || m.type !== 'received') { out.push(m); continue; }
+				var hit = -1;
+				for (var j = 0; j < out.length; j++) {
+					if (out[j] && out[j].type === 'received' && isSameSms(out[j], m)) { hit = j; break; }
+				}
+				if (hit < 0) out.push(m);
+				else out[hit] = keepRicher(out[hit], m);
+			}
+			return out;
+		}
+
 		function buildContacts(list) {
-			list = mergeConcatenated(list);
+			list = mergeSmsDuplicates(mergeConcatenated(list));
 			/*
 			 * 合并长短信分片之后才是「完整短信」条数；state.storage.used 是
 			 * AT+CPMS? 的物理槽位占用，一条 3 段的长短信占 3 格但只算 1 条，
@@ -793,17 +906,30 @@ return L.view.extend({
 		var newSmsHandler = function (resp) {
 			if (!resp || resp.type !== 'new_sms' || !resp.data) return;
 			var d = resp.data;
+			/*
+			 * 时间一律换算成与列表同一种写法。
+			 * 推送里的时间是 Rust 侧 `sms.date.format("%Y-%m-%d %H:%M:%S")` 出来的
+			 * `2026-09-27 21:33:13`，而 AT+CMGL 那边是 `26/09/27,21:33:13`。
+			 * 同一条短信的两个来源时间长得不一样，看上去就像两条不同的短信。
+			 */
+			var arrivedAt = d.time ? Parse.formatPDUTime(Parse.parseMessageTime(d.time)) : nowTimeStr();
 			var msg = {
 				index: d.index != null ? d.index : -Date.now(),
 				content: d.content || '',
 				number: normalizeNumber(d.sender || d.number || ''),
-				time: d.time || nowTimeStr(),
+				time: arrivedAt,
 				type: 'received',
 				isConcatenated: d.isComplete === false ? true : false
 			};
 			// 完整消息直接进列表；长短信由服务端拼接后推送（isComplete=true）
 			if (d.isComplete !== false) {
-				markUnread(msg.number);   // 刚到达、用户尚未点开 → 未读
+				/*
+				 * 正开着这个号码的会话时，新短信是当场落在眼前的 —— 再标未读等于
+				 * 「刚看完又冒个红点」，所以只有在没盯着它时才算未读。
+				 */
+				var watching = !!msg.number && normalizeNumber(state.selectedContact) === msg.number;
+				msg.unread = !watching;
+				if (!watching) markUnread(msg.number);   // 刚到达、用户尚未点开 → 未读
 				/*
 				 * 完整消息到达时，同号码尚未收齐的残缺合并消息必须剔除。
 				 * 那只是「某次读取时片段还没到齐」的中间态，留着会与这条完整消息

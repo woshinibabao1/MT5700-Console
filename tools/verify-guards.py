@@ -51,6 +51,8 @@ TARGETS = {
     "parsejs": ATWB / "parse.js",
     "termjs": ATWB.parent / "view" / "at-webserver" / "terminal.js",
     "smssetjs": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
+    # 短信中心视图：收件箱归并（列表一份 + 推送一份不能各留一份）+ 未读标记。
+    "smsjs": ATWB.parent / "view" / "at-webserver" / "sms_center.js",
     # Rust 后端也在守卫范围内（事件帧预算）；.rs 不做语法预检，见 syntax_ok。
     "rsrust": ROOT / "src" / "rust" / "src" / "rpcserver.rs",
     # ucode 后端（rpcd 插件）也在守卫范围内：exitip 的 bind 校验是**命令注入面**，
@@ -181,6 +183,7 @@ TARGET_TEST = {
     "uc6": ROOT / "tests" / "busy-fastfail-contract.test.js",
     "rpcjs6": ROOT / "tests" / "at-read-classification-contract.test.js",
     "uc7": ROOT / "tests" / "at-read-classification-contract.test.js",
+    "smsjs": ROOT / "tests" / "sms-concurrency-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -1313,6 +1316,79 @@ MUTATIONS = [
         "vowifiSwitch.disabled = !known || !!(t.busy || t.setBusy);",
         "vowifiSwitch.disabled = !!(t.busy || t.setBusy);",
         "读不到开关状态时不许显示成",
+    ),
+
+    # ============ 短信中心：收件箱归并 + 未读标记（2026-09-27 重复显示） ============
+    # ★ 锚点唯一性已逐条核（见 .workbuddy/tmp/_sms_anchor_check.py）：8 条锚点各出现 1 次。
+    (
+        "拿掉归并（列表一份 + 推送一份各自留一份 → 同一条短信显示两次）",
+        "smsjs",
+        "\t\t\tlist = mergeSmsDuplicates(mergeConcatenated(list));",
+        "\t\t\tlist = mergeConcatenated(list);",
+        "buildContacts 第一步就归并",
+    ),
+    (
+        "归并时间窗放大到无限（内容相同的两条真短信被吞掉一条）",
+        "smsjs",
+        "Math.abs(ta - tb) <= SAME_SMS_WINDOW_MS",
+        "true",
+        "无槽位时按时间窗区分",
+    ),
+    (
+        "取消「槽位优先」只看内容（删掉旧短信后槽位被复用 → 张冠李戴）",
+        "smsjs",
+        "\t\t\tif (ia.length && ib.length) {",
+        "\t\t\tif (false) {",
+        "槽位不同时，内容相同且只隔 3 秒也是两条",
+    ),
+    (
+        # ★ 这条要整段换：只改「选谁留下」会被下面的「把更全的字段补过来」救回来
+        #   （补的那行会把 partIndices 一起搬过来），于是变异看着生效、测试却照样绿 ——
+        #   互为冗余的两道防线必须一次全拆（红线 16c）。
+        "归并时留下后来的那条（推送那份没有槽位，删不掉：提示删除成功、模组上还在）",
+        "smsjs",
+        "\t\t\tvar keep = partIndicesOf(cur).length ? cur : (partIndicesOf(next).length ? next : cur);\n"
+        "\t\t\tvar drop = (keep === cur) ? next : cur;\n"
+        "\t\t\tvar merged = copySms(keep);\n"
+        "\t\t\tif (!merged.time && drop.time) merged.time = drop.time;\n"
+        "\t\t\tif (drop.unread) merged.unread = true;\n"
+        "\t\t\tif (!partIndicesOf(merged).length && partIndicesOf(drop).length) merged.partIndices = partIndicesOf(drop);\n"
+        "\t\t\treturn merged;",
+        "\t\t\treturn next;",
+        "不论先后都留能删的那条",
+    ),
+    (
+        "归并时丢掉未读标记（新短信来了却不显示未读）",
+        "smsjs",
+        "\t\t\tif (drop.unread) merged.unread = true;",
+        "",
+        "归并不得丢掉未读",
+    ),
+    (
+        "推送时间不再换算（同一条短信两个来源的时间长得不一样，看着像两条）",
+        "smsjs",
+        "\t\t\tvar arrivedAt = d.time ? Parse.formatPDUTime(Parse.parseMessageTime(d.time)) : nowTimeStr();",
+        "\t\t\tvar arrivedAt = d.time || nowTimeStr();",
+        "推送时间换算成与列表同一种写法",
+    ),
+    (
+        "正在看的会话也标未读（当面落下来的短信还要冒红点）",
+        "smsjs",
+        "\t\t\t\tif (!watching) markUnread(msg.number);",
+        "\t\t\t\tmarkUnread(msg.number);",
+        "正在看的会话不再标未读",
+    ),
+    (
+        "会话里不再逐条标未读（只剩左侧一个总数，看不出哪几条是新的）",
+        "smsjs",
+        "\t\t\t\tvar meta = E('div', { 'class': 'mt5700-sms-item-preview' }, m.time || '');\n"
+        "\t\t\t\tif (m.unread) {\n"
+        "\t\t\t\t\tmeta.appendChild(document.createTextNode(' '));\n"
+        "\t\t\t\t\tmeta.appendChild(Mt5700.badge('未读', 'danger'));\n"
+        "\t\t\t\t}\n"
+        "\t\t\t\tbubble.appendChild(meta);",
+        "\t\t\t\tbubble.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' }, m.time || ''));",
+        "会话里逐条标出未读",
     ),
 ]
 
