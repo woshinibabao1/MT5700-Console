@@ -5,6 +5,107 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.6] - 2026-09-28
+
+### Fixed
+
+**104. ★ 已发送的短信一条也删不掉（根因：编号字段名在唯一的主路径上丢了）**
+
+**用户报告**：「优化短信批量删除功能，目前删除不了已发送的短信」。
+
+**根因**在 `sms_center.js` 的一条**字段名直通**上：
+
+```js
+function migrateLegacySent(serverList) {
+	if (serverList.length) return Promise.resolve(serverList);   // ← 主路径：原样交出后端原始记录
+	...
+	return toSentRecords(r.messages);                            // 只有「迁移成功」这条冷路径才转换
+}
+function loadSentLog() {
+	return migrateLegacySent(r.messages || []);                  // ← 没有再统一过一遍
+}
+```
+
+设备端**已经有记录**时（日常必然的形态），交出去的是后端原始记录
+`{content, number, time, type, **id**}`；而 `logId` 只由 `toSentRecords()` 产生。
+删除路径只认 `m.logId`：
+
+```js
+} else if (msg.logId != null) { … }        // undefined != null → false
+else { Mt5700.warning('这条记录还没同步到设备上，无法删除…') }   // ← 用户看到的就是这句
+```
+
+于是单条删除弹一句驴唇不对马嘴的「还没同步到设备上」，批量删除里 `logIds` 恒为空、
+一条也删不掉，最后还报「成功删除 0 条短信」（**假成功**）。
+
+只有「localStorage 老数据迁移成功」那条冷路径才带 `logId`，所以这个缺陷
+**在日常使用中必然复现**。
+
+修法（两处）：
+1. 抽出 `logIdOf(m)` —— **两个字段名都认**（`logId` 优先，其次后端 `id`），编号来源只留一处真相；
+2. `loadSentLog` 出去之前统一过 `toSentRecords`，`toSentRecords` 改为**幂等**
+   （再过一遍不会把编号抹成 null）。
+
+**105. 删除路由收口：一条记录的两个目标都要收**
+
+一条短信可能**同时**有模组槽位（`index`/`partIndices` → `AT+CMGD`）和设备编号
+（`logId` → `ubus mt5700.smslog del`）。原来写成二选一：
+
+```js
+// 单条：else if (msg.logId != null)          批量：if (!idxs.length && m.logId != null)
+```
+
+只要带了槽位就永远轮不到设备记录 —— 表现为「删了模组那条、设备上那条还在」。
+现在抽出 `deleteTargetsOf(m)` 两个目标一次收齐，并让**单条与批量共用同一个
+`runDeletes()`**，避免两处逻辑各自漂移（本次两个缺陷正是两处同源的漏字段）。
+
+同时把报数改成按**短信条数**判定：一条短信的所有模组槽位都删成功、且它若有设备记录
+也删成功，这条才算删掉 —— 原来的报数把「AT 命令成功数」当成条数。
+
+### Changed
+
+**106. 批量删除对话框重做（全选 / 计数 / 反选 + 新样式）**
+
+用户反馈「没有全选按钮、样式太丑」。原来直接套「同意条款」那组组件
+（同意条款列表 + 单行内联），每行只有一截灰字「[发] 号码：内容…」——
+没有方向标识、没有时间、没有全选、也看不出选了几条；标题用的 `.mt5700-modal-title`
+直接贴在弹窗边缘（那个类没有内边距，要配 `.mt5700-modal-header` 才有）。
+
+现在改成：**工具栏**（全选 / 实时计数「已选 N / 共 M 条」/ 反选）+
+**选择列表**（方向徽章 + 号码 + 时间 + 正文单行截断，整行可点）+
+**底部动作区**（按钮带选中数量、无选中时禁用）。全选框有原生半选态
+（`indeterminate`，部分选中时不会显示成空框）。删不掉的记录当场标「未同步」徽章，
+不让用户点了删除才发现。正文一律走 `textContent`（短信正文是不可信输入）。
+
+新增 CSS：`.mt5700-modal-wide` 与 `.mt5700-sms-pick-*` 一组（暗色模式走既有变量）。
+改 `mt5700.css` 所以同步 bump `MT5700_CSS_VERSION`：**5.5.21 → 5.5.22**。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| **真机数据 + 真实函数**（`logIdOf`/`toSentRecords`/`deleteTargetsOf`） | **修复前可删 0/10 → 修复后可删 10/10**；编号类型 `number`（满足 rpcd 整型） |
+| **端到端实删**（前端 `rpcSmsLog(action,'',id)` 的确切请求体） | 记录 10 → 9 条，`id=3` 消失，`success=true removed=1` |
+| 新增 `tests/sms-delete-contract.test.js` | **50 项通过**（含 9 项真跑 `runDeletes` 的行为测试 + 3 条反向自证） |
+| `node tests/run-all.js` | **全部通过**（75 个文件） |
+| `TZ=UTC node tests/run-all.js` | 全部通过 |
+| `python tools/verify-guards.py` | **160 条判红、0 放过、0 锚点找不到、还原逐字节一致** |
+
+### 诚实边界
+
+- 排查中我先做了 6 轮静态推理（`getStr` 类型、ACL、`mergeConcatenated`、`+CMTI` 重复、
+  `known` 误删、`slice(-200)`），**前 5 个都被真机数据否定**；最后是把「前端会产出的
+  精确请求体」和「真机 `smslog list` 的字段名」对到一起才定位到根因。
+- **3 处既有断言绑定了旧代码写法而不是意图**，重构后必须更新判据：
+  `sms-sent-log-contract` 的 D 节两条（钉 `msg.logId` / `lid` 这两个变量名）、
+  `sms-concurrency-contract` 的一条（钉 `delFail`）、`verify-guards` 的第 144 号变异
+  （锚点为旧字符串）。**这本身就是个教训**：钉写法的断言会在重构时红，而它保护的
+  恰恰可能是 bug 的形状 —— 已全部改成钉意图（"必须走设备记录"、"编号必须是数字"、
+  "按真实条数报数"）。
+- `parseCMGL` 的 PDU 分支把 `type` 硬编码为 `'received'`（忽略 `<stat>` 的 2/3），
+  已在代码里留下说明但**本次未改**：本机实测 `AT+CMGL=4` 的 61/65 条全是 `stat=1`，
+  且 `smsEncode.js` 已论证不用 `CMGW` 存已发，SM 里不会出现 2/3。改动它需要一个
+  能解 SMS-SUBMIT 的 PDU 解码器，属于另一个话题，不在本次范围内。
 ## [2.4.5] - 2026-09-28
 
 ### Fixed

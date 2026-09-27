@@ -42,9 +42,10 @@ const js = fs.readFileSync(JSP, 'utf8');
  *   ② 把本常量改成新指纹（用本测试失败时打印出的实际值）。
  *
  * 变更日志：
+ *   2026-09-28  短信批量删除重做（全选/计数/选择列表）→ 5.5.22
  *   2026-09-20  eSIM 管理页重排（EID 等宽块 / Profile 行卡 / 卡内分区标题）→ 5.5.20
  */
-const CSS_FINGERPRINT = '4465c2cb90cdc1c7';
+const CSS_FINGERPRINT = '698acdb40477d738';
 
 let pass = 0;
 const fails = [];

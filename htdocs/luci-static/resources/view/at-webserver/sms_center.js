@@ -425,7 +425,33 @@ return L.view.extend({
 			});
 		}
 
-		/* 设备返回的记录 → 界面用的记录（id 改名 logId，避免与模组槽位 index 混淆） */
+		/*
+		 * 一条已发记录的「设备端编号」。
+		 *
+		 * ★ 2026-09-28 修复（用户报「删除不了已发送的短信」的根因）：
+		 *   两个字段名都要认 —— 后端原始记录用 `id`，界面内部用 `logId`。
+		 *   此前删除路径只读 `m.logId`，而 `logId` 只由 `toSentRecords()` 产生，
+		 *   偏偏 `loadSentLog()` 在**主路径**（设备端已有记录）上是
+		 *   `migrateLegacySent()` 的 `Promise.resolve(serverList)` 直通，
+		 *   把后端原始记录（字段是 `id`）原样交给了界面。于是：
+		 *     · 单条删除落进「既没有模组槽位、也没有设备编号」的兜底分支，
+		 *       弹的是「这条记录还没同步到设备上，无法删除」——驴唇不对马嘴；
+		 *     · 批量删除里 `logIds` 恒为空，一条也删不掉，最后还报
+		 *       「成功删除 0 条短信」（假成功）。
+		 *   只有「localStorage 老数据迁移成功」那条冷路径才带 `logId`，
+		 *   所以这个缺陷在日常使用中**必然复现**。
+		 */
+		function logIdOf(m) {
+			if (!m) return null;
+			if (m.logId != null) return m.logId;
+			return (m.id != null) ? m.id : null;
+		}
+
+		/*
+		 * 设备返回的记录 → 界面用的记录（id 改名 logId，避免与模组槽位 index 混淆）。
+		 * **必须幂等**：既能吃后端原始记录（带 id），也能吃已经转换过的（带 logId），
+		 * 因为 loadSentLog 会对 migrateLegacySent 的结果再统一过一遍。
+		 */
 		function toSentRecords(list) {
 			var out = [];
 			for (var i = 0; i < (list || []).length; i++) {
@@ -433,7 +459,7 @@ return L.view.extend({
 				if (!m) continue;
 				out.push({
 					content: m.content, number: m.number, time: m.time, type: m.type,
-					logId: (m.id != null ? m.id : null)
+					logId: logIdOf(m)
 				});
 			}
 			return out;
@@ -446,7 +472,15 @@ return L.view.extend({
 		function loadSentLog() {
 			return AtWs.smsLog('list').then(function (r) {
 				if (!r.success) return [];
-				return migrateLegacySent(r.messages || []);
+				/*
+				 * ★ 2026-09-28：无论走哪条路径，出去之前都统一过一遍 toSentRecords。
+				 *   原来这里是 `return migrateLegacySent(r.messages || [])`，
+				 *   而 migrateLegacySent 在「设备端已有记录」这条主路径上是
+				 *   `Promise.resolve(serverList)` —— 直接把后端原始记录交了出去，
+				 *   字段名是 `id` 而不是界面要的 `logId`，导致已发短信删不掉。
+				 *   详见 logIdOf() 的注释。
+				 */
+				return migrateLegacySent(r.messages || []).then(toSentRecords);
 			});
 		}
 
@@ -905,137 +939,234 @@ return L.view.extend({
 
 		/* ---------- 删除 ---------- */
 
-		function deleteMessage(msg) {
-			var storedIndices = (msg.partIndices && msg.partIndices.length)
-				? msg.partIndices
-				: (msg.index != null && msg.index >= 0 ? [msg.index] : []);
-			if (storedIndices.length) {
-				var chain = Promise.resolve();
-				var delOk = 0;
-				var delFail = 0;
-				storedIndices.forEach(function (ix) {
-					if (ix != null && ix >= 0) {
-						chain = chain.then(function () {
-							/*
-							 * sendCommand 以 {success:false} 而非 rejection 表示失败，
-							 * 不判就会「提示删除成功、模组上的短信还在」。
-							 */
+		/*
+		 * 一条短信身上「删得掉」的凭据，可能同时有两种：
+		 *   · indices —— 模组存储槽位（AT+CMGD）。收到的短信有；模块自己存过的已发短信也有。
+		 *   · logId   —— 设备端已发记录编号（ubus mt5700.smslog del）。本应用发出去的走这条。
+		 *
+		 * 一条记录**可能两者都有**（长短信合并后、或模组把已发也存了一份），所以必须**都收**。
+		 * 原来单条写成 `if (idxs.length) … else if (logId)`、批量写成
+		 * `if (!idxs.length && logId)` —— 只要带了槽位就永远轮不到设备记录，
+		 * 表现出来就是「删了模组那条、设备上那条还在」。
+		 */
+		function deleteTargetsOf(m) {
+			return { indices: partIndicesOf(m), logId: logIdOf(m) };
+		}
+
+		/*
+		 * 串行删除一批短信。单条删除与批量删除**共用这一份**，
+		 * 免得两处逻辑各自漂移 —— 本轮修的两个缺陷正是两处同源的漏字段。
+		 *
+		 * 按「短信条数」判定：一条短信的所有模组槽位都删成功、且它若有设备记录也删成功，
+		 * 这条才算删掉。这样报出来的数字是条数，不是 AT 命令成功数。
+		 */
+		function runDeletes(messages) {
+			var stats = { ok: 0, fail: 0, unsynced: 0 };
+			var chain = Promise.resolve();
+			messages.forEach(function (m) {
+				chain = chain.then(function () {
+					var t = deleteTargetsOf(m);
+					var idxs = t.indices.filter(function (ix) { return ix != null && ix >= 0; });
+					if (!idxs.length && t.logId == null) {
+						/* 既没有模组槽位、也没有设备编号：搬迁没成功的旧记录 */
+						stats.unsynced++;
+						return;
+					}
+					/* 逐段删模组槽位；任一段失败，这条就算失败 */
+					var seq = Promise.resolve(true);
+					idxs.forEach(function (ix) {
+						seq = seq.then(function (sofar) {
 							return AtWs.client.sendCommand('AT+CMGD=' + ix).then(function (res) {
-								if (res && res.success === false) delFail++; else delOk++;
+								/*
+								 * sendCommand 以 {success:false} 而非 rejection 表示失败，
+								 * 不判就会「提示删除成功、模组上的短信还在」。
+								 */
+								return sofar && !(res && res.success === false);
 							});
 						});
-					}
+					});
+					return seq.then(function (atOk) {
+						if (t.logId == null) {
+							if (atOk) stats.ok++; else stats.fail++;
+							return;
+						}
+						/*
+						 * 已发记录：删的是设备上的那一条。
+						 * ★ 编号必须传数字 —— ucode 里 args 声明的是整型，rpcd 会在进 ucode
+						 *   之前把字符串形态以 code=2 拒掉，界面只会落一个「删除失败」。
+						 */
+						return AtWs.smsLog('del', '', t.logId).then(function (r) {
+							if (atOk && r && r.success) stats.ok++; else stats.fail++;
+						});
+					});
 				});
-				chain.then(function () {
-					if (delFail) Mt5700.error('删除 ' + delOk + ' 段成功、' + delFail + ' 段失败');
-					else Mt5700.success('删除成功');
-					refresh();
-				})
-					.catch(function () { Mt5700.error('删除失败'); });
-			} else if (msg.logId != null) {
-				/*
-				 * 已发记录：删的是设备上的那一条。
-				 * ★ id 必须传数字 —— ucode 里 args 声明的是整型，rpcd 会在进 ucode
-				 *   之前把字符串形态以 code=2 拒掉，界面只会落一个「删除失败」。
-				 */
-				AtWs.smsLog('del', '', msg.logId).then(function (r) {
-					if (!r.success) Mt5700.error(r.error || '删除失败');
-					else Mt5700.success('删除成功');
-					refresh();
-				});
-			} else {
+			});
+			return chain.then(function () { return stats; }, function () { return stats; });
+		}
+
+		/* 把结果说清楚：报真实条数，绝不把「没删成」伪装成成功 */
+		function reportDeleteResult(s) {
+			if (!s.ok && s.unsynced) {
 				/*
 				 * 既没有模组槽位、也没有设备编号：这是搬迁没成功的旧记录，
 				 * 只存在于当前浏览器的内存里。删不掉就明说，不要假装删掉了。
 				 */
 				Mt5700.warning('这条记录还没同步到设备上，无法删除（请到「短信设置」清空后重试）');
+				return;
 			}
+			var tail = s.unsynced ? '，另有 ' + s.unsynced + ' 条未同步到设备、删不掉' : '';
+			if (s.fail) Mt5700.error('删除：成功 ' + s.ok + ' 条、失败 ' + s.fail + ' 条' + tail);
+			else Mt5700.success('成功删除 ' + s.ok + ' 条短信' + tail);
+		}
+
+		function deleteMessage(msg) {
+			runDeletes([msg]).then(function (s) {
+				reportDeleteResult(s);
+				refresh();
+			});
 		}
 
 		var openMask = null;
 
+		function closeMask(mask) {
+			if (openMask === mask) openMask = null;
+			if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
+		}
+
+		function bindMaskClose(mask) {
+			mask.addEventListener('click', function (e) {
+				if (e.target === mask) closeMask(mask);
+			});
+		}
+
+		/*
+		 * 批量删除对话框。
+		 *
+		 * ★ 2026-09-28 重做（用户反馈「没有全选按钮、样式太丑」）：
+		 *   原来直接套「同意条款」那组组件（同意条款列表 + 单行内联），
+		 *   每行只有一截灰字「[发] 号码：内容…」—— 没有方向标识、没有时间、
+		 *   没有全选、也看不出已经选了几条；标题用的 mt5700-modal-title 直接贴在
+		 *   弹窗边缘（那个类没有内边距，要配 mt5700-modal-header 才有）。
+		 *   现在改成：工具栏（全选 / 实时计数 / 反选）+ 选择列表（方向徽章 +
+		 *   号码 + 时间 + 正文预览，整行可点）+ 底部动作区。
+		 *
+		 * 正文一律走 E 的第三个参数（textContent），绝不拼 HTML ——
+		 * 短信正文是不可信输入。
+		 */
 		function batchDelete() {
 			var mask = E('div', { 'class': 'mt5700-modal-mask' });
 			openMask = mask;
-			var box = E('div', { 'class': 'mt5700-modal' });
-			box.appendChild(E('div', { 'class': 'mt5700-modal-title' }, '批量删除短信'));
-			var listEl = E('div', { 'class': 'mt5700-agree-list' });
-			var checked = [];
-			for (var i = 0; i < state.messages.length; i++) {
-				var m = state.messages[i];
-				var row = E('label', { 'class': 'mt5700-inline' });
-				var chk = E('input', { type: 'checkbox' });
-				(function (msg, cb) {
-					cb.addEventListener('change', function () {
-						var idx = checked.indexOf(msg);
-						if (cb.checked && idx < 0) checked.push(msg);
-						if (!cb.checked && idx >= 0) checked.splice(idx, 1);
-					});
-				})(m, chk);
-				row.appendChild(chk);
-				row.appendChild(E('span', { 'class': 'mt5700-hint' },
-					(m.type === 'sent' ? '[发] ' : '[收] ') + (m.number || '') + '：' + (m.content || '').slice(0, 30)));
-				listEl.appendChild(row);
+			var box = E('div', { 'class': 'mt5700-modal mt5700-modal-wide' });
+			var header = E('div', { 'class': 'mt5700-modal-header' });
+			header.appendChild(E('div', { 'class': 'mt5700-modal-title' }, '批量删除短信'));
+			box.appendChild(header);
+
+			var messages = state.messages.slice();
+			if (!messages.length) {
+				var emptyBody = E('div', { 'class': 'mt5700-modal-body' });
+				emptyBody.appendChild(Mt5700.empty('当前会话没有可删除的短信'));
+				box.appendChild(emptyBody);
+				var emptyFoot = E('div', { 'class': 'mt5700-modal-footer' });
+				emptyFoot.appendChild(Mt5700.ghostButton('关闭', function () { closeMask(mask); }));
+				box.appendChild(emptyFoot);
+				mask.appendChild(box);
+				bindMaskClose(mask);
+				document.body.appendChild(mask);
+				return;
 			}
-			if (!state.messages.length) listEl.appendChild(Mt5700.empty('当前会话没有可删除的短信'));
-			var actions = E('div', { 'class': 'mt5700-modal-footer' });
-			actions.appendChild(Mt5700.ghostButton('取消', function () {
-				if (openMask === mask) openMask = null;
-				if (mask.parentNode) mask.parentNode.removeChild(mask);
+
+			var rows = [];
+			var delBtn = null;
+			var countEl = E('span', { 'class': 'mt5700-sms-pick-count' });
+
+			/* --- 工具栏：全选 + 计数 + 反选 --- */
+			var toolbar = E('div', { 'class': 'mt5700-sms-pick-toolbar' });
+			var allWrap = E('label', { 'class': 'mt5700-checkbox mt5700-sms-pick-all' });
+			var allChk = E('input', { type: 'checkbox' });
+			allWrap.appendChild(allChk);
+			allWrap.appendChild(E('span', {}, '全选'));
+			toolbar.appendChild(allWrap);
+			toolbar.appendChild(countEl);
+			toolbar.appendChild(Mt5700.ghostButton('反选', function () {
+				for (var i = 0; i < rows.length; i++) rows[i].chk.checked = !rows[i].chk.checked;
+				sync();
 			}));
-			actions.appendChild(Mt5700.dangerButton('删除所选', function () {
-				if (openMask === mask) openMask = null;
-				if (mask.parentNode) mask.parentNode.removeChild(mask);
-				if (!checked.length) { Mt5700.warning('请先选择要删除的短信'); return; }
-				var chain = Promise.resolve();
-				var delOk = 0;
-				var delFail = 0;
-				var logIds = [];
-				var logOk = 0;
-				var logFail = 0;
-				checked.forEach(function (m) {
-					var idxs = (m.partIndices && m.partIndices.length)
-						? m.partIndices
-						: (m.index != null && m.index >= 0 ? [m.index] : []);
-					if (!idxs.length && m.logId != null) logIds.push(m.logId);
-					idxs.forEach(function (ix) {
-						if (ix != null && ix >= 0) {
-							chain = chain.then(function () {
-								return AtWs.client.sendCommand('AT+CMGD=' + ix).then(function (res) {
-									if (res && res.success === false) delFail++; else delOk++;
-								});
-							});
-						}
-					});
-				});
-				logIds.forEach(function (lid) {
-					chain = chain.then(function () {
-						return AtWs.smsLog('del', '', lid).then(function (r) {
-							if (!r.success) logFail++; else logOk++;
-						});
-					});
-				});
-				chain.then(function () {
-					/* 报的是真实删除结果，不是勾选条数 */
-					if (delFail || logFail) {
-						Mt5700.error('删除：模组 ' + delOk + ' 段成功 / ' + delFail + ' 段失败，'
-							+ '已发记录 ' + logOk + ' 条成功 / ' + logFail + ' 条失败');
-					} else {
-						Mt5700.success('成功删除 ' + (delOk + logOk) + ' 条短信');
-					}
-					refresh();
-				}).catch(function () { Mt5700.error('批量删除失败'); });
-			}));
-			box.appendChild(listEl);
-			box.appendChild(actions);
-			mask.appendChild(box);
-			mask.addEventListener('click', function (e) {
-				if (e.target === mask && mask.parentNode) {
-					if (openMask === mask) openMask = null;
-					mask.parentNode.removeChild(mask);
+			box.appendChild(toolbar);
+
+			/* --- 列表：一条短信一行，整行可点 --- */
+			var listEl = E('div', { 'class': 'mt5700-sms-pick-list' });
+			messages.forEach(function (m) {
+				var row = E('label', { 'class': 'mt5700-sms-pick-row' });
+				var chkWrap = E('span', { 'class': 'mt5700-checkbox' });
+				var chk = E('input', { type: 'checkbox' });
+				chkWrap.appendChild(chk);
+				row.appendChild(chkWrap);
+
+				var main = E('span', { 'class': 'mt5700-sms-pick-main' });
+				var line = E('span', { 'class': 'mt5700-sms-pick-head' });
+				line.appendChild(Mt5700.badge(m.type === 'sent' ? '发' : '收',
+					m.type === 'sent' ? 'primary' : 'info'));
+				line.appendChild(E('span', { 'class': 'mt5700-sms-pick-num' }, m.number || '未知号码'));
+				line.appendChild(E('span', { 'class': 'mt5700-sms-pick-time' }, m.time || ''));
+				/*
+				 * 删不掉的当场标出来，别等用户点了「删除所选」才发现 ——
+				 * 那种记录是旧版本搬迁没成功的，只活在浏览器内存里。
+				 */
+				var tg = deleteTargetsOf(m);
+				if (!tg.indices.length && tg.logId == null) {
+					line.appendChild(Mt5700.badge('未同步', 'warning'));
 				}
+				main.appendChild(line);
+				main.appendChild(E('span', { 'class': 'mt5700-sms-pick-text' }, m.content || '(空消息)'));
+				row.appendChild(main);
+
+				chk.addEventListener('change', function () { sync(); });
+				listEl.appendChild(row);
+				rows.push({ msg: m, chk: chk });
 			});
+			box.appendChild(listEl);
+
+			/* --- 底部动作区 --- */
+			var actions = E('div', { 'class': 'mt5700-modal-footer' });
+			actions.appendChild(Mt5700.ghostButton('取消', function () { closeMask(mask); }));
+			delBtn = Mt5700.dangerButton('删除所选', function () {
+				var picked = [];
+				for (var i = 0; i < rows.length; i++) if (rows[i].chk.checked) picked.push(rows[i].msg);
+				if (!picked.length) { Mt5700.warning('请先选择要删除的短信'); return; }
+				delBtn.disabled = true;
+				delBtn.textContent = '正在删除…';
+				runDeletes(picked).then(function (s) {
+					closeMask(mask);
+					reportDeleteResult(s);
+					refresh();
+				});
+			});
+			actions.appendChild(delBtn);
+			box.appendChild(actions);
+
+			/*
+			 * 选中状态只有一处真相（各行的 checkbox），
+			 * 全选框 / 计数 / 按钮文案都从这里派生，免得三处各自记数再对不上。
+			 */
+			function sync() {
+				var n = 0;
+				for (var i = 0; i < rows.length; i++) if (rows[i].chk.checked) n++;
+				allChk.checked = n > 0 && n === rows.length;
+				allChk.indeterminate = n > 0 && n < rows.length;   /* 部分选中：浏览器原生半选态 */
+				countEl.textContent = '已选 ' + n + ' / 共 ' + rows.length + ' 条';
+				delBtn.disabled = n === 0;
+				delBtn.textContent = n ? ('删除所选（' + n + '）') : '删除所选';
+			}
+
+			allChk.addEventListener('change', function () {
+				for (var i = 0; i < rows.length; i++) rows[i].chk.checked = allChk.checked;
+				sync();
+			});
+
+			mask.appendChild(box);
+			bindMaskClose(mask);
 			document.body.appendChild(mask);
+			sync();
 		}
 
 		/* ---------- 新短信推送 ---------- */

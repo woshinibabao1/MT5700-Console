@@ -2351,6 +2351,53 @@
    现改用与 JS 一致的类名；同时去掉 display:none + hover 显隐：触屏没有 hover，
    那样会让删除按钮在手机上永远点不到。位置相关声明一并去掉，保持当前实际版面不变。 */
 .mt5700-sms-del { padding: 0 6px; font-size: 11px; line-height: 18px; }
+
+/* ---------- 短信批量删除（2026-09-28 重做）----------
+   原来复用的是「同意条款」那组样式（.mt5700-agree-list + .mt5700-inline）：
+   每行只有一截灰字，没有方向标识、没有时间、也没有全选，视觉上不成一个列表。
+   这里给批量选择专用一套：工具栏（全选 / 计数 / 反选）+ 行式选择列表。 */
+.mt5700-modal-wide { max-width: 640px; }
+
+.mt5700-sms-pick-toolbar {
+	display: flex;
+	align-items: center;
+	gap: var(--mt5700-space-sm);
+	padding: var(--mt5700-space-sm) var(--mt5700-space-lg);
+	border-bottom: 1px solid var(--mt5700-divider);
+}
+.mt5700-sms-pick-all { flex: 0 0 auto; font-size: var(--mt5700-font-size-sm); color: var(--mt5700-text); }
+/* 计数吃掉中间空档，把「反选」推到最右 */
+.mt5700-sms-pick-count {
+	flex: 1 1 auto;
+	font-size: var(--mt5700-font-size-xs);
+	color: var(--mt5700-text-muted);
+}
+
+.mt5700-sms-pick-list { max-height: 46vh; overflow-y: auto; padding: var(--mt5700-space-xs) 0; }
+
+.mt5700-sms-pick-row {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--mt5700-space-sm);
+	padding: var(--mt5700-space-sm) var(--mt5700-space-lg);
+	cursor: pointer;
+	transition: background 0.15s ease;
+}
+.mt5700-sms-pick-row:hover { background: rgba(59, 130, 246, 0.05); }
+.mt5700-sms-pick-row .mt5700-checkbox { flex: 0 0 auto; padding-top: 1px; }
+.mt5700-sms-pick-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mt5700-sms-pick-head { display: flex; align-items: center; gap: var(--mt5700-space-sm); flex-wrap: wrap; }
+.mt5700-sms-pick-num { font-size: var(--mt5700-font-size-sm); font-weight: 600; color: var(--mt5700-text); }
+.mt5700-sms-pick-time { font-size: var(--mt5700-font-size-xs); color: var(--mt5700-text-muted); margin-left: auto; }
+/* 正文单行截断：列表要能一眼扫完，长短信不该把一行撑成好几行 */
+.mt5700-sms-pick-text {
+	font-size: var(--mt5700-font-size-sm);
+	color: var(--mt5700-text-secondary);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 .at-sms-input-row { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #eef0f3; align-items: flex-end; flex-wrap: wrap; }
 .at-sms-textarea {
 	flex: 1 1 auto; min-width: 200px; min-height: 44px; resize: vertical;

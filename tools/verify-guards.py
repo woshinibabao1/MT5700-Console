@@ -1553,9 +1553,12 @@ MUTATIONS = [
         #   与「传错参数」长得一模一样，最难排查，所以单独钉一条。
         "删除已发记录时把 id 传成字符串",
         "smsjs2",
-        "AtWs.smsLog('del', '', msg.logId)",
-        "AtWs.smsLog('del', '', String(msg.logId))",
-        "删除已发记录走设备（传数字 id）",
+        # ★ 2026-09-28：删除逻辑收口到 runDeletes()，
+        #   变量名从 msg.logId 改为 t.logId（编号统一经 logIdOf 取）。
+        #   锚点跟着改，否则变异落不到地方（出现 0 次）。
+        "AtWs.smsLog('del', '', t.logId)",
+        "AtWs.smsLog('del', '', String(t.logId))",
+        "删除已发记录走设备（编号经 logIdOf 取，且传数字）",
     ),
     (
         "设置页的清空按钮不作用到设备",

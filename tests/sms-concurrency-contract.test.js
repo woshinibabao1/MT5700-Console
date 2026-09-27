@@ -73,7 +73,13 @@ has('发送有 in-flight 守卫', /if \(sending\) return;/.test(SMS) && /sending
 has('守卫在函数末尾复位', /sending = false; sendBtn\.disabled = false;/.test(SMS), '不复位会永久锁死发送');
 has('单条删除检查 AT 成败', /AT\+CMGD=.*[\s\S]{0,200}res\.success === false/.test(SMS) || /delFail\+\+/.test(SMS),
 	'不判 success 会「提示删除成功、模组上还在」');
-has('批量删除按真实结果报数', /delFail\) Mt5700\.error\('删除/.test(SMS), '不应按勾选条数报成功');
+/* ★ 2026-09-28：报数收口到 reportDeleteResult(s)，变量从 delFail 改为 s.fail。
+   意图不变：必须报真实删掉的条数，不能拿勾选数当成功。 */
+has('批量删除按真实结果报数',
+	/function reportDeleteResult\(s\) \{/.test(SMS) &&
+	/if \(s\.fail\) Mt5700\.error\('删除/.test(SMS) &&
+	/Mt5700\.success\('成功删除 ' \+ s\.ok \+ ' 条短信'/.test(SMS),
+	'不应按勾选条数报成功');
 has('批量删除弹窗可被卸载清理', /openMask/.test(SMS) && /removeChild\(openMask\)/.test(SMS),
 	'弹窗挂在 body 上，切页会残留并挡住后续页面');
 

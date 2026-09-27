@@ -132,15 +132,23 @@ has('发送成功后写设备记录',
 has('写记录失败要分开说「已发出但未记账」',
 	/Mt5700\.warning\('已发出，但发送记录未写入设备/.test(SMS),
 	'拿一句「发送成功」把两件事盖过去 = 把失败粉饰成成功');
-has('删除已发记录走设备（传数字 id）',
-	/AtWs\.smsLog\('del', '', msg\.logId\)/.test(SMS),
-	'id 声明的是整型，传字符串会被 rpcd 以 code=2 拒掉，界面只落「删除失败」');
+/*
+ * ★ 2026-09-28 更新判据。原来钉的是 `AtWs.smsLog('del', '', msg.logId)`
+ *   这个**写法本身**，而它正是「已发送短信删不掉」的两个成因之一：
+ *   主路径交出来的记录字段是 `id`（不是 `logId`），`msg.logId` 恒为 undefined。
+ *   现在单条与批量共用一个 runDeletes()，编号统一经 logIdOf() 取。
+ *   意图不变（必须走设备、编号必须是数字），判据改成钉意图。
+ */
+has('删除已发记录走设备（编号经 logIdOf 取，且传数字）',
+	/AtWs\.smsLog\('del', '', t\.logId\)/.test(SMS) &&
+	/return \{ indices: partIndicesOf\(m\), logId: logIdOf\(m\) \};/.test(SMS),
+	'id 声明的是整型，传字符串会被 rpcd 以 code=2 拒掉；编号取不到则根本走不到这条路');
 has('既没槽位又没编号时如实说删不掉',
 	/Mt5700\.warning\('这条记录还没同步到设备上，无法删除/.test(SMS),
 	'不提示的话用户点了删除、什么都没发生');
-has('批量删除也走设备记录',
-	/return AtWs\.smsLog\('del', '', lid\)/.test(SMS),
-	'批量删除漏掉已发记录 = 勾了删不掉');
+has('批量删除也走设备记录（与单条共用 runDeletes）',
+	/runDeletes\(picked\)/.test(SMS) && /runDeletes\(\[msg\]\)/.test(SMS),
+	'批量删除漏掉已发记录 = 勾了删不掉；两处各写一套迟早漂移');
 has('设置页三个按钮都走 AtWs.smsLog',
 	/AtWs\.smsLog\('list'\)/.test(SMSSET) && /AtWs\.smsLog\('add'/.test(SMSSET) && /AtWs\.smsLog\('clear'\)/.test(SMSSET),
 	'导出/导入/清空必须作用在设备端，否则改了半天改的是空气');
@@ -168,18 +176,29 @@ has('smsEncode.js 仍用相对有效期',
 	'绝对有效期写发送时刻 = 短信一出就过期，会被短消息中心丢弃');
 
 /* ------------------------------------------------------------------ */
-console.log('== G. toSentRecords 行为 ==');
+console.log('== G. toSentRecords / logIdOf 行为 ==');
 
-var toSentRecords = null;
+/*
+ * 两个函数要**一起抽**：toSentRecords 现在经 logIdOf 取编号（编号只留一处真相），
+ * 只抽前者会在求值时撞上 ReferenceError，退化成「抽不出来」而看不见真实行为。
+ */
+var sentFns = null;
 try {
-	var m = SMS.match(/function toSentRecords\(list\) \{[\s\S]*?\n\t\t\}/);
+	var mLid = SMS.match(/function logIdOf\(m\) \{[\s\S]*?\n\t\t\}/);
+	var mTsr = SMS.match(/function toSentRecords\(list\) \{[\s\S]*?\n\t\t\}/);
 	/* eslint-disable no-new-func */
-	toSentRecords = new Function(m[0] + '; return toSentRecords;')();
+	sentFns = new Function(mLid[0] + '\n' + mTsr[0] +
+		'; return { logIdOf: logIdOf, toSentRecords: toSentRecords };')();
 } catch (e) {
-	toSentRecords = null;
+	sentFns = null;
 }
-has('能抽出 toSentRecords', typeof toSentRecords === 'function', '抽不出来就没法测这段行为');
-if (typeof toSentRecords === 'function') {
+has('能抽出 logIdOf 与 toSentRecords', !!sentFns && typeof sentFns.toSentRecords === 'function',
+	'抽不出来就没法测这段行为');
+
+if (sentFns) {
+	var logIdOf = sentFns.logIdOf;
+	var toSentRecords = sentFns.toSentRecords;
+
 	var r1 = toSentRecords([{ id: 7, content: 'a', number: '10086', time: 't', type: 'sent' }]);
 	has('后端 id 改名为 logId（不与模组槽位 index 混淆）',
 		r1.length === 1 && r1[0].logId === 7 && r1[0].content === 'a',
@@ -191,9 +210,29 @@ if (typeof toSentRecords === 'function') {
 		'后端返回 null 时页面会炸');
 	has('跳过空项', toSentRecords([null, { id: 1, content: 'c', number: '2', time: 't', type: 'sent' }]).length === 1,
 		'文件里混进 null 会把整页渲染打断');
+
+	/*
+	 * ★ 2026-09-28 新增：必须**幂等**。
+	 *   loadSentLog 会对 migrateLegacySent 的结果再统一过一遍；而冷路径
+	 *   （localStorage 老数据迁移成功）交出来的已经是 logId 形态。
+	 *   若这里只认 id，过第二遍就把编号抹成 null —— 那些记录立刻又变成删不掉。
+	 */
+	var once = toSentRecords([{ id: 9, content: 'c', number: '3', time: 't', type: 'sent' }]);
+	has('★ toSentRecords 幂等（已转过 logId 的记录再过一遍不会丢编号）',
+		toSentRecords(once)[0].logId === 9,
+		'过第二遍会抹掉编号 → 已发短信又变成删不掉');
+
+	/*
+	 * ★ 2026-09-28 新增：编号来源只此一处，且两个字段名都要认。
+	 *   后端原始记录用 `id`，界面内部用 `logId`；只认一个，主路径
+	 *   （设备端已有记录，不再走迁移）的记录就取不到编号。
+	 */
+	has('★ logIdOf 同时认 logId 与后端 id，且 0 是合法编号',
+		logIdOf({ logId: 3 }) === 3 && logIdOf({ id: 4 }) === 4 &&
+		logIdOf({ id: 0 }) === 0 && logIdOf({ logId: 0 }) === 0 && logIdOf({}) === null,
+		'只认一个字段名 —— 主路径交出来的正是后端原始记录（字段是 id）');
 }
 
-/* ------------------------------------------------------------------ */
 console.log('');
 console.log('sms-sent-log-contract: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
