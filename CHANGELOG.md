@@ -5,6 +5,88 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.88] - 2026-09-28
+
+攒满 **5 项**一次推送。本批四类：**1 处真缺陷**（错误提示码表）+ **2 处注释与真机不符的更正**
++ **2 处死代码清理**（共 **-1796 字符**）。
+
+### Fixed
+
+**37. `ui.js::atErrorText` 的 CME ERROR 码表 4 处码义错配**
+
+把 `+CME ERROR: <n>` 翻成中文提示时，**码与含义错配**，会把用户引向完全错误的排查方向：
+
+| 码 | 原写 | 标准（3GPP TS 27.007 §9.2） |
+| :-- | :-- | :-- |
+| 10 | 模组忙 | **SIM not inserted（卡未插入）** |
+| 14 | SIM 已满 | **SIM busy（SIM 忙）**；「内存满」在标准里是 **20**，原表漏收 |
+| 21 | 无效字符 | **invalid index（无效索引）** |
+| 22 | 无效索引 | **not found（未找到）** |
+
+**依据说明**：模组手册**没有收录 CME ERROR 码表**（已查手册 171 / 262 / 263 / 395 等处，
+都只写「与 MT 相关错误时：`+CME ERROR: <err>`」），故以 **3GPP TS 27.007 §9.2** 为准。
+`513/515/516/517/518` 属**厂商特定**范围、无标准可依，**原样保留**（不做无依据的改动）。
+
+> 实际影响：用户看到「模组忙」会去等或重启，真实原因是**卡没插好**；看到「SIM 已满」会去删短信，
+> 真实原因是**SIM 忙**（稍等即可）。**错误的错误提示比没有提示更糟。**
+
+### Docs（注释与真机不符，依据真机更正）
+
+**38. `parse.js`：`srvdomain` 的「枚举而非范围」是错的**
+
+真机 `AT^SYSCFGEX=?` 回 `…,(0-2),(0-4),…` —— **roam 与 srvdomain 都是 `(a-b)` 范围式**，
+这正是 `parseSysCfgRanges` 能「抓所有 `(a-b)` 取第 1、2 个」解析的前提。原文写「实测范围恒为
+0-4（枚举而非范围）」与真机不符；写死选项的**真正理由是「语义唯一」**（srvdomain 不存在漫游那种
+两套相反含义），不是「值域是枚举」。
+
+**39. `parse.js`：`parseRrcstat` 注释里的字段数举例与真机不符**
+
+原文写「`^RRCSTAT: 1`（只有一个字段、没有 `<state>`）时就会走到这里」，而真机回的是
+**`^RRCSTAT: 0,1`（两个字段）**——只有 `<enable>,<rrc>`、没有 `<camp>`，这才是常态。
+代码处理是对的（`camp` 为 `undefined` → `null`），错的只是注释的举例。
+
+### Removed（死代码，共 -1796 字符）
+
+**40. `rpc.js`：删除 `parsePDCP` / `PDCP_FIELDS` / `downSpeed` / `upSpeed`（-820 字符）**
+
+它有两个问题：
+- **字段解释与真机不符**：按 `<rx_bytes>,<tx_bytes>,<rx_pkts>,…` 读，而真机
+  （2026-09-28 实测 `^PDCPDATAINFO: 1,6,500,0,…,13623,…`）回的是
+  `<id>,<pduSessionId>,<discardTimerLen>,…` —— `fields[0]` 是 DRB id 却被当成 `rx_bytes`、
+  `fields[12]` 是丢包数却被当成 `rx_volte_bytes`，**整份数据错位**；
+- **产出无人消费**：`parseRawData` 造的是 `{type:'PDCP'}`（**大写**），而前端订阅者认的是
+  后端 `urc.rs` 推的 `{type:'pdcp_data'}`。全仓 grep 零消费点。
+（`parse.js::parsePdcpDataInfo` 与 `urc.rs::PDCP_FIELDS` 的字段名是**对的**，两者一致。）
+`parseRawData` 仍**保留切分动作**（避免 PDCP 行混进 URC 循环），只是不再造条目。
+
+**41. `rpc.js`：删除 `formatSpeed` / `splitSpeed` / `bandName` 与私有的 `NR_BANDS` / `LTE_BANDS`（-976 字符）**
+
+- `formatSpeed` / `splitSpeed`：全仓只有「定义 + 导出」两处，**零消费点**（同族的 `formatFlow` 仍在用）；
+- `bandName` 及其两张表：与 `parse.js` 的 `Parse.NR_BANDS` / `Parse.LTE_BANDS` **同名且并存**，
+  而实际在用的是 `parse.js` 那套（`network_settings.js:159`、`schedule.js:132` 都写 `Parse.NR_BANDS`）。
+  **两套同名表并存正是「改了一处、另一处纹丝不动」的温床**，故整块删除。
+
+> 一处**保留**并记录：`isUnsolicitedText` 同样零调用，但它的注释明确说「`^SRVST` 仍留在上面的
+> `isUnsolicitedText` 里，万一有人手动开过上报也能正确归类」——**作者有意保留**，属「注释声称
+> 有用、实际无人调用」，不删，仅记录。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `rpc.js` 语法 | 通过（删除后） |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| CME 行为核对 | 10/14/20/21/22 → SIM 卡未插入 / SIM 忙 / 内存满 / 无效索引 / 未找到 |
+| 残留检查 | 两处删除后全文件仅剩注释中的说明，无代码残留 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- 本批 5 项里只有 **#37 会改变用户看到的东西**；#38/#39 是注释更正，#40/#41 是死代码清理
+  （无行为影响，只减少维护面）。
+- 仍未改（依据不足，在交接清单候选区）：`normalizePhoneNumber` 无条件剥离开头 `86`。
+
+
 ## [2.3.87] - 2026-09-28
 
 **本批零生产代码改动** —— 全部是**为已经修好的问题补上守卫**，外加 1 个跨端样本。

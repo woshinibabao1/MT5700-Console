@@ -1209,21 +1209,12 @@ function formatFlow(bytes) {
 	return (bytes / 1099511627776).toFixed(2) + ' TB';
 }
 
-function formatSpeed(bytesPerSecond) {
-	var bits = bytesPerSecond * 8;
-	if (bits >= 1e9) return (bits / 1e9).toFixed(2) + ' Gbps';
-	if (bits >= 1e6) return (bits / 1e6).toFixed(2) + ' Mbps';
-	if (bits >= 1e3) return (bits / 1e3).toFixed(2) + ' Kbps';
-	return Math.round(bits) + ' bps';
-}
-
-function splitSpeed(bytesPerSecond) {
-	var bits = bytesPerSecond * 8;
-	if (bits >= 1e9) return { value: (bits / 1e9).toFixed(2), unit: 'Gbps' };
-	if (bits >= 1e6) return { value: (bits / 1e6).toFixed(2), unit: 'Mbps' };
-	if (bits >= 1e3) return { value: (bits / 1e3).toFixed(1), unit: 'Kbps' };
-	return { value: Math.round(bits).toString(), unit: 'bps' };
-}
+/*
+ * 已删除 formatSpeed / splitSpeed（2026-09-28 全量审查）。
+ * 全仓（htdocs / root / src / tests）grep `formatSpeed` 与 `splitSpeed` 只有
+ * 「本文件定义 + 本文件导出」两处，**零消费点**；同族的 formatFlow 仍在用，
+ * 说明速率展示后来改走了别的路径。属于死代码，按本仓惯例删除。
+ */
 
 function formatDuration(seconds, showDays) {
 	if (showDays) {
@@ -1237,21 +1228,14 @@ function formatDuration(seconds, showDays) {
 	return h2 + '时' + m2 + '分' + (seconds % 60) + '秒';
 }
 
-var NR_BANDS = {
-	'1': '2100 MHz (FDD)', '2': '1900 MHz (FDD)', '3': '1800 MHz (FDD)', '5': '850 MHz (FDD)',
-	'7': '2600 MHz (FDD)', '8': '900 MHz (FDD)', '20': '800 MHz (FDD)', '28': '700 MHz (FDD)',
-	'38': '2600 MHz (TDD)', '40': '2300 MHz (TDD)', '41': '2500 MHz (TDD)', '77': '3700 MHz (TDD)',
-	'78': '3500 MHz (TDD)', '79': '4700 MHz (TDD)'
-};
-var LTE_BANDS = {
-	'1': '2100 MHz', '2': '1900 MHz', '3': '1800 MHz', '4': '1700 MHz (AWS)', '5': '850 MHz',
-	'7': '2600 MHz', '8': '900 MHz', '12': '700 MHz', '20': '800 MHz', '28': '700 MHz', '38': '2600 MHz',
-	'39': '1900 MHz', '40': '2300 MHz', '41': '2500 MHz', '42': '3400 MHz', '43': '3700 MHz'
-};
-function bandName(kind, band) {
-	var table = kind === 'NR' ? NR_BANDS : LTE_BANDS;
-	return table[String(band)] || ('Band ' + band);
-}
+/*
+ * 已删除本文件私有的 NR_BANDS / LTE_BANDS 与 bandName（2026-09-28 全量审查）。
+ *
+ * 它们与 parse.js 的 `Parse.NR_BANDS` / `Parse.LTE_BANDS` **同名且并存**，但
+ * 实际在用的是 parse.js 那套（network_settings.js:159 与 schedule.js:132 都写的是
+ * `Parse.NR_BANDS` / `Parse.LTE_BANDS`）；本文件这套 `{ key: label }` 一个消费点都没有。
+ * 两套同名表并存正是「改了一处、另一处纹丝不动」的温床，故整块删除。
+ */
 
 /* ---- ^HCSQ / 信号 ---- */
 
@@ -1358,7 +1342,7 @@ function parseRawData(text) {
 	while ((m = re.exec(text)) !== null) {
 		gaps.push(text.slice(cursor, m.index));
 		cursor = m.index + m[0].length;
-		out.push({ type: 'PDCP', raw: m[1], parsed: parsePDCP(m[1].split(',')) });
+		/* 只切分、不再造条目：{type:'PDCP'} 没有任何消费方（见上面 parsePDCP 的删除说明） */
 	}
 	gaps.push(text.slice(cursor));
 	var rest = gaps.join('');
@@ -1388,44 +1372,21 @@ function parseRawData(text) {
 
 /* ---- PDCP 14 字段 ---- */
 
-var PDCP_FIELDS = [
-	{ key: 'rx_bytes', label: '下行字节' },
-	{ key: 'tx_bytes', label: '上行字节' },
-	{ key: 'rx_pkts', label: '下行包数' },
-	{ key: 'tx_pkts', label: '上行包数' },
-	{ key: 'rx_rate', label: '下行速率' },
-	{ key: 'tx_rate', label: '上行速率' },
-	{ key: 'rx_pdcp_delay', label: '下行 PDCP 时延(0.1ms)' },
-	{ key: 'tx_pdcp_delay', label: '上行 PDCP 时延(0.1ms)' },
-	{ key: 'rx_pkt_loss', label: '下行丢包率' },
-	{ key: 'tx_pkt_loss', label: '上行丢包率' },
-	{ key: 'rx_retx_pct', label: '下行重传率' },
-	{ key: 'tx_retx_pct', label: '上行重传率' },
-	{ key: 'rx_volte_bytes', label: '下行 VoLTE 字节' },
-	{ key: 'tx_volte_bytes', label: '上行 VoLTE 字节' }
-];
-
-function parsePDCP(fields) {
-	var obj = {};
-	obj.rx_bytes = parseInt(fields[0], 10) || 0;
-	obj.tx_bytes = parseInt(fields[1], 10) || 0;
-	obj.rx_pkts = parseInt(fields[2], 10) || 0;
-	obj.tx_pkts = parseInt(fields[3], 10) || 0;
-	obj.rx_rate = parseInt(fields[4], 10) || 0;
-	obj.tx_rate = parseInt(fields[5], 10) || 0;
-	obj.rx_pdcp_delay = parseInt(fields[6], 10) || 0;
-	obj.tx_pdcp_delay = parseInt(fields[7], 10) || 0;
-	obj.rx_pkt_loss = parseInt(fields[8], 10) || 0;
-	obj.tx_pkt_loss = parseInt(fields[9], 10) || 0;
-	obj.rx_retx_pct = parseInt(fields[10], 10) || 0;
-	obj.tx_retx_pct = parseInt(fields[11], 10) || 0;
-	obj.rx_volte_bytes = parseInt(fields[12], 10) || 0;
-	obj.tx_volte_bytes = parseInt(fields[13], 10) || 0;
-	obj.downSpeed = obj.rx_rate / 1024;   // Kbps 原始
-	obj.upSpeed = obj.tx_rate / 1024;
-	return obj;
-}
-
+/*
+ * 已删除 `parsePDCP` 与 `PDCP_FIELDS`（2026-09-28）。
+ *
+ * 它们是早期「前端自己解析 ^PDCPDATAINFO」的遗留，有两个问题：
+ *   ① **字段解释与真机不符** —— 按 <rx_bytes>,<tx_bytes>,<rx_pkts>,… 读，
+ *      而真机（2026-09-28 实测）回的是 <id>,<pduSessionId>,<discardTimerLen>,…
+ *      （见 parse.js::parsePdcpDataInfo 与 urc.rs::PDCP_FIELDS，后两者一致）。
+ *      即 fields[0] 是 DRB id 却被当成 rx_bytes、fields[12] 是丢包数却被当成
+ *      rx_volte_bytes —— 整份数据错位。
+ *   ② **产出无人消费** —— parseRawData 造的是 {type:'PDCP'}（大写），而前端订阅者
+ *      认的是后端 urc.rs 推的 {type:'pdcp_data'}；全仓 grep 零消费点，
+ *      PDCP_FIELDS / downSpeed / upSpeed 同样无人用。
+ * 前端展示的 5G 速率与流量走另一条路（fetchNetRate 读 /sys/class/net 计数），
+ * 与 ^PDCPDATAINFO 无关。故整块删除；parseRawData 仍会切掉 PDCP 行（见那里）。
+ */
 /* ---- MONSC ---- */
 
 function parseMONSC(data) {
@@ -1824,19 +1785,14 @@ var AtWs = {
 	hexToIP: hexToIP,
 	parseTemperature: parseTemperature,
 	formatFlow: formatFlow,
-	formatSpeed: formatSpeed,
-	splitSpeed: splitSpeed,
 	formatDuration: formatDuration,
 	parseHCSQ: parseHCSQ,
 	parseMONSC: parseMONSC,
 	parseHFREQINFO: parseHFREQINFO,
-	parsePDCP: parsePDCP,
 	parseRawData: parseRawData,
-	PDCP_FIELDS: PDCP_FIELDS,
 	psRegText: psRegText,
 	operatorFromCode: operatorFromCode,
 	qciLabel: qciLabel,
-	bandName: bandName,
 	isUnsolicitedText: isUnsolicitedText,
 	uci: AtUci
 };
