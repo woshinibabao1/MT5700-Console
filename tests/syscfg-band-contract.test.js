@@ -151,6 +151,26 @@ ok('C1 BAND_ALL_MASK 由 BAND_BITS 推导（不是手写字面量）',
 ok('C2 BAND_ALL_MASK 经 hexFromBits 拼串（避开 2^53）',
 	defBlock.indexOf('hexFromBits') >= 0);
 
+/*
+ * C3 —— hexFromBits **不依赖入参有序**。
+ *
+ * 它此前用 `bits[bits.length - 1]` 当最大值来定 nibble 数组长度 —— 那暗中要求
+ * 调用方升序：传未排序数组时数组初始化不足，中间出现稀疏空洞（undefined），
+ * 随后 `nibbles[j].toString(16)` 抛 TypeError。而本函数是**导出的**
+ * （api.hexFromBits），契约不该藏在调用方的书写习惯里。
+ *
+ * 这条例外能判红：修复前 `hexFromBits([16,0,9,1,8])` 会抛 TypeError。
+ */
+ok('C3 hexFromBits 不依赖入参有序', (function () {
+	try {
+		var sorted = Parse.hexFromBits([0, 1, 8, 9, 16]);
+		var shuffled = Parse.hexFromBits([16, 0, 9, 1, 8]);
+		return sorted === shuffled && typeof sorted === 'string' && sorted.length > 0;
+	} catch (e) {
+		return false;
+	}
+})(), '未排序入参抛 TypeError 或结果不一致 —— 隐式"必须升序"的契约');
+
 /* ---------- D. LTE 的 ALL 保留 magic value（它实测生效） ---------- */
 
 ok('D1 Parse.LTE_BAND_ALL_MASK 已导出',

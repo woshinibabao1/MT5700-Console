@@ -5,6 +5,61 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.79] - 2026-09-28
+
+读 `parse.js` 里此前未看过的**基础位操作函数**（`hexBit` / `hexFromBits`）。
+`hexBit` 写得很稳（按十六进制字符取位、越界与非 hex 字符都返回 false，
+注释还记着"`parseInt` 超过 2^53 会丢低位"这段由来）；`hexFromBits` 则藏了一处隐式契约。
+
+### Fixed（加固，非修故障）
+
+**28. `hexFromBits` 暗中要求入参升序**
+
+```js
+for (var i = 0; i <= Math.floor(bits[bits.length - 1] / 4); i++) nibbles.push(0);
+```
+
+它用 `bits[最后一项]` 当**最大值**来定 nibble 数组长度。若传入未排序的数组，
+数组初始化不足 → 中间出现**稀疏空洞**（`undefined`）→ 随后
+`nibbles[j].toString(16)` 抛 **TypeError**。
+
+而 `hexFromBits` 是**导出的**（`api.hexFromBits`），契约不该藏在调用方的书写习惯里。
+（现有两处调用方 —— `BAND_BITS.map(b => b[0])` 与 `decodeBandMask` 的收集循环 ——
+传的都是升序，所以这是加固、不是修故障。这一点必须说清楚。）
+
+修法：用 `bits.reduce((m, b) => b > m ? b : m, 0)` 取**真正的**最大值，
+不依赖顺序。对升序输入**行为完全等价**（含"全 0"与"空数组"两个边界）。
+
+### 新增守卫
+
+在既有 `tests/syscfg-band-contract.test.js` 里加 **C3**：对同一组位下标分别传
+**升序**与**乱序**数组，要求结果一致、且都不抛异常。
+
+**变异验证**：把 `reduce` 改回 `bits[bits.length - 1]` → **C3 判红**（36 passed / 1 failed）；
+还原 → 37 passed。
+
+> 这个测试文件此前只对 `hexFromBits` 做了**静态**断言（C2：检查源码里有没有调它），
+> 没有**功能性**断言 —— 所以"必须升序"这个契约一直是隐形的。C3 补的正是这一层。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `node tests/syscfg-band-contract.test.js` | **37 项通过**（新增 C3） |
+| C3 的变异验证 | 判红 1 处；还原后全绿 |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `cargo test --all-targets` | 43 passed / 0 failed |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- **这一处不是"修故障"**：现有调用方都满足那个隐式契约，所以线上不会出错。
+  它的价值在于**契约显式化**（导出的 API 不该要求调用方按某种顺序传参）+ 一条能判红的守卫。
+- `parse.js` 未读部分：`parseCMGL`(1210) 起约 550 行、`hexMaskSubset` / `sysCfgApplyCheck` /
+  `parseRejInfo` / `arfcnToBand` 等；`rpc.js` / `mt5700.js` / `euicc.js` / `ui.js` /
+  `compat.js` / 12 个视图层 / ucode 均未读。
+
+
 ## [2.3.78] - 2026-09-28
 
 第五轮双向核对（`parse.js::decodeTimestamp` ↔ `pdu.rs::decode_timestamp`）。

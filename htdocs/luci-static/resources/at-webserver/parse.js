@@ -61,11 +61,20 @@ var Parse = (function () {
 		return !isNaN(d) && ((d >> (bitIndex % 4)) & 1) === 1;
 	}
 
-	/* 把一组位下标还原成十六进制串（用于「未识别位」提示，同样不受 2^53 限制） */
+	/* 把一组位下标还原成十六进制串（用于「未识别位」提示，同样不受 2^53 限制）
+	 *
+	 * 位下标**不必**有序：下面用 reduce 取真正的最大值来定 nibble 数组长度。
+	 * 原先写的是 `bits[bits.length - 1]` —— 那**暗中要求调用方升序**：一旦有人
+	 * 传入未排序的数组，数组就会初始化不足，中间出现稀疏空洞（undefined），
+	 * 随后 `nibbles[j].toString(16)` 抛 TypeError。本函数是**导出的**
+	 * （`api.hexFromBits`），契约不该藏在调用方的书写习惯里。
+	 * （现有两处调用方传的都是升序，所以这是加固、不是修故障。）
+	 */
 	function hexFromBits(bits) {
 		if (!bits.length) return '';
+		var maxBit = bits.reduce(function (m, b) { return b > m ? b : m; }, 0);
 		var nibbles = [];
-		for (var i = 0; i <= Math.floor(bits[bits.length - 1] / 4); i++) nibbles.push(0);
+		for (var i = 0; i <= Math.floor(maxBit / 4); i++) nibbles.push(0);
 		bits.forEach(function (b) { nibbles[Math.floor(b / 4)] |= 1 << (b % 4); });
 		var out = '';
 		for (var j = nibbles.length - 1; j >= 0; j--) out += nibbles[j].toString(16);
