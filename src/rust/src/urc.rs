@@ -18,13 +18,17 @@ const MAX_PARTIAL_SMS: usize = 100;
 // 这些函数与前端共用同一套换算口径，改动任一侧都要同步另一侧
 // （见 tests/lte-signal-contract.test.js 的「⑤ 浮点尾数」段）。
 //
-// ★ 接线现状（别看漏）：目前只有 convert_rsrp / convert_rssi 走在生产路径上
-//   （handle_signal 的 ^HCSQ 分支，且只用 rsrp 做信号变化通知）。
-//   convert_rsrq / convert_sinr 尚无生产调用点 —— 但它们**不是**可以放任的残留：
-//   它们是「后端若自己换算就必须与前端同口径」的契约载具，各有一条
-//   `*_边界对齐_rpcjs` 测试守着。2.3.43 前端给 convertSinr 补了一位小数收尾
-//   （round1），后端当时没跟上，于是这条契约一直是红的 —— 只是 CI 只跑
-//   `cargo check`（不跑 `cargo test`），所以没人发现（见 CHANGELOG 2.3.43）。
+// ★ 接线现状（2026-09-28 更新）：**四个都在生产路径上**。
+//   · convert_rsrp / convert_rssi：handle_signal 里 ^HCSQ（以及非 NR/LTE 那一路）的换算；
+//   · convert_rsrq / convert_sinr：同一应答里的 rsrq / sinr，取出来给 ^MONSC 兜底
+//     —— ^MONSC 的解析只在 NR 分支赋值 sinr，LTE 用户的通知里 SINR 因此长期是空的，
+//     详见 notify_signal / fill_from_hcsq 的注释。
+//
+//   本段此前写的是「只有 convert_rsrp / convert_rssi 走在生产路径上，后两者尚无生产
+//   调用点」——那句话在 2026-09-28 完成接线后就**过时**了（当时它们没有调用点，
+//   `cargo check` 会报 dead_code；而 CI 的 rust-check 只做 check、不跑 test，
+//   所以 2.3.43 那次的契约漂移也没人发现，见 CHANGELOG 2.3.43）。
+//   留下这句更正，是为了让人一眼看出它们**已经**被用起来了，不必再去追那段历史。
 fn convert_rsrp(raw: f64) -> f64 {
     if raw == 0.0 { -140.0 } else if raw >= 97.0 { -44.0 } else { -140.0 + raw }
 }

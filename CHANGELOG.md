@@ -5,6 +5,62 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.72] - 2026-09-28
+
+读完 `urc.rs` 剩余部分，**Rust 后端至此逐行通读完毕**。本轮修的是一段**因我自己早前改动
+而过时的注释** —— 这类"文档与代码脱节"是改动时最容易留下的东西，值得单独记一笔。
+
+### Fixed
+
+**19. `urc.rs` 头部那段「接线现状」在完成接线后就过时了（是我留下的）**
+
+该段原文写着：
+
+> ★ 接线现状（别看漏）：目前只有 convert_rsrp / convert_rssi 走在生产路径上
+> （handle_signal 的 ^HCSQ 分支，且只用 rsrp 做信号变化通知）。
+> convert_rsrq / convert_sinr **尚无生产调用点**
+
+而本会话第一处改动（`e1607df` / 2.3.62）就已经把它们接线了 —— `handle_signal` 现在会从
+同一份 `^HCSQ` 应答里取出 sinr / rsrq，经 `convert_sinr` / `convert_rsrq` 换算后交给
+`fill_from_hcsq` 给 `^MONSC` 兜底。**我改了代码，却把这段"现状说明"留在了原地**，
+于是它反过来会让人以为那两个函数仍是死代码 —— 而这恰恰是它当初想防止的误读。
+
+已改写为准确的接线状况，并保留一句"本段此前写的是……，已在 2026-09-28 完成接线"的更正说明。
+
+> 这段注释本身值得记：它当初写那么细（连"CI 只跑 `cargo check` 不跑 `cargo test`，
+> 所以 2.3.43 的契约漂移没人发现"都记了），正是因为**死代码最难被发现**。
+> 而它这次过时，也说明"记录现状"的注释必须跟着改动一起维护 ——
+> 否则它会从"防止误读"变成"制造误读"。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **42 passed / 0 failed** |
+| `cargo check --all-targets` | **0 warning**（若那两个函数真没有调用点，这里会报 dead_code） |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+| 调用点核实 | `convert_sinr` 9 处、`convert_rsrq` 5 处、`round1` 2 处（含定义与测试） |
+
+### 后端通读收口
+
+`urc.rs` 其余部分本轮读完，**未发现缺陷**。几处值得一提的稳健设计：
+
+- `cmti_capture` **强制索引为纯数字**（`index.bytes().all(is_ascii_digit)`）——
+  注释写明理由是"防止 NETWORK 模式下 URC 注入 AT 命令"，是这个项目安全意识的一贯体现；
+- `parse_sms_response` 用 `is_hex` 挡住非 PDU 行，`while i + 1 < len` 保证 `lines[i+1]` 不越界；
+- `clip_number` / `cmti_capture` / `split_fields` 的字节切片都紧跟 ASCII 定界符
+  （`"` / prefix），因此一定落在字符边界上 —— 与全仓"用 `get(..n)` 而非 `&s[..n]`"同一纪律；
+- `handle_pdcp` 有 `parts.len() < PDCP_FIELDS.len()` 前置检查，`parts[i]` 因此安全。
+
+### 诚实边界
+
+- 本轮改动**只涉及注释**，零行为变更。
+- 后端 14 个文件（约 4900 行）**已逐行通读完毕**。仍未通读：前端共享模块
+  （`parse.js` / `rpc.js` / `mt5700.js` / `euicc.js` / `ui.js` / `smsEncode.js` /
+  `compat.js`）、12 个视图层文件、ucode 插件（`mt5700.uc` 2846 行）——**约 20000 行**，
+  且这部分上一轮已审过一遍（那轮贡献 4 项修复）。
+
 ## [2.3.71] - 2026-09-28
 
 通读 `schedule.rs` 的 `apply_lock`（348-482，本文件最大的一段）。锁频下发的逻辑本身
