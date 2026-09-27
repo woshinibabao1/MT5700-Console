@@ -5,6 +5,64 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.70] - 2026-09-28
+
+通读 `schedule.rs` 状态机主体（`tick` / `target_mode` / `lock_for` / `modem_busy_recently`）。
+状态机本身的逻辑与注释都经得起推敲（每个决策都写了"为什么不能反过来"），
+但摸到了一处**命名与结构**的问题。
+
+### Removed
+
+**17. `safe_tick()`：一个名字说"有保护"、实际什么也没做的中间层**
+
+```rust
+async fn safe_tick(&self) {
+    self.tick().await;        // ← 全部内容
+}
+```
+
+它只有一个调用点（`run` 的循环），没有任何测试引用，纯粹是转发 —— 既是 Middle Man，
+又用 `safe_` 前缀给出了**与实际相反**的暗示。
+
+**核查时想清了一件更要紧的事**：这个名字暗示的保护，**在本 crate 里架构上就不可能存在**。
+release 是 `panic = "abort"`，panic **不 unwinding** ⇒ 进程内**无法**用 `catch_unwind` 之类
+兜住它。所以 `tick` 里任何一处 panic 都是**整个进程消失**（随后由 procd 重新拉起），
+而不是"只有这个任务停了"。
+
+**而这种命名的错位比没有保护更危险**：它会让人以为已经兜住了，从而**不再去消除真正的
+panic 源**。所以删掉这层转发，并在调用点把真实后果写清楚（`run` 的循环里现在直接
+`self.tick().await`）。
+
+### 同批读过、未发现问题的部分
+
+- `tick`（186-275）：冷却期（避免"锁→解锁→锁"震荡 + 反复开关飞行模式）、
+  仅在下发成功时才置 `applied`（失败留给下周期重试）、无服务超时后解锁**同时**把
+  `applied` 置回 false 并上冷却 —— 后两条的注释里记着「界面显示与实际完全相反，
+  要等到下一次时段切换才自愈」那次事故，修法是对的；
+- `target_mode`（288-296）：`(night && night_enabled, !night && day_enabled)` 的
+  match 组合正确 —— 关掉夜间时段时，夜间确实不锁频；
+- `modem_busy_recently`（277-285）：扫频进行中或刚结束（`SCAN_RECOVERY_GRACE`）时跳过
+  无服务判定，避免把扫频导致的暂时无服务当成"锁频锁死了"。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **42 passed / 0 failed** |
+| `cargo check --all-targets` | 0 warning |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+| `safe_tick` 残留 | 已确认全仓无引用（只剩说明性注释） |
+
+### 诚实边界
+
+- 这是**删除一层转发的等价重构**，零行为变更；没有新增测试（原有的 4 条 `schedule.rs`
+  测试仍全绿）。
+- `schedule.rs` 的 `apply_lock`（348-475，最大的一段：下发锁频命令、失败处理、状态写回）
+  本轮只读到签名与调用关系，**尚未逐行通读**。
+- 仍未通读：`urc.rs` 约 500 行（`handle_memory_full` 前半、`cmti_capture`、`clip_number`
+  等辅助函数）、前端共享模块、12 个视图层文件、ucode 插件。
+
 ## [2.3.69] - 2026-09-28
 
 通读 `serial_linux.rs`（串口传输，221 行）。**一处真实的 fd 泄漏**，以及一次必须如实交代的

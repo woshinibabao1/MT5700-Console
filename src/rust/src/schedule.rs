@@ -145,7 +145,18 @@ impl Scheduler {
                 continue;
             }
 
-            self.safe_tick().await;
+            /*
+             * ★ 这里**没有** panic 保护 —— 此前中间隔着一层 `safe_tick()`，名字听着
+             *   像有，实际只是 `self.tick().await` 的转发（2026-09-28 把这层删掉了：
+             *   它既是 Middle Man，又用 `safe_` 前缀给出了与实际相反的暗示）。
+             *
+             *   真实后果要说清：本 crate 的 release 是 `panic = "abort"`，panic **不
+             *   unwinding**，所以进程内**根本不可能**用 catch_unwind 之类兜住它 ——
+             *   tick 里任何一处 panic 都是**整个进程消失**（随后由 procd 重新拉起），
+             *   而不是"只有这个任务停了"。名字与实际的这种错位，比没有保护更危险：
+             *   它会让人以为已经兜住了，从而不再去消除真正的 panic 源。
+             */
+            self.tick().await;
         }
     }
 
@@ -179,10 +190,6 @@ impl Scheduler {
      * 所以 catch_unwind 在这里无效。要保证的是 tick() 内部不 panic（不裸索引、
      * 不做 unwrap 于外部数据），而不是在外面套一层捕获。
      */
-    async fn safe_tick(&self) {
-        self.tick().await;
-    }
-
     async fn tick(&self) {
         let now = chrono::Local::now();
         let target = self.target_mode(now).await;
