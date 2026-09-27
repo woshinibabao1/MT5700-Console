@@ -5,6 +5,62 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.58] - 2026-09-27
+
+### Fixed（短信中心：换个浏览器就看不到已发送的短信记录）
+
+现象：在 A 浏览器发的短信，换 B 浏览器打开短信中心，一条已发记录都没有。
+
+**根子不在显示层，而在存错了地方** —— 已发短信当时只写在浏览器的 `localStorage`
+（`sms_sent_messages_cache`）。那是**浏览器**的私有空间：换浏览器、清缓存、换一台
+电脑打开页面，就一条不剩。而「这台设备发出过什么」明明是所有浏览器都该看到同一份的
+事实。
+
+#### 为什么不在模组短信存储里存一份（`AT+CMGW=<len>,3`）
+
+这条路径**真机验证过可行**，没采用：
+
+| 证据 | 结论 |
+| :-- | :-- |
+| `AT+CMGW=<tpdu长度>,3<SEP><PDU>` | 模组受理，`+CMGW` 转作业后 `AT+CMGL=4` 能回读 `+CMGL: 41,3,,25` |
+| `AT+CPMS?` 真机 | SM 只有 **50** 个槽位，实占 **44** —— 发几条就写满 |
+| `smsclean.rs::parse_cmgl_entries` | 淘汰名单只认 **SMS-DELIVER**；SUBMIT 解不出短信中心时间就**进不了名单** |
+
+三者合起来是：存满之后谁也删不掉这些日志 → 短信再也收不进来。拿稀缺的收信槽位换
+一条便利，稳定性上不划算。
+
+#### 改动：真源搬到设备
+
+| 位置 | 改动 |
+| :-- | :-- |
+| `mt5700.uc` 新增 `smslog`（list / add / del / clear） | 落在 `/etc/mt5700/sms-sent.json`；「写临时文件 + `rename`」原子落盘；只收 `content/number/time/type` 四个字段 |
+| `acl.d/luci-app-mt5700.json` | read / write 均放行 `mt5700.smslog` |
+| `rpc.js` 新增 `AtWs.smsLog()` | 与 `es9p` 同套路：`entry` 走 JSON 字符串；`id` 声明为整型（传字符串会被 rpcd 以 code=2 拒掉） |
+| `sms_center.js` | `refresh()` 并入设备记录；发送成功后写设备；删除 / 批量删除走设备编号 |
+| `sms_settings.js` | 「本地已发缓存」→「已发记录」，导出 / 导入 / 清空全部作用在设备端 |
+| `parse.js` | localStorage 那一组 API **整块删除**（留着就是下一个「两个来源」的入口） |
+| `smsEncode.js` | 回滚为归档方案加的绝对有效期编码（VPF=11）—— 绝对 VP 写发送时刻等于短信一出就过期，会被短消息中心丢弃 |
+
+老数据不会丢：首次进页面时若设备端为空、`localStorage` 里还有旧记录，会一次性搬到
+设备上，**搬成功才清本地**（写失败就留着，下次再试）。
+
+#### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `ucode -c` | RC=0 |
+| `ubus call mt5700 smslog`（root 直调） | list / add / del / clear 全部 success，文件落盘 `-rw-------` |
+| 经 LuCI `/ubus` 会话（走 ACL） | list / add / clear 均 `success:true`；`id` 传字符串 → `result:[2]`（Invalid argument） |
+| 非法 `entry` / 缺字段 / 未知 action | 全部 `success:false` + 明确原因，不静默吞掉 |
+| `tests/sms-sent-log-contract.test.js` | 34 项全绿 |
+| `tools/verify-guards.py` | 141 条变异全判红（本轮新增 10 条） |
+
+### Changed（顺手统一测试失败前缀）
+
+`sim-status-contract` / `sms-concurrency-contract` 的失败行原本打印 `  FAIL `，
+而 `verify-guards.py` 靠 `  ✗ ` 数「判红几处」—— 导致这两份文件的变异永远显示
+「判红 0 处」，看着像守卫没生效。已统一。
+
 ## [2.3.57] - 2026-09-27
 
 ### Fixed（短信中心：同一条短信显示两条）

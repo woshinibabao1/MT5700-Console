@@ -1276,31 +1276,27 @@ var Parse = (function () {
 		return sms;
 	};
 
-	// 短信中心保存的已发消息缓存（等价原 localStorage sms_sent_messages_cache）
-	api.SMS_CACHE_KEY = 'sms_sent_messages_cache';
-	api.MAX_SMS_CACHE = 1000;
-
-	api.getCachedSentMessages = function () {
-		try {
-			var raw = localStorage.getItem(api.SMS_CACHE_KEY);
-			if (!raw) return [];
-			var parsed = JSON.parse(raw);
-			if (Array.isArray(parsed)) return parsed;
-		} catch (e) { /* ignore */ }
-		return [];
-	};
-
-	api.saveSentMessageToCache = function (msg) {
-		var list = api.getCachedSentMessages();
-		list.unshift(msg);
-		if (list.length > api.MAX_SMS_CACHE) list = list.slice(0, api.MAX_SMS_CACHE);
-		try { localStorage.setItem(api.SMS_CACHE_KEY, JSON.stringify(list)); } catch (e) { /* ignore */ }
-		return list;
-	};
-
-	api.clearSentMessageCache = function () {
-		try { localStorage.removeItem(api.SMS_CACHE_KEY); } catch (e) { /* ignore */ }
-	};
+/*
+ * ============================================================================
+ * 「已发短信存在哪」—— 这一层已于 2.3.58 **整块删除**，不要再往回加
+ * ----------------------------------------------------------------------------
+ * 原先这里有一组 localStorage 缓存（SMS_CACHE_KEY / getCachedSentMessages /
+ * saveSentMessageToCache / clearSentMessageCache），已发短信全靠它。
+ *
+ * 那是**浏览器**的私有空间：换一个浏览器、清一次缓存、换一台电脑打开页面，
+ * 发过的记录就一条不剩 —— 而「这台设备发出过什么」明明是所有浏览器都该看到
+ * 同一份的事实。把设备级的事实存进浏览器级的地方，源头就错了。
+ *
+ * 现在唯一真源是设备上的 /etc/mt5700/sms-sent.json，经 ubus
+ * `mt5700.smslog`（list/add/del/clear）读写，封装在 AtWs.smsLog() 里。
+ *
+ * ★ 没选「写进模组短信存储（AT+CMGW=…,3）」的原因：模组 SM 只有 50 个槽位，
+ *   本机实测已占 44；且 smsclean 的解码器只认 SMS-DELIVER，SUBMIT 解不出时间
+ *   就进不了淘汰名单 —— 存满之后谁都删不掉它，表现为短信再也收不进来。
+ *   该路径真机验证过可行（AT+CMGW 受理、AT+CMGL 回得到 `+CMGL: 41,3,,25`），
+ *   是评估后放弃，不是没试过。
+ * ============================================================================
+ */
 
 	/* ================= 锁频 ================= */
 

@@ -13,7 +13,7 @@
  * - 会话视图（聊天样式）、发送（自动编码 PDU + 长短信分片）
  * - 新短信推送实时更新（new_sms）
  * - 单条删除 / 批量删除、存储量显示
- * - 缓存已发消息到 localStorage
+ * - 已发记录保存在**设备上**（/etc/mt5700/sms-sent.json），换浏览器也看得到
  */
 
 return L.view.extend({
@@ -349,6 +349,76 @@ return L.view.extend({
 			}, 1500);
 		}
 
+		/*
+		 * ============ 已发记录的唯一真源：设备 ============
+		 *
+		 * 已发短信原先只写 localStorage —— 那是**浏览器**的私有空间，换浏览器 /
+		 * 清缓存 / 换电脑打开页面就一条不剩。现在它落在设备上的
+		 * /etc/mt5700/sms-sent.json（ubus mt5700.smslog），任何浏览器打开都是
+		 * 同一份；localStorage 那一层已整块删除，不留第二个来源 —— 两个来源
+		 * 就是「同一条短信画两个气泡」的温床（2.3.57 刚修过一次）。
+		 */
+
+		/* 老版本的键：升级后要把它搬到设备上，搬完才清 */
+		var LEGACY_SMS_KEY = 'sms_sent_messages_cache';
+
+		function legacySentMessages() {
+			try {
+				var raw = localStorage.getItem(LEGACY_SMS_KEY);
+				if (!raw) return [];
+				var arr = JSON.parse(raw);
+				if (!Array.isArray(arr)) return [];
+				return arr.filter(function (m) {
+					return m && typeof m.content === 'string' && typeof m.number === 'string' &&
+						typeof m.time === 'string' && (m.type === 'sent' || m.type === 'received');
+				});
+			} catch (e) { return []; }
+		}
+
+		/*
+		 * 一次性迁移：老版本把已发记录留在 localStorage，升级后必须搬到设备上，
+		 * 否则用户升级完发现「以前发过的全没了」。
+		 * 只在设备端为空时搬一次，且**搬成功才清本地** —— 写失败就留着，下次
+		 * 进页面再试；没搬成的那些也照样显示出来（只是没有 logId，删不掉）。
+		 */
+		function migrateLegacySent(serverList) {
+			if (serverList.length) return Promise.resolve(serverList);
+			var legacy = legacySentMessages();
+			if (!legacy.length) return Promise.resolve(serverList);
+			return AtWs.smsLog('add', JSON.stringify(legacy)).then(function (r) {
+				if (!r.success) return legacy.map(function (m) {
+					return { content: m.content, number: m.number, time: m.time, type: m.type, logId: null };
+				});
+				try { localStorage.removeItem(LEGACY_SMS_KEY); } catch (e) {}
+				return toSentRecords(r.messages);
+			});
+		}
+
+		/* 设备返回的记录 → 界面用的记录（id 改名 logId，避免与模组槽位 index 混淆） */
+		function toSentRecords(list) {
+			var out = [];
+			for (var i = 0; i < (list || []).length; i++) {
+				var m = list[i];
+				if (!m) continue;
+				out.push({
+					content: m.content, number: m.number, time: m.time, type: m.type,
+					logId: (m.id != null ? m.id : null)
+				});
+			}
+			return out;
+		}
+
+		/*
+		 * 读不到设备记录时返回空数组，但**不把「读不到」伪装成「没有」**：
+		 * 后端没升级 / 文件不可写都要在别处给出说法，这里只保证界面不炸。
+		 */
+		function loadSentLog() {
+			return AtWs.smsLog('list').then(function (r) {
+				if (!r.success) return [];
+				return migrateLegacySent(r.messages || []);
+			});
+		}
+
 		function refresh() {
 			return AtWs.client.sendCommand('AT+CMGL=4').then(function (res) {
 				if (!res.success) {
@@ -361,8 +431,9 @@ return L.view.extend({
 				}
 				var raw = typeof res.data === 'string' ? res.data : '';
 				var parsed = (raw && raw !== 'OK' && raw !== 'NO SMS') ? Parse.parseCMGL(raw) : [];
-				var cached = Parse.getCachedSentMessages();
-				buildContacts(parsed.concat(cached));
+				return loadSentLog().then(function (sent) {
+					buildContacts(parsed.concat(sent));
+				});
 			}).catch(function () {
 				Mt5700.error('获取短信列表失败');
 			});
@@ -768,20 +839,34 @@ return L.view.extend({
 
 			chain.then(function (lastRes) {
 				if (lastRes && lastRes.success === false) throw new Error(String(lastRes.error || '发送失败'));
-				var sent = {
-					index: -Date.now(),
-					content: content,
-					number: target,
-					time: sentAt,
-					type: 'sent'
-				};
-				Parse.saveSentMessageToCache(sent);
-				state.messages.push(sent);
-				msgInput.value = '';
-				renderHint();
-				renderConversation();
-				Mt5700.success('发送成功');
-				refresh();
+				/*
+				 * 已发出 ≠ 已记账。记录写不进设备时必须分开说：短信确实出去了，
+				 * 但换个浏览器就看不到它 —— 那正是这次要治的毛病，不能拿
+				 * 「发送成功」一句话把两件事都盖过去（红线 23）。
+				 */
+				return AtWs.smsLog('add', JSON.stringify({
+					content: content, number: target, time: sentAt, type: 'sent'
+				})).then(function (r) {
+					msgInput.value = '';
+					renderHint();
+					if (!r.success) {
+						Mt5700.warning('已发出，但发送记录未写入设备：' + (r.error || '未知原因'));
+						return refresh();
+					}
+					/*
+					 * 立刻把这条画出来，不等 refresh 的下一轮拉取。
+					 * 取后端刚追加的那一条（追加在末尾），logId 是后端分配的编号，
+					 * 有了它「删除」按钮当场就能用。
+					 */
+					var all = toSentRecords(r.messages);
+					var rec = all.length ? all[all.length - 1] : null;
+					if (rec && rec.time === sentAt && rec.content === content) {
+						state.messages.push(rec);
+						renderConversation();
+					}
+					Mt5700.success('发送成功');
+					return refresh();
+				});
 			}).catch(function (err) {
 				Mt5700.error((err && err.message) || '发送失败');
 			}).then(function () { sending = false; sendBtn.disabled = false; });
@@ -816,12 +901,23 @@ return L.view.extend({
 					refresh();
 				})
 					.catch(function () { Mt5700.error('删除失败'); });
+			} else if (msg.logId != null) {
+				/*
+				 * 已发记录：删的是设备上的那一条。
+				 * ★ id 必须传数字 —— ucode 里 args 声明的是整型，rpcd 会在进 ucode
+				 *   之前把字符串形态以 code=2 拒掉，界面只会落一个「删除失败」。
+				 */
+				AtWs.smsLog('del', '', msg.logId).then(function (r) {
+					if (!r.success) Mt5700.error(r.error || '删除失败');
+					else Mt5700.success('删除成功');
+					refresh();
+				});
 			} else {
-				// 缓存中的已发消息
-				var updated = Parse.getCachedSentMessages().filter(function (m) { return m.index !== msg.index; });
-				try { localStorage.setItem(Parse.SMS_CACHE_KEY, JSON.stringify(updated)); } catch (e) {}
-				Mt5700.success('删除成功');
-				refresh();
+				/*
+				 * 既没有模组槽位、也没有设备编号：这是搬迁没成功的旧记录，
+				 * 只存在于当前浏览器的内存里。删不掉就明说，不要假装删掉了。
+				 */
+				Mt5700.warning('这条记录还没同步到设备上，无法删除（请到「短信设置」清空后重试）');
 			}
 		}
 
@@ -863,10 +959,14 @@ return L.view.extend({
 				var chain = Promise.resolve();
 				var delOk = 0;
 				var delFail = 0;
+				var logIds = [];
+				var logOk = 0;
+				var logFail = 0;
 				checked.forEach(function (m) {
 					var idxs = (m.partIndices && m.partIndices.length)
 						? m.partIndices
 						: (m.index != null && m.index >= 0 ? [m.index] : []);
+					if (!idxs.length && m.logId != null) logIds.push(m.logId);
 					idxs.forEach(function (ix) {
 						if (ix != null && ix >= 0) {
 							chain = chain.then(function () {
@@ -877,15 +977,21 @@ return L.view.extend({
 						}
 					});
 				});
+				logIds.forEach(function (lid) {
+					chain = chain.then(function () {
+						return AtWs.smsLog('del', '', lid).then(function (r) {
+							if (!r.success) logFail++; else logOk++;
+						});
+					});
+				});
 				chain.then(function () {
-					var cachedIds = checked.filter(function (m) { return m.index < 0; }).map(function (m) { return m.index; });
-					if (cachedIds.length) {
-						var updated = Parse.getCachedSentMessages().filter(function (m) { return cachedIds.indexOf(m.index) < 0; });
-						try { localStorage.setItem(Parse.SMS_CACHE_KEY, JSON.stringify(updated)); } catch (e) {}
-					}
 					/* 报的是真实删除结果，不是勾选条数 */
-					if (delFail) Mt5700.error('删除 ' + delOk + ' 段成功、' + delFail + ' 段失败');
-					else Mt5700.success('成功删除 ' + checked.length + ' 条短信');
+					if (delFail || logFail) {
+						Mt5700.error('删除：模组 ' + delOk + ' 段成功 / ' + delFail + ' 段失败，'
+							+ '已发记录 ' + logOk + ' 条成功 / ' + logFail + ' 条失败');
+					} else {
+						Mt5700.success('成功删除 ' + (delOk + logOk) + ' 条短信');
+					}
 					refresh();
 				}).catch(function () { Mt5700.error('批量删除失败'); });
 			}));

@@ -270,36 +270,56 @@ return L.view.extend({
 			})
 		));
 
-		/* ---------- 本地已发缓存 ---------- */
-		var cacheCard = Mt5700.card('本地已发缓存', '发送记录保存在浏览器本地，可导出/导入/清空');
+		/*
+		 * ---------- 已发记录（设备端） ----------
+		 *
+		 * ★ 原先这块叫「本地已发缓存」，存的是 localStorage —— 那是浏览器的私有
+		 *   空间，换浏览器 / 清缓存就一条不剩，这正是「换个浏览器看不到已发短信」
+		 *   的根子。现在记录落在设备上（/etc/mt5700/sms-sent.json，ubus
+		 *   mt5700.smslog），任何浏览器打开页面读的都是同一份。
+		 *
+		 * ★ 为什么不是写进模组短信存储（AT+CMGW=…,3）：SM 只有 50 个槽位，本机
+		 *   实测已占 44；而 smsclean 的解码器只认 SMS-DELIVER，SUBMIT 解不出时间
+		 *   就进不了淘汰名单 —— 存满之后谁都删不掉它，表现为短信再也收不进来。
+		 */
+		var cacheCard = Mt5700.card('已发记录', '保存在设备上（换浏览器也在），可导出/导入/清空');
 		var cacheBody = E('div');
 		cacheCard._body.appendChild(cacheBody);
 		body.appendChild(cacheCard);
 
-		var cacheEl = E('div', { 'class': 'mt5700-hint' }, '缓存条数：0');
+		var cacheEl = E('div', { 'class': 'mt5700-hint' }, '记录条数：—');
 		cacheBody.appendChild(cacheEl);
 
 		function exportCache() {
-			var messages = Parse.getCachedSentMessages();
-			var exportData = { app: 'at-webserver', version: 1, exportedAt: new Date().toISOString(), messages: messages };
-			var blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-			var url = URL.createObjectURL(blob);
-			var link = document.createElement('a');
-			link.href = url;
-			link.download = 'sms-cache-export.json';
-			link.click();
-			URL.revokeObjectURL(url);
-			Mt5700.success('已导出 ' + messages.length + ' 条记录');
+			return AtWs.smsLog('list').then(function (r) {
+				if (!r.success) { Mt5700.error(r.error || '读取已发记录失败'); return; }
+				var messages = r.messages || [];
+				var exportData = { app: 'at-webserver', version: 2, exportedAt: new Date().toISOString(), messages: messages };
+				var blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+				var url = URL.createObjectURL(blob);
+				var link = document.createElement('a');
+				link.href = url;
+				link.download = 'sms-sent-export.json';
+				link.click();
+				URL.revokeObjectURL(url);
+				Mt5700.success('已导出 ' + messages.length + ' 条记录');
+			});
 		}
 
 		function refreshCacheCount() {
-			state.cacheCount = Parse.getCachedSentMessages().length;
-			cacheEl.textContent = '缓存条数：' + state.cacheCount;
+			return AtWs.smsLog('list').then(function (r) {
+				if (!r.success) {
+					cacheEl.textContent = '记录条数：读不到（' + (r.error || '未知原因') + '）';
+					return;
+				}
+				state.cacheCount = (r.messages || []).length;
+				cacheEl.textContent = '记录条数：' + state.cacheCount;
+			});
 		}
 
 		cacheBody.appendChild(Mt5700.panelActions(
-			Mt5700.button('导出缓存', exportCache, 'primary'),
-			Mt5700.button('导入缓存', function () {
+			Mt5700.button('导出记录', exportCache, 'primary'),
+			Mt5700.button('导入记录', function () {
 				var input = document.createElement('input');
 				input.type = 'file';
 				input.accept = 'application/json';
@@ -316,19 +336,23 @@ return L.view.extend({
 									typeof m.time === 'string' && (m.type === 'sent' || m.type === 'received');
 							});
 							if (!valid.length) { Mt5700.error('文件中没有有效的短信记录'); return; }
-							/* 导入不走 saveSentMessageToCache，上限与去重都要自己补，
-							   否则反复导入能把 localStorage 撑爆（写失败还被吞掉）。*/
+							/*
+							 * 上限与「一次最多 200 条」都由后端把关（SMS_LOG_MAX / 200）：
+							 * 反复导入把设备存储撑爆这种事不该靠前端自觉 —— 前端去重只
+							 * 负责不把同一份文件导两遍。
+							 */
 							var seen = {};
-							var list = Parse.getCachedSentMessages().concat(valid).filter(function (m) {
+							var batch = valid.filter(function (m) {
 								var k = (m.time || '') + '|' + (m.number || '') + '|' + (m.content || '');
 								if (seen[k]) return false;
 								seen[k] = 1;
 								return true;
 							});
-							if (list.length > Parse.MAX_SMS_CACHE) list = list.slice(0, Parse.MAX_SMS_CACHE);
-							localStorage.setItem(Parse.SMS_CACHE_KEY, JSON.stringify(list));
-							Mt5700.success('导入成功，共 ' + valid.length + ' 条');
-							refreshCacheCount();
+							AtWs.smsLog('add', JSON.stringify(batch)).then(function (r) {
+								if (!r.success) { Mt5700.error(r.error || '导入失败'); return; }
+								Mt5700.success('导入成功，共 ' + (r.added || batch.length) + ' 条');
+								refreshCacheCount();
+							});
 						} catch (err) {
 							Mt5700.error('导入失败：文件格式不正确');
 						}
@@ -337,11 +361,13 @@ return L.view.extend({
 				});
 				input.click();
 			}, 'primary'),
-			Mt5700.dangerButton('清空缓存', function () {
-				Mt5700.confirm('确定清空本地已发缓存？', function () {
-					Parse.clearSentMessageCache();
-					Mt5700.success('已清空');
-					refreshCacheCount();
+			Mt5700.dangerButton('清空记录', function () {
+				Mt5700.confirm('确定清空设备上的已发短信记录？此操作不可恢复。', function () {
+					AtWs.smsLog('clear').then(function (r) {
+						if (!r.success) { Mt5700.error(r.error || '清空失败'); return; }
+						Mt5700.success('已清空');
+						refreshCacheCount();
+					});
 				});
 			})
 		));

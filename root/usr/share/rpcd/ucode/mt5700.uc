@@ -2531,6 +2531,77 @@ function es9pPost(host, path, body) {
 	return { success: true, status: status, body: respBody };
 }
 
+/* ============================================================================
+ * 已发短信记录（smslog）—— 跨浏览器可见的唯一真源
+ * ----------------------------------------------------------------------------
+ * ★ 为什么要有这一层：已发短信原先只写在浏览器的 localStorage 里，那是
+ *   **浏览器**的私有空间 —— 换一个浏览器、清一次缓存、换一台电脑打开页面，
+ *   发送过的记录就一条都不剩。而「这台设备发出过什么」的权威记录只能落在
+ *   **设备**上：所有浏览器读的是同一个文件，看到的就是同一份历史。
+ *
+ * ★★ 为什么不是写进模组短信存储（AT+CMGW=<len>,3）：模组的 SM 只有 50 个槽位，
+ *   本机实测已占用 44。把发送日志写进去，发几条就写满；而 smsclean 的解码器
+ *   只认 SMS-DELIVER（SUBMIT 解不出短信中心时间就不进淘汰名单），结果是
+ *   **存满以后谁都删不掉它** —— 表现为短信再也收不进来。
+ *   用稀缺的收信槽位换一条便利，稳定性上划不来，不做。
+ *   该路径的可行性已真机验证（AT+CMGW 受理、AT+CMGL 可回读 `+CMGL: 41,3,,25`），
+ *   是**评估过之后放弃**，不是没试过。
+ *
+ * 落盘用「写临时文件 + rename」：同一目录内 rename 是原子的，写到一半断电也
+ * 不会留下半个 JSON（与 READ_CACHE_DIR 的 cachePut 同一套路）。
+ * ============================================================================ */
+
+const SMS_LOG_DIR = '/etc/mt5700';
+const SMS_LOG_FILE = SMS_LOG_DIR + '/sms-sent.json';
+/* 条数上限：一条约 200 字节，1000 条约 200KB。记录是日志，超了丢最旧的 */
+const SMS_LOG_MAX = 1000;
+/* 单条正文上限：短信拼到极限也就几百字，4KB 纯粹是挡异常输入 */
+const SMS_LOG_TEXT_MAX = 4096;
+
+function smsLogRead() {
+	let raw = null;
+	try { raw = fs.readfile(SMS_LOG_FILE); } catch (e) { return []; }
+	if (raw == null || raw == '') { return []; }
+	let list = null;
+	try { list = jsonParse(raw); } catch (e) { return []; }
+	return (type(list) == 'array') ? list : [];
+}
+
+function smsLogWrite(list) {
+	try { fs.mkdir(SMS_LOG_DIR); } catch (e) { }
+	let tmp = SMS_LOG_FILE + '.tmp';
+	try {
+		fs.writefile(tmp, sprintf('%J', list));
+		fs.rename(tmp, SMS_LOG_FILE);
+		return true;
+	} catch (e) {
+		return false;
+	}
+}
+
+/*
+ * 只收界面画得出来的四个字段。
+ * 这条通路能把内容写进设备文件，多收一个字段就多一条「借短信记录往设备里
+ * 塞任意内容」的路子 —— 宁可少存，也不开这个口子。
+ */
+function smsLogEntry(m) {
+	if (type(m) != 'object') { return null; }
+	if (type(m.content) != 'string' || type(m.number) != 'string' || type(m.time) != 'string') { return null; }
+	if (m.type != 'sent' && m.type != 'received') { return null; }
+	if (length(m.content) > SMS_LOG_TEXT_MAX || length(m.number) > 32 || length(m.time) > 32) { return null; }
+	return { content: m.content, number: m.number, time: m.time, type: m.type };
+}
+
+function smsLogNextId(list) {
+	let max = 0;
+	for (let i = 0; i < length(list); i++) {
+		if (type(list[i]) != 'object') { continue; }
+		let v = int(list[i].id);
+		if (v != null && v > max) { max = v; }
+	}
+	return max + 1;
+}
+
 return {
 	mt5700: {
 		at: {
@@ -2825,6 +2896,112 @@ return {
 					return { success: false, error: '设备上没有 curl，无法访问 SM-DP+ 服务器' };
 				}
 				return es9pPost(host, path, body);
+			}
+		},
+
+		/*
+		 * 已发短信记录（跨浏览器可见的唯一真源，落在 /etc/mt5700/sms-sent.json）。
+		 *
+		 *   action='list'  → { success, messages: [...] }
+		 *   action='add'   → entry = JSON 字符串（单条对象或数组）→ 追加后回全量
+		 *   action='del'   → id = 记录编号 → 删该条后回全量
+		 *   action='clear' → 清空
+		 *
+		 * ★ entry 走「JSON 字符串」而不是结构化参数：rpcd 只按 args 的声明做前置
+		 *   类型校验，对象/数组形态根本传不进来；统一成字符串由这里自己解析，
+		 *   与 es9p 的 body 同一套路。
+		 * ★ 写盘失败必须回 success:false —— 记录没落盘却报成功，下次刷新用户会
+		 *   以为「又丢了」，那正是这个功能要解决的毛病（红线 23 的同构要求）。
+		 */
+		smslog: {
+			args: { action: '', entry: '', id: 0 },
+			call: function (req) {
+				let a = req.args;
+				let action = getStr(a, 'action');
+				if (action == null || action == '') {
+					return { success: false, error: '缺少参数 action（list/add/del/clear）' };
+				}
+
+				if (action == 'list') {
+					return { success: true, messages: smsLogRead() };
+				}
+
+				if (action == 'clear') {
+					if (!smsLogWrite([])) {
+						return { success: false, error: '写入已发记录失败（设备存储不可写）' };
+					}
+					return { success: true, messages: [] };
+				}
+
+				if (action == 'del') {
+					let id = getStr(a, 'id');
+					if (id == null) {
+						return { success: false, error: '缺少参数 id' };
+					}
+					let list = smsLogRead();
+					let kept = [];
+					let removed = 0;
+					for (let i = 0; i < length(list); i++) {
+						if (type(list[i]) == 'object' && list[i].id == id) {
+							removed = removed + 1;
+						} else {
+							kept[length(kept)] = list[i];
+						}
+					}
+					if (!removed) {
+						return { success: false, error: '没有找到该条已发记录（可能已被删除）' };
+					}
+					if (!smsLogWrite(kept)) {
+						return { success: false, error: '写入已发记录失败（设备存储不可写）' };
+					}
+					return { success: true, messages: kept, removed: removed };
+				}
+
+				if (action == 'add') {
+					let raw = getStr(a, 'entry');
+					if (raw == null || raw == '') {
+						return { success: false, error: '缺少参数 entry' };
+					}
+					let incoming = null;
+					try {
+						incoming = jsonParse(raw);
+					} catch (e) {
+						return { success: false, error: 'entry 不是合法 JSON' };
+					}
+					let batch = (type(incoming) == 'array') ? incoming : [incoming];
+					if (length(batch) > 200) {
+						return { success: false, error: '一次最多追加 200 条' };
+					}
+					let list = smsLogRead();
+					let nextId = smsLogNextId(list);
+					let added = 0;
+					for (let i = 0; i < length(batch); i++) {
+						let e = smsLogEntry(batch[i]);
+						if (e == null) { continue; }
+						e.id = nextId;
+						nextId = nextId + 1;
+						list[length(list)] = e;
+						added = added + 1;
+					}
+					if (!added) {
+						return { success: false, error: 'entry 里没有合法的短信记录' };
+					}
+					/* 超出上限丢最旧的：这是日志，最近发过的才有意义 */
+					if (length(list) > SMS_LOG_MAX) {
+						let keep = [];
+						let from = length(list) - SMS_LOG_MAX;
+						for (let k = from; k < length(list); k++) {
+							keep[length(keep)] = list[k];
+						}
+						list = keep;
+					}
+					if (!smsLogWrite(list)) {
+						return { success: false, error: '写入已发记录失败（设备存储不可写）' };
+					}
+					return { success: true, messages: list, added: added };
+				}
+
+				return { success: false, error: '未知的 action：' + action };
 			}
 		}
 	}

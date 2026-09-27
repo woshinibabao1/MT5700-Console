@@ -161,10 +161,15 @@ var SmsEncode = (function () {
 		 * TP 首字节位序（厂商手册附录 表 20-6，b7..b0）：
 		 *   TP-RP(b7) TP-UDHI(b6) TP-SRR(b5) TP-VPF(b4:b3) TP-RD(b2) TP-MTI(b1:b0)
 		 */
-		var firstOctet = 0x01;          // MTI=01 (SMS-SUBMIT)
-		if (udhi) firstOctet |= 0x40;   // TP-UDHI
-		firstOctet |= 0x10;             // TP-VPF=10：TP-VP 用相对格式（1 字节，下方 vp='AA'）
+	var firstOctet = 0x01;          // MTI=01 (SMS-SUBMIT)
+	if (udhi) firstOctet |= 0x40;   // TP-UDHI
+	firstOctet |= 0x10;             // TP-VPF=10（相对有效期，1 字节）
 		/*
+		 * 不写成「绝对有效期」（TP-VPF=11、VP 是 7 字节 SCTS）：
+		 * 绝对 VP 的语义是「过了这个时刻短信作废」。若写的是发送时刻，短信一出去
+		 * 就已经过期，短消息中心会直接丢弃 —— 那不是归档，是自杀。
+		 * 已发短信要带时间这件事已改由设备端记录文件承担，见 mt5700.uc 的 smslog。
+		 *
 		 * 不再置 TP-RD(0x04)。
 		 *
 		 * TP-RD=1 是「请求短消息中心拒收重复短信」：SMSC 会把「同一目的号码 + 同一
@@ -183,7 +188,7 @@ var SmsEncode = (function () {
 		var mr = '00';
 		var pid = '00';
 		var dcs = opts.encoding === 'UCS2' ? '08' : '00';
-		var vp = 'AA'; // 24 小时（相对有效期，23.040 VP=0xAA）
+		var vp = 'AA';   // 相对有效期：24 小时
 
 		var ud = buildUserData(opts.message, udhi, opts.encoding);
 		if (!ud) return null;
@@ -406,6 +411,24 @@ var SmsEncode = (function () {
 			return { pdu: fullPdu, tpduLength: pdu.length / 2 };
 		});
 	};
+
+	/*
+	 * ========================================================================
+	 * 「发送成功后把这条短信写回模组存储（AT+CMGW=<len>,3）」这条路径**评估过，
+	 * 没采用**，这里记下原因，免得以后再走一遍：
+	 *
+	 *   可行性已真机实测：AT+CMGW=<tpdu长度>,3<SEP><PDU> 会被受理，
+	 *   AT+CMGL=4 也确实能列出 `+CMGL: <idx>,3,,<len>`。
+	 *
+	 *   没采用的理由是**存储账算不过来**：模组 SM 只有 50 个槽位，本机实测已占
+	 *   44 —— 发几条就满了。而短信自动清理（smsclean.rs）的解码器只认
+	 *   SMS-DELIVER，SUBMIT 解不出短信中心时间就**进不了淘汰名单**，于是存满
+	 *   之后谁也删不掉这些日志，最终表现为「短信再也收不进来」。
+	 *   拿稀缺的收信槽位换一条便利，稳定性上不划算。
+	 *
+	 *   已发记录的归属改由设备端文件承担（ubus mt5700.smslog）。
+	 * ========================================================================
+	 */
 
 	return api;
 })();

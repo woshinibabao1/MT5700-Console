@@ -125,6 +125,18 @@ TARGETS = {
     "rpcjs6": ATWB / "rpc.js",
     "uc6": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
     "uc7": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
+    # ★ 再挂六个键（2026-09-27「换个浏览器看不到已发短信」）：
+    #   已发记录的真源从 localStorage 搬到设备文件，横跨 sms_center / sms_settings /
+    #   rpc.js / ucode / smsEncode（否决方案的残留）/ ACL 六处，守卫在自己的
+    #   tests/sms-sent-log-contract.test.js 里。
+    #   ★ 复用 smsjs / smssetjs / rpcjs / uc 都会**跑错测试**（红线 16b）。
+    "smsjs2": ATWB.parent / "view" / "at-webserver" / "sms_center.js",
+    "smssetjs3": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
+    "rpcjs7": ATWB / "rpc.js",
+    "uc8": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
+    "smsencjs": ATWB / "smsEncode.js",
+    # ACL 是无扩展名之外的 .json：syntax_ok 对非 .js 一律放行，变异只改一个字符串。
+    "acljson": ROOT / "root" / "usr" / "share" / "rpcd" / "acl.d" / "luci-app-mt5700.json",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -184,6 +196,13 @@ TARGET_TEST = {
     "rpcjs6": ROOT / "tests" / "at-read-classification-contract.test.js",
     "uc7": ROOT / "tests" / "at-read-classification-contract.test.js",
     "smsjs": ROOT / "tests" / "sms-concurrency-contract.test.js",
+    # ★ 已发记录真源（2026-09-27）：六个键都跑 sms-sent-log-contract
+    "smsjs2": ROOT / "tests" / "sms-sent-log-contract.test.js",
+    "smssetjs3": ROOT / "tests" / "sms-sent-log-contract.test.js",
+    "rpcjs7": ROOT / "tests" / "sms-sent-log-contract.test.js",
+    "uc8": ROOT / "tests" / "sms-sent-log-contract.test.js",
+    "smsencjs": ROOT / "tests" / "sms-sent-log-contract.test.js",
+    "acljson": ROOT / "tests" / "sms-sent-log-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -1389,6 +1408,82 @@ MUTATIONS = [
         "\t\t\t\tbubble.appendChild(meta);",
         "\t\t\t\tbubble.appendChild(E('div', { 'class': 'mt5700-sms-item-preview' }, m.time || ''));",
         "会话里逐条标出未读",
+    ),
+
+    # ============ 短信中心：已发记录真源搬到设备（2026-09-27 换浏览器看不到） ============
+    (   # 锚点唯一性已核：下面 10 条各出现 1 次（ACL 那条靠多行锚点取到 write 段）。
+        "refresh 不并设备记录（换浏览器依旧看不到已发短信，就是这个 BUG 本身）",
+        "smsjs2",
+        "buildContacts(parsed.concat(sent));",
+        "buildContacts(parsed);",
+        "refresh() 把设备记录并入列表",
+    ),
+    (
+        "发送后只列不写（短信发出去了，记录还是没落设备）",
+        "smsjs2",
+        "AtWs.smsLog('add', JSON.stringify({",
+        "AtWs.smsLog('list', JSON.stringify({",
+        "发送成功后写设备记录",
+    ),
+    (
+        "写记录失败却报成功（拿一句「发送成功」把两件事盖过去）",
+        "smsjs2",
+        "Mt5700.warning('已发出，但发送记录未写入设备",
+        "Mt5700.success('已发出，但发送记录未写入设备",
+        "写记录失败要分开说",
+    ),
+    (
+        # ★ 字符串形态会被 rpcd 以 code=2 拒掉，界面只剩一个「删除失败」——
+        #   与「传错参数」长得一模一样，最难排查，所以单独钉一条。
+        "删除已发记录时把 id 传成字符串",
+        "smsjs2",
+        "AtWs.smsLog('del', '', msg.logId)",
+        "AtWs.smsLog('del', '', String(msg.logId))",
+        "删除已发记录走设备（传数字 id）",
+    ),
+    (
+        "设置页的清空按钮不作用到设备",
+        "smssetjs3",
+        "AtWs.smsLog('clear')",
+        "AtWs.smsLog('list')",
+        "设置页三个按钮都走 AtWs.smsLog",
+    ),
+    (
+        "rpc 声明的方法名写错（前端调用全落到「后端未升级」）",
+        "rpcjs7",
+        "method: 'smslog'",
+        "method: 'smslog_typo'",
+        "rpc.js 声明了 mt5700.smslog",
+    ),
+    (
+        "直接写目标文件（写到一半断电留下半个 JSON，整份记录读不出来）",
+        "uc8",
+        "\t\tfs.writefile(tmp, sprintf('%J', list));\n\t\tfs.rename(tmp, SMS_LOG_FILE);",
+        "\t\tfs.writefile(SMS_LOG_FILE, sprintf('%J', list));",
+        "ucode 用「临时文件 + rename」落盘",
+    ),
+    (
+        "写盘失败却回报成功（三处 success:false 永远走不到）",
+        "uc8",
+        "\t\tfs.rename(tmp, SMS_LOG_FILE);\n\t\treturn true;\n\t} catch (e) {\n\t\treturn false;\n\t}",
+        "\t\tfs.rename(tmp, SMS_LOG_FILE);\n\t\treturn true;\n\t} catch (e) {\n\t\treturn true;\n\t}",
+        "smsLogWrite 自己也要如实回报失败",
+    ),
+    (
+        # ★ 这是**否决方案**的残留守卫：把相对有效期换成绝对（VP 写发送时刻）
+        #   会让短信一出就过期。已发记录改走设备文件后，这条路不该再出现。
+        "改用绝对有效期（短信一出就过期，会被短消息中心丢弃）",
+        "smsencjs",
+        "firstOctet |= 0x10;",
+        "firstOctet |= 0x18;",
+        "smsEncode.js 仍用相对有效期",
+    ),
+    (
+        "ACL 的 write 段没放行 smslog（add/del/clear 全被拒，页面只落「读不到」）",
+        "acljson",
+        "\t\t\t\t\t\"events\",\n\t\t\t\t\t\"es9p\",\n\t\t\t\t\t\"exitip\",\n\t\t\t\t\t\"vowifi\",\n\t\t\t\t\t\"vowifi_set\",\n\t\t\t\t\t\"smslog\"",
+        "\t\t\t\t\t\"events\",\n\t\t\t\t\t\"es9p\",\n\t\t\t\t\t\"exitip\",\n\t\t\t\t\t\"vowifi\",\n\t\t\t\t\t\"vowifi_set\"",
+        "ACL 的 write 允许 mt5700.smslog",
     ),
 ]
 

@@ -157,6 +157,25 @@ var rpcVowifiSet = L.rpc.declare({
 	expect: {}
 });
 
+/*
+ * 已发短信记录（设备端文件，跨浏览器可见的唯一真源）。
+ *
+ * ★ 为什么不能留在浏览器：localStorage 是**浏览器**的私有空间，换浏览器 /
+ *   清缓存 / 换电脑打开页面就一条不剩。而「这台设备发出过什么」是所有浏览器
+ *   都该看到同一份的事实，只能落在设备上。
+ *
+ * ★ 三个参数都是必需的：rpcd 按 args 的声明做**前置**类型校验（挡在 ucode
+ *   之前），id 声明的是整型，传字符串会被 code=2 直接拒掉 —— 所以 del 时
+ *   必须传数字，不能传 String(id)。
+ *   entry 是 JSON 字符串（后端自己解析），与 es9p 的 body 同一套路。
+ */
+var rpcSmsLog = L.rpc.declare({
+	object: 'mt5700',
+	method: 'smslog',
+	params: ['action', 'entry', 'id'],
+	expect: {}
+});
+
 function withTimeout(p, ms, msg) {
 	/*
 	 * ★ P11（2026-09-19 会审）：竞速胜出后清掉另一路的定时器。
@@ -1741,10 +1760,37 @@ function fetchVowifiSet(enable) {
 		});
 }
 
+/*
+ * 已发短信记录：list / add / del / clear。
+ *
+ * 返回 Promise<{success, messages, error}>。
+ * ★ 后端没升级（rpcd 里没有 mt5700.smslog）时 response 会是 undefined，
+ *   这里统一翻成 success:false + 明确文案 —— 调用方据此退化到「本地无记录」，
+ *   绝不能把「读不到」当成「没有」（红线 23）。
+ */
+function fetchSmsLog(action, entry, id) {
+	return withTimeout(
+		rpcSmsLog(action || 'list', entry == null ? '' : String(entry), (id == null ? 0 : id)),
+		15000, '已发记录操作超时'
+	).then(function (resp) {
+		if (!resp || resp.success === false) {
+			return {
+				success: false,
+				messages: [],
+				error: (resp && resp.error) || 'rpcd 没有 mt5700.smslog 方法（后端未升级）'
+			};
+		}
+		return { success: true, messages: resp.messages || [], added: resp.added, removed: resp.removed };
+	}).catch(function (err) {
+		return { success: false, messages: [], error: (err && err.message) || '已发记录操作失败' };
+	});
+}
+
 var AtWs = {
 	client: atClient(),
 	netRate: fetchNetRate,
 	sysDiag: fetchSysDiag,
+	smsLog: fetchSmsLog,
 	es9p: es9pPost,
 	exitIp: fetchExitIp,
 	vowifi: fetchVowifi,

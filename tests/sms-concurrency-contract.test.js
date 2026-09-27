@@ -45,7 +45,7 @@ const RUST = read(path.join(ROOT, 'src/rust/src/smsclean.rs'));
 
 let pass = 0, fail = 0;
 function ok(name) { pass++; console.log('  ok   ' + name); }
-function no(name, why) { fail++; console.log('  FAIL ' + name + '  → ' + why); }
+function no(name, why) { fail++; console.log('  ✗ ' + name + '  → ' + why); }
 function has(name, cond, why) { cond ? ok(name) : no(name, why); }
 
 /* ------------------------------------------------------------------ */

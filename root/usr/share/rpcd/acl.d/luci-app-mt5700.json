@@ -30,7 +30,8 @@
 					"es9p",
 					"exitip",
 					"vowifi",
-					"vowifi_set"
+					"vowifi_set",
+					"smslog"
 				],
 				"service": [
 					"list",
@@ -107,7 +108,8 @@
 					"es9p",
 					"exitip",
 					"vowifi",
-					"vowifi_set"
+					"vowifi_set",
+					"smslog"
 				],
 				"service": [
 					"set",

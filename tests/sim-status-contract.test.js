@@ -43,7 +43,7 @@ function ok(name, cond, detail) {
 		console.log('  ok   ' + name);
 	} else {
 		fail++;
-		console.log('  FAIL ' + name + (detail ? '\n       ' + detail : ''));
+		console.log('  ✗ ' + name + (detail ? '\n       ' + detail : ''));
 	}
 }
 
