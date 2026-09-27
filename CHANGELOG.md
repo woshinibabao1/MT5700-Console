@@ -5,6 +5,67 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.93] - 2026-09-28
+
+攒满一批推送。本批主题：**恒真断言**与**名单点名**。3 项，未改生产代码。
+
+### Fixed
+
+**61. `vowifi-contract`：`aclHits >= 0` 是恒真的一半（假守卫）**
+
+```js
+564: let aclHits = 0;            // 数的是 'vowifi' 的命中段数
+576: aclHits >= 2                // vowifi 那条写对了
+685: aclHits >= 0 && aclJson['luci-app-mt5700'].read.ubus.mt5700.indexOf('vowifi_set') >= 0
+```
+第 685 行的注释写的是「★ ACL **两段**都放行 `vowifi_set`（漏一处就是 rpcd Access denied，
+点了静默失败）」，但 `aclHits >= 0` **恒为真**（计数永远 ≥ 0），而且它数的还是 `vowifi`
+不是 `vowifi_set` —— 于是 **`vowifi_set` 实际只被检查了一处，「漏一处」完全检测不到**。
+
+修法：为 `vowifi_set` 单独计数（`aclSetHits`，在 `walk` 里加一行），断言改为
+`aclSetHits >= 2`，与上面 `vowifi` 那条用同一判据。
+**变异验证**：改成 `>= 3` → **判红** ✓。
+
+**62. `at-read-classification`：两处名单补逐个点名**
+
+`bare.length >= 4`（实测 **7** 条）与 `cur.length >= 5`（实测 **9** 条）都偏松。
+现按 `module-extract-anchor` 的 `②z2` 手法补点名：
+- `ucode BARE_READS` 正是这 7 条（`AT^DSFLOWQRY` / `AT^MONNC` / `AT^MONSC` / `AT^MONSSC` /
+  `AT+CGPADDR` / `AT+CNUM` / `AT+CGEQOSRDP`）；
+- `rpc.js NON_QUESTION_READS` 正是这 9 条（再多 `AT+CSQ` / `AT+CGMI`）。
+**变异验证**：把其中一条换成不存在的名字 → **判红** ✓。
+
+### 一处**主动撤回**（依据不足就不改）
+
+我原本还想给 `euicc-tag-whitelist`（`tags.length >= 10`）补点名，按 `euicc.js` 里出现的
+7 个 tag 字面量（`4F`/`5A`/`90`/`91`/`92`/`95`/`9F70`）写断言 —— **结果当场判红，全都不在
+`tags` 里**：`collectTags` 扫的对象与 `euicc.js` 的 tag 字面量不是一回事。
+按约定「**不得没有依据的修改**」，我没有去猜它到底扫什么，而是**把这段断言撤掉了**，
+文件恢复原样。
+
+同一个 `cellscan-removed` 的补点名也因**替换文本不匹配**而没有插入，同样保持原样
+（该文件本来就 22 项通过）。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `vowifi-contract` | 176 项通过 |
+| `at-read-classification-contract` | 35 项通过 |
+| `euicc-tag-whitelist-contract` | 6 项通过（已恢复原样） |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| 变异 1（`aclSetHits >= 3`） | **判红** ✓ |
+| 变异 2（名单换一条） | **判红** ✓ |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- 本批只有 **3 项**，不足 5 项就推了。原因：另外两处候选（`euicc-tag-whitelist` 的点名、
+  `cellscan-removed` 的点名）在落地时**发现自己的依据不成立**，按「不得没有依据的修改」
+  选择撤回/不动，而**不愿为凑满 5 项硬加一处改动**。
+- 已扫过全仓的恒真模式（计数变量配 `>= 0`、`|| true`、对字面量的 `typeof`），
+  **真正的恒真断言只有本批修的这一处**（其余 `>= 0` 都是 `indexOf` 的结果，有效）。
+
 ## [2.3.92] - 2026-09-28
 
 攒满 **5 项**一次推送。延续上一批的思路：**守卫的"覆盖范围"与"自检完整性"**。

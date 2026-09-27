@@ -96,6 +96,12 @@ MUST_BE_WRITES.forEach(function (c) {
 
 /* ---------- ④ 前后端对「什么算只读」必须一致 ---------- */
 const bare = ucodeList('BARE_READS');
+{	/* ★ 2026-09-28：补点名 —— ucode BARE_READS 是这 7 条（后端「不带 ? 的纯读」名单）。 */
+	const MUST_BARE = ['AT^DSFLOWQRY', 'AT^MONNC', 'AT^MONSC', 'AT^MONSSC', 'AT+CGPADDR', 'AT+CNUM', 'AT+CGEQOSRDP'];
+	const missBare = MUST_BARE.filter(function (k) { return bare.indexOf(k) < 0; });
+	ok('★ BARE_READS 正是这 7 条（逐个点名，少一条就判红）',
+		missBare.length === 0, '缺：' + missBare.join('、'));
+}
 ok('④ ucode BARE_READS 能解析出来（否则下面几条恒绿）', Array.isArray(bare) && bare.length >= 4,
 	JSON.stringify(bare));
 ['AT+CGPADDR', 'AT+CNUM', 'AT+CGEQOSRDP'].forEach(function (c) {
@@ -122,6 +128,14 @@ function readsOf(src) {
 	return (m[1].match(/'([^']+)'/g) || []).map(function (x) { return x.slice(1, -1); });
 }
 const cur = readsOf(rpcSrc);
+/* ★ 2026-09-28：补点名 —— rpc.js NON_QUESTION_READS 是这 9 条。 */
+{
+	const MUST_CUR = ['AT+CSQ', 'AT^MONSC', 'AT^MONNC', 'AT^MONSSC', 'AT^DSFLOWQRY',
+		'AT+CGPADDR', 'AT+CNUM', 'AT+CGEQOSRDP', 'AT+CGMI'];
+	const missCur = MUST_CUR.filter(function (k) { return cur.indexOf(k) < 0; });
+	ok('★ NON_QUESTION_READS 正是这 9 条（逐个点名，少一条就判红）',
+		missCur.length === 0, '缺：' + missCur.join('、'));
+}
 ok('⑥ 反向：NON_QUESTION_READS 能解析出来', cur.length >= 5, JSON.stringify(cur));
 ok('⑥ 反向：删掉 AT+CGPADDR 后它就不在名单里（证明上面 ① 不是恒绿）',
 	cur.indexOf('AT+CGPADDR') >= 0 &&

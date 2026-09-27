@@ -562,10 +562,12 @@ ok('★ 下发后重跑五门（开关状态与「VoWiFi 成不成立」是两�
 
 const aclJson = JSON.parse(aclSrc);
 let aclHits = 0;
+let aclSetHits = 0;   /* ★ 2026-09-28：vowifi_set 单独计数 —— 原来这条断言写的是 clHits >= 0（恒真），实际只检查了一处 ACL 段 */
 function walk(o) {
 	if (o == null || typeof o !== 'object') return;
 	if (Array.isArray(o)) {
 		if (o.indexOf('vowifi') >= 0) aclHits++;
+		if (o.indexOf('vowifi_set') >= 0) aclSetHits++;
 		o.forEach(walk);
 		return;
 	}
@@ -682,7 +684,11 @@ ok('★★ 前端把「读不到 EF_DIR」与「没有 ISIM」分开显示（一
 
 /* 开关：ACL / rpc / 前端三处都得通，缺一段就是点了没反应 */
 ok('★ ACL 两段都放行 vowifi_set（漏一处就是 rpcd Access denied，点了静默失败）',
-	aclHits >= 0 && aclJson['luci-app-mt5700'].read.ubus.mt5700.indexOf('vowifi_set') >= 0
+	/* ★ 2026-09-28 修：这里原来写 `aclHits >= 0`（计数 >= 0 恒真），等于只检查了
+	   `luci-app-mt5700` 那一段 —— 而注释要的是「ACL **两段**都放行 vowifi_set，
+	   漏一处就是 rpcd Access denied、点了静默失败」。改为对 vowifi_set 单独计数并
+	   要求两段都命中（与上面 vowifi 那条用同一判据）。 */
+	aclSetHits >= 2
 	&& aclJson['luci-app-mt5700'].write.ubus.mt5700.indexOf('vowifi_set') >= 0);
 ok('rpc.js 声明了 mt5700.vowifi_set，且参数只有 enable',
 	/method: 'vowifi_set',\s*\n\s*params: \['enable'\],/.test(rpcSrc));
