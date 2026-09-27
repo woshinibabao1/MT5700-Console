@@ -161,9 +161,9 @@ var SmsEncode = (function () {
 		 * TP 首字节位序（厂商手册附录 表 20-6，b7..b0）：
 		 *   TP-RP(b7) TP-UDHI(b6) TP-SRR(b5) TP-VPF(b4:b3) TP-RD(b2) TP-MTI(b1:b0)
 		 */
-	var firstOctet = 0x01;          // MTI=01 (SMS-SUBMIT)
-	if (udhi) firstOctet |= 0x40;   // TP-UDHI
-	firstOctet |= 0x10;             // TP-VPF=10（相对有效期，1 字节）
+		var firstOctet = 0x01;          // MTI=01 (SMS-SUBMIT)
+		if (udhi) firstOctet |= 0x40;   // TP-UDHI
+		firstOctet |= 0x10;             // TP-VPF=10（相对有效期，1 字节）
 		/*
 		 * 不写成「绝对有效期」（TP-VPF=11、VP 是 7 字节 SCTS）：
 		 * 绝对 VP 的语义是「过了这个时刻短信作废」。若写的是发送时刻，短信一出去
@@ -188,7 +188,20 @@ var SmsEncode = (function () {
 		var mr = '00';
 		var pid = '00';
 		var dcs = opts.encoding === 'UCS2' ? '08' : '00';
-		var vp = 'AA';   // 相对有效期：24 小时
+		/*
+		 * TP-VP：相对格式（配合上面 TP-VPF=10）。
+		 *
+		 * ★ 2026-09-28 更正：这里原注释写「相对有效期：24 小时」，与 3GPP 23.040
+		 *   §9.2.3.12 的三段区间对不上。该节规定：
+		 *     0–143   → (VP + 1) × 5 分钟      （最长 12 小时）
+		 *     144–167 → (VP − 143) × 30 分钟   （12.5 ~ 24 小时）
+		 *     168–255 → (VP − 166) × 1 天      （2 ~ 90 天）
+		 *   0xAA = 170 落在第三段 ⇒ **4 天**，不是 24 小时。
+		 *   另外这套编码里**不存在"正好 24 小时"的相对值**（143 → 12 小时，168 → 2 天），
+		 *   所以"取 24 小时"这个说法本身也无法用单个字节表达。
+		 *   值保持不动（改它会改变发给网络的有效期语义，不属本次「注释准确性」的范围）。
+		 */
+		var vp = 'AA';   // 相对格式，0xAA = 170 → 4 天（见上）
 
 		var ud = buildUserData(opts.message, udhi, opts.encoding);
 		if (!ud) return null;
@@ -407,7 +420,8 @@ var SmsEncode = (function () {
 			// SMSC 部分：有 smsc 时编码（长度含 TOA 字节）；没有则 00（使用 SIM 卡默认中心）
 			var sca = opts.smsc ? encodeAddress(opts.smsc, true) : '00';
 			var fullPdu = sca + pdu;
-			var scaOctets = sca.length / 2;
+			// （这里原先还有一个 `var scaOctets = sca.length / 2;`，从未被使用 ——
+			//   tpduLength 按定义只算 TPDU 部分，不含 SMSC。2026-09-28 删除。）
 			return { pdu: fullPdu, tpduLength: pdu.length / 2 };
 		});
 	};
