@@ -1093,8 +1093,16 @@ var Parse = (function () {
 			var b = raw[i];
 			var d1 = b & 0x0F;
 			var d2 = (b >> 4) & 0x0F;
-			if (d1 < 0x0F) digits += String(d1);
-			if (d2 < 0x0F) digits += String(d2);
+			/*
+			 * ★ 只接受真正的十进制半字节（0–9）。
+			 *   原写成 `if (d1 < 0x0F) digits += String(d1);` —— 0xA–0xE 这类非十进制
+			 *   半字节会被 String() 变成 "10"…"14" **两个字符**混进号码（例如 0x1A
+			 *   会产出 "10"），号码因此错乱。
+			 *   后端 src/rust/src/pdu.rs 的 decode_number 用的是 `lo <= 9`，
+			 *   两侧口径必须一致（这是同一份 PDU 的前端/后端两条解码路径）。
+			 */
+			if (d1 <= 9) digits += String(d1);
+			if (d2 <= 9) digits += String(d2);
 			nibbles -= 2;
 			i += 1;
 		}

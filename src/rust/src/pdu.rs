@@ -158,7 +158,20 @@ fn decode_address(data: &[u8], digits: usize, toa: u8) -> String {
         let septets = (digits * 4) / 7;
         return septets_to_string(&unpack_septets(data, septets));
     }
-    decode_number(data, digits)
+    /*
+     * ★ TON = 001（国际号码）要加前导 '+' —— 与前端 parse.js 的 decodeAddress 对齐
+     *   （那边写的是 `if (ton === 1) return '+' + digits;`）。
+     *
+     *   缺这一步会让**两端显示不一致**：同一条来自 +8613800138000 的短信，
+     *   页面里的短信列表显示「+8613800138000」，而通知 / 企业微信推送里
+     *   （走的是本函数）显示「8613800138000」。
+     *   3GPP 23.040 里 TON=1 本就表示国际格式，带 '+' 才是标准写法。
+     */
+    let number = decode_number(data, digits);
+    if (toa >> 4) & 0x07 == 0x01 {
+        return format!("+{number}");
+    }
+    number
 }
 
 /// 从 DCS 推出用户数据的编码：0 = GSM7、1 = 8bit、2 = UCS2。
@@ -353,7 +366,13 @@ mod tests {
     #[test]
     fn test_decode_ucs2_pdu() {
         let sms = decode_incoming_pdu(UCS2_PDU).unwrap();
-        assert_eq!(sms.sender, "13800138000");
+        /*
+         * ★ 2026-09-28：样本的 TOA=0x91 ⇒ (0x91>>4)&7 == 1 ⇒ TON=1（国际号码），
+         *   按 3GPP 23.040 与前端 parse.js 的 decodeAddress 口径应带前导 '+'。
+         *   这里原先断言的是不带 '+' 的形态 —— 那是在守后端漏掉这一步时的行为，
+         *   而它同时意味着「同一条短信在页面列表与通知里的号码写法不一致」。
+         */
+        assert_eq!(sms.sender, "+13800138000");
         assert_eq!(sms.content, "测试");
         let want = Local.with_ymd_and_hms(2025, 8, 25, 12, 0, 0).single().unwrap();
         assert_eq!(sms.date.timestamp(), want.timestamp());

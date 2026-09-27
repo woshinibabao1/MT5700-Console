@@ -5,6 +5,58 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.76] - 2026-09-28
+
+第四轮双向口径核对（`parse.js::decodeAddress` ↔ `pdu.rs::decode_address`），**两处确证缺陷**，
+而且都在真机那次验证**没覆盖到**的路径上（10086 的来信走 BCD + TON=2，既非字母数字、
+也非国际号码）。
+
+### Fixed
+
+**25. `parse.js`：无效 BCD 半字节被 `String()` 变成两位数，混进号码**
+
+```js
+if (d1 < 0x0F) digits += String(d1);   // 0xA–0xE 会让 String(10) == "10"
+```
+
+`0xA`–`0xE` 不是十进制半字节，`String(10)` 是**两个字符** —— 例如字节 `0x1A` 会产出
+`"10"`，号码因此错乱。后端 `pdu.rs::decode_number` 用的是 `lo <= 9`，两侧口径必须一致
+（这是同一份 PDU 的前端/后端两条解码路径）。已改为 `d1 <= 9` / `d2 <= 9`。
+
+**26. `pdu.rs`：`decode_address` 缺少 TON=1（国际号码）的前导 `+`**
+
+前端 `parse.js` 有 `if (ton === 1) return '+' + digits;`，后端没有这一步。后果是
+**同一条短信两端显示不一致**：页面里的短信列表是「`+8613800138000`」，而通知与企业微信
+推送（走后端 `decode_incoming_pdu`）是「`8613800138000`」。3GPP 23.040 里 TON=1 本就
+表示国际格式，带 `+` 才是标准写法 —— 已让后端跟上。
+
+> 附带更新了 Rust 测试 `test_decode_ucs2_pdu` 的期望：样本 PDU 的 TOA 是 `0x91`
+> ⇒ `(0x91>>4)&7 == 1` ⇒ TON=1，所以正确结果是 `+13800138000`。**它原先断言的是不带
+> `+` 的形态** —— 那正是在守"后端漏了这一步"的行为。改这条断言不是为了让测试变绿，
+> 而是因为它守的是错的那一侧（前端与 3GPP 都是带 `+`）。
+
+### 这一轮补充了双向核对方法的证据
+
+| 轮次 | 命中 | 谁修了 / 谁漏了 |
+| :-- | :-- | :-- |
+| 2.3.74 | `unpackSeptets` 的「填充位造字」 | **Rust 修了，前端漏改** |
+| 2.3.75 | `dcs_encoding` 的 0xC/0xE/0xF 组 | **前端修了，后端漏改** |
+| 2.3.76 | `decodeAddress` 的 BCD 半字节 + TON=1 | **前端后半段对、后端前半段对**（各缺一半） |
+
+三轮下来，"两端各有一份同口径实现"作为**漂移温床**这个判断得到了三次印证；而且
+各自的测试都拦不住（`sms-pdu.test.js` 92 项、Rust 侧也有 PDU 测试），因为**测试各自
+只守自己那一侧**。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **43 passed / 0 failed** |
+| `cargo check --all-targets` | 0 warning |
+| `node tests/run-all.js` | 全部测试文件通过（`d1 <= 9` 未破坏任何既有断言 —— 说明前端此前**未覆盖**无效 BCD 半字节这一场景） |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+
 ## [2.3.75] - 2026-09-28
 
 第三轮双向口径核对（`parse.js` ↔ `pdu.rs`）**又抓到一处**，而且这次是**反过来**的：
