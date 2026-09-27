@@ -127,9 +127,24 @@ var Ui = (function () {
 		return new Promise(function (resolve) { window.setTimeout(resolve, ms); });
 	};
 
-	// 原前端发命令前固定等 100ms，保证命令间隔
+	/*
+	 * ★ 2026-09-28 去掉固定 sleep(100)，改为直接下发。
+	 *
+	 * 原来是「发命令前固定等 100ms，保证命令间隔」—— 那是旧实现的口径。现在
+	 * `AtWs.client.sendCommand` 自己就**严格串行**：rpc.js 里 queue 是全局单链
+	 *   `this.commandQueue = this.commandQueue.then(...)`（rpc.js:212/870），
+	 *   上一条的 Promise 完成（等到模组回 OK/ERROR）才发下一条。
+	 * 也就是说「间隔」已经由应答本身保证了，这 100ms 是**纯等待**。
+	 *
+	 * 代价是实打实的：dial.js 有 19 处调用，典型流程是串行链
+	 *   `sendCmd('AT+CGDCONT?').then(function () { return sendCmd('AT+CGACT?'); })`
+	 * —— 两条各自白等 100ms。用户手动「刷新」拨号页时，这些毫秒直接叠在
+	 * 界面响应上，而串口那边一条命令都没少发。
+	 *
+	 * 保留 sendCmd 这个入口（接口不变），只是不再插入固定延时。
+	 */
 	api.sendCmd = function (command) {
-		return api.sleep(100).then(function () { return AtWs.client.sendCommand(command); });
+		return AtWs.client.sendCommand(command);
 	};
 
 	// 错误文本还原（等价 atx.ts 的 atErrorText）

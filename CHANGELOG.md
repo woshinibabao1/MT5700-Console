@@ -5,6 +5,58 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.1] - 2026-09-28
+
+### Performance
+
+**96. `Ui.sendCmd` 去掉固定 `sleep(100)` —— 后端早已保证串行，那 100ms 是纯等待**
+
+原实现（`ui.js`）：
+```js
+// 原前端发命令前固定等 100ms，保证命令间隔
+api.sendCmd = function (command) {
+	return api.sleep(100).then(function () { return AtWs.client.sendCommand(command); });
+};
+```
+「保证命令间隔」是**旧实现的口径**。现在 `AtWs.client.sendCommand` 自己就**严格串行**：
+`rpc.js` 的 queue 是**全局单链**（`this.commandQueue = this.commandQueue.then(...)`，
+见 rpc.js:212/870），上一条的 Promise 完成（等到模组回 OK/ERROR）才发下一条 ——
+**间隔已由应答本身保证**，那 100ms 纯属等待。
+
+代价是实打实的：`dial.js` 有 **19 处**调用，而且典型写法是串行链
+```js
+Ui.sendCmd('AT+CGDCONT?').then(function () {
+	return Ui.sendCmd('AT+CGACT?').then(...)      // 两条各白等 100ms
+});
+```
+这些毫秒直接叠在用户点「刷新」之后的响应时间上，**而串口那边一条命令都没少发**。
+`sendCmd` 这个入口保留（接口不变），只是不再插入固定延时。
+
+### Added
+
+**97. 守卫：`Ui.sendCmd` 不得再插入固定 sleep**
+
+加在 `tests/ui-consistency-contract.test.js`：读 `ui.js`，取出 `sendCmd` 的函数体，
+断言体内**不出现 `sleep(`**（前缀断言"ui.js 可读"与"能定位到函数体"，否则是空转）。
+**变异验证**：把 `api.sleep(100).then(...)` 加回去 → 精确判红并退出 1：
+```
+✗ ★ Ui.sendCmd 不再插入固定 sleep（sendCommand 已串行，那 100ms 是纯等待）
+  → 函数体里出现了 sleep：return api.sleep(100).then(...)
+```
+
+### 验证
+
+`node tests/run-all.js` **0 失败**（`ui-consistency-contract` 29 passed）·
+`node tests/syntax-check.js` 0 错误 · `cargo check` 0 warning · `cargo test` 44 passed。
+
+### 诚实边界
+
+- 本批 2 项都属性能/测试，**不改任何业务逻辑的运行结果**：原先每条命令多等 100ms，
+  现在按后端队列天然串行下发；命令顺序、条数、失败判定口径完全不变。
+- 我逐条核过慢档其余 15 条命令，**没有再能安全去掉的**：`AT+COPS?`（运营商）虽然很少变，
+  但**漫游/换网时会变** —— 放长缓存会让这类变化的检测延迟数十秒，依据不足故不动。
+- 判断依据是**代码 + 注释双重证据**，不是推测：`rpc.js:16` 的说明写着
+  「sendCommand(cmd) → {success,data,error}，保持 FIFO 顺序（RPC 逐条应答，**前端仍串行化**）」。
 ## [2.4.0] - 2026-09-28
 
 ### Performance

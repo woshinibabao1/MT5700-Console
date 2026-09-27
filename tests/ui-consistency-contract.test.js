@@ -215,6 +215,28 @@ has('反向：旧的「一次 warmCache(SLOW_WARM) 跑完全部任务」会被�
 	'旧写法竟被当成已切两段');
 
 /* ------------------------------------------------------------------ */
+/*
+ * ★ 2026-09-28 新增：`Ui.sendCmd` 不得再插入固定延时。
+ *
+ * 它原来是「发命令前固定等 100ms，保证命令间隔」。而 `AtWs.client.sendCommand`
+ * **本身就是严格串行**的：rpc.js 里 queue 是全局单链
+ *   `this.commandQueue = this.commandQueue.then(...)`（rpc.js:212/870），
+ * 上一条的 Promise 完成（等到模组回 OK/ERROR）才发下一条 —— 间隔由应答保证，
+ * 那 100ms 是纯等待。dial.js 有 19 处调用，还有串行链（CGDCONT? → CGACT?
+ * 各等一次），全部叠在用户点「刷新」之后的响应时间上，而串口一条没少发。
+ */
+const UI_SRC = fs.readFileSync(
+	path.join(ROOT, 'htdocs', 'luci-static', 'resources', 'at-webserver', 'ui.js'), 'utf8');
+has('ui.js 可读（否则下面那条断言是空转）', UI_SRC.length > 0);
+{
+	// 取 sendCmd 的函数体（到下一个顶层 api. 定义为止），只在体内找 sleep
+	const m = UI_SRC.match(/api\.sendCmd\s*=\s*function[\s\S]*?\n\t\};/);
+	has('能定位到 ui.js 的 sendCmd 函数体', m !== null);
+	has('★ Ui.sendCmd 不再插入固定 sleep（sendCommand 已串行，那 100ms 是纯等待）',
+		m !== null && !/sleep\s*\(/.test(m[0]),
+		m ? '函数体里出现了 sleep：' + (m[0].match(/.*sleep.*/) || [''])[0].trim() : '');
+}
+/* ------------------------------------------------------------------ */
 console.log('');
 console.log('ui-consistency-contract: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
