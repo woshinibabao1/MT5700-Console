@@ -54,9 +54,11 @@ let writer = tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(write_f
 | 人工审查 | 类型推导逐项核过：`AsyncFd::new` 返回 `io::Result<AsyncFd<T>>`，`match` 两分支为 `AsyncFd<OwnedFd>` 与 `!`；`libc::close` 接受 `c_int`（`write_fd` 正是）；函数返回 `Result<Box<dyn Transport>, String>` |
 
 **所以类型检查只能由 CI 承担**：`rust-check` 在 ubuntu 上跑 `cargo check --all-targets`，
-那才是真正编译这个文件的地方。**如果这次 CI 红了，最可能的原因就是这一处** ——
-按要求我没有等它跑完，请以 CI 结果为准；一旦报错，回滚这一处即可（改动是局部的、
-不涉及接口）。
+那才是真正编译这个文件的地方。
+
+> ✅ **事后核对（同日补齐）**：该提交（`c0990c8`）的 CI **`rust-check` 已通过** ——
+> 也就是说上面这处改动在「真正编译 `serial_linux.rs`」的环境里**类型正确**。
+> 补记这一行，是为了让"待验证"这个状态有个明确收尾，而不是留在这里让人猜。
 
 ### 验证
 
