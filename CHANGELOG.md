@@ -5,6 +5,77 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.69] - 2026-09-28
+
+通读 `serial_linux.rs`（串口传输，221 行）。**一处真实的 fd 泄漏**，以及一次必须如实交代的
+验证缺口。
+
+### Fixed
+
+**16. `open_serial` 的失败路径泄漏 `write_fd`（累积到 EMFILE 后串口再也打不开）**
+
+```rust
+let write_fd = unsafe { libc::dup(fd) };          // 裸 i32，还没有 RAII 持有者
+…
+let reader = tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(fd) })
+    .map_err(|e| format!("注册串口读侧事件失败: {e}"))?;   // ← 若这里失败
+let writer = tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(write_fd) })
+```
+
+三者的释放语义不同，必须分开看：
+
+- `fd` **不会**泄漏 —— 它已被 `OwnedFd::from_raw_fd(fd)` 接管，`AsyncFd::new` 返回 `Err`
+  时那个 `OwnedFd` 随 drop 关闭它；
+- `writer` 那一步失败**也不会** —— 那时 `write_fd` 已经进了 `OwnedFd`；
+- **只有读侧注册失败这一步**：`write_fd` 此刻**还是裸 `i32`**，没有任何 RAII 持有者，
+  `?` 直接返回不会替我们释放它。
+
+**为什么不能忽视**：`open_serial` 处在 `atclient` 的**重连循环**里 —— 每轮失败泄漏一个 fd，
+累积到 `EMFILE` 之后连串口都打不开，而现场现象只是「连不上模组」，根因在 fd 表上，
+排查方向会被完全带偏。
+
+修法：把读侧注册从 `.map_err(…)?` 改成 `match`，在 `Err` 分支显式 `libc::close(write_fd)`
+之后再返回（`fd` 仍交给 `OwnedFd` 自动关闭）。
+
+### ⚠️ 验证缺口（必须说清楚）
+
+**这一处改动没有通过本地的类型检查。** 原因：`serial_linux.rs` 是
+`#[cfg(target_os = "linux")]`，而本机只有 `x86_64-pc-windows-gnu` 目标 ——
+`cargo check` 根本不编译它。我尝试装 `x86_64-unknown-linux-gnu` 目标做交叉 check，
+但被卡在依赖层：`ring v0.17.14` 的 build script 需要 `x86_64-linux-gnu-gcc`（本机没有）。
+
+能做的与不能做的，分开列：
+
+| 手段 | 结果 |
+| :-- | :-- |
+| `cargo check --all-targets`（本机目标） | 通过 —— 但**不覆盖** `serial_linux.rs` |
+| `cargo check --target x86_64-unknown-linux-gnu` | **无法进行**（`ring` 需要交叉 gcc） |
+| `rustfmt --edition 2021 --check` | **解析通过**（仅语法，不含类型） |
+| 人工审查 | 类型推导逐项核过：`AsyncFd::new` 返回 `io::Result<AsyncFd<T>>`，`match` 两分支为 `AsyncFd<OwnedFd>` 与 `!`；`libc::close` 接受 `c_int`（`write_fd` 正是）；函数返回 `Result<Box<dyn Transport>, String>` |
+
+**所以类型检查只能由 CI 承担**：`rust-check` 在 ubuntu 上跑 `cargo check --all-targets`，
+那才是真正编译这个文件的地方。**如果这次 CI 红了，最可能的原因就是这一处** ——
+按要求我没有等它跑完，请以 CI 结果为准；一旦报错，回滚这一处即可（改动是局部的、
+不涉及接口）。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **42 passed / 0 failed** |
+| `cargo check --all-targets` | 0 warning |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+| `serial_linux.rs` 本身 | **仅语法级验证**（见上表） |
+
+### 诚实边界
+
+- 本轮**只**改了上面这一处；`serial_linux.rs` 其余部分（termios raw 配置、`VMIN=1` 的
+  必要性、`O_CLOEXEC` 与 `dup` 后补 `FD_CLOEXEC`、`AsyncFd` 事件驱动读写）逐行读过，
+  未发现新缺陷 —— 那几处的注释都写明了「为什么必须是这个值」。
+- 仍未通读：`smsclean.rs`(216) / `urc.rs` 其余部分 / `schedule.rs` 状态机主体 /
+  前端共享模块 / 12 个视图层文件 / ucode 插件。
+
 ## [2.3.68] - 2026-09-28
 
 通读 `schedule.rs`（定时锁频状态机）。这一批**先说一次误报的复核过程**，因为那正是

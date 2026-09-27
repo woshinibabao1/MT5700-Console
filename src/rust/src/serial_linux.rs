@@ -185,8 +185,23 @@ pub async fn open_serial(cfg: &SerialConfig) -> Result<Box<dyn Transport>, Strin
         libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
 
-    let reader = tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(fd) })
-        .map_err(|e| format!("注册串口读侧事件失败: {e}"))?;
+    // ★ 失败时必须显式关掉 write_fd。
+    //
+    //   `fd` 不必管：它已经被下面的 `OwnedFd::from_raw_fd(fd)` 接管，`AsyncFd::new`
+    //   返回 Err 时那个 OwnedFd 会随 drop 关闭它。但 `write_fd` 此刻**还是裸 i32**
+    //   （上面 dup 出来的），没有任何 RAII 持有者 —— 错误返回不会替我们释放它。
+    //
+    //   为什么不能忽视：`open_serial` 处在 atclient 的重连循环里，每轮失败都泄漏一个
+    //   fd；累积到 EMFILE 之后连串口都打不开，而现象只是「连不上模组」，根因在 fd 表上。
+    //
+    //   （190 行的 writer 注册失败不需要这样处理：那时 write_fd 已经进了 OwnedFd。）
+    let reader = match tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(fd) }) {
+        Ok(r) => r,
+        Err(e) => {
+            unsafe { libc::close(write_fd) };
+            return Err(format!("注册串口读侧事件失败: {e}"));
+        }
+    };
     let writer = tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(write_fd) })
         .map_err(|e| format!("注册串口写侧事件失败: {e}"))?;
 
