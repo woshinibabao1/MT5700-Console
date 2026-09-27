@@ -183,6 +183,15 @@ const shellFiles = [
 ];
 for (const [label, p] of shellFiles) {
 	const t = read(p);
+	/*
+	 * ★ 2026-09-28 修：原来这里是 `if (!t) continue` —— 文件被删、改名或路径写错时
+	 *   它**静默跳过**，下面 3 条断言一条都不跑，而测试仍然 PASS。
+	 *   本文件第 178-180 行的注释**自己警告过**这一点（"read() 对不存在的文件返回空，
+	 *   会被 `if (!t) continue` 静默跳过，那就变成了恒绿的空守卫"），
+	 *   却只处理了"已移除的看门狗不要列进清单"，没有修这个 continue。
+	 *   现在：读不到就判红（这才是"文件不该消失"的真正守卫）。
+	 */
+	ok(label + ' 存在（否则下面几条断言全是空转）', !!t, '读不到 ' + p);
 	if (!t) continue;
 	const code = stripHashComments(t);
 	ok(label + ' 不直接用 microcom 碰串口', !/microcom/.test(code));
@@ -204,6 +213,11 @@ const rustFiles = fs.existsSync(RUST_SRC)
 	? fs.readdirSync(RUST_SRC).filter((f) => f.endsWith('.rs'))
 	: [];
 
+/* ★ 2026-09-28：同上 —— 目录不存在时 rustFiles 为空，下面的循环一条都不跑，
+   而测试仍然 PASS。这里先把"扫得到 Rust 源文件"变成会判红的前置断言。 */
+ok('能扫到 Rust 源文件（否则下面的 simheal/HVSST 断言全是空转）',
+	rustFiles.length > 0, '实际 ' + rustFiles.length + ' 个（' + RUST_SRC + '）');
+
 ok('不存在 src/rust/src/simheal.rs', !fs.existsSync(path.join(RUST_SRC, 'simheal.rs')));
 for (const f of rustFiles) {
 	const t = stripComments(read(path.join(RUST_SRC, f)));
@@ -211,8 +225,14 @@ for (const f of rustFiles) {
 	ok('Rust 源码 ' + f + ' 里没有自动下发的 HVSST', !/AT\^HVSST/.test(t),
 		'自愈（开机自动推 HVSST）已在 v1.1.0 删除：无效、无收益、有掉网风险');
 }
-ok('UCI 随包配置里没有 sim_heal_enable', !/sim_heal_enable/.test(read(UCI_CFG)));
-ok('uci-defaults 里没有 sim_heal_enable', !/sim_heal_enable/.test(read(UCI_DEF)));
+/* ★ 2026-09-28：这两个文件读不到时 read() 返回 ''，`!/x/.test('')` 恒为真 ——
+   路径写错/文件被删都会让断言变成恒绿。先assert 文件读得到。 */
+const uciCfgText = read(UCI_CFG);
+const uciDefText = read(UCI_DEF);
+ok('UCI 随包配置可读（否则下面那条恒真）', uciCfgText.length > 0, '读不到 ' + UCI_CFG);
+ok('uci-defaults 可读（否则下面那条恒真）', uciDefText.length > 0, '读不到 ' + UCI_DEF);
+ok('UCI 随包配置里没有 sim_heal_enable', !/sim_heal_enable/.test(uciCfgText));
+ok('uci-defaults 里没有 sim_heal_enable', !/sim_heal_enable/.test(uciDefText));
 ok('服务配置页没有「SIM 卡状态自愈」卡片', !/SIM 卡状态自愈/.test(svc));
 ok('服务配置页不再读写 sim_heal_enable', !/sim_heal_enable/.test(svc));
 

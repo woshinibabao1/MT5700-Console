@@ -79,6 +79,10 @@ TARGETS = {
     #   原 "nsjs" 键指向 network_status.js 却配 vowifi-contract —— 迁页后这是**跑错
     #   测试**的组合（红线 16b），所以删键而不是留着。
     "vowifijs": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
+    # ★ 2026-09-28：服务状态页的「读不到 ≠ 没有」守卫（service-status-unknown-contract）
+    #   守 service.js 的三个 catch 是否留痕、resolveStatus 是否先判 unknown。
+    #   service.js 此前没有任何变异目标 —— 新守卫当时只在本地手工验过，没进自动验证。
+    "svcjs": ATWB.parent / "view" / "at-webserver" / "service.js",
     # 「调用了未定义的函数」守卫（tests/undefined-fn-contract.test.js）也按文件变异。
     "undeffnjs": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
     # ★ 再挂三个键（2026-09-25 全量审计）：引导收口契约（tests/bootstrap-contract.test.js）
@@ -176,6 +180,7 @@ TARGET_TEST = {
     "uc2": ROOT / "tests" / "vowifi-contract.test.js",
     "rpcjs2": ROOT / "tests" / "vowifi-contract.test.js",
     "vowifijs": ROOT / "tests" / "vowifi-contract.test.js",
+    "svcjs": ROOT / "tests" / "service-status-unknown-contract.test.js",
     "undeffnjs": ROOT / "tests" / "undefined-fn-contract.test.js",
     "corejs": ROOT / "tests" / "bootstrap-contract.test.js",
     "dialjs": ROOT / "tests" / "bootstrap-contract.test.js",
@@ -245,6 +250,32 @@ ORIG = {k: v.read_bytes() for k, v in TARGETS.items()}
 
 # (名字, 目标, 旧片段, 新片段, 期望被点名的断言关键词)
 MUTATIONS = [
+    (
+        # ★ 锚点唯一性已核：service.js 里 `if (state.binUnknown) {` 只出现 1 次。
+        #   去掉它 → 读失败重新落到「未安装」并劝用户重装
+        #   （红线 23：把读不出来伪装成确定的故障结论 + 给出错误的修复建议）。
+        "读失败时退回「未安装」并劝人重装（status unknown 分支被删）",
+        "svcjs",
+        "if (state.binUnknown) {",
+        "if (false) {",
+        "读失败时不下「未安装」的结论",
+    ),
+    (
+        # ★ 锚点唯一性已核：service.js 里 `if (state.svcUnknown) {` 只出现 1 次。
+        "读失败时退回「未注册」并把用户引去查 init 脚本（svcUnknown 分支被删）",
+        "svcjs",
+        "if (state.svcUnknown) {",
+        "if (false) {",
+        "serviceList 读失败时不许把人引去查 init.d",
+    ),
+    (
+        # ★ 锚点唯一性已核：service.js 里这行 catch 只出现 1 次。
+        "rpc 读失败不再留痕（catch 静默返回空壳，读不到与真的没有再次不可区分）",
+        "svcjs",
+        "statBinary(BINARY).catch(function () { statFailed = true; return null; })",
+        "statBinary(BINARY).catch(function () { return null; })",
+        "statBinary 的 catch 会置 statFailed",
+    ),
     (
         "超时后立刻向卡敲门（2026-09-20 那个把整包打死的旧 bug）",
         "js",
@@ -1643,6 +1674,36 @@ def syntax_ok(path):
     return p.returncode == 0
 
 
+def self_check_maps():
+    """自省：TARGETS / TARGET_TEST / MUTATIONS 三张表必须自洽。
+
+    ★ 2026-09-28 新增。为什么需要它：仓库红线 16b 写着 —— 变异挂错测试文件时，
+      「变异生效却没人判红，**比没守卫更危险**」。而这三张表原来全靠人工对照，
+      TARGETS 的注释里反复写「别挂错」「一份文件两条测试通道」，
+      却**没有任何机器检查**。于是新增守卫时忘了补映射、或改了键名漏改另一处，
+      都会静默退化成"变异改了、没人判红"，而输出仍然全绿。
+      这里把它变成会判红的断言。
+    """
+    bad = []
+    for k in TARGETS:
+        if k not in TARGET_TEST:
+            bad.append("TARGETS 的键 %r 在 TARGET_TEST 里没有映射"
+                       "（变异会生效但没人判红）" % k)
+    for k, t in TARGET_TEST.items():
+        if k not in TARGETS:
+            bad.append("TARGET_TEST 的键 %r 在 TARGETS 里没有对应目标" % k)
+        if not t.exists():
+            bad.append("TARGET_TEST 的键 %r 指向的测试文件不存在：%s" % (k, t))
+    for i, item in enumerate(MUTATIONS, 1):
+        name, tgt = item[0], item[1]
+        if tgt not in TARGETS:
+            bad.append("MUTATIONS[%d]（%s）的目标键 %r 不在 TARGETS 里" % (i, name, tgt))
+        elif tgt not in TARGET_TEST:
+            bad.append("MUTATIONS[%d]（%s）的目标键 %r 没有 TARGET_TEST 映射"
+                       "（变异生效却没人判红）" % (i, name, tgt))
+    return bad
+
+
 def restore_all():
     for k, path in TARGETS.items():
         path.write_bytes(ORIG[k])
@@ -1706,6 +1767,19 @@ def main():
     rc, _ = run_test("esimjs")
     print("还原后基线:", "绿色" if rc == 0 else "红！")
     return 1 if (bad or rc != 0 or not same) else 0
+
+
+# ★ 2026-09-28：表自洽是**纯静态**检查，放在所有定义之后、进入 main 之前。
+#   ★ 实测校准（别把它想得比实际更强）：模块级的 `NODE = _resolve_node()` 仍在**更前面**
+#     执行，所以本机没设 NODE_BIN 时这里同样**跑不到** —— 只会看到「找不到 node」。
+#     它能拦住的是"新增守卫忘了补映射"这类结构性退化：在 CI（有 node）与设了 NODE_BIN
+#     的本机上，它都会在 main() 之前跑完并判红。
+_map_bad = self_check_maps()
+if _map_bad:
+    print("三张表（TARGETS / TARGET_TEST / MUTATIONS）不自洽，先修表再谈验证守卫：")
+    for _m in _map_bad:
+        print("  ✗", _m)
+    sys.exit(1)
 
 
 if __name__ == "__main__":

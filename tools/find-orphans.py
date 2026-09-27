@@ -344,6 +344,38 @@ def check_events():
 # --------------------------------------------------------------------------- #
 # F. CSS 孤儿类
 # --------------------------------------------------------------------------- #
+# 「定义处已说明为何保留」的关键词。只收**明确的保留意图**，不收"通用"这类含糊词，
+# 否则等于把判据放宽到没判据（宁可少分组，也不要把待判的混进已说明）。
+KEEP_WORDS = ('保留备用', '保留，备用', '保留以便', '预留', '暂留', '尚未接上',
+              '迁移中', '备用组件', '留待')
+
+
+def css_context_above(css, cls, window=80):
+    """取该类定义处上方【最近的一段块注释】。
+
+    ★ 2026-09-28 修正：初版写的是"往上逐行，遇到非注释非空行就停"，但它**从来不工作** ——
+      类定义的正上方几乎总是**上一个规则的收尾 `}`**，所以第一行就 break，
+      ctx 恒为空、23 条孤儿类一条也分不到"已说明"组（本工具自己跑出来的实测）。
+      改为：在定义处上方 window 行内找【最近的 `*/`】，再向上配对到它的 `/*`。
+      这样"读数胶囊……保留备用"那种写在样式块正上方的说明就能被取到。
+    """
+    idx = css.find('.' + cls)
+    if idx < 0:
+        return ''
+    above = css[:idx].split('\n')[-window:]
+    end = None
+    for i in range(len(above) - 1, -1, -1):
+        if '*/' in above[i]:
+            end = i
+            break
+    if end is None:
+        return ''
+    for j in range(end, -1, -1):
+        if '/*' in above[j]:
+            return '\n'.join(above[j:end + 1])
+    return ''
+
+
 def check_css():
     """样式表定义 vs JS 里实际出现的类
 
@@ -356,14 +388,24 @@ def check_css():
     defined = sorted(set(re.findall(r'\.(mt5700-[a-z0-9-]+)', css)))
     userblob = '\n'.join(read(p) for p in walk(('.js', '.uc')))
     prefixes = set(re.findall(r'(mt5700-[a-z0-9-]*-)', userblob))
-    bad = []
+    bad, kept = [], []
     for c in defined:
         if c in userblob:
             continue
         if any(c.startswith(pf) for pf in prefixes):
             continue
-        bad.append(('CSS 定义了但 JS/ucode 从不使用（疑似基线工具类残留）', c, 'mt5700.css'))
-    return bad, len(defined)
+        # ★ 2026-09-28：区分「刻意保留」与「真待判」。
+        #   起因：本工具只列不判，23 条孤儿类全靠人工逐条核。人工核的时候用的判据
+        #   其实就是「定义处旁边的注释有没有说清楚为什么留着」——例如读数胶囊那条：
+        #     「该功能已于 2026-09-19 整块下线……胶囊本身是通用组件，保留备用」。
+        #   既然判据是确定的，就该由工具给出分组，人只看"真待判"那一小撮。
+        ctx = css_context_above(css, c)
+        if any(w in ctx for w in KEEP_WORDS):
+            kept.append(('定义处已说明为何保留（人工复核时确认措辞即可）', c, 'mt5700.css'))
+        else:
+            bad.append(('CSS 定义了但 JS/ucode 从不使用，且定义处没说明为何保留（待判）',
+                        c, 'mt5700.css'))
+    return bad, kept, len(defined)
 
 
 # --------------------------------------------------------------------------- #
@@ -505,12 +547,16 @@ def main():
         print('  （无）')
 
     print('\n### F. CSS 孤儿类')
-    f, total = check_css()
+    f, f_kept, total = check_css()
     if f:
         for kind, k, where in f:
             print('  · [%s] %s' % (kind, k))
     else:
-        print('  （无）')
+        print('  （无待判的）')
+    if f_kept:
+        print('  —— 以下定义处已写明为何保留，人工只需确认措辞（不算待判）：')
+        for kind, k, where in f_kept:
+            print('  · %s' % k)
     print('  （样式表共定义 %d 个 mt5700-* 类）' % total)
 
     total_bad = len(a) + len(b) + len(c) + len(d) + len(e) + len(f)

@@ -172,6 +172,15 @@ if (typeof jsQR === 'function') {
 
 const esimSrc = fs.existsSync(ESIM_JS) ? fs.readFileSync(ESIM_JS, 'utf8') : '';
 
+/*
+ * ★ 2026-09-28 补前置断言：上面这行在 ESIM_JS 缺失/改名时返回空串，于是
+ *   **E1~E9 的正向断言会全部恒绿**（`!/x/.test('')` 恒为真、`hasXxx('')` 恒为 false），
+ *   而它们各自的反向自检**仍然通过**（那些用的是硬编码坏样本，不依赖 esimSrc）——
+ *   也就是说这个文件会「整组空转却全绿」。本文件对 jsqr.js 与 LICENSE 都有
+ *   existsSync 断言，唯独漏了 esim.js。
+ */
+ok('E0 esim.js 可读（否则下面 E1~E9 全是空转）', esimSrc.length > 0, '读不到 ' + ESIM_JS);
+
 /* E1：不再把整条路堵死在 BarcodeDetector 上。
    反向：改动前那两句「当前环境不支持…」只要还在，就必须判红。 */
 function hasNativeOnlyDeadEnd(s) {
