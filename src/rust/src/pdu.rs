@@ -363,6 +363,48 @@ mod tests {
         assert_eq!((0xF4u8 >> 2) & 0x03, 1, "旧式算式在 0xF4 上是 1 —— 所以必须走 dcs_encoding");
     }
 
+    /// 跨端一致性：与前端 `tests/pdu-cross-end-contract.test.js` **读同一份 fixture**
+    /// （`tests/fixtures/pdu-samples.json`），断言同一结果。
+    ///
+    /// 这条契约补的是本仓的一个结构性缺口：`parse.js` 与 `pdu.rs` 各有一份 PDU 解码，
+    /// 而**各自的测试只守自己那一侧**（`sms-pdu.test.js` 拿后端样本当输入验证前端），
+    /// 所以"两端各自改对、口径却分叉"不会被任何测试发现 —— 2026-09-28 的人工核对就查出
+    /// 四处（填充位造字、DCS 分组、地址 BCD/TON=1、时间戳日期进位），方向各不相同。
+    /// 新增样本请改 fixture，两侧自动生效。
+    #[test]
+    fn pdu_共享样本两端一致() {
+        let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/pdu-samples.json");
+        let raw = std::fs::read_to_string(p).unwrap_or_else(|e| panic!("读不到共享样本 {p}: {e}"));
+        let v: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("共享样本不是合法 JSON: {e}"));
+        let samples = v["samples"].as_array().expect("samples 必须是数组");
+        assert!(!samples.is_empty(), "共享样本不能为空（否则这条契约形同虚设）");
+
+        for s in samples {
+            let name = s["name"].as_str().unwrap_or("(无名)");
+            let hex = s["hex"].as_str().unwrap_or_else(|| panic!("{name}: 样本缺 hex"));
+            let sms = decode_incoming_pdu(hex).unwrap_or_else(|e| panic!("{name}: 解码失败 {e}"));
+
+            assert_eq!(sms.sender, s["sender"].as_str().unwrap_or(""), "{name}: 发送方不一致");
+            if let Some(c) = s["content"].as_str() {
+                assert_eq!(sms.content, c, "{name}: 正文不一致");
+            }
+            if let Some(pfx) = s["contentPrefix"].as_str() {
+                assert!(
+                    sms.content.starts_with(pfx),
+                    "{name}: 正文不以 {pfx:?} 开头，实际 {:?}",
+                    sms.content.chars().take(24).collect::<String>()
+                );
+            }
+            if let Some(exp) = s["partial"].as_object() {
+                let got = sms.partial.as_ref().unwrap_or_else(|| panic!("{name}: 应解析出分段信息"));
+                assert_eq!(got.reference, exp["reference"].as_u64().unwrap_or(0) as u32, "{name}: reference");
+                assert_eq!(got.parts_count, exp["parts_count"].as_u64().unwrap_or(0) as u32, "{name}: parts_count");
+                assert_eq!(got.part_number, exp["part_number"].as_u64().unwrap_or(0) as u32, "{name}: part_number");
+            }
+        }
+    }
+
     #[test]
     fn test_decode_ucs2_pdu() {
         let sms = decode_incoming_pdu(UCS2_PDU).unwrap();

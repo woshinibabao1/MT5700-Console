@@ -5,6 +5,77 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.81] - 2026-09-28
+
+**补上本仓一个结构性缺口：跨端 PDU 一致性测试。**
+
+### Added
+
+**共享 fixture + 两端各自断言**（这是本会话命中率最高那类问题的根治手段）
+
+`parse.js` 与 `pdu.rs` 各有一份 PDU 解码实现，而**各自的测试只守自己那一侧** ——
+`tests/sms-pdu.test.js`（92 项）是拿后端样本当**输入**来验证前端，所以"两端各自改对、
+口径却分叉"它一律不会变红。
+
+2026-09-28 的人工核对查出的**四处漂移**（方向各不相同）都是这样活下来的：
+
+| 漂移 | 谁修了 / 谁漏了 |
+| :-- | :-- |
+| `unpackSeptets` 的「填充位造字」 | Rust 修了，前端漏改 |
+| `dcs_encoding` 的 0xC/0xE/0xF 组 | 前端修了，后端漏改 |
+| `decodeAddress` 的 BCD 半字节与 TON=1 的 `+` | 两头各缺一半 |
+| `decodeTimestamp` 的日期进位 | 前端 `Date` 进位 vs 后端 `chrono` 回落 |
+
+**做法**：`tests/fixtures/pdu-samples.json` —— 一份共享样本，**两侧各自读它、断言同一结果**。
+
+- 前端：`tests/pdu-cross-end-contract.test.js`（**12 项**）；
+- 后端：`pdu.rs` 的 `#[test] pdu_共享样本两端一致`，经
+  `concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/pdu-samples.json")` 定位。
+
+**新增样本请只改 fixture，两侧自动生效。** 不需要新依赖（`serde_json` 已是后端依赖）。
+
+**样本含一个真机数据**：10086 的 UCS2 长短信首段（BCD 发送方 `TOA=0xA0` + UDH 拼接头
++ 中文正文），两侧解出的发送方 / 正文前缀 / 分段信息完全一致 —— 这是**真机数据驱动的
+跨端验证**，不是自造样本。
+
+**变异验证（两侧各自能判红）**：
+
+- 抽掉后端的 TON=1 前导 `+` → `pdu_共享样本两端一致` **FAILED**；
+- 抽掉前端的 TON=1 前导 `+` → 前端 **判红 2 项**；
+- 两者还原后全绿。
+
+### 一条验证方法论的教训（重要，写给后来人）
+
+**Rust 侧做变异验证时，"还原"之后必须强制重编译**，否则会误判。
+
+我第一次还原后跑 `cargo test` 得到「42 passed / 2 failed」，一度以为源码没还原干净 ——
+实际是 `Copy-Item` 还原时把文件 mtime 恢复成了**备份的时间**（比编译产物旧），cargo 据此
+跳过重编译，**测的还是变异后的二进制**。`git diff` 显示源码只有我新增的 42 行、完全正确；
+`cargo clean -p at-webserver` 强制重编译后立刻 **44 passed / 0 failed**。
+
+> 前端（解释执行）没有这个问题，所以本会话前几轮对 JS 的变异验证一直可靠；
+> 只有 Rust 侧要额外加一步。`tools/verify-guards.py` 只对 JS 做变异、不跑 `cargo test`，
+> 因此不受影响。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `node tests/pdu-cross-end-contract.test.js` | **12 项通过**（含真机样本） |
+| `cargo test --all-targets`（`cargo clean -p` 后） | **44 passed / 0 failed**（43 → 44） |
+| 跨端守卫的变异验证 | 后端判红 1 处、前端判红 2 项；还原后全绿 |
+| `node tests/run-all.js` | 全部测试文件通过（新增第 4 个契约文件） |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- 这份 fixture 目前只有 **3 个样本**，覆盖 UCS2 / GSM7 / 国际号码 / BCD 号码 / UDH 长短信；
+  **未覆盖** `0xC/0xE/0xF` 组的 DCS 与"畸形日期"（那两处的依据仍是各自的单元测试）。
+  新增样本只需改 fixture，两端会自动生效。
+- `parse.js` 未读：`parseCMGL` 剩余、`parseRejInfo` / `arfcnToBand` / `nrArfcnToMHz` 等；
+  `rpc.js` / `mt5700.js` / `euicc.js` / `ui.js` / `compat.js` / 12 个视图层 / ucode 均未读。
+
+
 ## [2.3.80] - 2026-09-28
 
 读 `parse.js` 的掩码比较组（`normHexForCompare` / `hexMaskSubset` / `sysCfgApplyCheck`）。

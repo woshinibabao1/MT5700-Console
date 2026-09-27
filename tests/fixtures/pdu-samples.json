@@ -1,0 +1,35 @@
+{
+  "_why": "前端 parse.js 与后端 pdu.rs 各有一份 PDU 解码实现，此前**只有各自一侧的测试**，所以『两端各自改对、口径却分叉』不会被任何测试发现。2026-09-28 的人工核对已查出四处这类漂移（unpackSeptets 的填充位造字、dcs_encoding 的分组、decodeAddress 的 BCD 半字节与 TON=1 的 +、decodeTimestamp 的日期进位）。本文件是**共享样本**：两侧各自读同一份并断言同一结果，任一端分叉即判红。",
+  "_consumers": [
+    "tests/pdu-cross-end-contract.test.js（前端 Parse.decodeIncomingPdu）",
+    "src/rust/src/pdu.rs 的 #[test] pdu_共享样本两端一致（后端 decode_incoming_pdu）"
+  ],
+  "_fields": {
+    "hex": "SMS-DELIVER 的完整 PDU（含 SCA 部分）",
+    "sender": "期望的发送方（TON=1 国际号码带前导 +）",
+    "content": "期望的完整正文（与 contentPrefix 二选一）",
+    "contentPrefix": "期望的正文前缀（正文很长时用）",
+    "partial": "期望的长短信分段信息，可选"
+  },
+  "samples": [
+    {
+      "name": "UCS2 + 国际号码（TOA=0x91 → TON=1，两侧都必须带前导 +）",
+      "hex": "00040B913108108300F0000852805221000023046D4B8BD5",
+      "sender": "+13800138000",
+      "content": "测试"
+    },
+    {
+      "name": "GSM7 短消息（hello）",
+      "hex": "00040B913108108300F000005280522100002305E8329BFD06",
+      "sender": "+13800138000",
+      "content": "hello"
+    },
+    {
+      "name": "真机样本：10086 的 UCS2 长短信首段（BCD 发送方 TOA=0xA0 + UDH 拼接头）",
+      "hex": "0891683108901705F16405A00180F6000862907212022423880500032004015C0A656C76845BA26237FF0C622A6B6200320030003200365E740030003967080032003765E50032003170B9003200305206FF0C60A876846D4191CF4F7F752860C551B559824E0BFF1A000A5F5367086D4191CF603B91CF00390031003700470042FF0851764E2D901A75286D4191CF00320035003200470042FF0C5B9A54116D41",
+      "sender": "10086",
+      "contentPrefix": "尊敬的客户",
+      "partial": { "reference": 32, "parts_count": 4, "part_number": 1 }
+    }
+  ]
+}
