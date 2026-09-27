@@ -5,6 +5,59 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.94] - 2026-09-28
+
+本批 1 项，未改生产代码。
+
+### Fixed
+
+**63. `cellscan-removed-contract`：反向自检用 `String.replace`（只换第一处）**
+
+该文件 4 处「构造回退样本」原来都写 `X.replace(目标, 替换)` ——
+而 **`String.replace` 只换第一处**。其中 `'pdcp_data'` 在 `rpc.js` 里**出现 2 次**，
+第 122 行只是**恰好**第一处就是那个事件数组元素，断言才通过（靠巧合）。
+
+**这个文件自己第 127-129 行的注释正好记录过同类教训**：
+> ★ 首版把 ucode 与 cfg 写死在闭包里、只让 rust 可换，于是「拆掉 ucode 那一处」的替换串
+> 用的是 Rust 的写法（`"AT^CELLSCAN"`）而不是 ucode 的（`'AT^CELLSCAN'`），
+> **替换根本没生效 —— 反向断言测了个空气。**
+
+所以这是同一原则的漏网。4 处统一改成 `split(...).join(...)` 全局替换，并在那段注释后
+补了一句说明。**变异验证**：把 `cellscan` 放回 `handlePush` 的事件数组 →
+**2 项判红**（含"★ 反向：handlePush 若重新放回 cellscan，守卫必须检出"）；恢复后 22 项通过。
+
+### 顺带核查过、但**确认不是问题**的 11 处
+
+用脚本逐一统计"被替换的字面量在目标源码里出现几次"（>1 次才有风险）：
+`at-batch` / `esim-contract` / `esim-qr-decode`（2 处）/ `euicc-channel-fallback`（3 处）/
+`euicc-contract` / `busy-fastfail` / `euicc-download` —— **各字面量均只出现 1 次**，
+`replace` 与 `split/join` 等价，**不动**。
+
+（另有 2 处我的初测报了"0 次/2 次"，核实后都是**我的测法有误**：
+`cellscan:140` 替换的是 `cfg` 不是 ucode；`coupling()` 的语义是"三者全有或全无"，
+删掉其一必然返回 false。）
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cellscan-removed-contract` | 22 项通过 |
+| 变异（把 cellscan 放回事件数组） | **2 项判红** ✓ |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- 本批只有 **1 项**。另外 11 处候选经实测（字面量出现次数）**确认无风险**，
+  按"不得没有依据的修改"保持不动；不为凑满 5 项硬加改动。
+- 本批同时读完了 6 个尚未审计的契约测试（`version-consistency` / `read-command-fresh` /
+  `refresh-guard` / `rpc-command-budget` / `log-seq` / `at-error-text`），**质量普遍很高**，
+  只有本批这一处需要动。其中两条注释值得留档：
+  · `read-command-fresh`：「原先写的是『带 fresh 的 AT+CGMR 出现 ≥2 处』，那是**计数式断言**：
+    对『在同一个函数里连发两条』完全不设防（删掉一个、再补一个，计数照样是 2，守卫恒绿）」；
+  · `rpc-command-budget`：「反向断言必须全局替换（split/join）。`String.replace` 只换第一处
+    —— 只改一处的话另一处仍是新写法，断言会恒绿」。
+
 ## [2.3.93] - 2026-09-28
 
 攒满一批推送。本批主题：**恒真断言**与**名单点名**。3 项，未改生产代码。

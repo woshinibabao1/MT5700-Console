@@ -119,14 +119,18 @@ function hasScanEvent(src) {
 }
 ok('★ 反向：handlePush 若重新放回 cellscan，守卫必须检出',
 	hasScanEvent(rpcJs) === false &&
-	hasScanEvent(rpcJs.replace("'pdcp_data'", "'pdcp_data', 'cellscan'")) === true);
+	hasScanEvent(rpcJs.split("'pdcp_data'").join("'pdcp_data', 'cellscan'")) === true);
 ok('★ 反向：配置若重新写成旧口径，守卫必须检出',
 	!/全网扫频允许运行的秒数/.test(cfg) &&
 	/全网扫频允许运行的秒数/.test(cfg + '\n# 一次 ^CELLSCAN 全网扫频允许运行的秒数\n') === true);
 /* 三处耦合的判定函数：分开传三个源，反向断言才能精确拆掉其中一处。
    ★ 首版把 ucode 与 cfg 写死在闭包里、只让 rust 可换，于是「拆掉 ucode 那一处」
      的替换串用的是 Rust 的写法（`"AT^CELLSCAN"`）而不是 ucode 的（`'AT^CELLSCAN'`），
-     替换根本没生效 —— 反向断言测了个空气。 */
+     替换根本没生效 —— 反向断言测了个空气。
+   ★ 2026-09-28 同类收口：下面 4 处回退样本原来都用 String.replace ——
+     **它只换第一处**。其中 `'pdcp_data'` 在 rpc.js 里出现 2 次，只是恰好第一处
+     就是我们要改的那个数组元素，断言才通过（靠巧合）。统一改成 split/join 全局替换，
+     以后无论目标文本出现几次都不会再"测空气"。 */
 function coupling(rustSrc, ucodeSrc, cfgSrc) {
 	const r = hasIntercept(rustSrc);
 	const u = /'AT\^CELLSCAN'/.test(ucodeSrc);
@@ -135,11 +139,11 @@ function coupling(rustSrc, ucodeSrc, cfgSrc) {
 }
 ok('★ 反向：拆掉 ucode 那一条，耦合检查必须报红',
 	coupling(rpcRs, ucode, cfg) === true &&
-	coupling(rpcRs, ucode.replace("'AT^CELLSCAN', ", ''), cfg) === false);
+	coupling(rpcRs, ucode.split("'AT^CELLSCAN', ").join(''), cfg) === false);
 ok('★ 反向：拆掉配置那一条，耦合检查同样必须报红',
-	coupling(rpcRs, ucode, cfg.replace(/option\s+cellscan_timeout[^\n]*\n/, '')) === false);
+	coupling(rpcRs, ucode, cfg.split(/option\s+cellscan_timeout[^\n]*\n/).join('')) === false);
 ok('★ 反向：拆掉 Rust 那句拦截，耦合检查必须报红',
-	coupling(rpcRs.replace(/starts_with\("AT\^CELLSCAN"\)/, 'starts_with("AT^NOPE")'),
+	coupling(rpcRs.split(/starts_with\("AT\^CELLSCAN"\)/).join('starts_with("AT^NOPE")'),
 		ucode, cfg) === false);
 ok('★ 反向：gone() 对存在的文件必须返回 false（否则第 1 节全恒绿）',
 	gone('Makefile') === false && gone('tests/run-all.js') === false);
