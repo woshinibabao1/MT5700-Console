@@ -1131,8 +1131,18 @@ var Mt5700 = (function () {
 	/*
 	 * DOM 构造 helper 外露。
 	 *
-	 * 本文件是全站唯一的 E() 实现，但此前它只在本 IIFE 内可见，而 ui.js 的
-	 * promptModal 也直接调 E(...) —— 于是每一次弹窗都抛
+	 * ★ 2026-09-28 更正「全站唯一实现」这个说法（原文如此，与事实不符）：
+	 *   **LuCI 自己也有一个全局 E** —— 真机 /www/luci-static/resources/cbi.js:135
+	 *   `function E(){ return L.dom.create.apply(L.dom, arguments); }`，随 cbi.js
+	 *   作为传统脚本挂到 window。12 个视图层里的 362 处裸 `E(...)` 用的都是**它**，
+	 *   不是本文件这个（grep `Mt5700.E(` 在视图层是 0 次）。
+	 *   所以本文件的 E() 目前**唯一消费者是 ui.js 的 promptModal**。
+	 *   两者行为基本兼容：都只挂第 3 个参数、都支持把 DOM 节点当该参数
+	 *   （见 network_status.js:2462 那条 footgun 记录）。差异是本实现额外支持
+	 *   `on*` 属性转 addEventListener（LuCI 的未验证，但视图层没有一处用 on*，无影响）。
+	 *
+	 * 本文件的 E 此前只在本 IIFE 内可见，而 ui.js 的 promptModal 也直接调 E(...)
+	 * —— 于是每一次弹窗都抛
 	 * `ReferenceError: E is not defined`：改 IMEI / PUK 解锁 / eSIM 重命名 /
 	 * eSIM 删除 / 新增 PDP / 新短信 / 保存 AT 命令，这 7 处入口全部点不开。
 	 *

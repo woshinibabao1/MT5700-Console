@@ -3,10 +3,14 @@
 'require at-webserver/compat';
 'require at-webserver/rpc';
 'require at-webserver/parse';
-/* ★ 必须显式 require mt5700：本文件的 promptModal 用 E() 构造 DOM，而 E 全站
-   只有 mt5700.js 一份实现（经 api.E 导出）。此前缺这一行，promptModal 每次调用
-   都抛 `ReferenceError: E is not defined` —— 改 IMEI / PUK 解锁 / eSIM 重命名 /
-   eSIM 删除 / 新增 PDP / 新短信 / 保存 AT 命令这 7 处弹窗入口全部点不开。 */
+/* ★ 必须显式 require mt5700：本文件第 30 行 `var E = Mt5700.E;` 取的就是
+   mt5700.js 的实现（经 api.E 导出）。此前缺这一行，Mt5700 未定义 → E 取不到，
+   promptModal 每次调用都抛 `ReferenceError: E is not defined` ——
+   改 IMEI / PUK 解锁 / eSIM 重命名 / eSIM 删除 / 新增 PDP / 新短信 /
+   保存 AT 命令这 7 处弹窗入口全部点不开。
+   （注：原文写「E 全站只有 mt5700.js 一份实现」，**与事实不符** —— LuCI 的
+   cbi.js:135 另有一个全局 E（L.dom.create 转发），视图层 362 处裸 E(...) 用的是它。
+   本文件**刻意**取 Mt5700.E 而不依赖全局，两套的行为差异见 mt5700.js:1131 的说明。） */
 'require at-webserver/mt5700';
 /* global L, AtWs, Parse, baseclass, Mt5700 */
 

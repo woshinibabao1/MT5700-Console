@@ -202,7 +202,14 @@ return L.view.extend({
 		/* ---------------- 数据通道 ----------------
 		 * ★ expect 一律写 {}：LuCI 的 expect 不是「声明要哪些字段」，
 		 *   实测写 `expect: { entries: [] }` 只会把字段的**值**返回回来，
-		 *   表现为「ubus 直连明明有数据、页面却显示 0 条」这种极难查的现象。 */
+		 *   表现为「ubus 直连明明有数据、页面却显示 0 条」这种极难查的现象。
+		 *
+		 * ★ 2026-09-28 补一句界定：上面说的是**本文件**的写法（本页所有 declare
+		 *   都是 `expect: {}`）。别的文件里另有 `expect: { entries: [] }`、
+		 *   `expect: { '': {} }` 这类带字段的写法 —— 那不是笔误，而是**另一种用法**：
+		 *   调用方自己把返回值归一成数组/对象（见 service.js:114-131 对
+		 *   `Array.isArray(raw)` / `raw.entries` / `{name:type}` 映射的三种兼容），
+		 *   所以它们能正常工作。别据这句「一律」去批量"修正"那些写法。 */
 		var rpcLogs = L.rpc.declare({
 			object: 'mt5700', method: 'logs',
 			params: ['since', 'limit'], expect: {}

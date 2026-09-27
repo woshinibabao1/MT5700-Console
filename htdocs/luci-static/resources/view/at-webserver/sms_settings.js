@@ -731,7 +731,14 @@ return L.view.extend({
 		function loadAll() {
 			return Promise.resolve()
 				.then(loadIMS)
-				// 必须在 loadStorage 之前：后者会下发 AT+CMGF=0，会把它之前读到的格式覆盖掉
+				/*
+				 * ★ 2026-09-28 更正：这里原写「必须在 loadStorage 之前：后者会下发
+				 *   AT+CMGF=0，会把它之前读到的格式覆盖掉」—— 那条理由**已不成立**。
+				 *   loadStorage 原先确实会强切 PDU 模式，但那个写命令已按「读路径不许改
+				 *   模组全局状态」的原则删掉（见 loadStorage 上方的完整说明），
+				 *   现在它只发 AT+CPMS?，与短信格式无关。
+				 *   保留 loadFormat 在前只是习惯，调整顺序不再有影响。
+				 */
 				.then(loadFormat)
 				.then(loadStorageOptions)
 				.then(loadStorage)
