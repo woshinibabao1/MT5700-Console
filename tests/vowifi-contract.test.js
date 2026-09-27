@@ -23,6 +23,9 @@
  *   ⑤ ★ EF_DIR / IMPI / AKA 实测能力三件套（本轮新增，全部有真机实测依据）
  *   ⑥ 五道门与阻断清单齐全、ACL / rpc.js / 前端文案对齐
  *   ⑦ 真机取值回归（2026-09-24 实测，中国移动卡 + 三组对照）
+ *   ⑧ ★ 触发方式契约（2026-09-27 用户口径「改成不自动进行」）：五道门只由
+ *      「评估 VoWiFi」按钮触发，进页面与点「刷新」都不许自动跑；但开关的
+ *      当前值单独用一条只读 AT^IMSSWITCH? 保证是真值（读不到则显示未知）
  *
  * 运行：node tests/vowifi-contract.test.js
  */
@@ -74,6 +77,18 @@ function grab(name, src) {
 		else if (c === '}') { depth--; if (started && depth === 0) return src.slice(i, j + 1); }
 	}
 	throw new Error('函数体括号不配对：' + name);
+}
+
+/*
+ * 去注释后的纯代码（实现与 tests/esim-contract.test.js 的 stripComments 同一份）。
+ *
+ * ★ 为什么必须有它：⑧ 那组断言查的是「某个调用点在不在了」，
+ *   而**说明注释里必然要引用那个调用点的旧写法**（改动的来龙去脉就写在那儿）。
+ *   不做这一步判定，守卫会被自己的注释顶住 —— 今天已经踩过一次同型的
+ *   （说明注释把一个 po 孤儿「洗白」了）。
+ */
+function stripComments(src) {
+	return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
 }
 
 /* ucode 与 JS 在这几个函数上语法一致（length()/substr() 是注入的），直接 eval 跑真逻辑。
@@ -569,25 +584,49 @@ ok('★ rpc 声明不带 params（域名由后端拼，前端不传任何东西�
 ok('rpc.js 暴露了 AtWs.vowifi', /\bvowifi: fetchVowifi,/.test(rpcSrc));
 ok('★ 后端没升级时前端要明确提示（不能静默什么都不出）',
 	/后端未升级：rpcd 没有 mt5700\.vowifi 方法/.test(viewSrc));
-ok('★ 评估按钮保留（自动取过之后仍可手动重取）',
+ok('★ 评估按钮在（五道门只能靠它触发）',
 	/Mt5700\.ghostButton\(t\.busy \? '评估中…' : '评估 VoWiFi', runVowifi\)/.test(viewSrc));
 ok('★ 评估中重复点击要挡住（并发会占满 rpcd 工作线程）',
 	/function runVowifi\(\) \{\s*\n\s*var t = vowifiState;\s*\n\s*if \(t\.busy\) return;/.test(viewSrc));
 
 /*
- * ★★ 进页面就取一次（2026-09-24 用户口径：后端像 exitip 那样直接暴露成 AtWs.vowifi，
- *   前端不必等用户点一下才有数据）。
- *   两条必须同时成立：
- *   ① 挂在连接成功之后的链里（否则没连上就发，必然失败）；
- *   ② 排在 loadAll() **之后** —— 五道门真机实测 1.8~8.5s，并进 loadAll 会把首屏
- *      其它卡一起拖住。只断言「有调用」是不够的，顺序同样是契约。
+ * ★★ 反向契约：五道门评估**只能手点「评估 VoWiFi」触发**（2026-09-27 用户口径
+ *   「评估vowifi 功能改成不自动进行」）。
+ *
+ * 改之前的行为：进页面自动跑一次（真机实测 t=1.8s 发出 mt5700.vowifi → t=4.0s
+ *   出结论，≈2.2s，含逐条读卡 + 两次公网解析），且底部「刷新」也连带重跑一次。
+ *
+ * ⚠ 这类「不许出现 X」的断言**默认就是绿的**（没有 = 通过），最容易写成恒绿。
+ *   所以用两条互相独立的定位断言（都跑在**去注释后的纯代码**上）：
+ *     ① 从 connectThen 起直到文件末尾，不许再出现 runVowifi 这个词；
+ *     ② 全文件里 `runVowifi()` 只允许出现 1 次（函数声明本身）——
+ *        按钮绑的是**函数引用** `runVowifi`（不带括号），所以任何**调用**
+ *        都会让计数变成 2。
  */
-ok('★★ 进页面自动取一次 VoWiFi（挂在连接成功之后）',
-	/Mt5700\.connectThen\(function \(\) \{\s*\n\s*loadAll\(\);\s*\n\s*\}\)\.then\(function \(\) \{[\s\S]{0,700}?runVowifi\(\);/.test(viewSrc));
-ok('★★ 自动取数排在 loadAll 之后（不拖慢首屏其它卡）',
-	viewSrc.indexOf('loadAll();') < viewSrc.indexOf('runVowifi();', viewSrc.indexOf('loadAll();')));
-ok('★ 刷新按钮也重取 VoWiFi（与首屏顺序一致：先其它卡，再五道门）',
-	/Mt5700\.primaryButton\('刷新', function \(\) \{\s*\n\s*loadAll\(\)\.then\(function \(\) \{ runVowifi\(\); \}\);\s*\n\s*\}\)/.test(viewSrc));
+const vowifiCode = stripComments(viewSrc);
+const connTail = vowifiCode.slice(vowifiCode.indexOf('Mt5700.connectThen('));
+ok('★★ 进页面不再自动跑五道门（用户口径：改成不自动进行）',
+	connTail.length > 100 && connTail.indexOf('runVowifi') < 0,
+	'connectThen 之后仍出现 runVowifi —— 五道门又变成进页面就跑了');
+ok('★★ 全页只有函数声明那一处 `runVowifi()`，没有任何自动调用点',
+	(vowifiCode.match(/runVowifi\(\)/g) || []).length === 1,
+	'实际出现 ' + (vowifiCode.match(/runVowifi\(\)/g) || []).length + ' 次（期望 1：只剩函数声明）');
+ok('★ 刷新按钮不再连带跑五道门（评估只由「评估 VoWiFi」按钮触发）',
+	/Mt5700\.primaryButton\('刷新', function \(\) \{\s*\n\s*loadAll\(\);\s*\n\s*\}\)/.test(vowifiCode)
+	&& vowifiCode.indexOf('loadAll().then(function () { runVowifi(); })') < 0);
+
+/*
+ * ★ 但开关的当前值不能跟着一起"不自动"：它原先取自那份评估结果，不评估就没数据
+ *   → 开关会一直显示「关」，与真机真实状态相反（真机实测 ^IMSSWITCH=1,0,0，
+ *   而基线测量里未评估时开关确实渲染成 off）。所以单独留**一条只读**：
+ *   AT^IMSSWITCH?（手册 4.10），挂在 loadAll 链里，点「刷新」时它跟着刷新。
+ *   ★ 必须 fresh —— 状态类读取不许吃读缓存（否则显示的是下发前的旧值）。
+ */
+ok('★ 页面加载只读一条开关状态 AT^IMSSWITCH?（手册 4.10）',
+	/function fetchImsSwitch\(\)/.test(viewSrc)
+	&& /sendCommand\('AT\^IMSSWITCH\?', \{ fresh: true \}\)/.test(viewSrc));
+ok('★ 那条读挂在 loadAll 链里（点「刷新」时一并刷新开关状态）',
+	/\.then\(fetchImsSwitch\)/.test(viewSrc));
 
 /* 迁移：旧宿主不许留残骸（两页都渲染同一张卡是最难发现的一类重复） */
 ok('★★ 网络状态页已不再有任何 VoWiFi / ePDG 痕迹（整块迁到模组设置）',
@@ -652,9 +691,11 @@ ok('★ 后端没升级时前端对开关也要明确提示（不能点了什么
 	/后端未升级：rpcd 没有 mt5700\.vowifi_set 方法/.test(viewSrc));
 ok('★ 开关用五页共用的 .mt5700-switch 组件（不另造一套开关）',
 	/var vowifiSwitchWrap = E\('div', \{ 'class': 'mt5700-switch' \}\);/.test(viewSrc));
-ok('★★ 开关状态取后端实测值，不是本地勾选记忆（掉电保存的命令会记住一次没生效的写入）',
-	/vowifiSwitch\.checked = !!\(t\.data && t\.data\.ims && String\(t\.data\.ims\.imsswitch\) === '1'\);/
-		.test(viewSrc));
+ok('★★ 开关状态取实测值，不是本地勾选记忆（掉电保存的命令会记住一次没生效的写入）',
+	/var known = \(t\.imssw === '1' \|\| t\.imssw === '0'\);/.test(viewSrc)
+	&& /vowifiSwitch\.checked = \(t\.imssw === '1'\);/.test(viewSrc));
+ok('★★ 读不到开关状态时不许显示成「关」（红线 23：读不到 ≠ 确实是 0）',
+	/vowifiSwitch\.disabled = !known \|\| !!\(t\.busy \|\| t\.setBusy\);/.test(viewSrc));
 ok('★★ 关 IMS 要先确认（会断掉 IMS 短信与 VoLTE 语音），取消时把开关拨回去',
 	/Mt5700\.confirm\('关闭会下发 AT\^IMSSWITCH=0,0,0/.test(viewSrc)
 	&& /function \(\) \{ doVowifiSet\(0\); \}, '确定关闭',\s*\n\s*function \(\) \{ renderVowifiSwitch\(\); \}/
@@ -666,7 +707,8 @@ ok('★ 开了但 VoWiFi 仍不成立时，要把还差什么一起说出来',
 ok('★ 回读不到不许说「已生效」（unknown 单独成一句）',
 	/'命令已下发，但回读不到 \^IMSSWITCH/.test(viewSrc));
 ok('★ 开关与评估两条路互斥（都碰串口，并发会让回读拿到别人的包）',
-	/vowifiSwitch\.disabled = !!\(t\.busy \|\| t\.setBusy\);/.test(viewSrc));
+	/!known \|\| !!\(t\.busy \|\| t\.setBusy\)/.test(viewSrc)
+	&& /if \(t\.busy \|\| t\.setBusy\) \{ renderVowifiSwitch\(\); return; \}/.test(viewSrc));
 ok('★ 开关文案说清「ePDG 由运营商发布，本机没有可下发的参数」（不假装开了就通）',
 	/ePDG 隧道由运营商发布，本机没有可下发的参数/.test(viewSrc));
 

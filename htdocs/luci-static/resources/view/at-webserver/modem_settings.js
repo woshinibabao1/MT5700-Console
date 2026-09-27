@@ -606,11 +606,25 @@ return L.view.extend({
 		body.appendChild(vowifiCard);
 
 		/*
-		 * VoWiFi 的状态是**页内局部**的：这一页没有 state 对象（每张卡各自 load），
-		 * 而且它**手动触发、不进 loadAll()** —— 评估要跑五道门（含多次卡上读取与两次
-		 * 公网解析），跟着底部「刷新」一起跑会把整页加载拖到几十秒。
+		 * VoWiFi 的状态是**页内局部**的：这一页没有 state 对象（每张卡各自 load）。
+		 *
+		 * ★★ 五道门评估（mt5700.vowifi）**只能手点「评估 VoWiFi」触发**
+		 *   （2026-09-27 用户口径：改成不自动进行）。它要逐条读卡（EF_AD / EF_DIR）
+		 *   + 走系统 DNS 与 DoH 两条公网解析，真机实测 t=1.8s 发出 → t=4.0s 出结论
+		 *   （≈2.2s）。所以既不在进页面时跑，也不跟底部「刷新」一起跑。
+		 *
+		 * ★ 但**开关的当前值**不能跟着一起"不自动"：它原先取自那份评估结果，
+		 *   不评估就没数据 —— 开关会一直显示「关」，而真机此时其实是
+		 *   ^IMSSWITCH=1,0,0（开）。所以单独留一条**只读**：AT^IMSSWITCH?
+		 *   （手册 4.10，真机 65~133ms），一条 AT 换开关永远是真值。
+		 *
+		 * imssw：开关当前值，**唯一来源**。两条路都写它 ——
+		 *   · 进页面 / 点「刷新」时那条只读（fetchImsSwitch）
+		 *   · 五道门评估回来后用后端实测值覆盖（runVowifi / doVowifiSet）
+		 *   值域 '1' / '0' / null；null ＝ **读不到**，不是「关」（红线 23）。
 		 */
-		var vowifiState = { busy: false, ran: false, data: null, err: '', setBusy: false, setMsg: '' };
+		var vowifiState = { busy: false, ran: false, data: null, err: '',
+			setBusy: false, setMsg: '', imssw: null };
 
 		/* ---------- 常量与渲染 ---------- */
 
@@ -709,12 +723,42 @@ return L.view.extend({
 		};
 
 		/* 开关状态 = 后端实测值（^IMSSWITCH），不是本地勾选记忆 */
+		/*
+		 * 只读一条开关状态（手册 4.10：AT^IMSSWITCH? → ^IMSSWITCH: <lte>,<utran>,<gsm>）。
+		 *
+		 * 为什么单独读它：五道门评估已改成只能手点按钮（见 vowifiState 的注释），
+		 * 而开关的当前值原先取自那份评估结果 —— 不评估就没数据，开关会显示成「关」，
+		 * 与真机真实状态相反。这一条只花一条 AT（真机 65~133ms）。
+		 *
+		 * ★ fresh: true —— 这是**状态**，不许吃读缓存，否则显示的是下发前的旧值。
+		 * ★ 任何失败都落 null，不落 '0'：读不到 ≠ 确实是关（红线 23）。
+		 *   界面上 null 会禁用开关并写明「状态未知」，不允许把 null 画成「关」。
+		 */
+		function fetchImsSwitch() {
+			var t = vowifiState;
+			return AtWs.client.sendCommand('AT^IMSSWITCH?', { fresh: true }).then(function (res) {
+				var m = (res && res.success) ? atText(res).match(/\^IMSSWITCH:\s*(\d)/) : null;
+				t.imssw = m ? m[1] : null;
+				if (!disposed) renderVowifiSwitch();
+			}).catch(function () {
+				t.imssw = null;
+				if (!disposed) renderVowifiSwitch();
+			});
+		}
+
 		function renderVowifiSwitch() {
 			var t = vowifiState;
-			vowifiSwitch.checked = !!(t.data && t.data.ims && String(t.data.ims.imsswitch) === '1');
+			/*
+			 * 开关的当前值只有一个来源：t.imssw。
+			 * ★ 三态：'1' 开 / '0' 关 / null 未知。未知时**不能**画成「关」——
+			 *   那是编出来的状态；禁用开关并说明，让用户去点「刷新」或「评估 VoWiFi」重试。
+			 */
+			var known = (t.imssw === '1' || t.imssw === '0');
+			vowifiSwitch.checked = (t.imssw === '1');
 			/* 评估或开关正在跑时锁住：两条路都会碰串口，并发会让回读拿到别人的包 */
-			vowifiSwitch.disabled = !!(t.busy || t.setBusy);
-			vowifiSetMsg.textContent = t.setMsg || '';
+			vowifiSwitch.disabled = !known || !!(t.busy || t.setBusy);
+			vowifiSetMsg.textContent = t.setMsg
+				|| (known ? '' : '读不到 ^IMSSWITCH —— 当前状态未知，点「刷新」或「评估 VoWiFi」重试');
 			/* 「无法开启」是这一块要让用户看见的结论 → 用现成的红色小字类，
 			   不另造 CSS 类（另造一个不存在的类名是静默失效）。 */
 			var bad = t.setMsg.indexOf('无法开启') === 0 || t.setMsg.indexOf('失败') >= 0
@@ -789,6 +833,12 @@ return L.view.extend({
 					t.data = r.facts;
 					t.err = '';
 				}
+				/*
+				 * 开关的唯一来源 t.imssw 也跟着后端实测值走：这次下发到底生没生效，
+				 * 以回读到的 ^IMSSWITCH 为准（掉电保存的命令会记住一次没生效的写入）。
+				 * r.imsswitch 为 null ＝ 回读不到 → 落 null（未知），不落 '0'。
+				 */
+				t.imssw = (r.imsswitch != null) ? String(r.imsswitch) : null;
 				if (!disposed) { renderVowifiSwitch(); renderVowifi(); }
 			});
 		}
@@ -916,7 +966,10 @@ return L.view.extend({
 			}
 		}
 
-		/* 手动触发：换卡才变的东西，不做自动轮询（也不该在页面加载时偷偷联网）。 */
+		/*
+		 * 五道门评估 —— **全页唯一的触发点是「评估 VoWiFi」按钮**（2026-09-27 用户口径：
+		 * 改成不自动进行）。换卡才变的东西，不做自动轮询，也不在页面加载时偷偷读卡 + 联网。
+		 */
 		function runVowifi() {
 			var t = vowifiState;
 			if (t.busy) return;
@@ -937,6 +990,12 @@ return L.view.extend({
 					t.err = (r && r.error) || 'VoWiFi 评估失败';
 				} else {
 					t.data = r;
+					/*
+					 * 评估结果里带了后端实测的 ^IMSSWITCH（vowifiFacts 的 ims.imsswitch）
+					 * → 覆盖开关的唯一来源，省掉一条重复读。
+					 * 后端读不到时它是 null → 同样落 null（未知），不落 '0'。
+					 */
+					t.imssw = (r.ims && r.ims.imsswitch != null) ? String(r.ims.imsswitch) : null;
 				}
 				if (!disposed) renderVowifi();
 			});
@@ -1565,29 +1624,41 @@ return L.view.extend({
 				.then(fetchSysCfg)
 				.then(fetchSysCfgRanges)
 				.then(fetchThermConfig)
+				/*
+				 * 开关状态那条只读挂在这里（而不是跟着五道门评估）：
+				 * 成本一条 AT，进页面与点「刷新」都该把开关刷成真值。
+				 * ★ 它自己吞掉失败（落 null 并重绘），不会打断上面这些卡。
+				 */
+				.then(fetchImsSwitch)
 				.catch(function () { /* 单项数据失败时保留其余卡片，不打断整页 */ });
 		}
 
 		var bottomActions = Mt5700.panelActions(
-			/* 刷新 = 全部重取（含 VoWiFi），顺序与首屏一致：先其它卡，再五道门 */
+			/*
+			 * 刷新 = 重取本页各卡的读数（含「开关状态」那条只读）。
+			 * ★ **不再连带跑五道门评估**（2026-09-27 用户口径：评估改成不自动进行）——
+			 *   它只能由「评估 VoWiFi」按钮触发。
+			 */
 			Mt5700.primaryButton('刷新', function () {
-				loadAll().then(function () { runVowifi(); });
+				loadAll();
 			})
 		);
 		body.appendChild(bottomActions);
 
+		/*
+		 * ★★ 进页面**不跑**五道门评估（2026-09-27 用户口径：改成不自动进行）。
+		 *
+		 * 这里以前是 `Mt5700.connectThen(loadAll).then(function () { runVowifi(); });`
+		 * ——2026-09-24 的口径是「进页面就取一次，不必等用户点」。代价真机实测
+		 * t=1.8s 发出 mt5700.vowifi → t=4.0s 出结论（≈2.2s，逐条读卡 + 两次公网解析），
+		 * 而这张卡的结论只在换卡/换网时才变。现在改回纯手动：
+		 * 卡片进页面显示「未评估」+「评估 VoWiFi」按钮，用户点了才跑。
+		 * ★ 开关的当前值不靠它：那条由 loadAll 里的 fetchImsSwitch 单独读（一条 AT）。
+		 *
+		 * 契约由 tests/vowifi-contract.test.js 的 ⑧ 守着（含反向断言）。
+		 */
 		Mt5700.connectThen(function () {
 			loadAll();
-		}).then(function () {
-			/*
-			 * VoWiFi：**进页面就取一次** —— 后端像 exitip 那样直接暴露成 AtWs.vowifi，
-			 *   不需要用户先点一下才有数据（2026-09-24 用户口径）。
-			 * ★ 排在 loadAll() **之后**，不并进它的链里：五道门要读卡（EF_AD / EF_DIR
-			 *   逐条）+ 走系统与 DoH 两条公网解析，真机实测 1.8~8.5s，串进 loadAll
-			 *   会把首屏其它卡一起拖住；放在后面则其它卡照常先出来，这张卡显示「评估中…」。
-			 * ★ 仍然**只取一次，不做轮询**（换卡才变的东西）。
-			 */
-			runVowifi();
 		});
 
 		/*

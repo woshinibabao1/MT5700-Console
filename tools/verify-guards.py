@@ -1261,6 +1261,59 @@ MUTATIONS = [
         "\t'AT^DSFLOWQRY', 'AT^MONNC', 'AT^MONSC', 'AT^MONSSC',\n\t'AT+CNUM', 'AT+CGEQOSRDP'",
         "前后端一致",
     ),
+    # ★★ 2026-09-27「VoWiFi 评估改成不自动进行」的五条守卫（跑 vowifi-contract）：
+    #   前两条专门验证**负向断言**有没有牙齿 ——「不许出现 X」默认就是绿的，
+    #   是最容易写成恒绿的一类，必须把旧写法真的加回去看它红不红。
+    (
+        # ★ 锚点唯一性已核：`Mt5700.connectThen(function () {` 在 modem_settings.js 只 1 次。
+        "把「进页面自动跑五道门」加回去（用户口径：改成不自动进行）",
+        "vowifijs",
+        "\t\tMt5700.connectThen(function () {\n\t\t\tloadAll();\n\t\t});",
+        "\t\tMt5700.connectThen(function () {\n\t\t\tloadAll();\n\t\t}).then(function () { runVowifi(); });",
+        "进页面不再自动跑五道门",
+    ),
+    (
+        # ★ 锚点唯一性已核：刷新按钮那段 `Mt5700.primaryButton('刷新'` 只 1 次。
+        "把「刷新连带跑评估」加回去",
+        "vowifijs",
+        "\t\t\tMt5700.primaryButton('刷新', function () {\n\t\t\t\tloadAll();\n\t\t\t})",
+        "\t\t\tMt5700.primaryButton('刷新', function () {\n\t\t\t\tloadAll().then(function () { runVowifi(); });\n\t\t\t})",
+        "刷新按钮不再连带跑五道门",
+    ),
+    (
+        # ★ 锚点唯一性已核：那条只读只有一处。
+        "开关状态那条读不吃读缓存（会显示成下发前的旧值）",
+        "vowifijs",
+        "sendCommand('AT^IMSSWITCH?', { fresh: true })",
+        "sendCommand('AT^IMSSWITCH?')",
+        "页面加载只读一条开关状态",
+    ),
+    (
+        # ★ 锚点唯一性已核：loadAll 链里 `.then(fetchImsSwitch)` 只 1 次。
+        "把开关状态那条读从 loadAll 链里摘掉（点「刷新」不再刷新开关）",
+        "vowifijs",
+        "\t\t\t\t.then(fetchImsSwitch)\n",
+        "",
+        "那条读挂在 loadAll 链里",
+    ),
+    (
+        # ★ 锚点唯一性已核：`var known = (t.imssw` 只 1 次。
+        "开关状态改回读评估结果（不评估就没数据 → 显示成「关」）",
+        "vowifijs",
+        "\t\t\tvar known = (t.imssw === '1' || t.imssw === '0');\n"
+        "\t\t\tvowifiSwitch.checked = (t.imssw === '1');",
+        "\t\t\tvar known = true;\n"
+        "\t\t\tvowifiSwitch.checked = !!(t.data && t.data.ims && String(t.data.ims.imsswitch) === '1');",
+        "开关状态取实测值",
+    ),
+    (
+        # ★ 锚点唯一性已核：disabled 那一行只 1 次。
+        "读不到开关状态时仍然画成「关」（红线 23：读不到 ≠ 确实是 0）",
+        "vowifijs",
+        "vowifiSwitch.disabled = !known || !!(t.busy || t.setBusy);",
+        "vowifiSwitch.disabled = !!(t.busy || t.setBusy);",
+        "读不到开关状态时不许显示成",
+    ),
 ]
 
 
