@@ -5,6 +5,58 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.3] - 2026-09-28
+
+### Fixed
+
+**99. ★ CI 长期失败（`contract-check`）的根因：`parseMessageTime` 漏了时分秒的越界检查**
+
+**这是本轮最有价值的发现，而且它自 `d3d1e1f` 起让 CI 一直红**（`ec9a5ec` 是最后一次 success，
+`d3d1e1f` 之后 `contract-check` 连续失败；`.github` 的 30 次运行里 16 次 failure）。
+
+**根因**：`parseMessageTime` 只回读**日期三分量**做越界回落，
+而 `26/09/28,12:60:00` 会被 JS 的 `Date` 构造函数进位成 **`13:00:00`** ——
+**年月日一个都没变** ⇒ 不回落，返回了一个"看起来完全正常"的畸形时间。
+
+```js
+// 修前：只挡得住会改变日期的越界（26/02/31、24:00:00）
+if (d.getFullYear() !== y || d.getMonth() !== mo - 1 || d.getDate() !== dy) return new Date();
+```
+而**同函数上方那段注释自称「与 `decodeTimestamp` 同口径」**——实际并不同：
+`decodeTimestamp:1185` 有一道**逐字段的独立范围检查**（`hour > 23 || minute > 59`），
+`parseMessageTime` 没有。已补上同样的检查。
+
+**为什么本地一直没发现**：测试用的 `isToday()` 只比对**年月日**，只要运行当天恰好等于用例里的
+日期（`26/09/28` 在 2026-09-28 跑）就会**误判为通过**。我本地是 **+0800**（9/28），
+CI 的 runner 是 **UTC**（还是 9/27）——于是同一个测试在本地绿、在 CI 红，来回摇摆。
+
+### Changed
+
+**100. `tests/sms-time-contract.test.js` 的回落判据从 `isToday` 改为 `isNow`**
+
+原来只比对年月日（如上），既能被"当天恰好相符"骗过，也会因时区不同而摇摆。
+现在要求「**确实是刚刚**」（与 `Date.now()` 相差 < 5 秒）：既容忍跨秒抖动，
+又能真正区分"回落到当前时间"与"返回了那个进位后的畸形时间"。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `TZ=UTC node tests/sms-time-contract.test.js` | **修复前 FAILED 1/17**（`✗ 12:60:00 回落`）→ **修复后 17 项全通过** |
+| `TZ=UTC node tests/run-all.js` | **修复前 1 个文件失败** → **修复后 0 失败** |
+| 本地（+0800）`run-all.js` | 0 失败 |
+| **变异：去掉新加的字段范围检查** | `TZ=UTC` 下 **`FAILED 1 / 17`、退出码 1** ✓ |
+| `node tests/syntax-check.js` | 20 个文件 0 错误 |
+
+（`TZ=UTC` 是复现 CI runner 的关键：CI 用 `ubuntu-latest`，默认时区是 UTC。）
+
+### 诚实边界
+
+- 这个缺陷**早于本会话**（`d3d1e1f`，第三轮续 25），**不是我引入的**；但我也**一直没发现**，
+  因为我此前从未确认过 CI 状态——objective 写的是"**验证通过后**推送到 main"，
+  而我做了 6 次推送都没看过 CI 结果。**这是流程上的遗漏，已补上。**
+- 我本地是 +0800、CI 是 UTC，这个差异我此前**没有意识到**；现在把它写进验证流程
+  （以后凡涉及时分秒/日期的改动，都要用 `TZ=UTC` 再跑一遍）。
 ## [2.4.2] - 2026-09-28
 
 ### Changed

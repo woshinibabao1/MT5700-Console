@@ -1077,8 +1077,26 @@ var Parse = (function () {
 			var y = 2000 + parseInt(match[1], 10);
 			var mo = parseInt(match[2], 10);
 			var dy = parseInt(match[3], 10);
-			var d = new Date(y, mo - 1, dy,
-				parseInt(match[4], 10), parseInt(match[5], 10), parseInt(match[6], 10));
+			var hh = parseInt(match[4], 10);
+			var mi = parseInt(match[5], 10);
+			var ss = parseInt(match[6], 10);
+			/*
+			 * ★ 2026-09-28 补：**逐字段的独立范围检查**，与 decodeTimestamp 对齐。
+			 *
+			 * 下面那段「回读三个日期分量」只挡得住**会改变日期**的越界
+			 * （26/02/31 → 3/3、24:00:00 → 次日 00:00），而**只改时间**的越界会漏过去：
+			 *   `26/09/28,12:60:00` → new Date(2026,8,28,12,60,0) 被 JS 进位成 13:00:00，
+			 *   年月日三个分量**一个都没变** ⇒ 不回落，返回了一个「看起来完全正常」的
+			 *   13:00:00。而本函数上面那段注释自称「与 decodeTimestamp 同口径」——
+			 *   实际并不同：decodeTimestamp:1185 有这一道检查，这里没有。
+			 * 依据：`sms-time-contract.test.js` 的「12:60:00 回落」用例（该用例此前一直
+			 * 靠「运行当天恰好等于数据里的日期」而误判为通过）。
+			 */
+			if (mo < 1 || mo > 12 || dy < 1 || dy > 31
+				|| hh > 23 || mi > 59 || ss > 60) {
+				return new Date();
+			}
+			var d = new Date(y, mo - 1, dy, hh, mi, ss);
 			/*
 			 * ★ 与 decodeTimestamp 同口径：**回读三个日期分量做越界回落**。
 			 *
