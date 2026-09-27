@@ -269,6 +269,30 @@ ok('下拉里没有的当前值会被补为选项（不静默改写）',
 	/function ensureOption\(sel, value, label\)/.test(modemJs) &&
 	/预设未收录/.test(modemJs));
 
+/* ---------- 写后校验：非位图字段的"数值等价" ----------
+ *
+ * sysCfgApplyCheck 的非位图分支原先写的是
+ *     String(Number(wv)) === String(Number(av))
+ * 它有个漏洞：两边都不是数字时 Number 都返回 NaN，而 String(NaN) 是 'NaN' ——
+ * 于是两个毫不相干的字符串会被判成 exact，与那句注释"严格相等"正好相反。
+ * 下面三条同时钉住"漏洞不会再回来"与"数值等价本身仍然成立"。
+ */
+const applyState = (w, a) => {
+	const r = Parse.sysCfgApplyCheck(w, a);
+	return r.length === 1 ? r[0].state : '(共' + r.length + '条)';
+};
+ok('非位图校验：两个非数字串不得判为 exact',
+	applyState({ roam: 'abc' }, { roam: 'xyz' }) === 'rejected',
+	"旧写法下 String(Number('abc')) === String(Number('xyz')) 为 true（'NaN' === 'NaN'）");
+ok('非位图校验：数值等价仍成立（1 vs "1" → exact）',
+	applyState({ roam: '1' }, { roam: '1' }) === 'exact');
+ok('非位图校验：真不同必须 rejected（1 vs 2）',
+	applyState({ roam: '1' }, { roam: '2' }) === 'rejected');
+ok('非位图校验：回读为空时是 unknown（不臆断）',
+	applyState({ roam: '1' }, { roam: '' }) === 'unknown');
+ok('非位图校验：未下发的字段不参与（空 want 不产生条目）',
+	Parse.sysCfgApplyCheck({ roam: '' }, { roam: '1' }).length === 0);
+
 /* ---------- 汇总 ---------- */
 
 if (fails.length) {

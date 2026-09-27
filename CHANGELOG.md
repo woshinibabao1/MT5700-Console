@@ -5,6 +5,71 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.80] - 2026-09-28
+
+读 `parse.js` 的掩码比较组（`normHexForCompare` / `hexMaskSubset` / `sysCfgApplyCheck`）。
+前两个都正确（`hexBit` 对超出 `want` 的位返回 false，所以"回读位更高"也判非子集），
+但 `sysCfgApplyCheck` 的非位图分支有个漏洞 —— 而且**恰好违背它自己注释写的判据**。
+
+### Fixed
+
+**29. `sysCfgApplyCheck`：两个毫不相干的非数字串会被判成 `exact`**
+
+```js
+} else {
+    /* 非位图字段严格相等：命令里的 1 与回读的 "1" 是同一个值 …… */
+    if (wv.toUpperCase() === av.toUpperCase()
+        || String(Number(wv)) === String(Number(av))) row.state = 'exact';
+```
+
+`Number('abc')` 与 `Number('xyz')` 都是 `NaN`，而 `String(NaN)` 是 `'NaN'`
+—— 于是 **`'NaN' === 'NaN'` 为 true**，两个毫不相干的字符串被判成"完全一致"。
+注释里写的是「严格相等」，实际却放行了这一类。
+
+后果：`sysCfgApplyCheck` 是**写后校验**（本机实测 `AT` 回 OK 并不代表写进去了，
+所以专门有这层校验，注释里记着两个真机反例），把"模组没接受"误报成"已生效"
+正好是它存在的意义所在。
+
+修法：数值等价只在**两边都是有限数**时成立 ——
+
+```js
+var nw = Number(wv), na = Number(av);
+var numericEqual = isFinite(nw) && isFinite(na) && nw === na;
+```
+
+### 新增守卫（5 项，`tests/syscfg-contract.test.js`）
+
+| 断言 | 守什么 |
+| :-- | :-- |
+| 两个非数字串不得判为 exact | **这条就是漏洞本身** |
+| `1 vs "1"` → exact | 数值等价不能被"修过头" |
+| `1 vs 2` → rejected | 真不同必须报出来 |
+| `1 vs ""` → unknown | 回读不到时不臆断 |
+| 空 `want` 不产生条目 | "没下发就不算账" |
+
+**变异验证**：把修复改回 `String(nw) === String(na)` → **判红 1 处**（56 passed / 1 failed）；
+还原 → 57 passed。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `node tests/syscfg-contract.test.js` | **57 项通过**（52 → 57） |
+| 该批次变异验证 | 判红 1 处；还原后全绿 |
+| 行为核对（真实模块，逐场景） | 位图三态 `clipped/rejected/exact`、非位图 `exact/rejected/unknown/不计账` 全部符合预期 |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `cargo test --all-targets` | 43 passed / 0 failed |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- 触发面窄：非位图字段（`roam` / `srvdomain` 等）正常只会拿到数字串，所以要两个**都**
+  是非数字才会命中。这也是它一直没被发现的可能原因。
+- `parse.js` 未读：`parseCMGL`(1210) 起约 550 行、`parseRejInfo` / `arfcnToBand` /
+  `nrArfcnToMHz` / `parseNrssbid` 等；`rpc.js` / `mt5700.js` / `euicc.js` / `ui.js` /
+  `compat.js` / 12 个视图层 / ucode 均未读。
+
+
 ## [2.3.79] - 2026-09-28
 
 读 `parse.js` 里此前未看过的**基础位操作函数**（`hexBit` / `hexFromBits`）。

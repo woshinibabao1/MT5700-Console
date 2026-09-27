@@ -591,9 +591,17 @@ var Parse = (function () {
 				else row.state = 'rejected';
 			} else {
 				/* 非位图字段严格相等：命令里的 1 与回读的 "1" 是同一个值，
-				   但 '080302' 绝不能被当成 '0803' 的某种变体 —— 那正是要报出来的。 */
-				if (wv.toUpperCase() === av.toUpperCase()
-					|| String(Number(wv)) === String(Number(av))) row.state = 'exact';
+				   但 '080302' 绝不能被当成 '0803' 的某种变体 —— 那正是要报出来的。
+				 *
+				 * ★ 数值等价只在**两边都真的是数字**时才成立。
+				 *   原写法是 `String(Number(wv)) === String(Number(av))`，它有个漏洞：
+				 *   两边都不是数字时 Number 都返回 NaN，而 `String(NaN)` 是 `'NaN'`
+				 *   —— 于是两个毫不相干的字符串（'abc' 与 'xyz'）会被判成 exact，
+				 *   与上面那句"严格相等"的判据正好相反。补上有限性守卫。
+				 */
+				var nw = Number(wv), na = Number(av);
+				var numericEqual = isFinite(nw) && isFinite(na) && nw === na;
+				if (wv.toUpperCase() === av.toUpperCase() || numericEqual) row.state = 'exact';
 				else row.state = 'rejected';
 			}
 			out.push(row);
