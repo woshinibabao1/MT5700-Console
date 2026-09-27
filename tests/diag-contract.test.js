@@ -147,8 +147,23 @@ ok('★ 带上 USB 设备名（一眼确认取到的是不是模组）', /emit u
 /* ★★ 两个真机坑：busybox 的 nc 不支持 -z；119.29.29.29:443 不开 HTTPS（curl rc=28） */
 ok('★ 不用 nc -z（busybox 的 nc 不支持，永远返回 1 → 天天误报）',
 	!/nc -z/.test(probeCode));
+/*
+ * ★ 2026-09-28 修：这条断言原来把超时值也锁死了（`--max-time 4`），而断言名说的意图
+ *   只是「改走 curl（而不是 busybox 的 nc -z）」。锁死实现细节的后果是：
+ *   `diag-probe.sh` 里那个 `TCP_TIMEOUT=4` 常量**全脚本只被定义、从没被引用** ——
+ *   有人硬编码了 4、守卫再把 4 锁死，于是常量成了死的、改它也不生效还没人发现。
+ *   现在改为断言「引用了 TCP_TIMEOUT 常量」，改回硬编码会立刻判红。
+ */
 ok('★ HTTPS 探测改走 curl（该设备上可用，退出码可区分"连上但证书不认"）',
-	/curl -s -o \/dev\/null --max-time 4 https:\/\/www\.qq\.com/.test(probeSrc));
+	/curl -s -o \/dev\/null --max-time "?\$TCP_TIMEOUT"? https:\/\/www\.qq\.com/.test(probeSrc));
+
+/* 防"死常量"：三个探测超时常量都必须真的被引用（定义处各算一次） */
+/* 计数用的是 `$NAME`（带美元号的**引用**）；定义处 `NAME=4` 不算，所以门槛是 ≥1 */
+['PROBE_TIMEOUT', 'NS_TIMEOUT', 'TCP_TIMEOUT'].forEach(function (name) {
+	const n = (probeSrc.match(new RegExp('\\$' + name, 'g')) || []).length;
+	ok('★ ' + name + ' 常量真的被引用（≥1 处；只定义不用 = 改它不生效）',
+		n >= 1, '实际引用 ' + n + ' 处');
+});
 ok('★ curl 退出码 6（解析失败）单独区分，不算到链路上',
 	/6\) emit tcp_443 6/.test(probeSrc));
 

@@ -5,6 +5,122 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.98] - 2026-09-28
+
+**累计满 10 个修改**一次推送（按用户要求）。本批含 **1 处功能级隐患修复**（`apdu_timeout`
+无法配置）、**3 处死代码/残留清理**、**1 处守卫过紧**、**1 处缩进不一致**，其余为注释与工具。
+
+### Fixed
+
+**75. `apdu_timeout` 读了但 UCI 里从未声明 —— 用户无法配置它**
+
+`config.rs` 一直在读这个键，`atclient.rs:33` 的注释与 `main.rs:145` 的启动日志都写着
+「可由 UCI `at-webserver.config.apdu_timeout` 覆盖 —— 调这个值不必重新编译」，
+**但 `root/etc/config/at-webserver` 里从来没有这一项**。
+照日志 `uci set` 确实能生效（UCI 允许设未声明选项），却**无从发现、`uci show` 也看不到**。
+已补声明（值取 `12`，与 `atclient::DEFAULT_APDU_TIMEOUT` 一致，不是拍脑袋）。
+
+**76. `diag-probe.sh`：`TCP_TIMEOUT` 是死常量，改它不生效**
+
+三个探测超时常量并列定义（`PROBE_TIMEOUT` / `NS_TIMEOUT` / `TCP_TIMEOUT`），前两个都用上了，
+**只有第三个全脚本只出现一次（就是它自己的定义处）** —— 第 263 行的 curl 硬编码了同一个值 `4`。
+后果：**有人把 `TCP_TIMEOUT` 改成 10，实际仍是 4**，还以为改好了。
+
+**77. `smsEncode.js`：`EXT_CHARS` 是"错误实现"的残留**
+
+同文件注释批评过一种错法：「早期实现用的是私有字符串的下标（`'^'` → 1、`'€'` → 2），
+那是错的：收件人会把 `'^'` 解成 `ESC+£`」。改用 `EXT_MAP` 之后，**那个私有字符串没被删掉**，
+全仓再无引用。留着只有一个害处：后来者可能又去用它，把已修好的乱码问题再犯一遍。已删除。
+
+**78. `network_status.js`：`FAST_MS` 与 `TCP_TIMEOUT` 完全同形**
+
+`var FAST_MS = 5000;` 定义了却没人用，而 `var fast = (interval || 5) * 1000;` 硬编码了同一含义的
+魔法数 `5`。已改为 `var fast = interval ? interval * 1000 : FAST_MS;`（`interval` 为 0/缺省时同样
+落到 `FAST_MS`，与原 `(interval || 5)` 语义一致）。
+
+**79. `acl.d/luci-app-mt5700.json`：`"sysdiag",` 的缩进是 5 个 tab（同级都是 4）**
+
+纯格式，但属"统一代码风格"。`line-endings` / `shell-comment-style` 两个守卫都没覆盖它。
+
+### Changed
+
+**80. `config.rs`：`autodial_enable` / `autodial_mode` 两行**连注释**整段重复了两遍**
+
+值一样所以行为无害，但属明确冗余。**同源扫描**：全仓 Rust/JS 源文件扫"连续 3 行完全相同"，
+只有这一处。已删去重复的一份并加说明。
+
+**81. `diag-contract.test.js`：守卫锁死了实现细节（而这正是 76 的成因）**
+
+原断言 `/curl -s -o \/dev\/null --max-time 4 https:\/\/www\.qq\.com/` —— 断言名说的意图是
+"改走 curl（而不是 busybox 的 `nc -z`）"，却**顺带把超时值 4 也锁死了**。于是有人硬编码 4、
+守卫再把 4 锁死，`TCP_TIMEOUT` 就成了死常量、改它不生效还没人发现。
+已改为断言"引用了 `TCP_TIMEOUT` 常量"，并**补 3 条"防死常量"断言**（三个探测超时常量各必须
+至少被引用一次）。**变异验证**：改回硬编码 → 判红；去掉 `PROBE_TIMEOUT` 引用 → 同样判红。
+
+**82. `parse.js`：标注"未完成迁移"的三个常量**
+
+`MEAS_TYPES` / `NR_INVALID` / `LTE_BANDWIDTHS` 上方写着「辅载波/辅站小区（carrier.ts 等价迁移）」
+并列出手册 13.27 `^MONSSC` / 13.18 `^CASCELLINFO`，但**全仓没有对应的解析函数**
+（`parse.js` 的 25 个 `api.parse*` 里没有）。**没删**（分不清"待办"与"废弃"，删掉等于替别人
+做决定），只加状态说明："这三个常量当前全仓无引用，不要以为它们正在生效"。
+
+**83. `mt5700.uc`：给 4 个空壳方法加说明**
+
+`identity` / `aka` / `epdg` / `ims` 目前是空壳、前端无调用点，所以 `acl.d` 的 read/write 两段
+**都没有授权它们** —— 那是刻意的（最小权限），不是漏配。加说明提醒：将来实现这几个方法时
+**记得同步补 ACL**，否则前端会得到 `Access denied`，表现为"点了没反应"，很难查。
+
+### Added
+
+**84. `find-orphans.py`：A 节与 D 节从「只列不判」改为分类**
+
+- **A 节**「读了但未声明」原来是 3 条一律报，现在按两条判据分流：① 该键在仓库某处**被写入**
+  （`phone_note`，首次保存后自然落盘）② 键名邻近注释含**明确措辞**（`websocket_allow_insecure`
+  "真想要无认证对外监听，加一行 uci 即可"）。修掉 `apdu_timeout` 后 A 节待判 **3 → 0**。
+- **D 节** 162 条**全是「全网扫频」一个主题**，而它正是**刻意保留的安全网**（Rust 仍拦截
+  `AT^CELLSCAN`：去掉它，用户在 AT 终端手敲就会原样下发、变成无上限整网扫频；守卫是
+  `cellscan-removed-contract.test.js`）。加 `is_kept` 标记后从 162 行刷屏变成一行汇总。
+- 顺手修了 `total_bad` 的一个错（我上一轮引入的）：`len(a[0])` 写成了取"第一个条目的长度"（3），
+  导致"合计待判"从 38 变成 23。已改回 `len(a)`；`check_events()` 的返回值也从统计里剔除
+  （它给的是**几份名单**，不是"几条问题"）。
+- **效果：待判 203 → 38，`self_test()` 14/14。**
+
+**85. `.github/workflows/build-openwrt.yml`：把 4 个"存在却从不运行"的常驻扫描器接进 CI**
+
+`check-ucode-order.py`（ucode 不做函数提升，调用早于定义**只有真跑才炸**）、`check-line-endings.py`
+（CRLF 会让假设 LF 的正则静默失效）、`audit-at-reads.py`（读命令被当成写命令 → 不缓存不重试）、
+`find-orphans.py --self-test-only`（14 项自证）。这四个此前**没有任何入口调用它们** ——
+说明里写着"改完 ucode 就跑一次""这一类问题以后自动抓"，但"自动"实际靠人记得。
+四者都只读、几秒结束。
+
+**86. `.github/workflows/build-openwrt.yml`：新增 `concurrency`**
+
+原来没有它 —— 每次推送 main 都排一个数小时的 docker 打包，前一个还在跑也不取消，几次推送
+叠着烧机时。`group` 用 `workflow + ref`：同分支新推送**取消上一次未完成的运行**；tag 的 ref
+各不相同，所以各版本构建不会互相取消。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo check` | 0 warning |
+| `cargo test` | **44 passed / 0 failed** |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `node tests/syntax-check.js` | 20 个 JS 文件 0 错误 |
+| `python tools/find-orphans.py` | `self_test()` 14/14；待判 203 → 38 |
+| `python tools/verify-guards.py` | **154 条变异全判红、0 放过** + 还原逐字节一致 + 基线绿 |
+| 变异：`diag-contract` 改回硬编码 / 去掉常量引用 | 各判红 ✓ |
+| Python 真解析 workflow YAML | 结构、触发、5 个 job、matrix 组合数=2（aarch64 裁减保持） |
+
+### 诚实边界
+
+- 本批 **10 项**里，**75 是用户可感知的功能修复**（原来无法配置 APDU 超时），76~79 是死代码/格式，
+  80~84 是注释与工具。**没有一项改动了业务逻辑的运行结果**。
+- 有几处是我**先把判据用错、再自我纠正**的：死常量扫描起初只看单文件（把跨文件常量当死常量）、
+  手册对比只抽了目录的 11.x 段（`AT^C5GOPTION` 其实在 §13.17）。**都已记录**。
+- 76 与 81 是**同一条因果链**：硬编码 + 守卫锁死实现细节 → 常量沦为死代码且无人发现。
+
+
 ## [2.3.97] - 2026-09-28
 
 攒满 **5 项**一次推送。本批主题：**「空转 / 恒真的守卫」与「只列不判的工具」**。

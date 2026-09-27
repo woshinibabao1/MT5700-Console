@@ -260,7 +260,11 @@ fi
 #     退出码：0 正常；35/51/58/60 = TCP+TLS 已经握手成功（只是证书层面不认 IP/域名）；
 #     6 = 域名解析失败（那是 DNS 的问题，不是链路）；7/28 = 连不上 / 超时。
 if have_cmd curl; then
-	curl -s -o /dev/null --max-time 4 https://www.qq.com >/dev/null 2>&1
+	# ★ 2026-09-28：这里原来硬编码 `--max-time 4`，而上面定义的 TCP_TIMEOUT=4
+	#   **全脚本只出现一次（就是它自己的定义处）** —— 改常量不生效，改的人会以为改好了。
+	#   三个探测超时常量（PROBE_TIMEOUT / NS_TIMEOUT / TCP_TIMEOUT）本意都是给对应的
+	#   探测用的，前两个都用上了，只有这个漏了。改成引用常量。
+	curl -s -o /dev/null --max-time "$TCP_TIMEOUT" https://www.qq.com >/dev/null 2>&1
 	case "$?" in
 		0|35|51|58|60) emit tcp_443 1 ;;
 		6) emit tcp_443 6 ;;

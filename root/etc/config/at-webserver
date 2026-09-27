@@ -13,6 +13,14 @@ config at-webserver 'config'
 	option serial_port_custom '/dev/ttyUSB1'  # 自定义串口路径（当 serial_port='custom' 时使用）
 	option serial_baudrate '115200'
 	option serial_timeout '10'
+
+	# APDU 应答超时（秒）。eSIM 写卡时卡侧做密钥运算与非易失写入，单条跳到秒级是常态；
+	# 卡片越慢越需要给足时间（下限 2 秒，防「写卡必然超时」；上限不限）。
+	# ★ 2026-09-28 补声明：config.rs 一直在读这个键，atclient.rs 的注释与
+	#   main.rs 的启动日志都写着「可由 UCI at-webserver.config.apdu_timeout 覆盖 ——
+	#   调这个值不必重新编译」，但配置文件里从来没有这一项 —— 用户照日志 uci set
+	#   确实能生效（UCI 允许设未声明选项），却无从发现它、`uci show` 也看不到。
+	option apdu_timeout '12'
 	# 自动拨号：默认开启。模组不拨号则不会向 USB 网口下发 DHCP，
 	# 网络接口 MT5700M 将一直拿不到 IP，表现为「模组在线但无法联网」。
 	# 服务每次连上模组后会按此配置对齐一次（已在目标状态则不重复下发）。

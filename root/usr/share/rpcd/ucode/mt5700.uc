@@ -2200,6 +2200,14 @@ function vowifiFacts() {
 		mnc: ep.mnc,
 		mncLen: ep.mncLen,
 		mncSource: ep.mncSource,
+		/*
+		 * ★ 2026-09-28 加说明：identity / aka / epdg / ims 这四个方法**目前是空壳**，
+		 *   前端没有任何调用点（`rpc.js` 的 L.rpc.declare 里也没有它们），
+		 *   所以 `acl.d/luci-app-mt5700.json` 的 read/write 两段**都没有授权它们** ——
+		 *   那是刻意的（最小权限），不是漏配。
+		 *   ★ 将来真去实现这几个方法时，记得同步补 ACL，否则前端调用会得到
+		 *     `Access denied`，而 LuCI 侧表现为"点了没反应"，很难查。
+		 */
 		identity: {
 			impi: impi,
 			impiSource: 'derived',

@@ -336,9 +336,8 @@ pub async fn load_config() -> Config {
     );
 
     // 自动拨号：默认开启。模组不拨号则不会给 USB 网口下发 DHCP，接口拿不到 IP。
-    cfg.at.autodial_enable = values.bool("autodial_enable", true);
-    cfg.at.autodial_mode = values.int("autodial_mode", 1).clamp(1, 2);
-    // 自动拨号：默认开启。模组不拨号则不会给 USB 网口下发 DHCP，接口拿不到 IP。
+    // （★ 2026-09-28：这两行原先**整段重复了两遍**，连注释都一字不差 —— 大概是
+    //   某次编辑粘了两遍。值一样所以行为无害，但属明确冗余；已删去重复的一份。）
     cfg.at.autodial_enable = values.bool("autodial_enable", true);
     cfg.at.autodial_mode = values.int("autodial_mode", 1).clamp(1, 2);
     /*

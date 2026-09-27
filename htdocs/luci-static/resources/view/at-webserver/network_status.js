@@ -2756,7 +2756,12 @@ return L.view.extend({
 			if (slowTimer) { clearInterval(slowTimer); slowTimer = null; }
 			if (!enabled) return;
 			if (document.hidden) return;   /* 后台标签页不重建定时器（见下方 visibilitychange） */
-			var fast = (interval || 5) * 1000;
+			// ★ 2026-09-28：原为 `(interval || 5) * 1000` —— 那个 5 是魔法数，
+			//   而本文件上面已经定义了 FAST_MS = 5000（默认快档间隔），却从没被引用
+			//   （同形态：定义了不用 + 硬编码同一含义，全仓另一例是 diag-probe.sh 的
+			//   TCP_TIMEOUT）。改用常量；`interval` 为 0/缺省时同样落到 FAST_MS，
+			//   与原 `(interval || 5)` 的语义一致。
+			var fast = interval ? interval * 1000 : FAST_MS;
 			timer = setInterval(refreshFast, fast);
 			/* 慢档跟随快档倍数，但不少于 30 秒，避免小间隔下把慢档也拉成高频 */
 			slowTimer = setInterval(refreshSlow, Math.max(SLOW_MS, fast * 6));

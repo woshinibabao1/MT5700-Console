@@ -1565,6 +1565,15 @@ var Parse = (function () {
 	// 手册 13.27 AT^MONSSC — NSA 下 5G 辅连接服务小区（最多 8CC）
 	// 手册 13.18 AT^CASCELLINFO? — LTE CA 的辅小区（最多 4 个 SCELL）
 	// ^HFREQINFO 只给频点与带宽，这两条补每个辅载波各自的信号质量。
+	//
+	// ★ 2026-09-28 加状态说明（这段是**尚未完成的迁移**，不是"已废弃"）：
+	//   本段只有注释与下面三个常量，**没有对应的解析函数** —— 全仓搜 `CASCELLINFO`
+	//   与 `MONSSC` 只有这里的注释提及；`rpc.js` 的 `parseHFREQINFO` 走的是
+	//   `^HFREQINFO`（手册 13.16.3 的 <dl_bw>/<ul_bw> 本身就是数值，直接 `int(c[3])`
+	//   取用，不需要码表），所以 `LTE_BANDWIDTHS` 也用不上。
+	//   即：**这三个常量当前全仓无引用**。留着是因为分不清"待办"与"废弃"，
+	//   删掉等于替别人做决定；但**不要以为它们正在生效** —— 真要用它们，
+	//   得先按手册把 ^MONSSC / ^CASCELLINFO 的解析补出来。
 
 	var MEAS_TYPES = { 0: 'SSB', 1: 'CSI-RS' };
 	var NR_INVALID = { rsrp: -1256, rsrq: -348, sinr: -188 };

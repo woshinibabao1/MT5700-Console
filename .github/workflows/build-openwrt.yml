@@ -87,6 +87,26 @@ jobs:
       - name: 守卫有效性验证（故意违反须被判红）
         run: python3 tools/verify-guards.py
 
+      # ---- 常驻扫描器 ----
+      # ★ 2026-09-28 新增。这四个脚本此前**没有任何入口调用它们** —— 说明里写着
+      #   「用法：改完 ucode 就跑一次」「这一类问题以后自动抓」，但"自动"实际靠人记得，
+      #   属于「写了守卫 ≠ 有了守卫」的第三种形态：**守卫存在，却从不运行**。
+      #   它们守的还都是"编译能过、部署也看不出来、只有真跑才炸"的那一类，
+      #   恰恰最需要每次推送都过一遍。全部只读、几秒结束。
+      - name: ucode 函数顺序（不提升函数，调用早于定义只有真跑才炸）
+        run: python3 tools/check-ucode-order.py
+
+      - name: 行尾必须 LF（CRLF 会让假设 LF 的正则静默失效）
+        run: python3 tools/check-line-endings.py
+
+      # 该脚本需要一个 node 来载入 rpc.js 问 isRetryableRead() 的真实答案；
+      # setup-node 已把 node 放进 PATH，脚本自己会找到（不必设 NODE_BIN）。
+      - name: AT 读写分类对照手册（query 被当成写命令 → 不缓存、不重试）
+        run: python3 tools/audit-at-reads.py
+
+      - name: 孤儿与残留扫描器的自证（14 项，证明检查本身能报红）
+        run: python3 tools/find-orphans.py --self-test-only
+
   # ---- 是否需要真打包 ----
   # ★ 2026-09-28 新增（用户反馈「频繁推送非常浪费时间」）：
   #   打包要跑两个矩阵的 docker 构建（数小时），而只改 tests/ 或文档时完全不需要 ——

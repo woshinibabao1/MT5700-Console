@@ -28,7 +28,13 @@ import re
 import sys
 import glob
 
-ROOT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else '.')
+# ★ 2026-09-28：加 `--self-test-only` —— 供 CI 调用。
+#   本脚本的主体是**报告型**（列 38 条待判给人看），不适合直接当"判红"的闸门；
+#   但它的 self_test()（14 项，证明每个检查本身能报出已知缺陷）**适合**，
+#   而那正是"这个扫描器还活着吗"的唯一机器判据。
+_args = [a for a in sys.argv[1:] if not a.startswith('--')]
+SELF_TEST_ONLY = '--self-test-only' in sys.argv
+ROOT = os.path.abspath(_args[0] if _args else '.')
 
 # 扫描范围（排除产物与工作区）
 SKIP_DIRS = {'.git', 'target', 'node_modules', '.workbuddy', 'docs', 'po'}
@@ -149,10 +155,46 @@ def dynamic_key_prefixes():
     return fam
 
 
+# 「刻意不声明」的措辞。只收明确表达**有意为之**的说法。
+DELIBERATE_WORDS = ('加一行 uci', '刻意不声明', '不写进默认配置', '安全默认',
+                    '想用才', '默认不声明', '有意不声明')
+
+
+def _repo_blob(exts=('.js', '.uc', '.rs', '.sh', '.json', '.py')):
+    """全仓源码拼接（供"某处是否写/读了这个键"这类判断复用）。"""
+    return '\n'.join(read(p) for p in walk(exts))
+
+
+def key_is_written(k):
+    """该 UCI 键是否在仓库某处被**写入**（而非只读）。
+
+    写入的三种典型写法：`uci set ...<k>=`、`set('<k>', …)`、配置文件里的 `option <k>`。
+    命中任一即为"由代码写入"，默认配置文件里没有它不是遗漏。
+    """
+    blob = _repo_blob()
+    pats = (r'uci\s+set[^\n]*\.%s\s*=' % re.escape(k),
+            r"set\(\s*'%s'\s*," % re.escape(k),
+            r'^\s*option\s+%s\s' % re.escape(k))
+    return any(re.search(p, blob, re.M) for p in pats)
+
+
+def key_has_deliberate_note(k, window=18):
+    """该键名出现的位置附近，是否有说明「刻意不声明」的注释。"""
+    blob = _repo_blob()
+    for m in re.finditer(re.escape(k), blob):
+        seg = blob[max(0, m.start() - 400): m.start() + 400]
+        # 只看含注释行的一段，避免把无关代码算进来
+        line_ctx = '\n'.join(ln for ln in seg.split('\n')
+                             if ln.strip().startswith(('//', '*', '/*', '#')))
+        if any(w in line_ctx for w in DELIBERATE_WORDS):
+            return True
+    return False
+
+
 def check_uci():
     d, r = uci_declared(), uci_reads()
     dyn = dynamic_key_prefixes()
-    bad = []
+    bad, ok_side = [], []
     for k in sorted(set(d) - set(r)):
         hit = [p for p in dyn if k.startswith(p)]
         if hit:
@@ -161,8 +203,23 @@ def check_uci():
         else:
             bad.append(('声明了但无人读（死配置）', k, ', '.join(d[k])))
     for k in sorted(set(r) - set(d)):
-        bad.append(('读了但未声明（恒空值）', k, ', '.join(r[k][:3])))
-    return bad
+        # ★ 2026-09-28：区分「真遗漏」与两种正常情况 —— 原来一律报「恒空值」，
+        #   于是 apdu_timeout（真遗漏）和下面两类混在一起，每次都得人工重判一遍。
+        #   ① 该键由**代码写入**：首次保存后才落盘，默认文件里没有它是正常的。
+        #      判据：整个仓库里存在写它的地方（uci set / set('<k>' / option <k>）。
+        #   ② 注释里**写明刻意不声明**：安全默认，想用才自己加一行。
+        #      判据：键名所在位置的邻近注释含明确的「刻意/不声明/加一行 uci」措辞。
+        #   两类都不占，才是真正需要看的。
+        if key_is_written(k):
+            ok_side.append(('由代码写入（首次保存后落盘），默认文件里没有属正常', k,
+                            ', '.join(r[k][:3])))
+        elif key_has_deliberate_note(k):
+            ok_side.append(('邻近注释已说明刻意不声明（安全默认，想用再加一行）', k,
+                            ', '.join(r[k][:3])))
+        else:
+            bad.append(('读了但未声明（恒空值，且没写它、也没说明为何不声明）', k,
+                        ', '.join(r[k][:3])))
+    return bad, ok_side
 
 
 # --------------------------------------------------------------------------- #
@@ -267,10 +324,17 @@ def check_i18n():
 # --------------------------------------------------------------------------- #
 # 每个词条：关键词 / 说明 / 期望残留出现在哪些文件里（这些文件属"历史记录"，
 # 出现是正常的）。其余地方出现即为残留。
+# ★ 2026-09-28：第三个元素是「已判定保留」——这些残留**不是待清理项**，
+#   而是**刻意留下的安全网**，且各有专门守卫与 CHANGELOG 记录：
+#     · Rust 仍拦截 AT^CELLSCAN（伪命令 + 超时 + ABORT）：去掉它，用户在 AT 终端里
+#       手敲 AT^CELLSCAN 就会原样下发到模组、变成一次无上限的整网扫频（独占串口几分钟）；
+#     · ucode 的 NEVER_CACHE 名单、配置里的 cellscan_timeout 同理。
+#   守卫：tests/cellscan-removed-contract.test.js（横跨 rpc.js / ucode / config / Rust）。
+#   把它们归入「已判明」组，避免 162 条噪音每天淹没真正该看的残留。
 RETIRED = {
-    'CELLSCAN': ('全网扫频（CHANGELOG 记录 2026-09-20 下线）', ['CHANGELOG.md']),
-    'cellscan': ('全网扫频（同上）', ['CHANGELOG.md']),
-    '扫频': ('全网扫频（同上）', ['CHANGELOG.md']),
+    'CELLSCAN': ('全网扫频（CHANGELOG 记录 2026-09-20 下线）', ['CHANGELOG.md'], True),
+    'cellscan': ('全网扫频（同上）', ['CHANGELOG.md'], True),
+    '扫频': ('全网扫频（同上）', ['CHANGELOG.md'], True),
 }
 # 历史/报告类文件里出现旧功能名是正常的，不算残留
 HISTORY_OK = ('CHANGELOG.md', 'docs/', 'po/', 'FRONTEND_REVIEW_REPORT.md',
@@ -292,19 +356,20 @@ def check_retired():
       「此项保留的理由」）也会命中关键词。若不分流，报告会被自己的注释淹没，
       真正该动的「代码残留」反而看不出来。所以按行首注释符分流。
     """
-    bad = []
+    bad, kept = [], []
     for p in walk():
         r = rel(p)
         s = read(p)
-        for kw, (desc, whitelist) in RETIRED.items():
+        for kw, (desc, whitelist, is_kept) in RETIRED.items():
             if kw not in s:
                 continue
             if r in whitelist or r.startswith(HISTORY_OK):
                 continue
             for n, l in find(re.escape(kw), s):
                 kind = '仅注释' if _is_comment_line(l) else '代码'
-                bad.append(('%s｜%s ← %s' % (kind, desc, kw), '%s:%d' % (r, n), l[:90]))
-    return bad
+                row = ('%s｜%s ← %s' % (kind, desc, kw), '%s:%d' % (r, n), l[:90])
+                (kept if is_kept else bad).append(row)
+    return bad, kept
 
 
 # --------------------------------------------------------------------------- #
@@ -502,12 +567,16 @@ def main():
         print('\n★ 有自证失败项：下面的空白结论不可信，先修扫描器。')
 
     print('\n### A. UCI 配置对账')
-    a = check_uci()
+    a, a_ok = check_uci()
     if a:
         for kind, k, where in a:
             print('  · [%s] %-26s %s' % (kind, k, where))
     else:
-        print('  （无）')
+        print('  （无待判的）')
+    if a_ok:
+        print('  —— 以下已判明不是遗漏，人工无需再看：')
+        for kind, k, where in a_ok:
+            print('  · %-26s %s' % (k, kind))
 
     print('\n### B. ubus 三方对账')
     b = check_ubus()
@@ -526,7 +595,7 @@ def main():
         print('  （无）')
 
     print('\n### D. 下线功能关键词残留')
-    d = check_retired()
+    d, d_kept = check_retired()
     if d:
         seen = set()
         for kind, where, text in d:
@@ -534,6 +603,16 @@ def main():
             print('        %s' % text)
             seen.add(where.split(':')[0])
         print('  → 涉及 %d 个文件：%s' % (len(seen), ', '.join(sorted(seen))))
+    else:
+        print('  （无待判的）')
+    if d_kept:
+        # ★ 这些不是待清理项，是**刻意留下的安全网**，各有专门守卫与 CHANGELOG 记录
+        #   （见 RETIRED 上方的说明）。只报数量与涉及文件，不再逐条刷屏。
+        kseen = sorted(set(w.split(':')[0] for _, w, _ in d_kept))
+        print('  —— 「全网扫频」残留 %d 处，属**刻意保留的安全网**（守卫：'
+              'tests/cellscan-removed-contract.test.js），涉及 %d 个文件：'
+              % (len(d_kept), len(kseen)))
+        print('     %s' % ', '.join(kseen))
     else:
         print('  （无）')
 
@@ -559,7 +638,13 @@ def main():
             print('  · %s' % k)
     print('  （样式表共定义 %d 个 mt5700-* 类）' % total)
 
-    total_bad = len(a) + len(b) + len(c) + len(d) + len(e) + len(f)
+        # ★ 2026-09-28：e 是 check_events() 的返回值 —— 它给的是【几份名单】
+    #   （前端自造 / 前端认的 / Rust 推的），**不是"几条问题"**，
+    #   计进"合计待判"会让人以为 E 节有 3 条要处理。这里只统计真正的待判条目。
+        # ★ 注意 a 在 main 里**已经解包**（`a, a_ok = check_uci()`），所以 a 就是待判列表，
+    #   用 len(a)。2026-09-28 我一度写成 len(a[0]) —— 那是**第一个条目的长度**（3），
+    #   于是"合计待判"从 38 变成 23，数字看着更小却更错。
+    total_bad = len(a) + len(b) + len(c) + len(d) + len(f)
     print('\n' + '=' * 78)
     print('合计待判 %d 条（F 节与 D 节含正常用法，需人工判性质）' % total_bad)
     print('=' * 78)
@@ -567,4 +652,12 @@ def main():
 
 
 if __name__ == '__main__':
+    if SELF_TEST_ONLY:
+        # 只跑自证：全过退 0，任一失败退 1（CI 用它当闸门）
+        _st = self_test()
+        for _name, _okv in _st:
+            print('  %-30s %s' % (_name, '✓ 能检出' if _okv else '✗ 恒绿！该检查无效'))
+        _n_ok = sum(1 for _, _o in _st if _o)
+        print('find-orphans 自证：%d / %d' % (_n_ok, len(_st)))
+        sys.exit(0 if _n_ok == len(_st) else 1)
     sys.exit(main())
