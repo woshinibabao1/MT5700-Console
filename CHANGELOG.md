@@ -5,6 +5,71 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.63] - 2026-09-28
+
+第三轮通读继续。这一批是两条「同类问题只做了一半」——两条都**已经在仓库里写下了正确
+的原则**，只是没贯彻到第二处。
+
+### Fixed
+
+**7. `atclient.rs`：`is_terminator` 与 `has_error` 的判据不一致**
+
+- `has_error()` 走 `is_error_line()`：认 `+CME ERROR`（**不带冒号也行**，行尾即结束）；
+- `is_terminator()` 自己写了一遍 `starts_with("+CME ERROR:")`——**要求冒号**。
+
+于是模组若回无冒号的 `+CME ERROR`，就会出现自相矛盾的组合：`has_error()` 说这份应答含
+错误结束码，而 `is_terminator()` 不认它是结束码 ⇒ 那条命令收不到 notify，只能**白等到
+超时**，而最终报出来的是「模组无响应（已等待 2000ms…）」这种**指向完全错误**的原因。
+
+修法：`is_terminator` 复用 `is_error_line`（`line == "OK" || line == "ABORTED" || is_error_line(line)`），
+两条判据从此不可能分歧。**新增 Rust 测试** `is_terminator_与_has_error_同口径`，其中一条
+直接遍历三种错误结束码的 5 种形态，要求「凡 `has_error` 认的，`is_terminator` 必须也认」。
+（`cargo test` **31 → 32** 项。）
+
+**8. `logger.rs`：日志环形缓冲违反了自己在 `rpcserver.rs` 写下的 seq 约定**
+
+`rpcserver.rs` 的 `EventBus::push` 里有一段事故记录：
+
+> 先 fetch_add 再加锁，于是存在这样的窗口：号已分配、事件尚未入队，而此时 since() 读到
+> 这个新 seq 却看不到对应事件，前端据此把游标推进到该 seq —— 那条事件就永久拉不到了。
+
+`EventBus::since` 因此也约定「**返回本次实际回到的 seq，不是最新 seq**」，注释写着理由：
+「若报了最新 seq，前端会把游标推过去，被裁掉的那些就永久拉不到了」。
+
+而 `logger.rs` 两处都还是**未修的形态**：
+
+- `emit` **先** `LOG_SEQ.fetch_add`、**再**调 `buffer_push` 取锁 —— 同一个窗口；
+- `snapshot` 返回 `LOG_SEQ.load()`（全局最新），而它上面刚 `out.drain(..keep_from)` 把
+  最旧的若干条裁掉 —— **被裁掉的日志就此永久不可见**；
+- 顺带：`emit` 无条件 `msg.clone()`，而"级别不够、不打 stderr"时那份克隆必然被丢弃。
+
+修法三处：取号移进 `buffer_push` 的锁内（`emit` 不再自己取号，全文件只留一处取号）；
+`snapshot` 回传 `out.last().map(|r| r.seq).unwrap_or(since)`（无记录时表示"游标没动"）；
+`emit` 在不打 stderr 时直接 move，省掉一次高频且必然浪费的分配。
+
+**新增契约测试** `tests/log-seq-contract.test.js`（**13 项**）：判据全部落在**剥离注释后的
+源码**上（注释里正当地提到了这些标识符），并把 `EventBus::push` / `EventBus::since` 作为
+**参照物**一起断言 —— 防止有人反向"对齐"掉源头。
+
+**变异验证**（本仓红线「写了守卫 ≠ 有了守卫」）：
+把 `snapshot` 改回读全局最新 seq → **判红 2 处**；把取号移出锁 → **判红 3 处**；还原 → 全绿。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **32 passed / 0 failed**（新增判据一致性守卫） |
+| `node tests/run-all.js` | 全部测试文件通过（新增 `log-seq-contract`） |
+| `tests/log-seq-contract.test.js` | 13 项通过；两处变异分别判红 2 / 3 处，还原后全绿 |
+
+### 诚实边界
+
+- 第 8 项修的是**并发窗口**，没有构造并发复现（要精确卡在 `fetch_add` 与加锁之间）。
+  依据是 `rpcserver.rs` 里同一个事故的既有记录、`EventBus::since` 的既有约定，以及新增的
+  静态契约守卫。真机上日志量小、窗口极窄，实际影响面以「前端一旦改用 seq 游标就会立刻
+  暴露」为主 —— 但也正因为窄，它一直没被发现。
+- 通读覆盖范围同 2.3.62 所述（`rpcserver.rs` 本轮只读到 195 行）。
+
 ## [2.3.62] - 2026-09-28
 
 第三轮全仓优化。方法：**逐文件通读**（不再抽样），从代码逻辑、性能、可读性、安全性、

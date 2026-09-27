@@ -77,30 +77,39 @@ pub struct LogRecord {
 static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 static LOGS: Mutex<Option<VecDeque<LogRecord>>> = Mutex::new(None);
 
-fn buffer_push(rec: LogRecord) {
+/// 入队一条记录，**取号在锁内完成**。
+///
+/// ★ 取号必须在持有队列锁之后 —— 这与 `rpcserver.rs` 的 `EventBus::push` 是同一条
+///   约定，那边的注释记着同一个事故：「先 fetch_add 再加锁，于是存在这样的窗口：
+///   号已分配、事件尚未入队，而此时 since() 读到这个新 seq 却看不到对应事件，
+///   前端据此把游标推进到该 seq —— 那条事件就永久拉不到了」。
+///   本函数原先正是那个未修的形态（emit 里先取号再调它取锁），已对齐。
+fn buffer_push(level: &str, msg: String) {
     let mut guard = match LOGS.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if guard.is_none() {
-        *guard = Some(VecDeque::with_capacity(LOG_BUFFER_CAP));
-    }
-    if let Some(q) = guard.as_mut() {
-        q.push_back(rec);
-        while q.len() > LOG_BUFFER_CAP {
-            q.pop_front();
-        }
+    let q = guard.get_or_insert_with(|| VecDeque::with_capacity(LOG_BUFFER_CAP));
+    let seq = LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    q.push_back(LogRecord { seq, ts: now_ms(), level: level.to_string(), msg });
+    while q.len() > LOG_BUFFER_CAP {
+        q.pop_front();
     }
 }
 
-/// 取日志快照：返回 (当前最新 seq, seq > since 的记录，最多 limit 条)。
+/// 取日志快照：返回 (本次实际回到的 seq, seq > since 的记录，最多 limit 条)。
 /// limit 超出时保留**最新**的部分（排障看最新的更有用）。
+///
+/// ★ 返回的 seq 是「**本次真正回到的位置**」，不是当前最新 seq —— 与
+///   `rpcserver.rs` 的 `EventBus::since` 同一条约定（那里注释写着理由：
+///   「若报了最新 seq，前端会把游标推过去，被裁掉的那些就永久拉不到了」）。
+///   本函数上面刚把最旧的若干条 drain 掉，若这里报最新 seq，被 drain 的日志
+///   就此永久不可见。没有任何记录时回退到 `since`，表示「游标没动」。
 pub fn snapshot(since: u64, limit: usize) -> (u64, Vec<LogRecord>) {
     let guard = match LOGS.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let seq = LOG_SEQ.load(Ordering::Relaxed);
     let mut out: Vec<LogRecord> = match guard.as_ref() {
         Some(q) => q.iter().filter(|r| r.seq > since).cloned().collect(),
         None => Vec::new(),
@@ -109,7 +118,8 @@ pub fn snapshot(since: u64, limit: usize) -> (u64, Vec<LogRecord>) {
         let keep_from = out.len() - limit;
         out.drain(..keep_from);
     }
-    (seq, out)
+    let last = out.last().map(|r| r.seq).unwrap_or(since);
+    (last, out)
 }
 
 /* -------------------------------- 输出 -------------------------------- */
@@ -117,18 +127,15 @@ pub fn snapshot(since: u64, limit: usize) -> (u64, Vec<LogRecord>) {
 pub fn emit(lv: Level, tag: &str, args: std::fmt::Arguments) {
     let msg = format!("{}", args);
 
-    // 先入缓冲：**不受当前级别限制**，否则拨号/接口这类 info 日志在稳态下会完全消失
-    let seq = LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    buffer_push(LogRecord {
-        seq,
-        ts: now_ms(),
-        level: tag.to_string(),
-        msg: msg.clone(),
-    });
-
+    // 先入缓冲：**不受当前级别限制**，否则拨号/接口这类 info 日志在稳态下会完全消失。
+    // （取号在 buffer_push 的锁内完成，见那里的说明。）
     if lv < level() {
+        // 不打 stderr 时直接 move 进缓冲，省掉一次必然被丢弃的 String 克隆 ——
+        // 日志是本服务频率最高的一类分配（每条 URC / 每条命令都会走到这里）。
+        buffer_push(tag, msg);
         return;
     }
+    buffer_push(tag, msg.clone());
     eprintln!("{} [{}] {}", timestamp(), tag, msg);
 }
 

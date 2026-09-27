@@ -878,11 +878,18 @@ impl AtClient {
 }
 
 pub fn is_terminator(line: &str) -> bool {
-    match line {
-        "OK" | "ERROR" | "ABORTED" => return true,
-        _ => {}
-    }
-    line.starts_with("+CMS ERROR:") || line.starts_with("+CME ERROR:")
+    /*
+     * ★ 复用 is_error_line，而不是自己写一遍 `starts_with("+CME ERROR:")`。
+     *   两条判据必须**完全一致**，否则会出现这种自相矛盾的组合：
+     *   `has_error()` 说这份应答含错误结束码，而 `is_terminator()` 不认它是结束码
+     *   —— 于是那条命令收不到 notify，只能白等到超时，最终报出来的是
+     *   「模组无响应（已等待 2000ms…）」这种**指向完全错误**的原因。
+     *   具体分歧点在「不带冒号」的形态：is_error_line 接受 `+CME ERROR`（行尾即结束），
+     *   旧实现只接受 `+CME ERROR:`。
+     *   代价是 ERROR 一侧从大小写敏感放宽成 ASCII 不敏感 —— 与 has_error 一致，
+     *   而 has_error 那边早已按此口径（3GPP TS 27.007 的错误结束码独占一行）。
+     */
+    line == "OK" || line == "ABORTED" || is_error_line(line)
 }
 
 /// 只匹配不可能出现在查询应答里的主动上报。
@@ -1006,6 +1013,42 @@ mod tests {
         // 出现在行中间的同样不算
         assert!(!resp_of("+CME ERRORX").has_error());
         assert!(!resp_of("回显里提到 +CME ERROR 但不在行首").has_error());
+    }
+
+    /* ---------- 结束码判定：必须与 has_error 同口径 ---------- */
+
+    /// 回归守卫：`is_terminator` 与 `has_error` 一旦分歧，就会产出
+    /// 「认出是错误、却等不到结束码」的组合 —— 命令白等到超时，还报
+    /// 「模组无响应」这种指向错误的原因。分歧点就在**不带冒号**的形态上。
+    #[test]
+    fn is_terminator_与_has_error_同口径() {
+        // 正常成功 / 中断
+        assert!(is_terminator("OK"));
+        assert!(is_terminator("ABORTED"));
+        // 三种错误结束码，含不带冒号的形态（旧实现漏掉的就是这一种）
+        assert!(is_terminator("ERROR"));
+        assert!(is_terminator("+CME ERROR: 10"));
+        assert!(is_terminator("+CMS ERROR: 500"));
+        assert!(is_terminator("+CME ERROR"));
+        assert!(is_terminator("+CMS ERROR"));
+        // 不一致性本身：凡 has_error 认的结束码，is_terminator 必须也认
+        for s in [
+            "ERROR",
+            "+CME ERROR",
+            "+CME ERROR: 10",
+            "+CMS ERROR",
+            "+CMS ERROR: 500",
+        ] {
+            assert!(
+                !resp_of(s).has_error() || is_terminator(s),
+                "has_error 认它是错误，is_terminator 却不认它是结束码：{s}"
+            );
+        }
+        // 不能误判成结束码
+        assert!(!is_terminator("+CME ERRORX"));
+        assert!(!is_terminator("+CMGL: 1,1,,,\"My network error again\""));
+        assert!(!is_terminator("^HCSQ: 1,2,3,4"));
+        assert!(!is_terminator(""));
     }
 
     #[test]
