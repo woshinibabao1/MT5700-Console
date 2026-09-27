@@ -5,6 +5,58 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.74] - 2026-09-28
+
+读 `parse.js` 时做的**第二轮双向口径核对**（`parse.js` ↔ `pdu.rs`），抓到一个真缺陷 ——
+而且又是「同一问题只做了一半」。
+
+### Fixed
+
+**23. `parse.js` 的 `unpackSeptets` 保留了 `pdu.rs` 已修掉的「填充位造字」缺陷**
+
+两端同一算法的差别只在循环**之后**：
+
+```js
+// parse.js（修复前）
+if (bits > 0 && out.length < count) out.push(acc & 0x7F);   // ← 凭空造字
+```
+
+而 `pdu.rs` 的 `unpack_septets` 早已把这一步**删掉**，并在注释里记着原因：
+
+> ★ 循环结束时 bits 必定落在 1..=6 —— 那是末尾字节里的填充位，不是一个真实码位。
+> 原先在此补一个 (acc & 0x7F)，会凭空造出一个由填充位拼出来的字符，表现为短信正文
+> 尾部莫名多一个 '@' 之类，并且会原样进入企业微信推送。数据不足时宁可截断，也不要造字。
+
+**后果**：同一份 PDU，走前端解码与走后端解码会得到**不同长度**的正文 —— 前端那条路
+尾部会多一个字符。已按后端口径对齐（并保留一条指向 `pdu.rs` 那段说明的注释）。
+
+### 第二轮双向核对（`parse.js` ↔ `pdu.rs`）其余项均一致
+
+| 项 | 结论 |
+| :-- | :-- |
+| `GSM7_ALPHABET` | 逐字符相同（且已由 Rust 侧断言钉住"恰好 128 个码位"） |
+| `gsm7Extension` ↔ `gsm7_extension` | 逐项一致（含 `0x0A → \u000C`） |
+| `decodeUcs2Bytes` ↔ `decode_ucs2` | 都取 `i + 1 < len` 成对读取 |
+| `bcdDigit` ↔ `bcd_digit` | 半字节交换一致 |
+| `septetsToString` | 用 `c < GSM7_ALPHABET.length` 判界 —— 因为表中全是 BMP 字符，`.length`（UTF-16 码元数）等于字符数，故安全 |
+
+### 已记录但**未改**的一处
+
+`api.sanitizeAtParam` 剥的是 `" \r \n ; ,`（防**参数注入**），而 `smsEncode.sanitizeSmsText`
+剥的是 `\r \n \x00 \x1a`（防**命令分帧破坏 / 数据态提前结束**）。两者剥的集合不同是**有意
+的**（用途不同，各自注释都写了理由）。`sanitizeAtParam` 未剥 NUL / Ctrl-Z，理论上参数值
+含它们也可能截断命令；但该函数的调用点都只喂 UI 输入，且扩大剥除集合会改变所有调用点的
+行为，故**本轮不动**，仅记录。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `node tests/sms-pdu.test.js` | **92 项通过**（编码 ↔ `pdu.rs` 往返一致） |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+
 ## [2.3.73] - 2026-09-28
 
 开始读前端共享模块，第一站是 `smsEncode.js`（短信 PDU **编码**侧）。它与刚读完的 `pdu.rs`
