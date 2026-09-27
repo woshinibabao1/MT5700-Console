@@ -23,6 +23,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+# ★ 2026-09-28 新增（用户反馈「频繁推送非常浪费时间」）：
+#   原来没有 concurrency —— 每次推送到 main 都排一个**数小时**的 docker 打包，
+#   前一个还在跑也不取消，于是几次推送叠着一起烧机时。
+#   group 用 workflow + ref：同一分支上的新推送会**取消上一次未完成的运行**；
+#   tag 推送的 ref 各不相同（refs/tags/v1.2.0），所以各版本的构建**不会互相取消**——
+#   这正是我们要的：main 上只保留最新一次，发布的 tag 一律跑完。
+#   注意 rust-check / contract-check 也在这个 workflow 里，它们只要几十秒；
+#   取消旧的 main 运行时连它们一起取消，但新的一次会立刻重跑，不影响把关。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -75,11 +87,53 @@ jobs:
       - name: 守卫有效性验证（故意违反须被判红）
         run: python3 tools/verify-guards.py
 
+  # ---- 是否需要真打包 ----
+  # ★ 2026-09-28 新增（用户反馈「频繁推送非常浪费时间」）：
+  #   打包要跑两个矩阵的 docker 构建（数小时），而只改 tests/ 或文档时完全不需要 ——
+  #   最近几十轮大量改动都只落在 tests/ 里，每次都白烧一遍机时。
+  #   ★ 设计原则是**保守**：输出 code 默认 true，任何取不到改动清单的情况
+  #     （tag 推送、workflow_dispatch、shallow clone、命令失败）一律**照旧打包**。
+  #     最坏结果只是"多跑一次本该跳过的"，绝不会"该跑的没跑"。
+  #   判定：改动文件里只要有一个**不在** tests/ tools/ 或 *.md 之下，就需要打包。
+  needs_code:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    outputs:
+      code: ${{ steps.judge.outputs.code }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 判断本次改动是否需要打包
+        id: judge
+        run: |
+          set -u
+          code=true
+          BEFORE='${{ github.event.before }}'
+          AFTER='${{ github.event.after }}'
+          if [ -n "$BEFORE" ] && [ -n "$AFTER" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            if git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              CHANGED=$(git diff --name-only "$BEFORE" "$AFTER" || true)
+            fi
+          fi
+          if [ -z "${CHANGED:-}" ]; then
+            echo "==> 取不到改动清单（tag/dispatch/首次推送），按需要打包处理"
+          elif echo "$CHANGED" | grep -qvE '^(tests/|tools/|[^/]*\.md$)'; then
+            echo "==> 有非 tests/tools/md 改动，需要打包"
+          else
+            code=false
+            echo "==> 本次只动了 tests/ tools/ 或文档，跳过打包"
+            echo "$CHANGED" | sed 's/^/    /'
+          fi
+          echo "code=${code}" >> "$GITHUB_OUTPUT"
+
   build:
     # 闸门：rust-check / contract-check 挂了就不打包、更不发布。没有 needs 的话
     # 两个 job 并行跑，检查结果只能靠人盯着看，等于没拦。
-    needs: [rust-check, contract-check]
-    if: github.event_name != 'pull_request'
+    needs: [rust-check, contract-check, needs_code]
+    if: github.event_name != 'pull_request' && needs.needs_code.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -175,6 +229,8 @@ jobs:
     needs: build
     # 只在 push / 打标签时发布：PR 触发时 build 已被跳过，这里必须显式挡住，
     # 否则每个 PR 都会去创建或覆盖同名的 Release。
+    # ★ 2026-09-28：build 因「只动了 tests/tools/文档」被跳过时，release 自然也不会跑
+    #   （needs 未成功即不执行）—— 那正是不该发 Release 的情形。
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:

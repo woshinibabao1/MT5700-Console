@@ -5,6 +5,107 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.96] - 2026-09-28
+
+攒满 **5 项**一次推送（按用户要求：不再"有几项推几项"）。本批含 **2 项 CI 省时优化**
++ **1 处真实缺陷修复**（同一形态的另一处）+ **1 条新守卫**。
+
+### Performance / CI
+
+**65. `.github/workflows/build-openwrt.yml`：新增 `concurrency`（新推送取消旧的未完成构建）**
+
+原来没有 `concurrency` —— 每次推送到 main 都排一个**数小时**的 docker 打包，前一个还在跑
+也不取消，几次推送叠着一起烧机时。新增：
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+```
+`group` 含 ref：同一分支上的新推送**取消上一次未完成的运行**；tag 推送的 ref 各不相同
+（`refs/tags/v1.2.0`），所以各版本构建**不会互相取消**。这正是要的：main 上只保留最新一次，
+发布的 tag 一律跑完。
+
+**66. 只改 `tests/` 或文档时，跳过两个矩阵的 docker 打包**
+
+最近几十轮改动大量只落在 `tests/` 里，每次都白烧一遍完整打包。新增轻量 `needs_code` job，
+`build` 挂上它（`needs: [rust-check, contract-check, needs_code]`）。
+
+★ **设计原则是保守**：输出 `code` **默认 `true`** —— 任何取不到改动清单的情形（tag 推送、
+`workflow_dispatch`、shallow clone、命令失败、`before` 为全零）**一律照旧打包**。
+**最坏只是"多跑一次本该跳过的"，绝不会"该跑的没跑"。**
+判定：改动文件里只要有一个**不在** `tests/` `tools/` `[^/]*\.md` 之下就需要打包。
+`rust-check` / `contract-check` **不挂该条件、每次都跑**（几十秒，且改 `tests/` 时最需要它）。
+
+**验证方式**：CI 改动不能靠文本自查（YAML 错一处整个 workflow 就不跑），故用 **Python 真解析**
+核对：顶层键、触发条件、`concurrency`、五个 job 的 `needs`/`if`、`needs_code.outputs`、
+`matrix` 组合数仍为 **2**（aarch64 apk+ipk，**裁减保持不变**）。
+
+### Fixed
+
+**67. `service.js`：`statBinary` / `listSerial` 读失败被当成「未安装」/「没有串口」**
+
+`resolveStatus` 的注释写着「**区分**运行中/已停止/未注册/未安装/已禁用五种语义，给出对应的
+**修复建议**」—— 这个函数的立意就是精确区分。但两个读来源都是「失败就给空壳」：
+```js
+listSerial('/dev').catch(function () { return { entries: [] }; })
+statBinary(BINARY).catch(function () { return null; })
+var binExists = !!(st && (st.type || st.mode !== undefined));
+```
+于是「读失败」与「系统里真的没有」**完全不可区分**，渲染侧据此下结论：
+`label: '未安装'` + `'…请重新安装 luci-app-mt5700。'` —— **一次 rpcd 超时/权限问题就让界面
+断言「后端未安装」并劝用户重装**。
+
+修法：两处 `catch` 留痕（`statFailed` / `serialFailed`）→ 返回对象带 `binUnknown` /
+`serialUnknown` → 新增 **「状态未知」（`warning`，不劝重装）** 一态；串口下拉加一条**禁用态
+提示项**（"⚠ 读取 /dev 失败，串口列表可能不完整"），不让它和"真的没有串口"长得一样。
+同仓先例：`sms_settings.js` 的 `unknown=true`（回读不到就不许据此断言）。
+
+**68. `service.js`：`serviceList` 读失败被当成「未注册」（同一形态的另一处）**
+
+`registered` 的两个来源（`load()` 与 `refreshStatus()`）也是 `.catch(function () { return {}; })`，
+读失败即 `registered = false` → 报「未注册」并**把用户引去查**
+`/etc/init.d/at-webserver` **是否被 overlay 覆盖** —— 一次读失败就给出错误的排查方向。
+
+修法同 67：`svcFailed` 留痕 → `svcUnknown` → 「状态未知」一态（不给具体归因）。
+★ `refreshStatus()` 里**开头复位**该标志（否则失败一次之后会永远停在「状态未知」）。
+
+### Added
+
+**69. 新增守卫 `tests/service-status-unknown-contract.test.js`（24 项）**
+
+这一形态此前**没有任何守卫**：`silent-catch-contract` 守的是「无参数 catch 必须给出交代」，
+而这里的 `catch` 是**带返回值**的，不在它的判据内。新守卫钉：
+- 三处 `catch` 必须留痕、标志必须 `var` 声明；
+- 返回对象必须带 `binUnknown` / `serialUnknown` / `svcUnknown`；
+- `resolveStatus` 必须先判 `*Unknown` 再落到「未安装」/「未注册」（**顺序断言**）；
+- **行为断言**：抽出 `resolveStatus` 真跑 —— 未知态不得报「未安装」/「未注册」、
+  措辞不得含"重新安装"或"init.d"，且**真故障时仍要如实报并给出建议**（没有矫枉过正）；
+- **5 条反向自检**（含一条行为层的：拿旧版 `resolveStatus` 真跑，确认它确实会误报）。
+
+`run-all.js` 自动扫目录，新文件已被收录。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `node tests/syntax-check.js` | 20 个 JS 文件，语法错误 0 个 |
+| `node tests/run-all.js` | 全部测试文件通过（含新守卫 24 项） |
+| 变异 A：去掉 `binUnknown` 分支 | **5 项判红** ✓ |
+| 变异 B：去掉 `statFailed` 标记 | **1 项判红** ✓ |
+| 变异 C：去掉 `svcUnknown` 分支 | **3 项判红** ✓ |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+| Python 真解析 workflow YAML | 结构、触发、5 个 job 的 needs/if、matrix 组合数=2 全部正确 |
+
+### 诚实边界
+
+- **67 / 68 是真实缺陷**：都会把「读不到」显示成确定的故障结论，并给出**错误的修复建议**
+  （劝重装 / 劝查 init 脚本），而现有守卫全都抓不到（它们是运行时渲染行为，静态断言看不见）。
+- 65 / 66 是**用户反馈「频繁推送非常浪费时间」**的直接回应：我此前把「凑满 5 项再推」
+  执行成了"有几项推几项"，连推了 3/1/1/1 次 —— 这是我的执行错误，已改正；
+  CI 侧的两项则是让"即使推得勤也不会叠着烧机时"。
+- 66 的路径判断**故意保守**：宁可多跑一次，也不冒"该跑没跑"的风险。
+
+
 ## [2.3.95] - 2026-09-28
 
 本批 1 项（`service.js` 的三处相关注释），未改任何逻辑。**防的是一个会静默改坏配置显示的误删。**

@@ -61,6 +61,23 @@ function resolveStatus(state) {
 		};
 	}
 	if (!binExists) {
+		/*
+		 * ★ 2026-09-28 修：原来这里一律报「未安装」。而 binExists 来自
+		 *   statBinary(BINARY).catch(function () { return null; })，**RPC 读失败也是 null**，
+		 *   于是「读不到」与「真的没装」不可区分 —— 一次 rpcd 超时就会让界面断言
+		 *   「未安装」并劝用户「请重新安装 luci-app-mt5700」，把人引向错误操作。
+		 *   本函数的立意（见上方注释）恰恰是**区分语义、给出对应的修复建议**，
+		 *   所以这里必须把「读失败」单列一态，措辞上也**不许**下"未安装"的结论。
+		 *   同仓先例：sms_settings.js 的 unknown=true（回读不到就不许据此断言）。
+		 */
+		if (state.binUnknown) {
+			return {
+				label: '状态未知', variant: 'warning', pid: null,
+				hint: '读取 ' + BINARY + ' 的状态失败（rpcd file.stat 没有返回结果），' +
+					'因此无法判断后端是否已安装。请点右上角「重载服务」重试；' +
+					'若持续如此，再查看 logread -e at-webserver。'
+			};
+		}
 		return {
 			label: '未安装', variant: 'danger', pid: null,
 			hint: '未找到可执行文件 ' + BINARY + '，后端可能未安装或安装不完整。请重新安装 luci-app-mt5700。'
@@ -73,6 +90,21 @@ function resolveStatus(state) {
 		};
 	}
 	if (!registered) {
+		/*
+		 * ★ 2026-09-28 修（与上面 binUnknown 同一形态）：registered 来自
+		 *   serviceList(SERVICE).catch(function () { return {}; })，**读失败也是 {}**，
+		 *   于是「rpcd 读不到实例」与「procd 里真的没有实例」不可区分 ——
+		 *   一次读失败就会把用户引去查 /etc/init.d/at-webserver 是否被 overlay 覆盖，
+		 *   而实际只是这次没读到。读不到时只报「未知」，不给具体归因。
+		 */
+		if (state.svcUnknown) {
+			return {
+				label: '状态未知', variant: 'warning', pid: null,
+				hint: '读取 procd 实例列表失败（rpcd service list 没有返回结果），' +
+					'因此无法判断服务是否已注册。请点右上角「重载服务」重试；' +
+					'若持续如此，再查看 logread -e at-webserver。'
+			};
+		}
 		return {
 			label: '未注册', variant: 'warning', pid: null,
 			hint: '进程未运行，且 procd 中不存在 at-webserver 实例——通常是 /etc/init.d/at-webserver ' +
@@ -106,6 +138,10 @@ return L.view.extend({
 			params: ['name'],
 			expect: { '': {} }
 		});
+		/* ★ 2026-09-28：区分「读失败」与「真的没有」—— 见 resolveStatus 里 binUnknown 的说明 */
+		var statFailed = false;
+		var serialFailed = false;
+		var svcFailed = false;
 		return Promise.all([
 			/*
 			 * ★ 2026-09-28 补说明（**不要删这一行**）：本例的返回值确实没人用，
@@ -116,9 +152,9 @@ return L.view.extend({
 			 *   删掉它不会有任何静态报错、测试也抓不到 —— 所以把理由写在这里。
 			 */
 			L.uci.load(SERVICE),
-			serviceList(SERVICE).catch(function () { return {}; }),
-			listSerial('/dev').catch(function () { return { entries: [] }; }),
-			statBinary(BINARY).catch(function () { return null; })
+			serviceList(SERVICE).catch(function () { svcFailed = true; return {}; }),
+			listSerial('/dev').catch(function () { serialFailed = true; return { entries: [] }; }),
+			statBinary(BINARY).catch(function () { statFailed = true; return null; })
 		]).then(function (res) {
 			var raw = res[2];
 			var entries = [];
@@ -183,6 +219,9 @@ return L.view.extend({
 				pid: pid,
 				binExists: binExists,
 				binExec: binExec,
+				binUnknown: statFailed,
+				serialUnknown: serialFailed,
+				svcUnknown: svcFailed,
 				enabled: enabled,
 				serials: serials
 			};
@@ -265,6 +304,17 @@ return L.view.extend({
 				serialSel.appendChild(o);
 			}
 			add('auto', '自动探测（优先 /dev/ttyUSB1 PCUI）');
+			/*
+			 * ★ 2026-09-28：listSerial('/dev') 失败时原来只返回 { entries: [] }，
+			 *   与「系统里真的没有任何 ttyUSB/ttyACM 设备」长得一模一样 ——
+			 *   用户会以为机器上没有串口，而实际是一次 rpcd 读取失败。
+			 *   这里插一条**禁用**的提示项（value 不是候选值，选不中，只是让人看见）。
+			 */
+			if (state.serialUnknown) {
+				var warn = E('option', { value: '__dev_read_failed__', disabled: 'disabled' },
+					'⚠ 读取 /dev 失败，串口列表可能不完整（点「重载服务」重试）');
+				serialSel.appendChild(warn);
+			}
 			(state.serials || []).forEach(function (p) {
 				var hint = p === '/dev/ttyUSB1' ? '（PCUI 推荐）' : '';
 				add(p, p + hint);
@@ -533,8 +583,10 @@ return L.view.extend({
 		}
 
 		function refreshStatus() {
+			/* ★ 每次重查都要先复位：否则失败一次之后会永远停在「状态未知」 */
+			var svcRefreshFailed = false;
 			return Promise.all([
-				rpcServiceList(SERVICE).catch(function () { return {}; }),
+				rpcServiceList(SERVICE).catch(function () { svcRefreshFailed = true; return {}; }),
 				/* ★ 同上：返回值不用，副作用必需 —— 539 行的 L.uci.get 读的就是它加载进缓存的配置 */
 				L.uci.load(SERVICE)
 			]).then(function (res) {
@@ -554,6 +606,7 @@ return L.view.extend({
 				state.running = found;
 				state.pid = pid;
 				state.registered = !!(res[0] && res[0][SERVICE]);
+				state.svcUnknown = svcRefreshFailed;
 				state.enabled = (en === null || en === undefined) ? '1' : String(en);
 
 				var st = resolveStatus(state);
