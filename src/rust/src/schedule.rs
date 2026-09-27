@@ -453,8 +453,6 @@ impl Scheduler {
         s.apply_failed = !lock_ok;
         drop(s);
 
-        log_info!("定时锁频切换完成: {}（{}）", actions, if lock_ok { "成功" } else { "失败" });
-
         if !should_notify {
             log_warn!("锁频下发仍失败，处于连续失败状态，本周期不再推送通知");
             return lock_ok;
@@ -476,6 +474,10 @@ impl Scheduler {
                 .notify(Notification { sender: SENDER_SIGNAL.into(), content, kind: NotifyKind::Signal, memory_full: false })
                 .await;
         });
+        // 整条路径只在这一处记录结果。
+        // ★ 2026-09-28：此前这里**前面还有一条一模一样的 log_info!**，于是正常路径下
+        //   每次切换都会打两条完全相同的「定时锁频切换完成: …」；而上面那个
+        //   「连续失败则静默」的分支又有自己的 log_warn，所以删掉前面那条不会丢信息。
         log_info!("定时锁频切换完成: {}（{}）", actions, if lock_ok { "成功" } else { "失败" });
         lock_ok
     }

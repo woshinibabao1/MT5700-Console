@@ -5,6 +5,69 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.71] - 2026-09-28
+
+通读 `schedule.rs` 的 `apply_lock`（348-482，本文件最大的一段）。锁频下发的逻辑本身
+经得起推敲，但有一处**确证的重复日志**。
+
+### Fixed
+
+**18. `apply_lock` 里同一条 `log_info!` 被调用了两次**
+
+```rust
+if !should_notify {
+    log_warn!("锁频下发仍失败，处于连续失败状态，本周期不再推送通知");
+    return lock_ok;
+}
+
+let notifier = …;
+let content = …;
+tokio::spawn(async move { … });
+
+log_info!("定时锁频切换完成: {}（{}）", actions, if lock_ok { "成功" } else { "失败" });
+```
+
+**同一句**在同一函数的前面（推进通知分支之前）也出现过一次 —— 于是正常路径下每次锁频
+切换都会打**两条一模一样**的完成日志。（那段历史很像"先写了日志，后来又补了一个末尾
+日志，补的时候没删前面那条"。）
+
+删掉前面那条即可，**不丢任何信息**：连续失败那条路径本来就有自己的
+`log_warn!("锁频下发仍失败…")`，而成功/首次失败都会走到末尾这条。
+
+> 顺带记一次我自己的核对方式：删完我用 `Select-String` 数 `定时锁频切换完成` 的**出现次数**，
+> 得到 2，一度以为没删掉 —— 其实第 2 次出现是**我新写的注释里引用了这句话**。
+> 改成精确匹配 `log_info!("定时锁频切换完成` 后确认只剩 1 处。教训是：**用字符串计数去
+> 验证删除时，要先排除刚写进去的说明文字**。
+
+### 同批读过、未发现问题的部分（`apply_lock` 的其余逻辑）
+
+- 进/出飞行模式失败都记 `lock_ok = false`，且注释写明了各自的后果 ——
+  尤其"退出飞行模式失败"那条：**模组停在 `CFUN=0` 就是完全离线，而 `applied=true` 会让
+  调度器认为已下发成功、永不再试**，设备会一直没信号直到人为重启；
+- "一条锁频命令都没下发"时区分两种成因：用户关掉了 `unlock_lte`/`unlock_nr`（本就该什么
+  都不发，属正常）vs 配置有误导致命令生成不出来（必须判失败好重试）—— 原先不区分，
+  前者会被判成失败并**每个周期重放一次空切换**污染日志；
+- 通知只在**状态翻转**时推（`should_notify = lock_ok || !s.apply_failed`）：否则配置有误时
+  就是每 `check_interval` 一条通知 + 一条日志，而通知日志在 tmpfs 上会持续膨胀；
+- 每处 `sleep_ctx` 都检查返回值（ctx 结束即 `return false`），不会在关服时继续下发命令。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **42 passed / 0 failed** |
+| `cargo check --all-targets` | 0 warning |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+| 重复日志 | 精确匹配确认 `log_info!("定时锁频切换完成` 全文件仅 1 处 |
+
+### 诚实边界
+
+- 这是一处**日志噪音**修复（低严重度），不影响任何行为或数据。
+- **后端逐行通读到此只剩 `urc.rs` 约 500 行**（`handle_memory_full` 前半、`cmti_capture`、
+  `clip_number` 等辅助函数）——下一轮即可把后端收口。
+- 仍未通读：前端共享模块、12 个视图层文件、ucode 插件（约 20000 行）。
+
 ## [2.3.70] - 2026-09-28
 
 通读 `schedule.rs` 状态机主体（`tick` / `target_mode` / `lock_for` / `modem_busy_recently`）。
