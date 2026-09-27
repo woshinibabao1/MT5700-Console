@@ -188,6 +188,15 @@ async fn run(verbose: bool) -> Result<(), String> {
     });
 
     // 等待退出信号或服务异常。
+    //
+    // ★ serve_handle 会被 select! 借用着 poll。**它一旦先完成，就不能再 await 第二次**：
+    //   tokio 的 JoinHandle 在完成后再次 poll 会 panic（"JoinHandle polled after completion"，
+    //   已在本机 tokio 1.53.1 实测复现）。而本 crate 的 release 是 panic = "abort"，
+    //   一次 panic 就是 abort —— 恰好违反本文件 join_log 上方那条约定：
+    //   「不能改变进程退出码，否则 procd 会判定为崩溃并反复 respawn，攒满重试后
+    //     永久放弃拉起」。触发场景正是最该优雅收尾并留下日志的那条路：
+    //   RPC 服务因 bind 失败 / 端口被占而先于关闭信号结束。
+    //   所以下面用 serve_done 记住"它是否已经在 select! 里结束"，收尾时跳过它。
     let mut serve_handle = serve_task;
     let serve_result = tokio::select! {
         _ = shutdown_signal() => None,
@@ -197,7 +206,7 @@ async fn run(verbose: bool) -> Result<(), String> {
     // 触发优雅关闭。
     let _ = ctx_tx.send(true);
 
-    match serve_result {
+    match &serve_result {
         // RPC 服务正常结束（关闭信号触发），无需处理。
         Some(Ok(Ok(()))) => {}
         Some(Ok(Err(e))) => log_error!("LuCI RPC 服务异常退出: {}", e),
@@ -206,6 +215,7 @@ async fn run(verbose: bool) -> Result<(), String> {
         Some(Err(e)) => log_error!("LuCI RPC 服务任务 panic: {}", e),
         None => {}
     }
+    let serve_done = serve_result.is_some();
 
     // 给后台任务一点时间优雅收尾。
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
@@ -213,7 +223,10 @@ async fn run(verbose: bool) -> Result<(), String> {
         join_log(notify_task.await, "通知");
         join_log(dispatch_task.await, "URC 分发");
         join_log(sched_task.await, "定时锁频");
-        join_log(serve_handle.await, "RPC 服务");
+        // 只有它还没结束时才 await —— 见上面那段说明。
+        if !serve_done {
+            join_log(serve_handle.await, "RPC 服务");
+        }
     })
     .await;
 

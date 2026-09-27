@@ -5,6 +5,128 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.62] - 2026-09-28
+
+第三轮全仓优化。方法：**逐文件通读**（不再抽样），从代码逻辑、性能、可读性、安全性、
+可维护性五个角度审计；凡涉及 AT 行为的结论一律回到《MT5700M-CN AT 命令手册》原文核对；
+凡涉及运行时行为的假设一律写实验复现、或上真机取证。
+
+### Fixed
+
+**1. `main.rs`：进程退出路径上的 panic（本机实测复现）**
+
+`serve_handle` 在 `tokio::select!` 里被 `&mut` poll，若该分支**先完成** —— RPC 服务因
+bind 失败 / 端口被占而先于关闭信号结束，恰恰是最该优雅收尾并留下日志的那条路 ——
+收尾时的 `serve_handle.await` 就成了**第二次 poll 同一个 JoinHandle**。
+
+- **依据（实测，非推测）**：本机 tokio 1.53.1 上复现：
+  `panicked at tokio-1.53.1/src/runtime/task/core.rs:427: JoinHandle polled after completion`。
+- **后果被放大**：本 crate 的 release 是 `panic = "abort"`，一次 panic 就是 abort；而它
+  恰好违反本文件 `join_log` 上方那条约定 ——「不能改变进程退出码，否则 procd 会判定为
+  崩溃并反复 respawn，攒满重试后永久放弃拉起」。
+- 修法：用 `serve_done` 记住它是否已在 `select!` 里结束，收尾时跳过它。
+
+**2. `urc.rs`：`^HCSQ` 的 LTE 字段表注释与手册不符（SINR 与 RSRQ 对调）**
+
+原注释写 `"LTE",<srxlev>,<rsrp>,<rsrq>,<sinr>,<rssi>`。手册 13.5.3 的字段表是：
+
+| `<sysmode>` | value1 | value2 | value3 | value4 |
+| :-- | :-- | :-- | :-- | :-- |
+| `"LTE"` | lte_rssi | lte_rsrp | **lte_sinr** | **lte_rsrq** |
+| `"NR"` | 5g_rsrp | 5g_sinr | 5g_rsrq | — |
+
+三处都错：`srxlev` 这个字段名手册里根本不存在；LTE 的 sinr 在 value3、rsrq 在 value4
+（旧注释把两者对调）；也没有第 5 个值。当时只取 `parts[2]`（rsrp）**恰好侥幸取对**，
+但按旧注释去接 sinr/rsrq 必然取反 —— 前端 `rpc.js` 的 `parseHCSQ` 才是照手册写对的那份。
+
+**3. 功能补全：`^HCSQ` 里免费带回的 sinr / rsrq 此前被整条丢弃**
+
+`handle_signal` 只从 `^HCSQ` / `^CERSSI` 取 rsrp 来判断「信号变了没」，同一应答里的
+sinr/rsrq 被丢掉。而通知里的 SINR 来自 `query_monsc()`（`^MONSC`），那个解析**只在 NR
+分支赋值** —— 于是 **LTE 用户的信号通知里 SINR 永远是「未知」**，而同一次 `^HCSQ` 的
+LTE 应答第 3 个值就是 sinr。
+
+修法：`handle_signal` 顺带取出 sinr/rsrq 传给 `notify_signal`，新增 `fill_from_hcsq()`
+**只在 `^MONSC` 为空时兜底**（绝不覆盖它给出的权威值）。
+
+顺带消除了 3 个 `cargo check` warning：`convert_sinr` / `convert_rsrq` / `round1` 此前
+没有生产调用点（只被测试引用，所以 `cargo test --all-targets` 看不见 dead_code）。现在
+它们真的走在生产路径上。
+
+**4. 边界：手册的 `255 未知或不可测` 被算成"信号最好"（前后端同步修）**
+
+手册 13.5.3 的四张换算表（rssi / rsrp / sinr / rsrq）都以 `255 未知或不可测` 结尾，而线性
+公式会把它算成**满格**：`convert_rsrp(255)` 命中 `>=97` 钳位得 −44、`convert_sinr(255)`
+命中 `>=251` 得 30、`convert_rsrq(255)` 命中 `>=34` 得 −3。于是模组明确说"测不出来"时，
+界面反而显示信号最好 —— 比不显示更误导。
+
+- 前端 `rpc.js` 的 `parseHCSQ`：`eng()` 里 `n === 255 → null`；后端新增 `eng_value()`
+  做同一件事，并在 `handle_signal` 的 rsrp 路径启用（避免 255 触发一次虚假的"信号变强"通知）。
+
+**5. `config.rs`：一处描述"已删除功能"的孤立注释**
+
+```rust
+// SIM 卡状态自愈：默认开启，且每次开机最多执行一次（与 UCI 默认值保持一致）。
+```
+
+它后面**没有任何代码**。git 历史揭示该功能**已于 v1.1.0 明确删除**（提交 `07553ce`
+「删除 SIM 卡状态自愈，并把 SIM 状态 11 改回『不是故障』」，理由：无效、无收益、有掉网
+风险），且 `tests/sim-status-contract.test.js` 有 5 条守卫防它"再回来"。那几条守的是
+`simheal|sim_heal` 符号名与"服务配置页"，且**守卫在校验前会 `stripComments()`**
+（有意为之：注释里提历史是允许的）—— 所以问题不在守卫，而在**这句注释用现在时宣称了
+一个不存在的配置项**，会让人以为漏读了配置。已改为一句不误导的历史线索。
+
+### Changed
+
+**6. CI 编译矩阵裁减为只出 `aarch64_cortex-a53`**
+
+本插件跑在 CPE 上控制 5G 模组，目标机全是 aarch64（MT7987A / qualcommax 这类），
+x86 产物没有任何用户 —— 留着只是让每次推送多烧一倍机时、把 Release 资产翻倍、
+还让"按架构选包"变复杂。
+
+**这不是删两行就完事**：`Verify dist completeness` 里写着 `if [ "$count" -lt 4 ]`
+（期望 2 架构 × apk/ipk），矩阵减半后主包只剩 2 个，**发布会被自己的完整性校验拦下**。
+已同步修改：
+
+- 矩阵 `include`（删 `x86_64-main` 与 `x86_64-23.05.5`）
+- 校验阈值 `4 → 2` 与对应文案
+- 架构循环 `for arch in x86_64 aarch64_cortex-a53` → 只留 aarch64，并加注「这两个循环与
+  矩阵**成对**，加回架构时必须同步扩这里，否则新架构的包压根不会被断言覆盖」
+- 三处注释里的「四个矩阵」/「四矩阵」/「4 个构建组合」
+- **用户可见的 `.github/release-notes-header.md`**（含 x86 表格行与错误示例）
+- `README.md` 的适用架构行
+
+> 有意保留：`scripts/sdk-build.sh` 的 `x86_64-unknown-linux-musl)` 分支 —— 那是通用
+> 构建脚本的职责（支持多架构），矩阵不再用它而已；`Makefile` 的 `RUST_TARGET_x86_64`
+> 是**本机开发**时的宿主机架构映射，与 CI 矩阵无关。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **31 passed / 0 failed** |
+| `cargo check --all-targets` | **0 warning**（补全前有 3 条 dead_code） |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 151 条变异全判红、还原逐字节一致、基线绿 |
+| workflow YAML | 可解析；矩阵实测 **2 条，均为 aarch64_cortex-a53**（apk + ipk） |
+| 手册核对 | `^HCSQ` 字段表逐字取自《MT5700M-CN AT 命令手册》13.5.3（PDF 287-289 页） |
+| 实验 | `JoinHandle` 二次 await 的 panic 在 tokio 1.53.1 上实测复现 |
+
+### 诚实边界
+
+1. **`^HCSQ` 的补全未经真机验证**：`^HCSQ` 要等信号真实变化才会主动上报，我没有构造该
+   场景。逻辑与手册字段表一致、且 `convert_*` 与前端同口径（有既有契约测试守着），但
+   「LTE 通知里 SINR 会显示出来」这件事**没有实机证据**。
+2. **255 判据未经真机验证**：没有让模组真的返回 255（那需要"未知或不可测"的射频条件）。
+3. **通读覆盖范围（诚实交代）**：本轮完整读了 `config.rs`、`logger.rs`、`transport.rs`、
+   `serialdetect.rs`、`main.rs`、`atclient.rs`（前 830 行）、`urc.rs` 的信号段、
+   `build-openwrt.yml`。**尚未通读**：`rpcserver.rs`、`schedule.rs`、`schedconfig.rs`、
+   `notify.rs`、`pdu.rs`、`smsclean.rs`、`serial_linux.rs`，前端共享模块（`parse.js` /
+   `mt5700.js` / `ui.js` / `smsEncode.js` / `compat.js` / `euicc.js`），12 个视图层文件，
+   以及 ucode 插件（2846 行）。这些留待后续。
+4. **CI 未等编译完成**（按要求）。矩阵裁减的正确性由 YAML 解析 + 矩阵条目计数验证，
+   但"发布校验 `-lt 2` 真的能过"要等一次真实构建。
+
 ## [2.3.61] - 2026-09-28
 
 第二轮全仓审计的修复批。**方法**：先逐条复核上一轮审计中「已记录但未采纳」的候选

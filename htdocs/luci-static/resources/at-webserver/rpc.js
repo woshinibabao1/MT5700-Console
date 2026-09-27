@@ -1273,6 +1273,16 @@ function parseHCSQ(data) {
 	var eng = function (v, conv) {
 		var n = parseInt(v, 10);
 		if (!isFinite(n)) return null;
+		/*
+		 * ★ 手册 13.5.3 的四张换算表（rssi / rsrp / sinr / rsrq）都以
+		 *   `255 未知或不可测` 结尾 —— 而线性公式会把它算成"信号最好"：
+		 *   rsrp 255 命中 >=97 钳位得 -44、sinr 255 命中 >=251 得 30、
+		 *   rsrq 255 命中 >=34 得 -3。于是模组明确说"测不出来"时，
+		 *   界面反而显示满格，比不显示更误导。这里统一按未知处理
+		 *   （返回 null → 由调用方渲染成「—」）。
+		 *   后端 src/rust/src/urc.rs 的 eng_value() 同步做同一件事。
+		 */
+		if (n === 255) return null;
 		var out = conv(n);
 		return isFinite(out) ? out : null;
 	};

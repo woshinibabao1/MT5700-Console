@@ -26,7 +26,7 @@
 | 服务 / 配置 | 服务 `at-webserver` · 二进制 `/usr/bin/at-webserver-rust` · UCI `/etc/config/at-webserver` |
 | 链路 | LuCI → rpcd + ucode → Rust（`127.0.0.1:8765`，仅回环）→ 模组 AT |
 | 默认连接 | PCUI 串口 `/dev/ttyUSB1`（TCP 备用） |
-| 适用 | OpenWrt 23.05（ipk）/ 24.10+（apk）· `x86_64` · `aarch64_cortex-a53` |
+| 适用 | OpenWrt 23.05（ipk）/ 24.10+（apk）· **只发布 `aarch64_cortex-a53`**（CPE 目标机架构；源码可自行交叉编译其它架构） |
 
 > 后端只监听回环，页面经 rpcd 代理，依赖 LuCI 登录态与 ACL。
 

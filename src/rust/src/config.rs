@@ -320,7 +320,16 @@ pub async fn load_config() -> Config {
     // 自动拨号：默认开启。模组不拨号则不会给 USB 网口下发 DHCP，接口拿不到 IP。
     cfg.at.autodial_enable = values.bool("autodial_enable", true);
     cfg.at.autodial_mode = values.int("autodial_mode", 1).clamp(1, 2);
-    // SIM 卡状态自愈：默认开启，且每次开机最多执行一次（与 UCI 默认值保持一致）。
+    // 自动拨号：默认开启。模组不拨号则不会给 USB 网口下发 DHCP，接口拿不到 IP。
+    cfg.at.autodial_enable = values.bool("autodial_enable", true);
+    cfg.at.autodial_mode = values.int("autodial_mode", 1).clamp(1, 2);
+    /*
+     * 此处原先有一行注释宣称「SIM 卡状态自愈：默认开启，且每次开机最多执行一次」——
+     * 那个配置项和功能**已于 v1.1.0 删除**（提交 07553ce「删除 SIM 卡状态自愈，
+     * 并把 SIM 状态 11 改回『不是故障』」，理由：无效、无收益、有掉网风险），
+     * 只是注释忘在这里。它用现在时描述一个不存在的功能，会让人以为漏读了配置。
+     * 回归守卫见 tests/sim-status-contract.test.js 第 5 节。
+     */
 
     cfg.websocket.port = values.int("websocket_port", 8765).clamp(1, 65535) as u16;
     cfg.websocket.auth_key = values.str("websocket_auth_key", "");

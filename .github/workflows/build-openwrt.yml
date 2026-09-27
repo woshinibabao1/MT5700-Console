@@ -3,7 +3,12 @@ name: Build OpenWrt packages (apk + ipk)
 # 云编译 OpenWrt 软件包：
 #   - 最新主线（main snapshot，OpenWrt 24.10+ 包管理器 apk）→ 产出 .apk
 #   - 老版本 23.05（opkg 包管理器）→ 产出 .ipk
-# 架构矩阵：x86_64 / aarch64_cortex-a53（主线 apk + 老版 23.05 ipk）
+# 架构矩阵：**只出 aarch64_cortex-a53**（主线 apk + 老版 23.05 ipk）。
+# ★ 2026-09-28 裁减：原先还编 x86_64 两个组合。本插件是 CPE 上控制 5G 模组的，
+#   目标机全是 aarch64（MT7987A / qualcommax 这类），x86 产物没有任何用户 ——
+#   留着只是让每次推送多烧一倍机时、并把 Release 资产翻倍、还让"按架构选包"变复杂。
+#   若日后真需要 x86，把下面两条 include 加回去，并同步改 Verify dist completeness
+#   里的期望值（那里按架构 × 包格式逐个断言覆盖）。
 # 触发：push 到 main、打 v* 标签、或手动 workflow_dispatch
 # 另加 pull_request：合并前先跑 rust-check（见该 job 的说明）。
 # 注意：PR 只跑检查，不跑打包、更不会发布 Release（build/release 两个 job 都有条件）。
@@ -26,7 +31,7 @@ jobs:
   # 为什么单独要这一条：打包编译只会构建 lib/bin，测试代码（#[cfg(test)]）平时根本
   # 不参与，写错了 SDK 编译照样过 —— 曾经就有一批测试代码的编译错误这样进了 main。
   # `cargo check --all-targets` 把测试目标也检查一遍，几十秒出结果，
-  # 不必等四个矩阵的 docker 打包跑完才知道挂了。
+  # 不必等两个矩阵的 docker 打包跑完才知道挂了。
   rust-check:
     runs-on: ubuntu-latest
     steps:
@@ -50,7 +55,7 @@ jobs:
   # 只在本地手工跑。它们守的恰恰是「编译能过、真机会炸」的那一类：
   # APDU 时序与超时恢复、init.d 的 start/reload 幂等、行尾必须 LF、三处版本号一致、
   # 以及「守卫本身会不会真的判红」。cargo check 对这些一无所知。
-  # 与 rust-check 同层：几十秒出结果，拦在四矩阵打包之前。
+  # 与 rust-check 同层：几十秒出结果，拦在两矩阵打包之前。
   contract-check:
     runs-on: ubuntu-latest
     steps:
@@ -82,12 +87,6 @@ jobs:
         include:
           # ---- 最新主线 → .apk ----
           # 镜像 tag 格式：openwrt/sdk:<架构>-<版本>（已用 Docker Hub API 核实）
-          - image: x86_64-main
-            arch: x86_64
-            rust: x86_64-unknown-linux-musl
-            ver: main
-            target: x86/64
-            fmt: apk
           - image: aarch64_cortex-a53-main
             arch: aarch64_cortex-a53
             rust: aarch64-unknown-linux-musl
@@ -95,12 +94,6 @@ jobs:
             target: qualcommax/ipq50xx
             fmt: apk
           # ---- 老版本 23.05 → .ipk ----
-          - image: x86_64-23.05.5
-            arch: x86_64
-            rust: x86_64-unknown-linux-musl
-            ver: 23.05.5
-            target: x86/64
-            fmt: ipk
           - image: aarch64_cortex-a53-23.05.5
             arch: aarch64_cortex-a53
             rust: aarch64-unknown-linux-musl
@@ -174,7 +167,7 @@ jobs:
           if-no-files-found: error
 
   # ---- 统一发布：每次编译成功后运行一次，汇总全部架构产物并上传 Release ----
-  # 不能放在 build job 内：4 个矩阵 job 并发发布同一 tag 的 Release 会 API 竞态，
+  # 不能放在 build job 内：2 个矩阵 job 并发发布同一 tag 的 Release 会 API 竞态，
   # 导致 Release 创建失败或资产互相覆盖。这里由 release job 串行汇总后再发布。
   # 资产统一加 <架构>- 前缀：不同架构的依赖包 basename 相同（如 libc-1.2.6-r5.apk），
   # 同名文件在同一 Release 内必然冲突。用 gh CLI 替代 softprops 避免元数据更新 404 竞态。
@@ -223,16 +216,19 @@ jobs:
       - name: Verify dist completeness
         run: |
           set -e
-          # 主包（前端+后端合一）必须覆盖全部 4 个构建组合（x86_64/aarch64_cortex-a53 × apk/ipk）
+          # 主包（前端+后端合一）必须覆盖全部 2 个构建组合（aarch64_cortex-a53 × apk/ipk）
           count=$(find dist -type f -name '*-luci-app-mt5700*' -not -name '*luci-i18n*' | wc -l)
           echo "==> luci-app-mt5700 主包: ${count} 个"
-          if [ "$count" -lt 4 ]; then
-            echo "::error::主包仅有 ${count} 个（期望 4 个：2 架构 × apk/ipk），拒绝发布不完整的 Release"
+          if [ "$count" -lt 2 ]; then
+            echo "::error::主包仅有 ${count} 个（期望 2 个：1 架构 × apk/ipk），拒绝发布不完整的 Release"
             find dist -type f | sort
             exit 1
           fi
           # 架构覆盖：单包内含二进制，必须每个架构都有
-          for arch in x86_64 aarch64_cortex-a53; do
+          # ★ 2026-09-28：矩阵只剩 aarch64_cortex-a53（见文件头「架构矩阵」注释）。
+          #   这两个循环是与矩阵**成对**的约束：加回架构时必须同步扩这里，
+          #   否则新架构的包压根不会被断言覆盖（缺了也照样发布）。
+          for arch in aarch64_cortex-a53; do
             for fmt in apk ipk; do
               f=$(find dist -type f -name "${arch}-luci-app-mt5700*.${fmt}" -not -name '*luci-i18n*' -print -quit)
               [ -n "$f" ] || { echo "::error::缺少 ${arch}-${fmt} 主包"; exit 1; }

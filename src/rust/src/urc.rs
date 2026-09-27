@@ -416,6 +416,9 @@ impl Dispatcher {
         let mut rsrp: f64 = 0.0;
         let mut sys_mode = String::new();
         let mut ok = false;
+        // ^HCSQ 里顺带取到的 sinr / rsrq，只用于给 ^MONSC 兜底（见 notify_signal）
+        let mut sinr: Option<f64> = None;
+        let mut rsrq: Option<f64> = None;
 
         if line.contains("^CERSSI:") {
             let parts = split_fields(line, "^CERSSI:");
@@ -429,15 +432,31 @@ impl Dispatcher {
             }
         } else if line.contains("^HCSQ:") {
             let parts = split_fields(line, "^HCSQ:");
-            // parts[0] 为带引号的制式名。字段顺序随制式变化：
-            //   NR    : "NR",<rsrp>,<sinr>,<rsrq>
-            //   LTE   : "LTE",<srxlev>,<rsrp>,<rsrq>,<sinr>,<rssi>
-            //   其余  : <rssi/其它>
-            // 旧实现一律取 parts[1] 且用 -140+raw 线性换算，LTE 下 rsrp 取错字段、
-            // 且换算与前端 rpc.js 不一致。这里按制式选字段并用对齐前端的换算。
+            /*
+             * parts[0] 为带引号的制式名。字段顺序随制式变化 ——
+             * **以下按手册 13.5 的字段表逐条核对**（《MT5700M-CN AT 命令手册》
+             * 13.5.3 参数说明，PDF 287-289 页）：
+             *
+             *   <sysmode>   value1      value2    value3     value4
+             *   "GSM"       gsm_rssi    -         -          -
+             *   "WCDMA"     wcdma_rssi  rscp      ecio       -
+             *   "LTE"       lte_rssi    lte_rsrp  lte_sinr   lte_rsrq
+             *   "NR"        5g_rsrp     5g_sinr   5g_rsrq    -
+             *
+             * ★ 2026-09-28 更正：本段此前的注释写的是
+             *   `"LTE",<srxlev>,<rsrp>,<rsrq>,<sinr>,<rssi>` —— 三处都错：
+             *   ① 字段名 srxlev 在手册里根本不存在；
+             *   ② **LTE 的 sinr 在 value3、rsrq 在 value4**，旧注释把两者对调了；
+             *   ③ 不存在第 5 个值。
+             *   当时只取 parts[2]（rsrp）恰好侥幸取对，但按旧注释去接 sinr/rsrq
+             *   必然取反 —— 前端 rpc.js 的 parseHCSQ 才是照手册写对的那一份。
+             *
+             * 旧实现还一律取 parts[1] 且用 -140+raw 线性换算，LTE 下 rsrp 取错字段、
+             * 且换算与前端 rpc.js 不一致。这里按制式选字段并用对齐前端的换算。
+             */
             if parts.len() >= 2 {
                 let mode = parts[0].trim_matches('"');
-                // 制式名可能带后缀，前端 rpc.js:824-826 用 indexOf 前缀匹配，这里保持一致
+                // 制式名可能带后缀，前端 rpc.js 的 parseHCSQ 用 indexOf 前缀匹配，这里保持一致
                 let is_lte = mode.starts_with("LTE");
                 let is_nr = mode.starts_with("NR");
                 let idx = if is_lte { 2 } else { 1 };
@@ -447,13 +466,22 @@ impl Dispatcher {
                  * 而 panic 会打断整个 URC 分发循环（见 safe_handle 的注释承诺）。
                  * 拿不到就算了，绝不能因为一条畸形上报把分发链打掉。
                  */
-                if parts.len() > idx {
-                    if let Ok(raw) = parts[idx].parse::<f64>() {
-                        // 非 NR/LTE 制式那一路在前端是 convertRssi（量纲不同），不能统一用 rsrp
-                        rsrp = if is_nr || is_lte { convert_rsrp(raw) } else { convert_rssi(raw) };
-                        sys_mode = mode.to_string();
-                        ok = true;
-                    }
+                if let Some(raw) = parts.get(idx).and_then(|v| eng_value(v)) {
+                    // 非 NR/LTE 制式那一路在前端是 convertRssi（量纲不同），不能统一用 rsrp
+                    rsrp = if is_nr || is_lte { convert_rsrp(raw) } else { convert_rssi(raw) };
+                    sys_mode = mode.to_string();
+                    ok = true;
+                }
+                /*
+                 * 同一应答里的 sinr / rsrq 是**免费带回来的**，顺手取出来交给
+                 * notify_signal 做兜底（^MONSC 在 LTE 下不提供 sinr，见那里的注释）。
+                 * 位置同样按上表：LTE = value3(sinr) / value4(rsrq)，
+                 * NR = value2(sinr) / value3(rsrq)。取不到就留 None，绝不猜。
+                 */
+                if ok && (is_lte || is_nr) {
+                    let (si, ri) = if is_lte { (3, 4) } else { (2, 3) };
+                    sinr = parts.get(si).and_then(|v| eng_value(v)).map(convert_sinr);
+                    rsrq = parts.get(ri).and_then(|v| eng_value(v)).map(convert_rsrq);
                 }
             }
         }
@@ -473,11 +501,21 @@ impl Dispatcher {
         self.last_rsrp = rsrp;
         self.have_rsrp = true;
         self.last_sys_mode = sys_mode;
-        self.notify_signal(rsrp, mode_switched).await;
+        self.notify_signal(rsrp, mode_switched, sinr, rsrq).await;
     }
 
-    async fn notify_signal(&mut self, rsrp: f64, mode_switched: bool) {
+    /// `hcsq_sinr` / `hcsq_rsrq`：本次 ^HCSQ 里顺带取到的值，**仅用于给 ^MONSC 兜底**。
+    async fn notify_signal(
+        &mut self,
+        rsrp: f64,
+        mode_switched: bool,
+        hcsq_sinr: Option<f64>,
+        hcsq_rsrq: Option<f64>,
+    ) {
         let info = self.query_monsc().await;
+        // ^MONSC 为空时用 ^HCSQ 兜底（见 fill_from_hcsq 的说明）
+        let sinr_txt = fill_from_hcsq(&info.sinr, hcsq_sinr);
+        let rsrq_txt = fill_from_hcsq(&info.rsrq, hcsq_rsrq);
 
         let mut b = String::new();
         if mode_switched {
@@ -496,8 +534,8 @@ impl Dispatcher {
                     "{}RSRP: {} dBm\nRSRQ: {} dB\nSINR: {} dB\n\n📡 小区信息:\n频点: {}\nPCI: {}\nTAC: {}\n小区ID: {}",
                     b,
                     or_unknown(&info.rsrp),
-                    or_unknown(&info.rsrq),
-                    or_unknown(&info.sinr),
+                    or_unknown(&rsrq_txt),
+                    or_unknown(&sinr_txt),
                     or_unknown(&info.arfcn),
                     or_unknown(&info.pci),
                     or_unknown(&info.tac),
@@ -509,7 +547,7 @@ impl Dispatcher {
                     "{}RSRP: {} dBm\nRSRQ: {} dB\nRSSI: {} dBm\n\n📡 小区信息:\n频点: {}\nPCI: {}\nTAC: {}\n小区ID: {}",
                     b,
                     or_unknown(&info.rsrp),
-                    or_unknown(&info.rsrq),
+                    or_unknown(&rsrq_txt),
                     or_unknown(&info.rssi),
                     or_unknown(&info.arfcn),
                     or_unknown(&info.pci),
@@ -732,11 +770,43 @@ fn hex_to_dec(s: &str) -> String {
     }
 }
 
+/// 把 ^HCSQ 的一个工程值字段解析成数字。
+///
+/// ★ **255 按"未知"处理**：手册 13.5.3 的三张换算表（rssi / rsrp / sinr / rsrq）
+///   都以 `255 未知或不可测` 结尾 —— 而线性公式会把它当成"越界即最好"
+///   （convert_rsrp(255) → -44、convert_sinr(255) → 30），于是模组明确说
+///   "测不出来"时，界面反而显示满格信号。这里统一拦成 None，交给上层显示「未知」。
+fn eng_value(s: &str) -> Option<f64> {
+    let v = s.trim().parse::<f64>().ok()?;
+    if v >= 255.0 {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 fn or_unknown(s: &str) -> &str {
     if s.trim().is_empty() {
         "未知"
     } else {
         s
+    }
+}
+
+/// ^MONSC 的值优先；它为空时用 ^HCSQ 兜底值（保留一位小数）。
+/// 两者都没有就返回空串，交给 or_unknown 渲染成「未知」。
+///
+/// 为什么需要它：`MonscInfo.sinr` 只在 ^MONSC 的 **NR** 分支被赋值，所以 LTE 用户的
+/// 信号通知里 SINR 一直是「未知」—— 而同一次 ^HCSQ 的 LTE 应答第 3 个值就是 sinr
+/// （手册 13.5 字段表）。两者同为 dB，convert_* 又与前端同口径，混用是安全的。
+/// 关键约束：**只在 ^MONSC 为空时填**，绝不覆盖它给出的权威值。
+fn fill_from_hcsq(monsc: &str, fallback: Option<f64>) -> String {
+    if !monsc.trim().is_empty() {
+        return monsc.to_string();
+    }
+    match fallback {
+        Some(v) => format!("{v:.1}"),
+        None => String::new(),
     }
 }
 

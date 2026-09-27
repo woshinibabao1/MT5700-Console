@@ -1,12 +1,14 @@
 ## 先按设备架构选包（选错装不上）
 
-Release 里有 **x86_64** 与 **aarch64_cortex-a53** 两套包，架构不匹配时 `apk` 会报：
+本 Release **只提供 `aarch64_cortex-a53` 一套包** —— 本插件跑在 CPE 上控制 5G 模组，
+目标机都是这个架构（MT7987A / qualcommax 这类）。但仍请先确认设备架构，
+装错了 `apk` 会报：
 
 ```
 ERROR: unable to select packages:
   luci-app-mt5700-<版本>:
     error: uninstallable
-    arch: x86_64          ← 这里的架构不是你设备的
+    arch: mips_24kc        ← 这里的架构不是你设备的
 ```
 
 **先在设备上确认架构，再下载对应前缀的文件：**
@@ -20,13 +22,12 @@ opkg print-architecture | tail -1
 
 | 设备输出 | 下载哪个 |
 | --- | --- |
-| `aarch64_cortex-a53`（或 `aarch64`） | `aarch64_cortex-a53-luci-app-mt5700-*.apk` |
-| `x86_64` | `x86_64-luci-app-mt5700-*.apk` |
+| `aarch64_cortex-a53`（或 `aarch64`） | `aarch64_cortex-a53-luci-app-mt5700-*.apk`（或 `.ipk`） |
+| 其它架构 | **本 Release 没有对应产物**；源码在本仓库，可用 `scripts/sdk-build.sh` 自行交叉编译 |
 
 - 后缀 `.apk` → 新包管理器 `apk add --allow-untrusted`；
   `.ipk` → 老版本（23.05 及更早）`opkg install`。
-- **`luci-i18n-*` 是中文语言包（noarch）**，装不装都行，装上界面才是中文；
-  它与主包没有强版本绑定，两个架构的 i18n 内容相同，取任意一个即可。
+- **`luci-i18n-*` 是中文语言包（noarch）**，装不装都行，装上界面才是中文。
 - 主包已内含 Rust 后端（约 1.2MB），**不需要**额外安装 `at-webserver`。
 
 ---
