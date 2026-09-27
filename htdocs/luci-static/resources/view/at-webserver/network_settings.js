@@ -376,7 +376,18 @@ return L.view.extend({
 				if (lines[i].indexOf(prefix) === 0) { head = i; break; }
 			}
 			if (head < 0) return null;
-			var typeMatch = lines[head].match(new RegExp(prefix.replace('^', '\\^') + ':\\s*(\\d+)'));
+			/*
+			 * ★ prefix 是拼进正则的，要转义**全部**元字符，不能只处理开头的 `^`。
+			 *   原写法 `prefix.replace('^', '\\^')` 只替换第一个 `^`：若 prefix 里出现
+			 *   `.` `*` `(` `[` 等，匹配范围会悄悄变宽，甚至因括号不成对直接抛
+			 *   SyntaxError（本函数在锁频页读取链路里，抛异常会中断整段解析）。
+			 *   与 `parse.js::parseRegStat`、`rpc.js:1146` 保持同一写法 —— 后面那处
+			 *   本来就是全量转义，这里只是对齐。
+			 *   现有两个调用点传的是字面常量（'^LTEFREQLOCK' / '^NRFREQLOCK'），
+			 *   两种情况转义结果相同，所以这是加固、不是修故障。
+			 */
+			var esc = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			var typeMatch = lines[head].match(new RegExp(esc + ':\\s*(\\d+)'));
 			if (!typeMatch) return null;
 			var lockType = Number(typeMatch[1]);
 			if (lockType === 0) return { lockType: 0, mobility: 0, items: [{}] };

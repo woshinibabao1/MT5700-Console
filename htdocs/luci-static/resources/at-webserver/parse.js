@@ -530,8 +530,20 @@ var Parse = (function () {
 	api.buildSysCfgCommand = function (cfg) {
 		var c = cfg || {};
 		var num = function (v, d) { var n = parseInt(v, 10); return isFinite(n) ? n : d; };
-		return 'AT^SYSCFGEX="' + String(c.acqorder || '') + '",' + String(c.band || '') + ','
-			+ num(c.roam, 1) + ',' + num(c.srvdomain, 2) + ',' + String(c.lteband || '') + ',,';
+		/*
+		 * ★ 三个字符串字段必须先清洗再拼接 —— 它们是**直接拼进 AT 命令**的，
+		 *   而值来自模组回读：`parseSysCfg` 里 `band` 取自 `([^,]*)`、
+		 *   `lteband` 取自 `([^,\r\n]*)`，**两者都允许含引号**。
+		 *   一个 `"` 就能闭合 `<acqorder>` 的字符串参数、把后面的内容改写成新参数。
+		 *
+		 *   这里**只剥 `" \r \n`，不剥逗号与分号** —— 与公共的 `api.sanitizeAtParam`
+		 *   刻意不同：那一个是为「参数值」设计的、会连 `,` `;` 一起去掉，
+		 *   而 `<acqorder>` 的语法里逗号是否带分隔含义我无法从手册确证；
+		 *   现有取值（如 "080302"）本就不含逗号，保守起见不动它。
+		 */
+		var clean = function (v) { return String(v == null ? '' : v).replace(/["\r\n]/g, ''); };
+		return 'AT^SYSCFGEX="' + clean(c.acqorder) + '",' + clean(c.band) + ','
+			+ num(c.roam, 1) + ',' + num(c.srvdomain, 2) + ',' + clean(c.lteband) + ',,';
 	};
 
 	var SYSCFG_FIELDS = [
@@ -852,7 +864,19 @@ var Parse = (function () {
 
 	/* +CEREG? / +C5GREG? 这类「<n>,<stat>」结构的通用解析 */
 	api.parseRegStat = function (text, prefix) {
-		var m = String(text).match(new RegExp('\\' + prefix + ':\\s*([^\\r\\n]*)'));
+		/*
+		 * ★ prefix 是**拼进正则**的，必须先转义它的元字符。
+		 *
+		 *   原写法 `'\\' + prefix` 只给 prefix 的**第一个**字符加了反斜杠，其余位置的
+		 *   `.` `*` `(` `[` 等仍是正则元字符 —— 匹配范围会悄悄变宽（例如传 '+C.REG'
+		 *   会连 '+CXREG' 一起命中）。本函数是导出的（api.parseRegStat），
+		 *   调用方可传任意字符串，所以这层不能省。
+		 *
+		 *   对现有调用方（传的都是 '+CEREG' / '+C5GREG' 这类字面常量）**行为等价**：
+		 *   转义后同样是 `\+CEREG`。
+		 */
+		var esc = String(prefix == null ? '' : prefix).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		var m = String(text).match(new RegExp(esc + ':\\s*([^\\r\\n]*)'));
 		if (!m) return null;
 		var f = m[1].split(',').map(function (x) { return x.trim().replace(/^"|"$/g, ''); });
 		var stat = Number(f[1]);
