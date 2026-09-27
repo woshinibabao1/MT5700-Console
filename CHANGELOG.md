@@ -5,6 +5,82 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.86] - 2026-09-28
+
+按用户要求**攒批推送**（2 项修复 + 1 个新契约测试，一次 push 只触发一轮构建）。
+
+### Fixed
+
+**35. `parse.js::parseMessageTime` 日期自动进位（`decodeTimestamp` 的同类第二处）**
+
+```js
+return new Date(2000 + y, mo - 1, dy, …);   // JS 会自动进位
+```
+`26/02/31,12:00:00` → `new Date(2026,1,31)` → **2026-03-03**。2.3.78 修 `decodeTimestamp`
+（PDU 的 SCTS 解析）时漏了这一处。
+
+**触发路径真实可达**：本函数会解析**用户导入文件**里的 `time` 字段（`sms_settings.js` 的
+「导入记录」只校验 `typeof m.time === 'string'`，**不校验日期合法性**），畸形日期会被渲染成
+一个**看似合理**的错误日期——比显示"读不到"更容易误导。
+
+修法：与 `decodeTimestamp` 一致，构造后回读三个日期分量、不符即回落。**至此"日期越界"三处同口径**：
+前端 `decodeTimestamp`(2.3.78) + 前端 `parseMessageTime`(本次) + 后端 `pdu.rs::decode_timestamp`。
+
+**36. `parse.js::parseLendc` 把「未上报字段」当成数值 0**
+
+**手册依据（11.7.1，已查证）**：`^LENDC` 有两种应答，**字段数不同** ——
+```
+AT^LENDC?  查询 → <enable>,<endc_available>,<endc_plmn_available>,<endc_restricted>,<nr_pscell>  （5 段）
+URC 上报        → <endc_available>,<endc_plmn_available>,<endc_restricted>,<nr_pscell>            （4 段）
+```
+所以"段数 ≥5 就跳过 `<enable>`"**本来是对的**（作者的实现没错）。问题在于它**先 `Number(v)` 再数长度** ——
+而 `Number('')` 是 **0** 而不是 `NaN`，于是未上报的字段被当成数值 0：
+```
+^LENDC: 0,1,1,,1     ← <endc_restricted> 为空
+旧 → restricted: true   ✗ 把「没上报」读成一个确定结论
+新 → restricted: false  ✓
+```
+这与本项目在 `parseRejInfo` / `parseCsDomain` 里立的规矩一致（解析不出来 → null，不许按乐观值补齐）。
+顺带删掉一处**死代码**：旧代码的 `.filter(isFinite)` 在正则 `[\d,\s]+` 保证下永远不会移除任何东西。
+
+> **诚实边界**：我最初的怀疑是"filter 会把空字段滤掉、导致段数判定错位" —— **那是错的**
+> （`Number('')` 是 0 不是 NaN）。是**查手册 + 跑真机**才纠正过来的。真机样本
+> `^LENDC: 1,0,0,0,0` 下**新旧实现结果完全相同**，所以这条属于"已存在但尚未触发"的语义错误，
+> 不是已发生的故障。
+
+### Added
+
+**`tests/lendc-parse-contract.test.js`（16 项）** —— `parseLendc` 此前**没有任何解析覆盖**
+（`ui-consistency-contract` 里那个 `AT^LENDC?` 只是预热命令清单）。
+
+覆盖：真机样本（5 段，断言 `<enable>` 被跳过）、URC 样本（4 段）、**中间字段为空时
+`restricted`/`available` 必须为 false**、尾字段为空、无匹配、传 null、字段不足、全 1 边界。
+
+**变异验证**：把实现改回旧写法 → **判红 1 处**（精确命中核心断言）；还原 → 16 项全过。
+
+### 真机验证（用户提供访问，全程只读查询）
+
+| 命令 | 应答 |
+| :-- | :-- |
+| `AT^LENDC?` | `^LENDC: 1,0,0,0,0`（**确证查询应答是 5 段**） |
+| `AT^LENDC=?` | `^LENDC: (0,1)` |
+| `AT+CREG?` | `+CREG: 0,0`（CS 域未注册——与 `parseCsDomain` 注释里 2026-09-24 记的形态一致，仍在复现） |
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `node tests/lendc-parse-contract.test.js` | **16 项通过** + 变异判红 1 处 |
+| `node tests/run-all.js` | 全部测试文件通过（第 6 个新契约文件） |
+| `cargo test --all-targets` | 44 passed / 0 failed（未改 Rust） |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- #36 **真机当前不触发**（字段都非空），属防回归；#35 的触发路径是"用户导入畸形日期的文件"。
+- 同批仍未改（依据不足，在交接清单候选区）：`normalizePhoneNumber` 无条件剥离开头 `86`。
+
+
 ## [2.3.85] - 2026-09-28
 
 按用户要求**攒批推送**。本批 6 处**同一形态**：导出的解析 API 直接对入参调方法，没防 null。

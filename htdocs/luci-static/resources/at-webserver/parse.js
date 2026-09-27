@@ -136,10 +136,25 @@ var Parse = (function () {
 	api.parseLendc = function (text) {
 		var match = String(text == null ? '' : text).match(/\^LENDC:\s*([\d,\s]+)/);
 		if (!match) return null;
-		var f = match[1].split(',').map(function (v) { return Number(v.trim()); })
-			.filter(function (v) { return isFinite(v); });
-		var v = f.length >= 5 ? f.slice(1) : f;
+		/*
+		 * ★ 手册 11.7.1 的两种应答**字段数不同**，这是本函数要区分的第一件事：
+		 *     AT^LENDC?  查询 → ^LENDC:<enable>,<endc_available>,<endc_plmn_available>,
+		 *                             <endc_restricted>,<nr_pscell>        （5 段，第一段是 <enable>）
+		 *     URC 主动上报    → ^LENDC:<endc_available>,<endc_plmn_available>,
+		 *                             <endc_restricted>,<nr_pscell>        （4 段，无 <enable>）
+		 *   所以"段数够 5 就跳过 <enable>"—— 这一步的依据就是手册。
+		 *
+		 * ★ 但**不能拿"过滤掉非数字之后的长度"来判**：查询应答里的字段可能为空
+		 *   （例如 `^LENDC: 0,1,1,0,`，<nr_pscell> 没上报），过滤后只剩 4 段，就会被
+		 *   误判成 URC 形态，进而整体错位 —— 界面上把 <enable> 当成 <endc_available>。
+		 *   手册同节写明「本命令仅在 LTE 主模查询结果有效」，所以非 LTE 主模下字段为空
+		 *   是可能发生的，这条路径不是纯理论。
+		 *   改为：**先按原始段数定位，再逐个转数**（numOrNull 对空串返回 null）。
+		 */
+		var nums = match[1].split(',').map(function (v) { return numOrNull(v); });
+		var v = nums.length >= 5 ? nums.slice(1) : nums;
 		if (v.length < 4) return null;
+		/* 缺字段（null）一律不判为 1，避免把"没上报"读成确定结论 */
 		return {
 			available: v[0] === 1,
 			plmnAvailable: v[1] === 1,
@@ -1042,8 +1057,31 @@ var Parse = (function () {
 		if (!timeStr) return new Date();
 		var match = String(timeStr).trim().match(/(\d{2})\/(\d{2})\/(\d{2}),(\d{2}):(\d{2}):(\d{2})/);
 		if (match) {
-			return new Date(2000 + parseInt(match[1], 10), parseInt(match[2], 10) - 1, parseInt(match[3], 10),
+			var y = 2000 + parseInt(match[1], 10);
+			var mo = parseInt(match[2], 10);
+			var dy = parseInt(match[3], 10);
+			var d = new Date(y, mo - 1, dy,
 				parseInt(match[4], 10), parseInt(match[5], 10), parseInt(match[6], 10));
+			/*
+			 * ★ 与 decodeTimestamp 同口径：**回读三个日期分量做越界回落**。
+			 *
+			 *   JS 的 Date 构造函数会自动进位（26/02/31,12:00:00 → new Date(2026,1,31)
+			 *   → 2026-03-03），而这里的时间串是 `YY/MM/DD,HH:MM:SS` 的**字面**字段。
+			 *   进位会把一个畸形时间渲染成**看似合理**的错误日期，比直接显示"读不到"
+			 *   更容易误导。
+			 *
+			 *   本函数的输入可能来自**用户导入的文件**（sms_settings.js 的「导入记录」，
+			 *   其 time 字段只校验了 `typeof === 'string'`，不校验日期合法性），
+			 *   所以这条路径是真实可达的。
+			 *
+			 *   2.3.78 修的是 decodeTimestamp（PDU 的 SCTS 解析），当时漏了这里 ——
+			 *   同一问题的第二处。后端 pdu.rs 的 decode_timestamp 走 chrono 的
+			 *   with_ymd_and_hms，越界返回 None 并回落当前时间，三处现已同口径。
+			 */
+			if (d.getFullYear() !== y || d.getMonth() !== mo - 1 || d.getDate() !== dy) {
+				return new Date();
+			}
+			return d;
 		}
 		var parsed = new Date(timeStr);
 		return isNaN(parsed.getTime()) ? new Date() : parsed;
