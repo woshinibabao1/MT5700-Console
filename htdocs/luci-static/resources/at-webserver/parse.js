@@ -1297,6 +1297,11 @@ var Parse = (function () {
 			}
 
 			// PDU 块：+CMGL: idx,stat,,,<len> 下一行是 PDU hex
+			//
+			// PDU 行的识别用「≥20 个十六进制字符」这个启发式：最短的 DELIVER
+			// （SCA=00 + 11 位号码 + 7 字节时间戳 + 1 字节正文）也有 21 字节 = 42 个
+			// 十六进制字符，所以正常 PDU 都远高于这个门槛；而 +CMGL 头行含空格与逗号，
+			// 不会被它命中。
 			var lines = block.split('\n').map(function (l) { return l.trim(); });
 			var pduHex = '';
 			for (var li = 0; li < lines.length; li++) {
@@ -1311,6 +1316,18 @@ var Parse = (function () {
 						number: api.normalizePhoneNumber(decoded.sender || ''),
 						time: api.formatPDUTime(decoded.date),
 						type: 'received',
+						/*
+						 * ★ 这里只把 stat === 0 当"未读"，即 **2/3（草稿 / 已发）按已读显示**；
+						 *   而后端 smsclean.rs 的 parse_cmgl_entries 是 `read = (stat == 1)`，
+						 *   把 2/3 当**未读**（注释写的是"未读、草稿、已发一律按未读对待，
+						 *   绝不优先删"）。两者对 2/3 的解释**相反**，但不是缺陷：
+						 *   · 后端的口径更保守（不会误删用户没看过的），方向安全；
+						 *   · 本固件**不用 CMGW 存已发**（smsEncode.js 末尾专门论证过
+						 *     "拿稀缺的收信槽位换一条便利，稳定性上不划算"），
+						 *     所以 SM 里实际不会出现 stat=2/3 的条目。
+						 *   记在这里是为了避免后来人看到两边写法不同就去"统一"——
+						 *   统一的任一侧都会改变该侧行为。
+						 */
 						unread: stat === 0,
 						isConcatenated: !!decoded.partial,
 						concatenatedRef: decoded.partial ? decoded.partial.reference : undefined,
