@@ -23,6 +23,7 @@
   否则该检查恒空、结论是假的（这是本项目记录过的真实事故）。
 """
 import io
+import json
 import os
 import re
 import sys
@@ -270,6 +271,42 @@ def fe_declared():
     return out
 
 
+def acl_all_methods():
+    """ACL 里【所有】ubus 对象 → 授权方法集合（read 与 write 两段取并集）。
+
+    ★ 2026-09-28 新增。原来的 acl_methods() / fe_declared() 都**只取 mt5700 一个对象**，
+      于是 `file.exec` 这类漏授权（前端 L.rpc.declare 了 file.exec，而 ACL 的 file 段
+      只有 list/read/stat/write）**完全看不见** —— 在 LuCI 侧表现为「点了没反应」
+      （Access denied），而且项目自己的 B 节报告还会是"（无）"，等于没守。
+      该缺口是用 Python 手工对账时发现的，现在固化成检查。
+    """
+    p = os.path.join(ROOT, 'root/usr/share/rpcd/acl.d/luci-app-mt5700.json')
+    try:
+        data = json.loads(read(p))
+    except Exception:
+        return None
+    out = {}
+    for app in data.values():
+        for section in ('read', 'write'):
+            ubus = (app.get(section) or {}).get('ubus') or {}
+            for obj, methods in ubus.items():
+                out.setdefault(obj, set()).update(methods)
+    return out
+
+
+def fe_all_calls():
+    """前端【所有】L.rpc.declare 的 (object, method)，不限 mt5700。"""
+    out = []
+    for p in walk(('.js',), SKIP_DIRS):
+        if not p.endswith('.js'):
+            continue
+        s = read(p)
+        for m in re.finditer(r"object:\s*'([a-z_0-9]+)'\s*,\s*method:\s*'([a-zA-Z_0-9]+)'", s):
+            out.append((m.group(1), m.group(2),
+                        '%s:%d' % (rel(p), s.count('\n', 0, m.start()) + 1)))
+    return out
+
+
 def check_ubus():
     u, a, f = ucode_methods(), acl_methods(), fe_declared()
     bad = []
@@ -281,6 +318,22 @@ def check_ubus():
         bad.append(('前端声明了但 ucode 无此方法', k, str(f[k])))
     for k in sorted(set(u) - set(f)):
         bad.append(('ucode 有但前端从不调用（可能是死的）', k, 'mt5700.uc:%d' % u[k]))
+
+    # ★ 覆盖**所有** ubus 对象（上面四条只管 mt5700）：前端声明了、ACL 却没授权
+    #   → 调用会 Access denied，而 LuCI 侧只表现为"点了没反应"。
+    acl_all = acl_all_methods()
+    if acl_all is None:
+        bad.append(('acl.d 无法解析（下面的全对象对账等于没跑）', 'luci-app-mt5700.json', ''))
+    else:
+        for obj, method, where in fe_all_calls():
+            if method in acl_all.get(obj, set()):
+                continue
+            if obj not in acl_all:
+                bad.append(('前端调用了 ACL 完全未授权的 ubus 对象（必被拒）',
+                            '%s.%s' % (obj, method), where))
+            else:
+                bad.append(('前端调用了 ACL 未授权的方法（Access denied，表现为点了没反应）',
+                            '%s.%s' % (obj, method), where))
     return bad
 
 

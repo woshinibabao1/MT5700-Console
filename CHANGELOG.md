@@ -5,6 +5,80 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.99] - 2026-09-28
+
+### Fixed
+
+**87. `acl.d` 漏授权 `file.exec` —— 一条"兜底路径"从未生效**
+
+`service.js` 声明并使用了它（`rpcFileExec('/etc/init.d/' + SERVICE, ['stop'])`），
+注释写着「直接经 ubus 注册并拉起实例。**即使 /etc/init.d/at-webserver 缺失
+（overlay 白化等），这条路径依然能把服务跑起来**」—— 而 ACL 的 `file` 段只有
+`list/read/stat`（read）与 `read/stat/write`（write），**没有 `exec`**，所以这条路径每次都被拒。
+**风险评估**：ACL 已授予 `uci set/commit/delete` 与 `service set/delete/reload/restart`，
+那是等效 root 能力，且 `file.exec` 的实参在代码里硬编码，**加它不增加实质权限面**。
+顺带修了二层问题：`.catch` 把 `err` 丢掉了 —— 这条路径最可能的失败原因恰恰是权限，
+`Access denied` 是唯一线索，被吞掉后只显示"调用失败"。
+
+**88. 三处死常量（同一形态：定义了不用 + 别处硬编码同一含义）**
+
+- `diag-probe.sh`：三个探测超时常量并列定义，前两个用了，**`TCP_TIMEOUT` 全脚本只出现一次**
+  （定义处），而 curl 硬编码 `--max-time 4` → **改常量不生效**；
+- `network_status.js`：**`FAST_MS = 5000` 没人用**，`(interval || 5) * 1000` 硬编码魔法数 `5`；
+- `smsEncode.js`：**`EXT_CHARS` 是"错误实现"的残留** —— 同文件注释批评过"拿私有字符串的
+  下标当扩展码"（会把 `'^'` 发成 `ESC+£`），改用 `EXT_MAP` 后那行没删、全仓再无引用。
+
+**89. `config.rs`：`autodial_enable`/`autodial_mode` 两行**连注释**整段重复两遍**
+
+值一样所以行为无害，属明确冗余。同源扫描全仓"连续 3 行完全相同"，只有这一处。
+
+**90. `acl.d` 的 `"sysdiag",` 缩进是 5 个 tab（同级都是 4）** —— 属"统一代码风格"。
+
+### Added
+
+**91. 补上 `compat.js` 的守卫 —— 它是唯一"完全没有测试"的前端共享模块**
+
+覆盖率盘点发现：**7 个前端共享模块里，只有 `compat.js` 被 0 个测试文件提到**。
+而它是**全局兜底**：补 `String.prototype.format`。失效后果不是"某个功能坏了"，
+而是**整个插件不可用** —— `luci.js` 的 bootstrap 用 `'%s/%s.js%s'.format(...)` 拼
+require 的 URL，而 `this.require('ui')` 在 DOMContentLoaded 之前执行；`format` 被摇树
+优化掉后这一步抛 `TypeError`，异常被 `Promise.all(...).catch(this.error)` 吞掉 →
+`setupDOM()` 永不执行 → 所有视图的 `load()/render()` 都不运行 → 页面只剩 HTML 骨架。
+新增 `tests/compat-shim-contract.test.js`（**26 项断言**，含 3 条反向自证）。
+
+**92. `find-orphans.py` B 节从"只对账 `mt5700`"扩展为**全 ubus 对象****
+
+它守的正是"ubus 三方对账"，却报"（无）"、没发现上面那个 `file.exec` —— 因为
+`acl_methods()`/`fe_declared()` 的正则都**写死了 `mt5700`**，`file`/`log`/`luci`/
+`service`/`system`/`uci` 全不在视野内。扩展后覆盖全部对象，并加"`acl.d` 解析失败就报"的
+分支。**变异验证**：把 `"exec"` 改成 `"execXXX"` → 精确报出 `file.exec … service.js:542`。
+
+**93. `verify-guards.py` 补 6 条变异（`compat.js` 3 条 + `init.d` 3 条）**
+
+`init.d` 此前**有守卫（`initd-contract.test.js`）但从未被变异验证过** —— 无法排除那些
+断言是恒绿的。新增覆盖：`reload_service` 用 `ubus call service delete` 代替标准 `start`
+（删掉的是**整个服务对象**，2026-09-21 实测：reload 返回 0、日志打满「配置重新加载完成」，
+但进程列表里一个后端都没有）；就绪判据退化（空数组 `[]` 也判就绪）；去掉
+`ensure_enabled` 调用（禁用状态下也补回自启链接，界面与开机行为互相矛盾）。
+现有 **160 条变异 / 60 个目标键，放过 0 条**。
+
+### 验证
+
+`cargo check` 0 warning · `cargo test` **44 passed** · `run-all` **0 失败** ·
+`syntax-check` 0 错误 · `verify-guards` **160 条全判红、0 放过** + 还原逐字节一致 ·
+`find-orphans` `self_test()` 14/14、待判 38 条、B 节 0 条。
+
+### 诚实边界
+
+- 本批 7 项里，**87 是用户可感知的功能修复**，91~93 是测试/工具，88~90 是死代码与格式。
+  **没有一项改动业务逻辑的运行结果**。
+- 我自己踩了两个坑：① 在 `vm` context 里注入 `String`/`Object` 等内置对象会让所有
+  context **共享同一个 `String.prototype`**，导致"模块求值即安装"那条断言变成**空转**；
+  ② 给 `init.d` 选的第一个变异值 `xipv4-address|...` **仍包含**原串，断言照样匹配 →
+  变异被放过；换成 `ipv4Address|...` 才真正破坏判据。
+- 另发现 `assert-signature-contract.test.js` 的一个盲区：它判"第一个参数是不是名称"只认
+  字面量拼接（`/\w+\s*\+\s*['"]/`），**包装函数里的 `ok(name, ...)` 是合法的却会被报**。
+  本次按它的口径改成 `ok(name + '', ...)` 绕开，**盲区本身留待后续**。
 ## [2.3.98] - 2026-09-28
 
 **累计满 10 个修改**一次推送（按用户要求）。本批含 **1 处功能级隐患修复**（`apdu_timeout`

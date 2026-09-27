@@ -22,6 +22,14 @@ TARGETS = {
     "js": ATWB / "euicc.js",
     "esimjs": ESIM,
     "esimcss": ATWB / "mt5700.css",
+    # ★ 2026-09-28：init.d 此前【有守卫但从未被变异验证】—— 即 initd-contract
+    #   里的断言可能是恒绿的。它守的是实机才暴露的问题（reload 删掉服务对象后
+    #   进程列表一个后端都没有），最需要验证。
+    "initd": ROOT / "root" / "etc" / "init.d" / "at-webserver",
+    # ★ 2026-09-28 新增：compat.js 是 7 个前端共享模块里最后被纳入变异验证的一个
+    #   （覆盖率盘点发现它此前被 0 个测试文件提到）。它是**全局兜底**：补
+    #   String.prototype.format，失效后果不是"某个功能坏了"而是整个插件不可用。
+    "compatjs": ATWB / "compat.js",
     "test": ROOT / "tests" / "euicc-download-contract.test.js",
     # euicc.js 的**同一份文件**再挂一个键：卡级阻断那组守卫在 esim-contract 里，
     # 而 "js" 键固定跑下载契约测试。一份文件两条测试通道，别把守卫挂错测试上。
@@ -158,6 +166,8 @@ TARGET_TEST = {
     "test": ROOT / "tests" / "euicc-download-contract.test.js",
     "esimjs": ROOT / "tests" / "esim-contract.test.js",
     "esimcss": ROOT / "tests" / "esim-contract.test.js",
+    "initd": ROOT / "tests" / "initd-contract.test.js",
+    "compatjs": ROOT / "tests" / "compat-shim-contract.test.js",
     "js2": ROOT / "tests" / "esim-contract.test.js",
     "mt5700js": ROOT / "tests" / "esim-contract.test.js",
     "mt5700js2": ROOT / "tests" / "single-source-contract.test.js",
@@ -250,6 +260,67 @@ ORIG = {k: v.read_bytes() for k, v in TARGETS.items()}
 
 # (名字, 目标, 旧片段, 新片段, 期望被点名的断言关键词)
 MUTATIONS = [
+    # ★ 2026-09-28 新增：init.d 的三条。它此前有守卫（initd-contract.test.js）
+    #   但从没被变异验证过 —— 无法排除那些断言是恒绿的。
+    #   锚点唯一性已核（`start "$@"` 1 次；`ipv4-address|ipv6-address` 1 次；
+    #   带制表符缩进的 `\tensure_enabled` 1 次）。
+    (
+        # 用 ubus call service delete 代替标准 start：删掉的是**整个服务对象**，
+        # 紧接着 procd_open_instance 往一个正在被删除的对象上注册 —— 收尾时新实例
+        # 一并被清掉。2026-09-21 实测：reload 返回 0、日志打满「配置重新加载完成」，
+        # 但进程列表里一个后端都没有。同时破坏「不得 delete」与「必须走 start」两条。
+        "init.d：reload 用 ubus call service delete 代替标准 start（旧实例与新实例一起没了）",
+        "initd",
+        '\tstart "$@"\n',
+        '\tubus call service delete at-webserver\n',
+        "reload_service 不得调用 ubus call service delete",
+    ),
+    (
+        # 就绪判据退化：改成匹配关键字本身，于是空数组 `[]` 也算「已就绪」，
+        # 接口还没拿到地址就报成功（up=true 造成的假成功那一类）。
+        "init.d：就绪判据不再要求「数组里有元素」（空数组也判就绪）",
+        "initd",
+        "ipv4-address|ipv6-address",
+        "ipv4Address|ipv6Address",
+        "就绪判据匹配「数组里有元素」",
+    ),
+    (
+        # 把 ensure_enabled 的调用点从「enabled 检查之后」挪走（这里直接删掉），
+        # 于是禁用状态下 start 也会把 S99 自启链接补回来：界面显示已启用、
+        # 开机又因 enabled=0 退出，两个结论互相矛盾。
+        "init.d：去掉 ensure_enabled 调用（禁用状态下也会补回自启链接）",
+        "initd",
+        "\tensure_enabled\n",
+        "\t:\n",
+        "ensure_enabled 在 start_service 里被调用",
+    ),
+    # ★ 2026-09-28 新增：compat.js（LuCI core 兼容垫片）的三条。
+    #   它是全局兜底，失效 = 页面能打开但功能全不可用。
+    #   锚点唯一性已核（每条在 compat.js 里只出现 1 次）。
+    (
+        # 去掉 %% 转义分支：'100%%' 会被当成 %s 吃掉参数，格式串错位。
+        "compat：%% 转义分支被删（格式串错位）",
+        "compatjs",
+        "if (m === '%%') return '%';",
+        "if (false) return '%';",
+        "%% 转义为字面 %",
+    ),
+    (
+        # 去掉"已有实现就不覆盖"：会覆盖上游 luci 的 format 实现。
+        "compat：丢失「已有上游实现就不覆盖」（垫片变成劫持）",
+        "compatjs",
+        "if (typeof String.prototype.format === 'function') return false;",
+        "if (false) return false;",
+        "已有上游实现时 install() 返回 false",
+    ),
+    (
+        # 让 install() 不执行：垫片形同不存在，页面全废。
+        "compat：模块求值不再安装（垫片形同不存在）",
+        "compatjs",
+        "api.installed = api.install();",
+        "api.installed = true;",
+        "模块求值即安装",
+    ),
     (
         # ★ 锚点唯一性已核：service.js 里 `if (state.binUnknown) {` 只出现 1 次。
         #   去掉它 → 读失败重新落到「未安装」并劝用户重装

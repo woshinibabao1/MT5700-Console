@@ -688,7 +688,13 @@ return L.view.extend({
 						tried.push('init stop（返回 ' + JSON.stringify(res || {}) + '）');
 					})
 					.catch(function (err) {
-						tried.push('init stop 调用失败');
+						/*
+						 * ★ 2026-09-28：原来把 err 丢了，只记「init stop 调用失败」——
+						 *   而这条路径最可能的失败原因恰恰是**权限**（ACL 漏授权 file.exec 时
+						 *   会得到 Access denied）。吞掉 err 就等于把唯一线索扔了。
+						 *   （ACL 已在同一批补上 exec；这行是为了下次再出问题能一眼看出。）
+						 */
+						tried.push('init stop 调用失败（' + String((err && err.message) || err || '未知') + '）');
 					})
 					.then(function () {
 						// stop_service 内含一次 firewall reload，等它跑完再复核

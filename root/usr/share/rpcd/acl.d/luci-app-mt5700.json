@@ -96,7 +96,8 @@
 				"file": [
 					"write",
 					"read",
-					"stat"
+					"stat",
+					"exec"
 				],
 				"luci": [
 					"setInitAction"
