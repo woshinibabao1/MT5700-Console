@@ -1051,7 +1051,7 @@ return L.view.extend({
 		/* ---------- 1. 网络接入顺序 ----------
 		 * label 只给「人话」（5G 优先 / 仅 5G…）—— 十六进制码是给排障对 AT 手册用的，
 		 * 塞进 label 会让它长得没人愿意读。码值改由两处承载：
-		 *   ① 选中后下方 hint 里带出「制式代码 080302（NR → LTE → WDMA）」（见 paintAcq）
+		 *   ① 选中后下方 hint 里带出「制式代码 080302（NR → LTE → WCDMA）」（见 paintAcq）
 		 *   ② 卡片底部只读原始值 sysRaw 会显示模组当前 acqorder
 		 * 两者都在，既不丢排障信息，也不把下拉撑成一列十六进制。 */
 		var ACQ_OPTIONS = [

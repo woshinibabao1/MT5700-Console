@@ -2169,7 +2169,18 @@ return L.view.extend({
 					});
 				});
 				return chain.catch(function (e) {
-					if (e === 'break') { /* 已找到 */ }
+					/*
+					 * ★ 2026-09-28 修：原来这里写的是
+					 *     if (e === 'break') { …已找到… }   ← 里面是空语句
+					 *     state.activeCid = null;
+					 *   —— 那个 if 是**空语句**，清空写在它之外、**无条件执行**。
+					 *   后果：resolveActiveCid() 的缓存判据是
+					 *   `if (!force && state.activeCid !== null) return state.activeCid;`，
+					 *   而每次 getAMBR 跑完都把它置 null，于是 getAMBR / getQCI 下一轮
+					 *   又要重查一次 AT+CGACT?。慢档 30s 一轮，等于每轮白搭 1~2 条
+					 *   串口往返 —— 而那句注释的本意显然是「已找到就保留」。
+					 */
+					if (e === 'break') return;   /* 已找到：保留 activeCid 作为缓存 */
 					state.activeCid = null;
 				}).then(renderConn);
 			});
@@ -2516,8 +2527,8 @@ return L.view.extend({
 						 * 计数器回绕或接口重置会产生负差，此时不能输出负值，
 						 * 直接以 0 处理并重置基准，下一拍即可恢复。
 						 */
-					state.rtDown = drx >= 0 ? drx / dt : 0;
-					state.rtUp = dtx >= 0 ? dtx / dt : 0;
+						state.rtDown = drx >= 0 ? drx / dt : 0;
+						state.rtUp = dtx >= 0 ? dtx / dt : 0;
 					history.push({ down: state.rtDown, up: state.rtUp });
 					if (history.length > HISTORY_POINTS) history = history.slice(history.length - HISTORY_POINTS);
 					/* 峰值只在本段监测内累计（单位与 rt* 一致：字节/秒） */

@@ -1,8 +1,18 @@
 'use strict';
 /*
  * rpcd ucode 插件：mt5700。
- * OpenWrt ucode 语法：无 ===/模板字符串；无 require('json')，
- * 序列化用 sprintf('%J')，反序列化用内置迷你解析器。
+ * ★ 2026-09-28 更正下面这行语法说明（真机逐条实测，原文两条都不对）：
+ *   原文写「无 ===/模板字符串」—— **实测两者都可用**：
+ *     `1 === 1` → ok；`'1' === 1` → DIFF（是**严格**比较，没被当成 ==）；
+ *     `1 !== 2` → ok；模板字符串 `x${a}y` 形式 → `x1y`。
+ *   所以本文件里那 5 处 `===`（ES9+ 路径白名单、vowifi_set 的参数判定）是正常工作的。
+ *   ★ 真正要避开的是 **typeof**：`typeof "AT"` 直接**语法错误**
+ *     （Syntax error: Unexpected token / Expecting ')'），必须用 `type()`。
+ *     这条**原文没写**，而它才是本文件唯一栽过的坑 ——
+ *     2026-09-25 部署后 at_batch 的 20 条命令全部被拒就是这么来的（见那里的注释）。
+ *
+ * 属实的一条：无 `require('json')`（Runtime error: No module named 'json' 可复现），
+ * 故序列化用 sprintf('%J')、反序列化用下面的内置迷你解析器。
  * 参数在 req.args 上（不是 req 顶层）。
  */
 
@@ -1130,7 +1140,13 @@ function readMncLength() {
 	if (hex == null || length(hex) < 8) {
 		return null;
 	}
-	/* data[3] & 0x0f —— 用取模，避免依赖位运算 */
+	/*
+	 * data[3] & 0x0f。
+	 * ★ 2026-09-28 补实测依据：原文写「用取模，避免依赖位运算」，容易被读成
+	 *   「位运算在这个固件上有坑」—— **实测没有**：`255 >> 4` = 15、`255 & 15` = 15、
+	 *   `144 >> 4` = 9、`0 & 15` = 0，本文件的 decHex2 就一直在用位运算且工作正常。
+	 *   这里与下面 readEhplmnMnc 用 % 16 只是更直观、与早期写法一致，**不是**被迫的。
+	 */
 	let n = hexPairVal(hex, 6) % 16;
 	if (n == 2 || n == 3) {
 		return n;
