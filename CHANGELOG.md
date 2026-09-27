@@ -5,6 +5,69 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.4] - 2026-09-28
+
+### Performance
+
+**101. ★ 真机实测发现：`^RSSI` / `^CERSSI` 每秒 10 条无消费事件，撑爆事件帧预算**
+
+**这是真机（`192.168.10.1`，`luci-app-mt5700-2.4.3-r1 aarch64_cortex-a53`）实测发现的**，
+不是纸面推断：
+
+```
+$ ubus call mt5700 events '{"since":0}'     # 连续三轮
+  轮1: 90 条 = ^CERSSI 45 + ^RSSI 45
+  轮2: 90 条 = ^CERSSI 45 + ^RSSI 45
+  轮3: 72 条 = ^CERSSI 26 + ^RSSI 25 + +CMTI 16 + new_sms 3 + ^HCSQ 2
+
+$ ubus call mt5700 logs '{"since":0}'       # 13 分钟内 12 条同样的 WRN
+  [WRN] 事件帧超出 6144 字节预算，本次回 90 条，剩余等下一轮（seq 已停在 468）
+```
+
+**即：事件队列 100% 被这两个高频 URC 占满，而 `+CMTI`（新短信）这类要紧事件被排在后面**
+（`urc_tx` 队列只有 256 格，满了会丢弃）。
+
+**核实消费方（全仓 + 真机）**：`AtWs.client.subscribe()` 只有 **2 处** ——
+`network_settings.js:151` 的 `rejectHandler`（只认 `REJINFO`）、
+`sms_center.js:1053` 的 `newSmsHandler`（认 `new_sms`）。而：
+
+| URC | 前端消费方 |
+| :-- | :-- |
+| `^RSSI` | **无** —— `rpc.js::parseRawData` 根本不认这个前缀（全仓 0 处引用） |
+| `^CERSSI` | **无** —— 会产出 `{type:'CERSSI', raw}`，但**全仓没有任何消费方**；它的信号语义由 Rust 侧 `urc::handle_signal` 解析并用于 `notify_signal`（企业微信推送），与前端事件是两条路 |
+| `^REJINFO` | ✅ 唯一被前端消费的 URC |
+
+### Fixed
+
+**102. `atclient.rs`：空闲期上报改为按需广播（`should_broadcast`）**
+
+原来是「空闲期收到的**任何**数据都 `broadcast: true`」（与 Go 实现一致）。现按黑名单排除
+`^RSSI:` / `^CERSSI:` 两个已实测确认无消费方的高频项。
+**用黑名单而非白名单**：未知/新出现的 URC 保持「原样推给前端」的既有行为，
+不会因为这次改动被静默吞掉。`^HCSQ` **不在**黑名单里 —— 它既是主动上报也是
+`AT^HCSQ?` 的应答，且 `handle_signal` 依赖它。
+
+预期收益：事件量从 **约 10 条/秒降到接近 0**，「事件帧超出预算」的 WRN 应当消失，
+`+CMTI` 不再被迫排队。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo check` | 0 warning |
+| `cargo test` | **45 passed / 0 failed**（新增 1 条单元测试） |
+| **变异：清空黑名单** | 单元测试 **FAILED（44 passed; 1 failed）** ✓ |
+| `node tests/run-all.js` | 0 失败 |
+| `TZ=UTC node tests/run-all.js` | 0 失败 |
+| `python tools/verify-guards.py` | 160 条判红、**0 放过** |
+
+### 诚实边界
+
+- 这次改动的依据是**真机实测数据的消费方核实**，不是纸面推断；但我**尚未在真机上验证
+  修改后的效果**（要等新版本装上后重跑 `events` / `logs` 对比）。
+- `^CERSSI` 被排除是**基于"当前无消费方"**：`rpc.js` 仍会产出 `{type:'CERSSI'}` 分支，
+  将来若前端要用它，把 `^CERSSI:` 从 `NO_BROADCAST_PREFIXES` 删掉即可恢复
+  （注释里写明了这一点）。
 ## [2.4.3] - 2026-09-28
 
 ### Fixed

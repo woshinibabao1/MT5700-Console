@@ -186,6 +186,34 @@ fn parse_autodial_enable(text: &str) -> Option<bool> {
     None
 }
 
+/*
+ * 不推给前端的主动上报前缀。
+ *
+ * ★ 2026-09-28 真机实测（设备 192.168.10.1，luci-app-mt5700-2.4.3-r1）：
+ *   模组在空闲期**每秒**上报约 10 条 —— `^RSSI` 5 条 + `^CERSSI` 5 条，
+ *   而这两者在**前端完全没有消费方**：
+ *     · `^RSSI`   —— `rpc.js` 的 `parseRawData` 根本不认这个前缀（全仓 0 处引用），
+ *                    推过去就是「解包 → 没有产出 → 丢弃」；
+ *     · `^CERSSI` —— 会产出 `{type:'CERSSI', raw}`，但**全仓没有任何消费方**；
+ *                    它的信号语义由 Rust 侧 `urc::handle_signal` 解析并用于
+ *                    `notify_signal`（企业微信推送），与前端事件是两条路。
+ *   实测后果（`ubus call mt5700 logs` 的 WRN，每分钟一次）：
+ *     `事件帧超出 6144 字节预算，本次回 90 条，剩余等下一轮`
+ *   —— 90 条里 90 条都是这两者，而 `+CMTI`（新短信）这类**真正要紧**的事件
+ *   被排在它们后面；`urc_tx` 队列只有 256 格（见 main.rs），满了还会丢。
+ *
+ * 为什么用**黑名单**而不是白名单：未知/新出现的 URC 应当保持「原样推给前端」的
+ * 既有行为，只排除已被实测确认无消费方的高频项。若日后前端要用这两个数据，
+ * 把它们从这里删掉即可恢复（`^HCSQ` 不在此列：它既是主动上报也是 `AT^HCSQ?`
+ * 的应答，且 `handle_signal` 依赖它）。
+ */
+const NO_BROADCAST_PREFIXES: &[&str] = &["^RSSI:", "^CERSSI:"];
+
+/// 这条主动上报要不要作为 `raw_data` 推给前端。
+fn should_broadcast(line: &str) -> bool {
+    !NO_BROADCAST_PREFIXES.iter().any(|p| line.starts_with(p))
+}
+
 /// 一条模组主动上报。broadcast 为真表示需要作为 raw_data 推给前端。
 #[derive(Debug)]
 pub struct Unsolicited {
@@ -852,9 +880,14 @@ impl AtClient {
         };
 
         if !has_pending {
-            // 空闲期收到的任何数据都视为主动上报：交给处理器，并按原样推给前端。
-            // 与 Go 实现一致（Go handleLine: p == nil 时 broadcast: true）。
-            self.emit(Unsolicited { line, broadcast: true }).await;
+            // 空闲期收到的数据视为主动上报：交给处理器；是否推给前端见 should_broadcast。
+            // 与 Go 实现一致（Go handleLine: p == nil 时 broadcast: true），
+            // 唯一的例外是下面 NO_BROADCAST_PREFIXES 里那几个前端不消费的高频 URC。
+            // ★ 必须先算 broadcast 再构造：struct 字面量的字段按书写顺序求值，
+            //   写成 `Unsolicited { line, broadcast: should_broadcast(&line) }`
+            //   会先 move `line` 再借用它 → E0382。
+            let broadcast = should_broadcast(&line);
+            self.emit(Unsolicited { line, broadcast }).await;
             return;
         }
 
@@ -1255,5 +1288,35 @@ mod tests {
         );
 
         holder.abort();
+    }
+
+    /// ★ 2026-09-28 真机实测（192.168.10.1，luci-app-mt5700-2.4.3-r1）：
+    ///   模组空闲期**每秒**上报约 10 条 —— `^RSSI` 5 + `^CERSSI` 5，
+    ///   而两者在前端都没有消费方（`^RSSI` 连 `rpc.js::parseRawData` 都不认；
+    ///   `^CERSSI` 虽会产出 `{type:'CERSSI'}`，但全仓无消费方）。
+    ///   实测后果是 `logs` 里每分钟一条 WRN「事件帧超出 6144 字节预算」，
+    ///   而 `+CMTI`（新短信）这类要紧事件被排在它们后面。
+    #[test]
+    fn 高频且前端不消费的上报不推给前端() {
+        // 这两个必须被挡掉
+        assert!(!should_broadcast("^RSSI: 156"));
+        assert!(!should_broadcast("^CERSSI: 0,0,255,0,0,0,3,15,0,0,99,99,99,99,99,99,99,99,-78,-10,17"));
+
+        // 真正被前端消费的必须放行
+        assert!(should_broadcast("^REJINFO: 1,2,3"), "网络拒绝原因是唯一被前端消费的 URC");
+        assert!(should_broadcast("+CMTI: \"ME\",57"), "新短信通知必须放行");
+        assert!(should_broadcast("RING"));
+        assert!(should_broadcast("^CLIP: \"+8613800138000\",145"));
+
+        // ^HCSQ 不在黑名单里：它既是主动上报也是 AT^HCSQ? 的应答，且 handle_signal 依赖它
+        assert!(should_broadcast("^HCSQ: \"NR\",63,186,30"));
+
+        // 未知/新出现的 URC 保持「原样推给前端」的既有行为（黑名单而非白名单）
+        assert!(should_broadcast("^SOMETHINGNEW: 1"), "未知 URC 不应被静默吞掉");
+        assert!(should_broadcast(""), "空行的行为与改动前一致");
+
+        // 前缀匹配必须是「从头开始」：正文里出现不算
+        assert!(should_broadcast("OK"));
+        assert!(should_broadcast("^HCSQ: \"LTE\",45,34,106"), "其他信号 URC 不受影响");
     }
 }
