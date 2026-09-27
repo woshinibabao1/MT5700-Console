@@ -63,6 +63,20 @@ function ok(name, cond, hint) {
 	fails.push(name + (hint ? ' —— ' + hint : ''));
 }
 
+/*
+ * ★ 2026-09-28：下面 4 条正则**同时**被「主断言」与「文件末尾的反向自检」使用，
+ *   所以提成常量、只写一份。
+ *   起因：原来自检各自**抄了一遍**正则 —— 主断言的正则一旦被修改，自检仍在测
+ *   **旧**正则、仍在通过，「每条正则型断言都能判红」这个保证就悄悄失效了。
+ *   这是恒绿的第二形态：不是断言恒真，而是**证明断言有效的自检**恒真。
+ *   仓里已有正面例子：assert-signature-contract.test.js 的反向自检调用的就是
+ *   真实的 collectCalls / direction，测的是真逻辑而不是副本。
+ */
+const R_SIGNAL_110 = /rsrp\s*-\s*\(\s*-110\s*\)/;
+const R_DANGER_HINT = /Parse\.atDangerHint\(/;
+const R_REJ_ZERO = /return isFinite\(n\) \? n : 0/;
+const R_SINCE_BUDGET = /fn since\(&self, since: u64, budget: usize\)/;
+
 /* ==========================================================================
  * 1. 信号百分比 / 等级：只准在 parse.js 算一次
  * ========================================================================== */
@@ -80,7 +94,7 @@ ok('mt5700.js 的 api.signalPercent 转调 Parse.signalPercent',
 
 /* 量程算式本身不许再出现在别处（只匹配算式，不匹配注释里提到的数字） */
 ok('rpc.js 不再自带 -110 量程算式',
-	!/rsrp\s*-\s*\(\s*-110\s*\)/.test(rpc),
+	!R_SIGNAL_110.test(rpc),
 	'rpc.js 里又出现了 (rsrp - (-110)) 量程，与 parse.js 的 -120~-70 打架');
 ok('mt5700.js 不再自带 -120 量程算式',
 	!/2 \* \(Number\(rsrp\) \+ 120\)/.test(m5700),
@@ -110,9 +124,9 @@ ok('AT_DANGER 里 CFUN 相关规则恰好 3 条',
 	count(parseCode, /AT\\\+CFUN/g) === 3,
 	'实际 ' + count(parseCode, /AT\\\+CFUN/g) + ' 条');
 
-ok('终端页在发送前查 Parse.atDangerHint', /Parse\.atDangerHint\(/.test(term),
+ok('终端页在发送前查 Parse.atDangerHint', R_DANGER_HINT.test(term),
 	'终端又没有危险指令提示了 —— AT+CFUN=0 会直接把 5G 断掉');
-ok('短信设置页在执行开关前查 Parse.atDangerHint', /Parse\.atDangerHint\(/.test(smsSet),
+ok('短信设置页在执行开关前查 Parse.atDangerHint', R_DANGER_HINT.test(smsSet),
 	'短信开关又会不经确认就发 AT+CFUN=0 与 AT+CMGD=1,4（清空全部短信）');
 
 /* ==========================================================================
@@ -134,7 +148,7 @@ ok('短信设置页在执行开关前查 Parse.atDangerHint', /Parse\.atDangerHi
 });
 
 ok('parseRejInfo 不再把「读不到」归 0',
-	!/return isFinite\(n\) \? n : 0/.test(parse),
+	!R_REJ_ZERO.test(parse),
 	'缺字段又归 0 了：0 在域/制式表里都是合法取值，会把「没上报」显示成「CS 域」');
 
 /* ==========================================================================
@@ -142,7 +156,7 @@ ok('parseRejInfo 不再把「读不到」归 0',
  * ========================================================================== */
 
 ok('rpcserver.rs 定义 EVENT_FRAME_BUDGET', /const EVENT_FRAME_BUDGET: usize/.test(rust));
-ok('EventBus::since 带 budget 参数', /fn since\(&self, since: u64, budget: usize\)/.test(rust),
+ok('EventBus::since 带 budget 参数', R_SINCE_BUDGET.test(rust),
 	'since 又没有字节预算了 —— 500 条事件一次全回会撑爆 8192 单帧');
 ok('events 调用点传入 EVENT_FRAME_BUDGET', /\.since\(since, EVENT_FRAME_BUDGET\)/.test(rust));
 
@@ -154,17 +168,17 @@ const badRpc = 'function calculateSignalPercent(rsrp) {\n'
 	+ '\tvar ratio = (rsrp - (-110)) / ((-70) - (-110));\n'
 	+ '\treturn Math.round(ratio * 100) + "%";\n}';
 ok('★ 反向自检：rpc.js 自带的 -110 量程会被判红',
-	/rsrp\s*-\s*\(\s*-110\s*\)/.test(badRpc));
+	R_SIGNAL_110.test(badRpc));
 
 const badTerm = 'AtWs.client.sendCommand(command).then(function (res) { render(res); });';
-ok('★ 反向自检：终端不查 atDangerHint 会被判红', !/Parse\.atDangerHint\(/.test(badTerm));
+ok('★ 反向自检：终端不查 atDangerHint 会被判红', !R_DANGER_HINT.test(badTerm));
 
 const badRej = 'var num = function (v) { var n = Number(unquote(v)); return isFinite(n) ? n : 0; };';
-ok('★ 反向自检：缺字段归 0 会被判红', /return isFinite\(n\) \? n : 0/.test(badRej));
+ok('★ 反向自检：缺字段归 0 会被判红', R_REJ_ZERO.test(badRej));
 
 const badRust = 'fn since(&self, since: u64) -> (u64, Vec<serde_json::Value>) {';
 ok('★ 反向自检：since 不带 budget 会被判红',
-	!/fn since\(&self, since: u64, budget: usize\)/.test(badRust));
+	!R_SINCE_BUDGET.test(badRust));
 
 console.log('通过 ' + pass + ' 项，失败 ' + fails.length + ' 项');
 if (fails.length) {

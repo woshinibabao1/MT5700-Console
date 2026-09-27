@@ -104,12 +104,14 @@ const MODULE_FILES = walk(path.join(RES, 'at-webserver'), [])
 	.concat(walk(path.join(RES, 'view', 'at-webserver'), []));
 
 let declared = 0;
+const declaredNames = [];
 MODULE_FILES.forEach(function (file) {
 	const src = fs.readFileSync(file, 'utf8');
 	const names = [];
 	const declRe = /(?:^|\n)var\s+(\w+)\s*=\s*\(function/g;
 	let m;
 	while ((m = declRe.exec(src)) !== null) names.push(m[1]);
+	names.forEach(function (name) { declaredNames.push(name); });
 	names.forEach(function (name) {
 		declared++;
 		const rel = path.relative(ROOT, file).replace(/\\/g, '/');
@@ -130,7 +132,19 @@ MODULE_FILES.forEach(function (file) {
 	});
 });
 
-ok('②z 至少扫到 6 个模块声明（扫描器没空转）', declared >= 6, '实际 ' + declared);
+/*
+ * ★ 2026-09-28 收紧：原来门槛是 `declared >= 6`，而实测仓里**恰好 7 个**这种形态的
+ *   模块声明（compat / euicc / mt5700 / parse / rpc / smsEncode / ui 各一个）。
+ *   门槛留 6 意味着「少扫到一个模块」仍会通过 —— 而这条断言的语义正是「扫描器没空转」，
+ *   少扫一个是它最该抓到的情况。故抬到 7，并补一条**逐个点名**的断言：
+ *   少任何一个模块都会判红，而不是只对着一个数字。
+ */
+ok('②z 至少扫到 7 个模块声明（扫描器没空转）', declared >= 7, '实际 ' + declared);
+
+const EXPECTED_MODULES = ['AtCompat', 'Euicc', 'Mt5700', 'Parse', 'atClient', 'SmsEncode', 'Ui'];
+const missingModules = EXPECTED_MODULES.filter(function (n) { return declaredNames.indexOf(n) < 0; });
+ok('②z2 7 个已知共享模块都被扫到（逐个点名，少一个就判红）',
+	missingModules.length === 0, '没扫到：' + missingModules.join('、'));
 
 /* ---------- ③ 测试侧：不允许再出现未加锚的提取正则 ---------- */
 

@@ -182,10 +182,26 @@ function declared(src) {
 	const reProp = /([A-Za-z_$][\w$]*)\s*:\s*(?:function\b|\([^)]*\)\s*=>)/g;
 	while ((m = reProp.exec(src))) names.add(m[1]);
 
-	/* 形参：function(...) 与 (...) =>  */
-	const reParams = /\(([^()]*)\)\s*(?:=>|\{)/g;
+	/*
+	 * 形参：function(...) 与 (...) => 。
+	 *
+	 * ★ 2026-09-28 修正一处**漏报**：原正则 /\(([^()]*)\)\s*(?:=>|\{)/g 无法区分
+	 *   `function (x) {`（真形参）与 `if (x) {` / `while (x) {` / `switch (x) {`
+	 *   —— 后者会把条件里的**纯标识符**当成「已声明」。
+	 *   变异验证实测（改前）：
+	 *       if (__probe_if_fn__) { Mt5700.info('x'); }
+	 *       __probe_if_fn__();          ← 不判红（漏报）
+	 *   而同一个名字若**只调用**、不先出现在 if(...) 里，则正常判红。
+	 *   于是补一步：取 `(` 前面那个词，是控制关键字就不算形参。
+	 *   （`catch (e)` 另有 reCatch 单独收，这里拦掉不影响它；
+	 *     `function (x)` 的 head 是 `function`，**刻意不列入**关键字表，故仍会收 —— 正确。）
+	 */
+	const NON_PARAM_HEAD = /^(?:if|while|switch|for|catch|return|typeof|new|delete|void|in|of|do|else|case)$/;
+	const reParams = /([A-Za-z_$][\w$]*\s*)?\(([^()]*)\)\s*(?:=>|\{)/g;
 	while ((m = reParams.exec(src))) {
-		m[1].split(',').forEach(function (p) {
+		const head = (m[1] || '').trim();
+		if (head && NON_PARAM_HEAD.test(head)) continue;
+		m[2].split(',').forEach(function (p) {
 			const nm = p.trim().split(/[\s=]/)[0];
 			if (/^[A-Za-z_$][\w$]*$/.test(nm)) names.add(nm);
 		});

@@ -52,12 +52,35 @@ function ok(name, cond, hint) {
 	fails.push(name + (hint ? ' —— ' + hint : ''));
 }
 
-/* 从 `{` 起做括号配对取出函数体，跳过字符串与注释里的括号 */
+/*
+ * 从 `{` 起做括号配对取出函数体，跳过字符串 / 注释 / **正则字面量**里的括号。
+ *
+ * ★ 2026-09-28 补两处（原来只认字符串与注释，不认正则）：
+ *   ① **正则字面量**：`/["]/`、`/['\"]+/` 这类正则里的引号会被当成字符串起点。
+ *      若该正则里的引号**不成对**，引号状态就再也不退出 —— 于是后面所有 `{` `}` 都被
+ *      当成"字符串内容"跳过，括号配对永远归不了零，`extractBody` 会把**函数体之后
+ *      的一大段代码**一起当成 body 返回（本文件靠 body 判"有没有用户可见反馈"，
+ *      判错就会误报或漏报）。
+ *      实测复现：输入含 `/['"]+/` 后再取某函数体，body 里会丢掉后面的 `{ a: 1 }`。
+ *      （仓里 euicc.js 的 `(/[+]CSIM:…"([0-9A-Fa-f]*)"?/` 引号恰好成对，所以暂时没出事
+ *        —— 属于**潜在**缺陷，不是当时就有故障。）
+ *   ② **单/双引号不能跨行**（只有模板字符串可以）：在该状态里遇到 `\n` 一定是误判，
+ *      直接退出。这是与 ① 配套的安全网。
+ *   正则起点的判据与 undefined-fn-contract.test.js 的 strip() 保持一致：
+ *   上一个有意义字符属于 `(),=:[!&|?{};+-*%~^<>` 或行首时，`/` 才是正则开始。
+ */
+const REGEX_PREV = '(),=:[!&|?{};+-*%~^<>\n';
+
 function extractBody(src, start) {
 	let depth = 0;
 	let inStr = null;
 	let inLine = false;
 	let inBlock = false;
+	let prevSig = '\n';
+	for (let i = 0; i < start; i++) {
+		const p = src[i];
+		if (p !== ' ' && p !== '\t' && p !== '\r' && p !== '\n') prevSig = p;
+	}
 	for (let i = start; i < src.length; i++) {
 		const c = src[i];
 		const n = src[i + 1];
@@ -65,17 +88,37 @@ function extractBody(src, start) {
 		if (inBlock) { if (c === '*' && n === '/') { inBlock = false; i++; } continue; }
 		if (inStr) {
 			if (c === '\\') { i++; continue; }
-			if (c === inStr) inStr = null;
+			if (c === inStr) { inStr = null; prevSig = '"'; continue; }
+			if (c === '\n' && inStr !== '`') { inStr = null; prevSig = '\n'; continue; }   /* ② 安全网 */
 			continue;
 		}
 		if (c === '/' && n === '/') { inLine = true; i++; continue; }
 		if (c === '/' && n === '*') { inBlock = true; i++; continue; }
-		if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+		if (c === '/' && REGEX_PREV.indexOf(prevSig) >= 0) {
+			/* ① 正则字面量：扫到未转义的 / 为止（跳过字符类 []，不跨行） */
+			i++;
+			let inClass = false;
+			while (i < src.length) {
+				const r = src[i];
+				if (r === '\\') { i += 2; continue; }
+				if (r === '\n') break;
+				if (r === '[') inClass = true;
+				else if (r === ']') inClass = false;
+				else if (r === '/' && !inClass) { i++; break; }
+				i++;
+			}
+			while (i < src.length && /[gimsuyd]/.test(src[i])) i++;
+			i--;
+			prevSig = '"';
+			continue;
+		}
+		if (c === '"' || c === "'" || c === '`') { inStr = c; prevSig = c; continue; }
 		if (c === '{') depth++;
 		else if (c === '}') {
 			depth--;
 			if (depth === 0) return { body: src.slice(start, i + 1), end: i };
 		}
+		if (c !== ' ' && c !== '\t' && c !== '\r' && c !== '\n') prevSig = c;
 	}
 	return { body: src.slice(start), end: src.length };
 }
