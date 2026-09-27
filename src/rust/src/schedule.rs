@@ -665,7 +665,20 @@ fn registered(text: &str) -> bool {
     false
 }
 
+/// 校验「频段 ↔ 频点」是否都落在该频段的合法频点范围内。
+///
+/// ★ 前置不变量：`bands` 与 `arfcns` **必须等长** —— 本函数按同一下标同步索引两者。
+///   两个调用方（`lte_command` / `nr_command`）都在调用之前做了 `len()` 比较并提前返回
+///   "改为解锁"，所以实际上从来不会越界。**但那是调用方的检查，没有写进这个接口**：
+///   签名只说了"两个字符串数组"，任何将来新增的调用点只要漏掉那一步，`arfcns[i]` 就会
+///   越界 panic —— 而本 crate 的 release 是 `panic = "abort"`（一次越界 = 进程退出，
+///   且 procd 的重试计数会累积）。代价不对称（一次比较 vs 进程退出），所以这里显式挡
+///   一道，把隐式契约变成显式的、可被这个函数自己保证的东西。
 fn validate_pairs(bands: &[String], arfcns: &[String], table: &std::collections::HashMap<i64, (i64, i64)>, kind: &str) -> bool {
+    if bands.len() != arfcns.len() {
+        log_warn!("{} 锁频参数数量不一致：频段 {} 个，频点 {} 个", kind, bands.len(), arfcns.len());
+        return false;
+    }
     for (i, band_s) in bands.iter().enumerate() {
         let band: i64 = match band_s.parse() {
             Ok(b) => b,
@@ -719,5 +732,88 @@ async fn sleep_ctx(ctx: &tokio::sync::watch::Receiver<bool>, d: Duration) -> boo
     tokio::select! {
         _ = tokio::time::sleep(d) => true,
         _ = ctx_c.changed() => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn to_v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// `is_night` 的跨零点边界 —— 这是"界面显示与实际相反"那类事故的高发处。
+    #[test]
+    fn is_night_跨零点() {
+        use chrono::TimeZone;
+        let mk = |h: u32, m: u32| {
+            chrono::Local.with_ymd_and_hms(2026, 9, 28, h, m, 0).unwrap()
+        };
+        let mut cfg = crate::config::default_config().schedule;
+        cfg.night_start = "22:00".into();
+        cfg.night_end = "06:00".into();
+
+        assert!(!is_night(&cfg, mk(21, 59)), "21:59 尚未进入夜间");
+        assert!(is_night(&cfg, mk(22, 0)), "22:00 是闭区间起点");
+        assert!(is_night(&cfg, mk(23, 59)));
+        assert!(is_night(&cfg, mk(0, 0)), "跨零点后仍在夜间");
+        assert!(is_night(&cfg, mk(5, 59)));
+        assert!(!is_night(&cfg, mk(6, 0)), "06:00 是开区间终点");
+        assert!(!is_night(&cfg, mk(12, 0)));
+
+        // 同日时段（不跨零点）
+        cfg.night_start = "01:00".into();
+        cfg.night_end = "05:00".into();
+        assert!(!is_night(&cfg, mk(0, 59)));
+        assert!(is_night(&cfg, mk(1, 0)));
+        assert!(!is_night(&cfg, mk(5, 0)));
+
+        // 无法解析时按"非夜间"处理，且不能 panic
+        cfg.night_start = "坏".into();
+        assert!(!is_night(&cfg, mk(23, 0)));
+    }
+
+    /// 回归：`bands` 与 `arfcns` 不等长时必须返回 `false`，**而不是越界 panic**。
+    /// （两个现有调用方都已提前比较长度，所以这条路径原本不可达；本断言守的是
+    ///   「将来新增调用点漏掉那一步」的情况 —— release 是 panic = "abort"。）
+    #[test]
+    fn validate_pairs_不等长时返回假而不是越界() {
+        let table = crate::schedconfig::lte_band_arfcn();
+        let bands = to_v(&["1", "3"]);
+        let arfcns = to_v(&["100"]); // 故意少一个
+        assert!(
+            !validate_pairs(&bands, &arfcns, table, "LTE"),
+            "不等长必须返回 false；否则 arfcns[1] 越界 panic"
+        );
+
+        // 等长且配对合法 → 真
+        let lo1 = table.get(&1).map(|(lo, _)| lo.to_string()).unwrap_or_default();
+        assert!(validate_pairs(&to_v(&["1"]), &to_v(&[lo1.as_str()]), table, "LTE"));
+
+        // 等长但频点越界 → 假
+        assert!(!validate_pairs(&to_v(&["1"]), &to_v(&["99999999"]), table, "LTE"));
+    }
+
+    /// `registered`：四种 CxREG 应答形态都要认，且正文里的干扰不能误判。
+    #[test]
+    fn registered_判据() {
+        assert!(registered("+CEREG: 2,1\r\nOK"));
+        assert!(registered("+CREG: 0,5"), "5 = 已注册漫游");
+        assert!(registered("+CGREG: 2,5\r\n+CEREG: 2,1"));
+        assert!(!registered("+CEREG: 2,0"), "0 = 未注册");
+        assert!(!registered("+CEREG: 2,2"), "2 = 搜索中");
+        assert!(!registered("+CEREG: 2,4"), "4 = 未知");
+        assert!(!registered("OK"));
+        assert!(!registered(""));
+    }
+
+    /// `auto_detect_scs`：未知频段不能 panic，且枚举值只落在 0/1/3。
+    #[test]
+    fn auto_detect_scs_取值受限() {
+        for s in auto_detect_scs(&to_v(&["1", "78", "999999", "坏"])) {
+            assert!(s == "0" || s == "1" || s == "3", "SCS 只能是 0/1/3，实际 {s}");
+        }
+        assert_eq!(auto_detect_scs(&to_v(&[])).len(), 0);
     }
 }
