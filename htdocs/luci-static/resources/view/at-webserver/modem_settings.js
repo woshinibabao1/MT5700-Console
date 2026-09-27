@@ -287,15 +287,42 @@ return L.view.extend({
 
 		function handleSimSwitch(target) {
 			Mt5700.confirm('切换 SIM 卡需要重启射频与模组，确定切换到' + (target === 0 ? '外置' : '内置') + ' SIM 卡？', function () {
+				/*
+				 * ★ 逐条判 res.success —— 不能只挂 .catch。
+				 *   send() 只在**异常**（超时 / 通道断）时 reject；AT 命令返回 ERROR 时
+				 *   它是 resolve({success:false})，所以原来的 `.catch` 对「业务失败」
+				 *   永远不触发 —— 五条命令的成败一条都没判，卡槽没切也照样弹
+				 *   「正在切换…」。同文件的 handleSimHotPlug 是判了 res.success 的，
+				 *   此处属遗漏（同一类问题只做了一半）。
+				 *   另外：某一步失败后**不再下发后续命令** —— 否则会在卡槽没切成功的情况下
+				 *   继续 CFUN=0/1 去动射频，把设备留在更糟的状态。
+				 */
+				var steps = [
+					['AT^HVSST=1,0', '关闭 SIM 热插拔'],
+					['AT^SCICHG=' + target + ',' + (1 - target), '切换卡槽'],
+					['AT^HVSST=1,1', '恢复 SIM 热插拔'],
+					['AT+CFUN=0', '关闭射频'],
+					['AT+CFUN=1', '恢复射频']
+				];
 				var chain = Promise.resolve();
-				chain = chain.then(function () { return send('AT^HVSST=1,0'); });
-				chain = chain.then(function () { return send('AT^SCICHG=' + target + ',' + (1 - target)); });
-				chain = chain.then(function () { return send('AT^HVSST=1,1'); });
-				chain = chain.then(function () { return send('AT+CFUN=0'); });
-				chain = chain.then(function () { return send('AT+CFUN=1'); });
+				var failed = '';
+				steps.forEach(function (st) {
+					chain = chain.then(function () {
+						if (failed) return;              /* 已失败：不再往下发 */
+						return send(st[0]).then(function (res) {
+							if (!res || res.success === false) {
+								failed = st[1] + '（' + st[0] + '）：'
+									+ String((res && res.error) || '模组未接受');
+							}
+						});
+					});
+				});
 				chain.then(function () {
-					Mt5700.success('正在切换到' + (target === 0 ? '外置' : '内置') + ' SIM 卡，请等待设备重启…');
-				}).catch(function () { Mt5700.error('切换 SIM 卡失败'); });
+					if (failed) { Mt5700.error('切换 SIM 卡失败 —— ' + failed); return; }
+					Mt5700.success('已切换到' + (target === 0 ? '外置' : '内置') + ' SIM 卡，请等待设备重启…');
+				}).catch(function () {
+					Mt5700.error('切换 SIM 卡失败' + (failed ? ' —— ' + failed : '（通信异常）'));
+				});
 			});
 		}
 

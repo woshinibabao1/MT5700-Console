@@ -676,9 +676,20 @@ return L.view.extend({
 		}
 
 		function loadStorage() {
-			return AtWs.client.sendCommand('AT+CMGF=0').then(function () {
-				return AtWs.client.sendCommand('AT+CPMS?');
-			}).then(function (res) {
+			/*
+			 * ★ 这里原先第一条命令是 `AT+CMGF=0` —— 那是**写**命令，会把模组全局
+			 *   切成 PDU 模式。而本函数是**读路径**（进页面、每次暂存变更后都会跑），
+			 *   于是「打开短信设置页」这个只读动作会顺手改掉模组的短信格式，
+			 *   把正在用 Text 模式的用户（或别的工具）现场掀掉，且毫无提示；
+			 *   本页第 655 行还在**显示**当前格式，前后自相矛盾。
+			 *   `AT+CPMS?`（查存储用量与当前存储）不依赖 CMGF —— 3GPP TS 27.005 的
+			 *   +CPMS 与短信格式无关，所以这条强切既无必要也有副作用。
+			 *   ★ 后端早已确立同一原则（src/rust/src/smsclean.rs 的「非 PDU 模式跳过
+			 *   而非强切」，由 tests/sms-concurrency-contract.test.js 的 G 组守着，
+			 *   理由原文就是「AT+CMGF 是全局设置，临时切换会干扰其它操作」）——
+			 *   这里是同一原则在前端的另一半。
+			 */
+			return AtWs.client.sendCommand('AT+CPMS?').then(function (res) {
 				if (res.success && res.data) {
 					var m = String(res.data).match(/\+CPMS: "(\w+)",(\d+),(\d+),"(\w+)",(\d+),(\d+),"(\w+)",(\d+),(\d+)/);
 					if (m) {

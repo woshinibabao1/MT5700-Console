@@ -228,10 +228,11 @@ def _resolve_node() -> str:
     env = os.environ.get("NODE_BIN")
     if env:
         return env
-    managed = pathlib.Path(
-        r"C:\Users\Ajmd007\.workbuddy\binaries\node\versions\22.22.2-3\node.exe")
-    if managed.exists():
-        return str(managed)
+    # ★ 2026-09-28：这里原先还有一条写死的本机路径
+    #   （r"C:\Users\<某开发者>\.workbuddy\binaries\node\versions\<版本>\node.exe"）。
+    #   两个问题：① 把开发机的用户名与目录结构泄进了仓库；② 对别人和 CI 毫无意义 ——
+    #   CI（ubuntu）上没有该路径，本来就只有下面 shutil.which 那条会命中。
+    #   要指定 node 请用 NODE_BIN 环境变量（上面那条分支就是它）。
     found = shutil.which("node")
     if found:
         return found
@@ -1351,7 +1352,7 @@ MUTATIONS = [
     ),
 
     # ============ 短信中心：收件箱归并 + 未读标记（2026-09-27 重复显示） ============
-    # ★ 锚点唯一性已逐条核（见 .workbuddy/tmp/_sms_anchor_check.py）：8 条锚点各出现 1 次。
+    # ★ 锚点唯一性已逐条核对：8 条锚点各出现 1 次。
     (
         "拿掉归并（列表一份 + 推送一份各自留一份 → 同一条短信显示两次）",
         "smsjs",

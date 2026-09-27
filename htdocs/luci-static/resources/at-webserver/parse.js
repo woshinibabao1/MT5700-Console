@@ -341,30 +341,14 @@ var Parse = (function () {
 	};
 
 	/*
-	 * AT^FASTDORM? —— 快速休眠（手册 13.15）。
-	 *   <type>  0 停止休眠 / 1 只允许 Fast Dormancy（默认）/ 2 只允许 ASCR / 3 允许两者
-	 *   <timer_length> 无流量后多久进入休眠，1~30 秒，默认 5（可选项，可能不回）
-	 * 这条解释了「打开网页第一下要卡半秒」：休眠后首个数据包要重新建 RRC 连接。
+	 * 已删除 Parse.parseFastdorm 与它的 FASTDORM_TYPES 表（2026-09-28）。
+	 *
+	 * 它是 2.3.x 早期「空口健康」卡显示快速休眠状态的遗留：那一版把 ^FASTDORM
+	 * 当成一项要展示的指标，后来判定它「只是复述一个用户既改不了也无需改的模组
+	 * 开关，每轮白搭一次串口往返」，查询被移除，解析器随之失去调用方。
+	 * 全仓确认**零调用点**（parse.js 之外无任何文件引用 parseFastdorm /
+	 * FASTDORM_TYPES），属于死代码。若日后要恢复该展示，直接从 git 历史取回即可。
 	 */
-	var FASTDORM_TYPES = {
-		0: '停止休眠',
-		1: '只允许 Fast Dormancy',
-		2: '只允许 ASCR',
-		3: '允许 ASCR 和 Fast Dormancy'
-	};
-	api.parseFastdorm = function (text) {
-		var m = String(text == null ? '' : text).match(/\^FASTDORM:\s*(\d+)\s*(?:,\s*(\d+))?/);
-		if (!m) return null;
-		var type = Number(m[1]);
-		var timer = m[2] === undefined ? null : Number(m[2]);
-		return {
-			type: type,
-			typeText: FASTDORM_TYPES[type] || ('类型 ' + type),
-			timer: isFinite(timer) ? timer : null,
-			/* 只有 0 是「不休眠」，其余都会进休眠 */
-			enabled: type !== 0
-		};
-	};
 
 	/*
 	 * AT+CGSMS? —— 短信承载域（手册 7.7）。

@@ -96,6 +96,16 @@ return L.view.extend({
 		var sawUpgrade = false;
 		// AT^FWUP 只允许发一次：40 可能连续几轮都读到，重复下发会把升级打断。
 		var fwupSent = false;
+		/*
+		 * AT^FWUP 的重试计数与上限。
+		 * 下发被拒时不能只报错就完事：tick 的 case 40 是**先** `fwupSent = true`
+		 * **再**调 beginFirmwareUpgrade，下一轮进来直接命中 `if (fwupSent) break;`
+		 * —— 既不重发、也进不了 50/70 终态，界面永远停在「固件下载完成」。
+		 * 所以失败要复位 fwupSent；但重试必须有上限（模组持续拒绝时不该无限刷屏、
+		 * 白占独占串口）。
+		 */
+		var fwupTries = 0;
+		var FWUP_MAX_TRIES = 3;
 		// 31（下载挂起）续传的节流时间戳 —— 手册建议用 AT^FOTADL=1 续传，
 		// 但不能每轮都发，否则又变成高频命令。
 		var lastResumeAt = 0;
@@ -357,9 +367,24 @@ return L.view.extend({
 		function beginFirmwareUpgrade() {
 			AtWs.client.sendCommand('AT^FWUP').then(function (res) {
 				/* 不判 success 就把「下发被拒」报成「升级已开始」；而 fwupSent 一旦
-				   置位就封死了重发，失败无法自愈，只能干等轮询超时。*/
+				   置位就封死了重发，失败无法自愈，只能干等轮询超时。
+				   ★ 所以失败时还要**复位 fwupSent**（下面），否则这条链就死在这里：
+				     case 40 是先置位再调本函数，下一轮直接 `if (fwupSent) break;`，
+				     既不重发也进不了 50/70 终态 —— 界面永远停在「固件下载完成」，
+				     直到 30 分钟后那条「已等待超过 30 分钟」提示。
+				     先前只在调用处补了「判 success」，没解决复位，是同一问题的另一半。*/
 				if (res && res.success === false) {
-					Mt5700.error('触发升级失败：' + String(res.error || '模组未接受'));
+					fwupSent = false;
+					fwupTries += 1;
+					if (fwupTries >= FWUP_MAX_TRIES) {
+						stopTimer();
+						Mt5700.error('触发升级失败（已重试 ' + fwupTries + ' 次）：'
+							+ String(res.error || '模组未接受') + '。请检查模组状态后重新开始升级');
+						failReset();
+						return;
+					}
+					Mt5700.error('触发升级失败（第 ' + fwupTries + ' 次）：'
+						+ String(res.error || '模组未接受') + '，稍后自动重试');
 					return;
 				}
 				Mt5700.success('固件升级已开始，设备即将重启');
@@ -538,6 +563,7 @@ return L.view.extend({
 			sawDownload = false;
 			sawUpgrade = false;
 			fwupSent = false;
+			fwupTries = 0;
 			lastResumeAt = 0;
 			pollStallWarned = false;
 

@@ -22,11 +22,14 @@ AT 命令分类审计（对照技术手册）
 
 用法：
     python tools/audit-at-reads.py [项目根] [手册目录]
-默认手册目录 = C:/Users/Ajmd007/.workbuddy/skills/mt5700-at-commands/references/commands
+
+手册目录也可用环境变量 MT5700_AT_MANUAL 指定；node 用 NODE_BIN（否则取 PATH 里的 node）。
+★ 2026-09-28：原先这里把「默认手册目录」写成了开发机上的绝对路径，别人与 CI 上都不可用。
 """
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import glob
@@ -34,9 +37,21 @@ import json
 import tempfile
 
 ROOT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else '.')
-MANUAL = sys.argv[2] if len(sys.argv) > 2 else (
-    r'C:/Users/Ajmd007/.workbuddy/skills/mt5700-at-commands/references/commands')
-NODE = r'C:/Users/Ajmd007/.workbuddy/binaries/node/versions/22.22.2-3/node.exe'
+# 手册目录：命令行参数 → 环境变量 MT5700_AT_MANUAL。
+#   ★ 原先默认写死开发机上的绝对路径
+#     （C:/Users/<某开发者>/.workbuddy/skills/mt5700-at-commands/references/commands），
+#     在别人机器与 CI 上都不存在 —— 脚本会静默走到「手册目录不存在」那条分支。
+MANUAL = sys.argv[2] if len(sys.argv) > 2 else os.environ.get('MT5700_AT_MANUAL', '')
+# node：与 tools/verify-guards.py 用同一解析顺序（NODE_BIN → PATH 里的 node）。
+#   ★ 原先同样把开发机的托管 node 绝对路径写死在这里，且没有任何覆盖途径。
+#   找不到时**明确报错**而不是退回字面量 'node' —— 后者会让 subprocess 抛一个
+#   与真实原因无关的 FileNotFoundError；而 node 不在 PATH 是这台开发机的常态
+#   （dsh 运行时自带 node，但不进 PATH），所以这条提示要能直接照做。
+NODE = os.environ.get('NODE_BIN') or shutil.which('node')
+if not NODE:
+    sys.exit('找不到 node：请设置 NODE_BIN 环境变量指向 node 可执行文件'
+             '（或把 node 加进 PATH）。本脚本用 node 载入 rpc.js、'
+             '问它 isRetryableRead() 的真实答案。')
 
 SKIP = {'.git', 'target', 'node_modules', '.workbuddy'}
 

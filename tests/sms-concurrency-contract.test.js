@@ -181,8 +181,21 @@ has('PIN 未就绪不再谎报 READY', !/if \(!ready\) pinStatusEl\.textContent 
 	'卡等输 PIN 时会被显示成 READY，用户无从下手');
 has('PIN 正则能匹配 "SIM PIN"', /\\\+CPIN:\\s\*\(\[A-Za-z \]\+\)/.test(MODEM),
 	'(\\w+) 匹配不到空格，只能解出 SIM');
-has('AT^FWUP 检查成败', /AT\^FWUP'\)\.then\(function \(res\)[\s\S]{0,300}res\.success === false/.test(UPG),
+/*
+ * ★ 2026-09-28 判据收紧/放宽各一处：
+ *   ① 距离上限原为 {0,300} —— 但那条 `.then` 与 `res.success === false` 之间
+ *      允许写注释，而注释是**会变长**的（本轮就因为在中间补了一段说明而误报）。
+ *      这与本文件 G 组开头批评过的「断言绑死具体写法、换个等价写法就误报」是同一类
+ *      脆弱：距离本身不是契约，**语义**才是。故放宽到 1500，只用来圈定范围。
+ *   ② 断言理由里一直写着「且 fwupSent 已封死重试」，但**从来没有断言过复位** ——
+ *      补上。那才是这条链真正会卡死的地方：case 40 先置位、失败后不复位，
+ *      下一轮 `if (fwupSent) break;` 让流程永远停在「固件下载完成」。
+ */
+has('AT^FWUP 检查成败', /AT\^FWUP'\)\.then\(function \(res\)[\s\S]{0,1500}res\.success === false/.test(UPG),
 	'不判 success 会把下发被拒报成「升级已开始」，且 fwupSent 已封死重试');
+has('AT^FWUP 失败后复位 fwupSent',
+	/res\.success === false[\s\S]{0,300}fwupSent = false/.test(UPG),
+	'不复位 → tick 的 case 40 命中 if (fwupSent) break，既不重发也进不了 50/70，界面卡在「下载完成」');
 has('清空短信不再漏第一个存储', /\+CPMS:\\s\*\(\.\*\)/.test(SMSSET),
 	'旧正则要求存储名前有逗号，而第一个存储紧跟 ": "');
 has('清空短信检查成败', /missed\) Mt5700\.error\('清空/.test(SMSSET), '不检查就报「已清空」');

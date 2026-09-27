@@ -307,7 +307,16 @@ return L.view.extend({
 		wsBody.appendChild(Mt5700.formGroup('本机号码备注', phoneNoteInput,
 			'SIM 卡未写入 MSISDN 时（AT+CNUM 返回 not found），用于「网络状态 / 设备信息」显示'));
 
-		var authKeyInput = Mt5700.input('text', '留空表示无需认证', '');
+		/*
+		 * ★ 认证密钥用 password 类型。
+		 *   它此前是全站唯一一个把密钥**明文显示**的输入框：370 行还会把 UCI 里
+		 *   存着的真密钥回填进来，等于把「后端的唯一凭据」直接摆在屏幕上
+		 *   （也会进浏览器的表单历史 / 自动填充）。同仓至少 4 处已经用了 password
+		 *   （dial.js 的 APN 密码、modem_settings.js 的 PIN 与 PUK、esim.js 的确认码），
+		 *   唯独最该遮的这一个没遮 —— 同一原则只做了一半。
+		 *   需要查看原值时用 `uci show at-webserver | grep auth_key`。
+		 */
+		var authKeyInput = Mt5700.input('password', '留空表示无需认证', '');
 		wsBody.appendChild(Mt5700.formGroup('认证密钥', authKeyInput, 'ucode 代理自动附带该密钥；LuCI 登录态由 rpcd 会话保证'));
 
 		/* ---------- 通知配置 ---------- */

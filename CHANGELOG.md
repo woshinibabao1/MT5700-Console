@@ -5,6 +5,160 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.61] - 2026-09-28
+
+第二轮全仓审计的修复批。**方法**：先逐条复核上一轮审计中「已记录但未采纳」的候选
+（它们都带证据，比重新扫一遍更可靠），再用 Fowler 的坏味道清单（Duplicated Code /
+Shotgun Surgery / Mysterious Name 等 12 条）扫同形问题；每条都要么上真机、要么在
+源码里找到**项目自己写下的同一条原则**才动手。
+
+本轮的九项里，有 **5 项属于「同一原则只做了一半」** —— 这是本仓最稳定的一类缺陷形态，
+所以下面每项都标出「另一半在哪」。
+
+### Fixed（真实缺陷）
+
+**1. 切换 SIM 卡：五条命令的成败一条都没判，卡槽没切也弹「正在切换…」**
+
+`view/at-webserver/modem_settings.js` 的 `handleSimSwitch`：
+```js
+chain = chain.then(function () { return send('AT^HVSST=1,0'); });
+…
+chain.then(function () { Mt5700.success('正在切换到…'); })
+     .catch(function () { Mt5700.error('切换 SIM 卡失败'); });
+```
+`send()` 在**业务失败**（AT 命令回 ERROR）时是 `resolve({success:false})`，只有**异常**
+才 reject —— 所以那个 `.catch` 永远等不到"命令被拒"，五条命令的 `res.success` 一个都没判。
+
+- **另一半在哪**：同文件的 `handleSimHotPlug` 是判了 `res.success` 并回滚勾选的。
+- 修法：抽出 `steps` 数组逐条判成败；**某步失败就不再下发后续命令**（否则会在卡槽没切
+  成功的情况下继续 `AT+CFUN=0/1` 去动射频，把设备留在更糟的状态）；失败时把**具体哪一步、
+  哪条命令、模组原话**一起报出来。
+
+**2. FOTA：`AT^FWUP` 被拒后 `fwupSent` 不复位 → 界面永久停在「下载完成」**
+
+`upgrade.js` 的 `tick()` case 40 是**先** `fwupSent = true` **再**调
+`beginFirmwareUpgrade()`，而后者失败时只 `Mt5700.error(...)` + `return`：
+下一轮进来立即命中 `if (fwupSent) break;` —— 既不重发、也进不了 50/70 终态，
+界面永远停在「固件下载完成」，直到 30 分钟后那条超时提示。
+
+- **另一半在哪**：`beginFirmwareUpgrade` 上方的注释**自己写着**「fwupSent 一旦置位就
+  封死了重发，失败无法自愈，只能干等轮询超时」；而测试 `sms-concurrency-contract` 的
+  断言理由里也写着「且 fwupSent 已封死重试」—— 两处都点到了，却都只做了「判 success」。
+- 修法：失败时复位 `fwupSent`，并加 `FWUP_MAX_TRIES = 3` 的重试上限（模组持续拒绝时
+  不该无限刷屏、白占独占串口）；达到上限才 `stopTimer()` + `failReset()`。
+- **守卫补强**：新增断言 `AT^FWUP 失败后复位 fwupSent`（见下「测试」一节）。
+
+**3. 读路径下发写命令：打开「短信设置」页会强切模组的短信格式**
+
+`sms_settings.js` 的 `loadStorage()` 第一条命令是 `AT+CMGF=0` —— 那是**写**命令，
+而该函数是读路径（进页面、每次暂存变更后都跑）。于是「打开页面」这个只读动作会
+把模组全局切成 PDU 模式，把正在用 Text 模式的用户（或别的工具）现场掀掉，且毫无提示；
+同页第 655 行还在**显示**当前格式，前后自相矛盾。
+
+- **另一半在哪**：后端早已确立同一原则 —— `src/rust/src/smsclean.rs` 的「非 PDU 模式
+  跳过而非强切」，由 `tests/sms-concurrency-contract.test.js` 的 G 组守着，理由原文是
+  「AT+CMGF 是全局设置，临时切换会干扰其它操作」。
+- **依据（手册原文，2026-09-28 复核）**：《MT5700M-CN 5G 系列模组 AT 命令手册》把两者
+  分列 **8.1 `AT+CPMS`-设置短信存储器** 与 **8.2 `AT+CMGF`-设置短信格式**；8.1 的语法是
+  `AT+CPMS=<mem1>[,<mem2>[,<mem3>]]` / `AT+CPMS?`，其接口说明与参数表**只讲存储介质
+  （SM / ME）与容量、占用，通篇没有提到短信格式**，也没有任何「需先设 CMGF」的前置条件
+  （3GPP TS 27.005 同理）。所以这条强切既无必要、又有副作用。
+  真机复核：本机 `AT+CMGF?` → `+CMGF: 0`，`AT+CPMS?` → `+CPMS: "ME",53,300,…` —— 两条
+  命令各自独立返回，互不影响。
+
+**4. eSIM 待发回执：长度字节越界会让**整个解析循环提前退出**，一条回执都读不出来
+
+`at-webserver/euicc.js` 的 `parseNotifications`：`0x81` / `0x82` 分支直接读
+`bytes[i+3]` / `bytes[i+4]`，而 `Uint8Array` 越界读返回 `undefined` ⇒ `vs + len` 变 `NaN`
+⇒ 下一行 `vs + len > bytes.length` 的兜底**恒为 false**（`NaN` 与任何数比较都是 false）
+⇒ `i = vs + len - 1` 同样变 `NaN` ⇒ 循环条件立刻为假，**整个 for 提前退出**，
+此后所有 `BF2F` 一个都不再解析。症状是「卡上明明挂着待发回执，页面显示没有」，且不报错。
+
+- 修法：长度字节**逐个**判存在，越界即 `break`。
+
+**5. 认证密钥是全站唯一一个明文显示的输入框**
+
+`view/at-webserver/service.js` 用 `Mt5700.input('text', …)` 装 `websocket_auth_key`，
+而 370 行还会把 UCI 里存着的**真密钥回填进来** —— 等于把后端唯一凭据摆在屏幕上
+（也进浏览器的表单历史 / 自动填充）。
+
+- **另一半在哪**：同仓至少 4 处已经用了 password（`dial.js` 的 APN 密码、
+  `modem_settings.js` 的 PIN 与 PUK、`esim.js` 的确认码）。
+- 修法：改 `input('password', …)`。不加显示/隐藏切换，是为了与那 4 处保持同一形态
+  （要看原值用 `uci show at-webserver | grep auth_key`）。
+
+### Removed（死代码）
+
+**6. `Parse.parseFastdorm` 及其 `FASTDORM_TYPES`**
+
+`at-webserver/parse.js`：早期「空口健康」卡会把 `^FASTDORM` 当指标展示，后来判定它
+「只是复述一个用户既改不了也无需改的模组开关，每轮白搭一次串口往返」，查询被移除，
+解析器随之失去调用方。全仓确认**零调用点**（`parse.js` 之外无任何文件引用两者）。
+原地留了一行说明，将来要恢复直接从 git 历史取回。
+
+### Security / 卫生（本机绝对路径泄漏）
+
+**7. `tools/verify-guards.py`**：删掉写死的
+`C:\Users\<某开发者>\.workbuddy\binaries\node\versions\…\node.exe`
+—— 既泄漏开发机用户名与目录结构，对别人与 CI 也毫无意义（CI 上本来只有
+`shutil.which('node')` 那条会命中）。要指定 node 用 `NODE_BIN` 环境变量。
+
+**8. `tools/audit-at-reads.py`（全局排查出来的同类问题）**：它的问题比 7 更重 ——
+`MANUAL` 与 `NODE` **两处默认值**都是本机绝对路径，且 `NODE` 连覆盖途径都没有
+（写死在 `subprocess.run` 里）。现改为「命令行参数 → `MT5700_AT_MANUAL` 环境变量」与
+「`NODE_BIN` → PATH 里的 node」，与 `verify-guards.py` 同一解析顺序。
+
+> 保留未改：源码注释里那些 `.workbuddy/tmp/xxx.js` 形式的**相对**引用 —— 它们标注的是
+> 某次真机实验的证据来源，不含机主信息，去掉反而丢失可追溯性。
+
+> ⚠️ **本机开发的迁移注意**：删掉那条硬编码路径之后，若 `node` 不在 PATH 里，
+> 这两个脚本会**明确报**「找不到 node」（实测本机就是这种情形 —— dsh 运行时自带 node
+> 但不进 PATH）。以前它们靠写死的开发机路径"碰巧能跑"。请在运行前二选一：
+>
+> ```sh
+> export NODE_BIN=/path/to/node          # 或
+> export PATH="$PATH:/path/to/node-dir"
+> ```
+>
+> CI（ubuntu）上 `actions/setup-node` 已把 node 放进 PATH，`contract-check` 无需额外设置。
+
+### 测试
+
+**9. `tests/sms-concurrency-contract.test.js`：放宽一处脆弱距离 + 补一条缺失断言**
+
+- `AT^FWUP 检查成败` 原用 `[\s\S]{0,300}` 限定 `.then` 与 `res.success === false` 的距离。
+  但两者之间允许写注释，而注释会变长（本轮就因为在中间补了说明而误报）。这与本文件
+  G 组开头批评过的「断言绑死具体写法、换个等价写法就误报」是同一类脆弱：**距离不是契约，
+  语义才是**。放宽到 1500，只用来圈定范围。
+- **补上 `AT^FWUP 失败后复位 fwupSent`** —— 那正是第 2 项缺陷卡死的位置，而原断言的
+  理由文字里提了它却从未断言过。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `node tests/run-all.js` | **全部测试文件通过**（`sms-concurrency-contract` 由 84 项增至 **85 项**） |
+| `python tools/verify-guards.py` | 变异全判红、还原逐字节一致、还原后基线绿色 |
+| `cd src/rust && cargo test --all-targets` | **31 passed / 0 failed / 0 warning** |
+| 改动文件语法 | 6 个 JS 过 `new Function` 解析、2 个 Python 过 `ast.parse` |
+| 真机（192.168.10.1，只读） | 见下「诚实边界」第 3 条 |
+
+### 诚实边界
+
+1. **需要一次真实构建才能验证的**：`sms_settings.js` 去掉 `AT+CMGF=0` 之后，
+   短信设置页在**模组处于 Text 模式**时是否仍能正确显示存储用量 —— 逻辑上
+   `AT+CPMS?` 与 CMGF 无关（3GPP TS 27.005），但本机未在 Text 模式下实测过。
+2. **未上机验证的**：切卡链（要动 SIM 与射频，属破坏性操作）、FOTA 重试
+   （要真下发 `AT^FWUP`）、eSIM 回执（本机是普通 USIM，无 eUICC）。
+   三者都只做了静态与测试级验证。
+3. **本轮真机操作仍严格只读**：只做了 `uci show` / `logread` / `cat` / `ls` /
+   `iw` / `iwinfo` 这类查询，没有下发任何写命令、没有改配置、没有重启服务。
+4. **未改的**（延续上一轮的克制）：H1 关短信链的 `AT+CFUN=0`+`AT+CMGD=1,4`、
+   H2 的 rpcd ACL 授权面、H3 改拨号方式顺带开自动拨号（需先按手册确认
+   `AT^SETAUTODIAL` 第 1 参数语义，且属产品决策）、H6/H10/H14 的并发与刷新竞态
+   （改的是并发模型，风险高）、R-C/R-J 的渲染性能（中等重构）。
+   其中 H3 的手册依据本轮仍未取得（上一轮提取的手册文本已在会话中清理）。
+
 ## [2.3.60] - 2026-09-28
 
 全仓审计（逻辑 / 性能 / 可读性 / 安全 / 可维护性五个角度）后的修复批。

@@ -2831,12 +2831,26 @@ api.buildEs10b = function (ch, tag, derHex) {
 		var bytes = api.hexToBytes(dataHex);
 		for (var i = 0; i + 1 < bytes.length; i++) {
 			if (bytes[i] !== 0xBF || bytes[i + 1] !== 0x2F) continue;
+			/*
+			 * ★ 长度字节的**每一个**都要判存在，不能只判 lenByte。
+			 *   0x81 / 0x82 分支原先直接读 bytes[i+3] / bytes[i+4]，而 Uint8Array
+			 *   越界读返回 undefined ⇒ `vs + len` 变 NaN，于是下一行
+			 *   `vs + len > bytes.length` 的兜底**恒为 false**（NaN 与任何数比较
+			 *   都是 false），`i = vs + len - 1` 同样变 NaN，循环条件立刻为假 ——
+			 *   整个 for **提前退出**，此后所有 BF2F 一个都不再解析。
+			 *   症状是「卡上明明挂着待发回执，页面却显示没有」，且不报任何错。
+			 */
 			var lenByte = bytes[i + 2];
 			var vs, len;
 			if (lenByte == null) break;
 			if (lenByte < 0x80) { len = lenByte; vs = i + 3; }
-			else if (lenByte === 0x81) { len = bytes[i + 3]; vs = i + 4; }
-			else { len = (bytes[i + 3] << 8) | bytes[i + 4]; vs = i + 5; }
+			else if (lenByte === 0x81) {
+				if (bytes[i + 3] == null) break;
+				len = bytes[i + 3]; vs = i + 4;
+			} else {
+				if (bytes[i + 3] == null || bytes[i + 4] == null) break;
+				len = (bytes[i + 3] << 8) | bytes[i + 4]; vs = i + 5;
+			}
 			if (vs + len > bytes.length) break;
 			var item = dataHex.substr(vs * 2, len * 2);
 			var seq = api.pickTagValue(item, '80');
