@@ -5,6 +5,60 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.77] - 2026-09-28
+
+读完 `parse.js` 的解码段之后做了一次**三方核对**（把"双向"扩到"三份独立定义"），
+结论是**一致**——但顺手把它变成了机械守卫，因为"三份定义"本身就是漂移风险。
+
+### 核对与新增守卫
+
+**GSM7 默认字母表在仓库里有三份独立定义**：
+
+| 位置 | 服务于 |
+| :-- | :-- |
+| `htdocs/.../parse.js` | 前端**解码**（`septetsToString`） |
+| `htdocs/.../smsEncode.js` | 前端**编码**（`gsm7Code`） |
+| `src/rust/src/pdu.rs` | 后端**解码**（`septets_to_string`） |
+
+**核对结果：三份逐字符一致**，且都是 `128` 个码元 = `128` 个码点（全 BMP）、
+14 个 GSM 03.38 关键锚点（`0x00 @` / `0x0A \n` / `0x0D \r` / `0x1B ESC` / `0x20` /
+`0x24 ¤` / `0x30 0` / `0x3F ?` / `0x40 ¡` / `0x41 A` / `0x5A Z` / `0x61 a` / `0x7A z` /
+`0x7F à`）三份都对。
+
+> 这同时给上一批的结论补上了数据支撑：`septetsToString` 用 `c < GSM7_ALPHABET.length`
+> 判界是**安全**的 —— 因为表里全是 BMP 字符，UTF-16 码元数恰好等于码点数（128）。
+
+**新增 `tests/gsm7-alphabet-triple-contract.test.js`（26 项）**：断言三份都恰好 128 个码位、
+全部为 BMP、**两两逐字符相等**，并逐个校验 14 个关键锚点（防"三份一起错"）。
+
+**变异验证**：把 `smsEncode.js` 表里的 `@` 改成 `X` → **判红 3 处**
+（`parse.js == smsEncode.js`、`smsEncode.js == pdu.rs`、`锚点 0x00`）；还原 → 全绿。
+
+### 为什么值得单独立一条守卫
+
+本会话已经查出**三起**前后端同源实现的漂移（`unpackSeptets` 的填充位造字、
+`dcs_encoding` 的 0xC/0xE/0xF 组、`decodeAddress` 的 BCD 半字节与 TON=1 的 `+`），
+方向各不相同。这次的三份字母表**当前是一致的**——但那意味着它只是"还没漂移"，
+而**任何一次"只改一份"的编辑都会静默改变短信内容**。
+把它钉成契约，是这一轮真正的产出。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `node tests/gsm7-alphabet-triple-contract.test.js` | **26 项通过** |
+| 该守卫的变异验证 | 判红 3 处；还原后全绿 |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `cargo test --all-targets` | 43 passed / 0 failed |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- **本轮没有发现缺陷**：三方核对的结果就是"一致"。产出是**守卫**，不是修复。
+- 未做的事：`parse.js` 仍只读到解码段（`parseCMGL` 起约 550 行未读）；`rpc.js` /
+  `mt5700.js` / `euicc.js` / `ui.js` / `compat.js` / 12 个视图层 / ucode 均未读。
+
+
 ## [2.3.76] - 2026-09-28
 
 第四轮双向口径核对（`parse.js::decodeAddress` ↔ `pdu.rs::decode_address`），**两处确证缺陷**，
