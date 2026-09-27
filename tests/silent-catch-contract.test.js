@@ -175,6 +175,12 @@ texts.forEach(function (f) {
 
 ok('扫到了无参数 catch（否则本守卫等于没跑）', total >= 3,
 	'只扫到 ' + total + ' 处');
+/* ★ 2026-09-28：`>= 3` 挡不住"少扫了一个文件" —— 现仓里 euicc 1 处 + esim 10 处 = 11。
+   改为**两个文件都必须被读到、且各自都扫到了 catch**，这样漏一个立刻判红。 */
+const perFile = texts.map(function (f) { return findSilentCatches(f.src).length; });
+ok('★ eSIM 链路的两个文件都扫到了无参数 catch（逐个点名）',
+	perFile.length === 2 && perFile[0] >= 1 && perFile[1] >= 1,
+	'各文件命中：' + perFile.join(' / '));
 
 ok('★ 每个无参数 catch 都有交代（要么给出用户可见反馈，要么注释说明为何可吞）',
 	offenders.length === 0,

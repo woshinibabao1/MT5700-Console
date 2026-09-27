@@ -168,6 +168,19 @@ const files = walk(TESTS, []);
 ok('扫到了测试文件（否则本守卫等于没跑）', files.length >= 20,
 	'只扫到 ' + files.length + ' 个');
 
+/*
+ * ★ 2026-09-28：光有 `>= 20` 挡不住"扫描范围悄悄变小" —— 仓里现有 71 个 .js，
+ *   门槛 20 意味着漏掉几十个也照样通过。这里按 module-extract-anchor 的 ②z2 同一手法，
+ *   把**必须被扫到的关键文件逐个点名**；数字门槛保留（它防的是路径写错成 0）。
+ */
+const MUST_SCAN = ['assert-signature-contract.test.js', 'undefined-fn-contract.test.js',
+	'parse-contract.test.js', 'euicc-contract.test.js', 'vowifi-contract.test.js'];
+const notScanned = MUST_SCAN.filter(function (n) {
+	return !files.some(function (p) { return p.endsWith(n); });
+});
+ok('★ 关键守卫文件都在扫描范围内（逐个点名，少一个就判红）',
+	notScanned.length === 0, '没扫到：' + notScanned.join('、'));
+
 const offenders = [];
 const unknowns = [];
 const checked = {};      /* fnName → 判定了多少份文件 */
@@ -200,10 +213,13 @@ files.forEach(function (p) {
 	});
 });
 
-ok('判定了一批文件的方向（否则本守卫等于没跑）', checked.ok >= 20,
-	'ok 只判定了 ' + checked.ok + ' 个');
+/* ★ 2026-09-28：这两个门槛原来分别是 20 / 10，而实测定义了 ok() 的有 63 份、
+   定义了 eq() 的有 16 份 —— 门槛留得太低，少判几十个文件也照样通过。
+   按实测下调余量（不写死等于实测值，留出增删测试文件的弹性）。 */
+ok('判定了一批文件的方向（否则本守卫等于没跑）', checked.ok >= 50,
+	'ok 只判定了 ' + checked.ok + ' 个（实测 60+）');
 ok('★ eq 也判到了一批文件（2026-09-28 扩展；为 0 说明 eq 检查等于没跑）',
-	checked.eq >= 10, 'eq 只判定了 ' + checked.eq + ' 个（仓里约 16 份文件定义了 eq）');
+	checked.eq >= 14, 'eq 只判定了 ' + checked.eq + ' 个（仓里 16 份文件定义了 eq）');
 ok('★ 每个测试文件的 ok(…) 调用顺序都与自身定义一致（反序会让字符串落进条件位 → 恒为真）',
 	offenders.filter(function (s) { return s.indexOf(' —— ok ') >= 0; }).length === 0,
 	offenders.filter(function (s) { return s.indexOf(' —— ok ') >= 0; }).join('；'));

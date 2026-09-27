@@ -587,11 +587,20 @@ ok('D5 反向：CGLA 分支若改回显式 open 必须判红',
 const ucSrc = fs.readFileSync(path.join(__dirname, '..', 'root', 'usr', 'share',
 	'rpcd', 'ucode', 'mt5700.uc'), 'utf8');
 ok('D6 ucode 仍暴露 mt5700.es9p（下载必需的 HTTPS 转发）', /es9p:\s*\{/.test(ucSrc));
+/*
+ * ★ 2026-09-28：D7 有**两个**判据（`/lpac/i` 与 `/function lpacAvailable/`），
+ *   而 D8 的反向自检原来只复制了第一个 —— 第二个判据失效了 D8 照样通过，
+ *   「能判红」的保证只覆盖一半。现把两个模式提成常量，D7 与 D8 共用。
+ */
+const LPAC_WORD = /lpac/i;
+const LPAC_FN = /function lpacAvailable/;
 ok('D7 ucode 已无 lpac 残留（全自研，不引入第三方二进制）',
-	!/lpac/i.test(ucSrc) && !/function lpacAvailable/.test(ucSrc));
-/* 反向自检：往源码里塞回一个 lpac 字样，D7 的正则必须能抓到（否则它是恒绿摆设） */
+	!LPAC_WORD.test(ucSrc) && !LPAC_FN.test(ucSrc));
+/* 反向自检：两个模式都必须能判红（否则 D7 有一半是恒绿摆设） */
 ok('D8 反向自检：ucode 若重新出现 lpac，D7 的守卫必须判红',
-	!/lpac/i.test(ucSrc) && /lpac/i.test(ucSrc + '\nfunction lpacAvailable() {}'));
+	!LPAC_WORD.test(ucSrc) && LPAC_WORD.test(ucSrc + '\nfunction lpac() {}'));
+ok('D8b 反向自检：`function lpacAvailable` 这个模式也必须能判红（原来没被自检覆盖）',
+	!LPAC_FN.test(ucSrc) && LPAC_FN.test(ucSrc + '\nfunction lpacAvailable() {}'));
 
 /* rpc.js / esim.js：自研链路的承接 */
 ok('D9 rpc.js 已无 lpac 探测（只留自研的 es9p）',

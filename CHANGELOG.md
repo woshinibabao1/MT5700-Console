@@ -5,6 +5,64 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.92] - 2026-09-28
+
+攒满 **5 项**一次推送。延续上一批的思路：**守卫的"覆盖范围"与"自检完整性"**。
+本批 5 项全是 `tests/` 内的加固，未改生产代码。
+
+### Changed
+
+**58. 三个守卫的门槛从「数字」改为「数字 + 逐个点名」**
+
+`assert-signature`（`files.length >= 20`，实测 71）、`silent-catch`（`total >= 3`，实测 11）、
+`undefined-fn`（`files.length >= 10`，实测 21）—— 数字门槛防的是"路径写错变成 0"，
+**挡不住"扫描范围悄悄变小"**：漏掉几十个文件也照样通过。
+
+按 `module-extract-anchor` 的 `②z2` 同一手法，各补一条**点名断言**：
+- `assert-signature`：5 个关键守卫文件必须在扫描范围内；
+- `silent-catch`：**eSIM 链路两个文件各自都扫到了 catch**（原来只查总数，漏一个看不出）；
+- `undefined-fn`：5 个体积最大、最容易藏未定义调用的前端文件必须在范围内。
+数字门槛保留（防 0）。
+
+**59. `assert-signature`：另两个门槛贴近实测**
+
+`checked.ok >= 20` → `>= 50`（实测 67 份文件定义了 `ok()`）；
+`checked.eq >= 10` → `>= 14`（实测 17 份定义了 `eq()`）。
+原来"少判几十个文件"也照样通过。留余量而不写死实测值，保证增删测试文件时不误伤。
+
+**60. `esim-contract`：D7 的两个判据只有一个被自检覆盖**
+
+```
+D7（主断言）: !/lpac/i.test(ucSrc) && !/function lpacAvailable/.test(ucSrc)     ← 两个模式
+D8（自检）  : !/lpac/i.test(ucSrc) && /lpac/i.test(ucSrc + '…lpacAvailable…')  ← 只覆盖第一个
+```
+也就是说 **`function lpacAvailable` 这个模式失效了，D8 照样通过** —— "能判红"的保证只覆盖一半。
+现把两个模式提成常量 `LPAC_WORD` / `LPAC_FN` 共用，并**补 D8b 专门自检第二个模式**。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| 四个守卫自跑 | 全部通过（12 / 6 / 22 项 + esim P01–P09） |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| 变异 1：`LPAC_FN` 改成匹配不到 | **D7 与 D8b 同时判红** ✓ |
+| 变异 2：`checked.ok` 门槛抬到 999 | **判红** ✓ |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 方法说明（这一批的取舍）
+
+上一批我按"文件名/是否含 eval"推断哪些文件的剥注释器会受正则字面量影响，
+**推断是错的**：`esim-contract` 的 `stripComments` 是纯正则替换（不做括号配对，
+不受影响），`diag-contract` 的 `stripFn` 处理的是 **shell 脚本**（里面没有 JS 正则）。
+实际用状态机提取函数体的只有 `assert-signature` / `silent-catch` / `undefined-fn` 三个，
+**都已在前两批处理完**。所以本批转向"门槛与自检完整性"这两个更普遍的模式。
+
+### 诚实边界
+
+- 本批 5 项**未改生产代码**，用户看不到区别。
+- 价值同样在于"守卫的覆盖范围"：门槛偏松会让**扫描范围缩小**这种退化静默通过，
+  自检不完整会让**一半的判据**失去"能判红"的保证。
+
 ## [2.3.91] - 2026-09-28
 
 攒满 **5 项**一次推送。本批全部是**测试守卫（tests/）自身的加固**——把守卫的盲区逐个补上。

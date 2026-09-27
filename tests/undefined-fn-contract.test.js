@@ -257,6 +257,14 @@ files.sort();
 
 ok('★ 扫描到了前端 JS 文件（路径写错会让这个守卫恒绿）', files.length >= 10,
 	'实际扫到 ' + files.length + ' 个');
+/* ★ 2026-09-28：`>= 10` 挡不住"少扫几个" —— 现仓里 21 个。补一份**必须被扫到**的点名，
+   少了任何一个（尤其体积最大、最容易藏未定义调用的那几个）立刻判红。 */
+const MUST_SCAN = ['esim.js', 'euicc.js', 'network_status.js', 'modem_settings.js', 'parse.js'];
+const notScanned = MUST_SCAN.filter(function (n) {
+	return !files.some(function (p) { return p.endsWith(n); });
+});
+ok('★ 关键前端文件都在扫描范围内（逐个点名，少一个就判红）',
+	notScanned.length === 0, '没扫到：' + notScanned.join('、'));
 
 files.forEach(function (f) {
 	const raw = fs.readFileSync(f, 'utf8');
