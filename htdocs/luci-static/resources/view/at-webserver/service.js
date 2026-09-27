@@ -107,6 +107,14 @@ return L.view.extend({
 			expect: { '': {} }
 		});
 		return Promise.all([
+			/*
+			 * ★ 2026-09-28 补说明（**不要删这一行**）：本例的返回值确实没人用，
+			 *   但它的**副作用**是必需的 —— L.uci.load 把配置读进 LuCI 的 uci 缓存，
+			 *   后面 168 行的 L.uci.get(SERVICE,'config','enabled') 与 render() 里
+			 *   364 行的 get() 都是**同步读缓存**，没有这次 load 就一律拿不到值、
+			 *   全部退回默认值（配置界面显示成默认，且不报错）。
+			 *   删掉它不会有任何静态报错、测试也抓不到 —— 所以把理由写在这里。
+			 */
 			L.uci.load(SERVICE),
 			serviceList(SERVICE).catch(function () { return {}; }),
 			listSerial('/dev').catch(function () { return { entries: [] }; }),
@@ -359,7 +367,12 @@ return L.view.extend({
 		var webhookInput = Mt5700.input('text', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx', '');
 		notifBody.appendChild(Mt5700.formGroup('企业微信 WebHook', webhookInput, '通知将推送到该 WebHook 地址'));
 
-		/* ---------- 载入 UCI（单 section `config` + 扁平键，与 Rust/ucode 一致） ---------- */
+		/*
+		 * ---------- 读取 UCI（单 section `config` + 扁平键，与 Rust/ucode 一致） ----------
+		 * ★ 2026-09-28 措辞修正：这里只是**读缓存**，配置的**载入**发生在本页 load() 里的
+		 *   L.uci.load(SERVICE)（见那处注释）。写成"载入"会让人以为在这里加载，
+		 *   进而以为那一行可以删。
+		 */
 		var get = function (key, def) {
 			var v = L.uci.get('at-webserver', 'config', key);
 			return v == null || v === '' ? def : v;
@@ -522,6 +535,7 @@ return L.view.extend({
 		function refreshStatus() {
 			return Promise.all([
 				rpcServiceList(SERVICE).catch(function () { return {}; }),
+				/* ★ 同上：返回值不用，副作用必需 —— 539 行的 L.uci.get 读的就是它加载进缓存的配置 */
 				L.uci.load(SERVICE)
 			]).then(function (res) {
 				var svc = (res[0] && res[0][SERVICE]) || {};
