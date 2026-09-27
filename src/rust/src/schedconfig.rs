@@ -2,7 +2,7 @@
 //! 与 Go 实现（schedconfig.go）键名、校验规则完全一致。
 
 use chrono::Timelike;
-use crate::config::{BandLock, ScheduleConfig};
+use crate::config::{BandLock, ScheduleConfig, UCI_TIMEOUT};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,8 +11,10 @@ pub const SCHED_QUERY_COMMAND: &str = "AT+SCHED?";
 pub const SCHED_SET_PREFIX: &str = "AT+SCHED=";
 pub const SCHED_RESPONSE_PREFIX: &str = "+SCHED: ";
 
-/// 单次 `uci` 调用的超时，与 config.rs 的 `uci show` 保持同一口径。
-const UCI_TIMEOUT: Duration = Duration::from_secs(5);
+/// 单次 `uci` 调用的超时：**引用 config.rs 的那一份常量**，不再本地重复定义。
+/// （原先这里自带一份同值常量，注释写着"与 config.rs 保持同一口径" —— 但那是靠人
+///   肉同步的重复；`schedconfig` 依赖 `config`，所以真源只能放在 config.rs。）
+/// 至于为什么必须有超时、以及为什么 `kill_on_drop` 同样必需，见 `uci_run` 的注释。
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BandLockDto {
@@ -368,11 +370,21 @@ async fn uci_run(args: &[&str]) -> Result<std::process::Output, String> {
 }
 
 /// 回滚本服务在 UCI staging 里的未提交改动。失败只丢弃 staging，不影响已落盘配置。
+///
+/// ★ 2026-09-28 修：必须与其它 uci 调用**同一口径** —— 复用 `uci_run`。
+///   本函数在 `write_schedule_uci` 的**每一条失败分支**上被调用，而它原先直接
+///   `Command::new("uci").args(["revert", …]).output().await`，既没有 5 秒超时、
+///   也没有 `kill_on_drop(true)`。上面 `uci_run` 的注释描述的正是这种写法的后果：
+///   「uci 会争用 /var/lock/uci …… 这条 RPC 的 handle_connection 任务就永远停在
+///   .output().await 上，而同一连接上后续所有请求（含前端每 1.5s 一次的 events
+///   轮询）会全部堵在它后面 —— 用户看到的是『点了保存之后这个页面再也不刷新』」。
+///   而且它出现的时机恰恰是"uci 已经出过问题"之后（写失败了才来 revert），
+///   锁被占用/残留的概率比平时更高。
+///
+///   复用 uci_run 后自动获得超时与 kill_on_drop。失败依然是尽力而为：
+///   调用方拿到的是**原始**失败原因，revert 成不成功不改变对外结果。
 async fn revert_schedule_uci() {
-    let _ = tokio::process::Command::new("uci")
-        .args(["revert", "at-webserver"])
-        .output()
-        .await;
+    let _ = uci_run(&["revert", "at-webserver"]).await;
 }
 
 /// 下一次时段切换的时刻（HH:MM），夜间时段的两个端点就是切换点。

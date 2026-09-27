@@ -5,6 +5,74 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.66] - 2026-09-28
+
+通读 `schedconfig.rs` 时发现的一处「原则已写下、未贯彻到第二处」，而**顺着它做的全局排查
+又抓出第三处**。
+
+### Fixed
+
+**12. `revert_schedule_uci` 绕过了 `uci_run` 的超时与 `kill_on_drop`**
+
+`uci_run` 的注释写得非常清楚（原文）：
+
+> 不加超时的后果不是「慢」而是「卡死」：`uci` 会争用 `/var/lock/uci`，commit 还要写
+> flash。任一处挂住，这条 RPC 的 handle_connection 任务就永远停在 `.output().await` 上，
+> 而同一连接上后续所有请求（含前端每 1.5s 一次的 events 轮询）会全部堵在它后面 ——
+> 用户看到的是「点了保存之后这个页面再也不刷新」。
+> `kill_on_drop(true)` 是必需的：超时只是 drop 掉 future，并不会杀掉子进程；那个 uci
+> 可能稍后才拿到锁、并把 staging 真的提交下去，于是出现「接口报超时、配置却被改了」的
+> 不一致。
+
+而 `revert_schedule_uci` **就在 `write_schedule_uci` 的每一条失败分支上被调用**，却自己
+起了一个裸的 `Command::new("uci") … output().await` —— 既无超时、也无 `kill_on_drop`。
+它出现的时机恰恰是"uci 已经出过问题"之后（写失败了才来 revert），锁被占用/残留的概率
+比平时更高。已改为复用 `uci_run`。
+
+**13. 全局排查的同批发现：`config.rs` 的 `uci show` 缺 `kill_on_drop`（以及一个重复魔数）**
+
+顺着第 12 项写的静态守卫去扫全仓，立刻抓到第二处：`config::uci_values()`。它**有** 5 秒
+超时（与 Go 版一致），但**没有** `kill_on_drop(true)` —— 于是超时之后那个 uci 仍会继续
+跑、仍持有 `/var/lock/uci`，之后每次 uci 调用都要排队等它。
+
+顺带消除了一处重复：那个 `5` 是硬编码字面量，而 `schedconfig.rs` 另有一份
+`const UCI_TIMEOUT = Duration::from_secs(5)`，注释写着"与 config.rs 的 uci show 保持同一
+口径"—— 靠人肉同步的重复。因为 `schedconfig` 已经 `use crate::config::…`，反向引用会
+成环，所以**真源只能放在最底层的 `config.rs`**：现在 `config::UCI_TIMEOUT` 是唯一定义，
+`schedconfig` 改为引用它。
+
+### 新增守卫
+
+`tests/uci-call-contract.test.js`（**14 项**）：
+
+- `schedconfig.rs` 全文件只允许一处 `Command::new("uci")`（即 `uci_run` 内部）；
+- `uci_run` 必须同时带 `UCI_TIMEOUT` 与 `kill_on_drop(true)`；
+- `revert_schedule_uci` 必须复用 `uci_run`、且不得再直接起 uci 进程；
+- `write_schedule_uci` 的**每条**失败分支都必须 revert（失败不 revert 会把残缺 staging
+  挂着，被之后任意一次 `uci commit at-webserver` 连带落盘成半套配置）；
+- 全仓扫描：只允许 `config.rs` / `schedconfig.rs` 各一处 uci 调用，**且两处都必须同时
+  带超时与 `kill_on_drop`**（新增调用点会被这条挡住）。
+
+**变异验证**：把 `revert` 改回裸 `Command::new("uci")` → **判红 4 处**；还原 → 全绿。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **37 passed / 0 failed** |
+| `cargo check --all-targets` | 0 warning |
+| `node tests/run-all.js` | 全部测试文件通过（新增 `uci-call-contract`） |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+| `tests/uci-call-contract.test.js` | 14 项通过；变异判红 4 处 |
+
+### 诚实边界
+
+- 这两处修的都是**挂起风险**，没有在真机上制造 uci 锁争用去复现。依据是代码自身对同一
+  问题的既有分析（`uci_run` 的注释）与 `kill_on_drop` 的 tokio 语义。
+- 通读覆盖：本轮读完 `schedconfig.rs` 全 402 行。仍未通读：`schedule.rs`(665) /
+  `pdu.rs`(290) / `smsclean.rs`(216) / `serial_linux.rs`(197) / `urc.rs` 其余部分、
+  前端共享模块、12 个视图层文件、ucode 插件。
+
 ## [2.3.65] - 2026-09-28
 
 ### Fixed

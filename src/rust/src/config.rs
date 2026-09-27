@@ -10,6 +10,18 @@ pub const PREFERRED_AT_PORT: &str = "/dev/ttyUSB1";
 /// 通知日志默认路径，与 root/etc/config/at-webserver 的 `option log_file` 保持一致。
 pub const DEFAULT_NOTIFY_LOG: &str = "/tmp/at-notifications.log";
 
+/// 单次 `uci` 子进程调用的墙钟预算（**唯一真源**）。
+///
+/// 定义在 config.rs 而非 schedconfig.rs：`schedconfig` 已经
+/// `use crate::config::{…}`，反向引用会成环，所以常量只能放在最底层这个模块，
+/// 由 schedconfig 引用（那边原先自己定义了一份同值常量，只能靠人肉同步）。
+///
+/// 为什么必须有这个超时：`uci` 会争用 `/var/lock/uci`，commit 还要写 flash。
+/// 任何一处**不带超时**的 uci 调用挂住，都会让那条 RPC 的 handle_connection 任务
+/// 永远停在 `.output().await` 上，而同一连接上后续所有请求（含前端每 1.5s 一次的
+/// events 轮询）会全部堵在它后面 —— 表现为「点了保存之后这个页面再也不刷新」。
+pub const UCI_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BandLock {
     /// Type: 0=解锁 1=频点 2=小区 3=频段
@@ -246,11 +258,17 @@ impl UciReader {
 
 /// 用一次 `uci show at-webserver` 取回整个配置段。
 pub async fn uci_values() -> Result<UciReader, String> {
-    // 与 Go 版一致：加 5s 超时，避免 uci 命令异常挂起卡死启动。
+    // 与 Go 版一致：加超时，避免 uci 命令异常挂起卡死启动。
+    //
+    // ★ kill_on_drop(true) 与超时**同等重要**（理由与 schedconfig.rs 的 uci_run 相同）：
+    //   超时只是 drop 掉 future，并**不会**杀掉子进程 —— 那个 uci 仍会继续跑、
+    //   仍持有 /var/lock/uci，于是之后每一次 uci 调用都得排队等它。
+    //   让它随 future 一起结束，失败就是干净的失败。
     let out = tokio::time::timeout(
-        Duration::from_secs(5),
+        UCI_TIMEOUT,
         tokio::process::Command::new("uci")
             .args(["show", "at-webserver"])
+            .kill_on_drop(true)
             .output(),
     )
     .await
