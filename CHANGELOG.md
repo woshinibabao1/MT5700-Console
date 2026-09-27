@@ -5,6 +5,57 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.65] - 2026-09-28
+
+### Fixed
+
+**11. `notify.rs`：一行「减出过去时刻」的 `Instant` 运算，会在开机不足 60 秒时 panic**
+
+```rust
+let mut last_send = Instant::now() - NOTIFY_INTERVAL;   // NOTIFY_INTERVAL = 60s
+```
+
+`Instant` 的 `Sub<Duration>` 在**下溢时 panic**（内部是
+`checked_sub(other).expect("overflow when subtracting duration from instant")`），
+而 Linux 上 `Instant` 基于 `CLOCK_MONOTONIC`、**从系统启动起算** ——
+于是「本服务在开机不足 60 秒内启动」就会让这一行 panic。boot 阶段 procd 拉起服务时
+uptime 通常只有 10~30 秒，**这个窗口并不窄**。
+
+**后果被本仓的一条约定放大**：release 是 `panic = "abort"`，一次 panic 就是 abort →
+procd 视作崩溃并 respawn → 反复几次后**永久放弃拉起本服务**。这正是 `main.rs` 里
+`join_log` 上方那条注释要避免的事（"不能改变进程退出码，否则 procd 会判定为崩溃并反复
+respawn，攒满重试后永久放弃拉起"）。
+
+**为什么一直没暴露**：`run()` 开头在**没配企业微信 webhook** 时直接 `return`
+（`if self.cfg.wechat_webhook.is_empty() { … return; }`），根本走不到这一行 ——
+踩到它的是**配了 webhook 的用户**，而启动瞬间就 abort 的现象很容易被归因成别的问题。
+
+修法：把等待时长抽成纯函数 `next_wait(last: Option<Instant>)`，`None` 表示"本进程还没
+发过第一批"（等价于原来的"窗口已满、可立即发"），**语义完全不变**，只是不再需要"减出
+一个过去时刻"。新增 2 个测试：一个钉住首轮不依赖该运算，一个钉住批量汇总不丢内容。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `cargo test --all-targets` | **37 passed / 0 failed**（35 → 37） |
+| `cargo check --all-targets` | 0 warning |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+
+### 诚实边界
+
+- 这个 panic **没有在真机上复现**：复现需要在开机 60 秒内启动服务**且**配置了企业微信
+  webhook，而那会打断你现在正在用的设备。判定依据是 `Instant::Sub` 的 Rust 语义
+  （`checked_sub(..).expect(..)`）与 Linux 上 `Instant` 的 `CLOCK_MONOTONIC` 基准 ——
+  两者都是标准库行为，不是推测。
+- 我加的第一个测试**自己写错了**（断言多条汇总里出现 `SENDER_CALL` 的字面值，而那个分支
+  是把它当发送者匹配、只输出 content 配图标），`cargo test` 当场判红，已按实现改正。
+  记在这里是因为"测试先红后绿"这件事本身就是它有效的证据。
+- 通读覆盖：本轮读完了 `notify.rs` 全 357 行。仍未通读：`schedule.rs`(665) /
+  `schedconfig.rs`(375) / `pdu.rs`(290) / `smsclean.rs`(216) / `serial_linux.rs`(197) /
+  `urc.rs` 的其余部分、前端共享模块、12 个视图层文件、ucode 插件。
+
 ## [2.3.64] - 2026-09-28
 
 第三轮通读继续。这一批落在**性能**与**可维护性**两个角度 —— 前几批修的都是正确性问题，

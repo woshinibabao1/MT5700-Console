@@ -65,6 +65,30 @@ pub struct Notifier {
     log_file: Option<String>,
 }
 
+/// 距下一次 flush 还要等多久。
+///
+/// `last` 为 `None` 表示"本轮窗口尚未开始"（进程刚起来），此时返回 0 —— 语义上
+/// 等价于原来的 `Instant::now() - NOTIFY_INTERVAL`（即"窗口已满、可以立即发"）。
+///
+/// ★ 2026-09-28 修：原来那一行是
+///     `let mut last_send = Instant::now() - NOTIFY_INTERVAL;`
+///   `Instant` 的 `Sub<Duration>` 在**下溢时 panic**（内部是
+///   `checked_sub(other).expect("overflow when subtracting duration from instant")`），
+///   而 Linux 上 `Instant` 基于 `CLOCK_MONOTONIC`、从**系统启动**起算 ——
+///   于是「服务在开机不足 60 秒内启动」就会让这一行 panic。本 crate 的 release 是
+///   `panic = "abort"`，一次 panic 即 abort，后果是 procd 反复 respawn、攒满重试后
+///   **永久放弃拉起本服务**（正是 main.rs 里 join_log 上方那条约定要避免的事）。
+///   boot 阶段 procd 拉起服务时 uptime 通常只有 10~30 秒，这个窗口并不窄。
+///
+///   它一直没被发现，是因为上面 145-148 行在**没配企业微信 webhook** 时直接 return，
+///   根本走不到这里 —— 踩到的是配了 webhook 的用户。
+fn next_wait(last: Option<Instant>) -> Duration {
+    match last {
+        Some(t) => NOTIFY_INTERVAL.saturating_sub(t.elapsed()),
+        None => Duration::ZERO,
+    }
+}
+
 #[allow(dead_code)] // sender 字段保留（通知来源标识，与 Go 一致）
 impl Notifier {
     pub fn new(cfg: NotificationConfig) -> (Notifier, mpsc::Receiver<Notification>) {
@@ -148,10 +172,11 @@ impl Notifier {
         }
 
         let mut pending: Vec<Notification> = Vec::new();
-        let mut last_send = Instant::now() - NOTIFY_INTERVAL;
+        // None = 本进程还没发过第一批（等价于"窗口早已期满"），见 next_wait 的说明。
+        let mut last_send: Option<Instant> = None;
 
         loop {
-            let wait = NOTIFY_INTERVAL.saturating_sub(last_send.elapsed());
+            let wait = next_wait(last_send);
             tokio::select! {
                 _ = ctx.changed() => {
                     flush(&self.cfg.wechat_webhook, &mut pending);
@@ -174,7 +199,7 @@ impl Notifier {
                 }
                 _ = tokio::time::sleep(wait), if !pending.is_empty() => {
                     flush(&self.cfg.wechat_webhook, &mut pending);
-                    last_send = Instant::now();
+                    last_send = Some(Instant::now());
                 }
             }
         }
@@ -354,4 +379,48 @@ pub fn combine_messages(msgs: &[Notification]) -> String {
         b.push_str(&"-".repeat(20));
     }
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：进程刚启动时**不得**依赖 `Instant::now() - NOTIFY_INTERVAL` 这类运算 ——
+    /// 它在系统运行不足一个窗口时会下溢 panic，而 release 是 `panic = "abort"`。
+    /// （boot 阶段 procd 拉起本服务时 uptime 通常只有 10~30 秒。）
+    #[test]
+    fn next_wait_首轮不依赖减去一个窗口() {
+        assert_eq!(next_wait(None), Duration::ZERO, "首轮应视为窗口已满、可立即发");
+        let w = next_wait(Some(Instant::now()));
+        assert!(
+            w <= NOTIFY_INTERVAL && w >= NOTIFY_INTERVAL - Duration::from_millis(500),
+            "刚发过之后应等待接近一个完整窗口，实际 {w:?}"
+        );
+    }
+
+    /// 合并排版的两种形态（单条 / 多条）不能丢内容。
+    #[test]
+    fn combine_messages_keeps_every_entry() {
+        let one = Notification {
+            sender: "10086".into(),
+            content: "流量提醒".into(),
+            kind: NotifyKind::Sms,
+            memory_full: false,
+        };
+        let s = combine_messages(std::slice::from_ref(&one));
+        assert!(s.contains("10086") && s.contains("流量提醒"), "{s}");
+
+        let many = vec![
+            one.clone(),
+            // 注意：多条汇总里 SENDER_CALL / SENDER_SIGNAL 是被当作**发送者**匹配的，
+            // 输出的是它们的 content 配图标 —— 所以下面断言 content，而不是发送者名。
+            Notification { sender: SENDER_CALL.into(), content: "13800138000".into(), ..one.clone() },
+            Notification { sender: SENDER_SIGNAL.into(), content: "信号 -95".into(), ..one.clone() },
+            Notification { memory_full: true, ..one.clone() },
+        ];
+        let s = combine_messages(&many);
+        for expect in ["10086", "流量提醒", "13800138000", "信号 -95", "存储空间已满"] {
+            assert!(s.contains(expect), "批量汇总里少了 {expect}：{s}");
+        }
+    }
 }
