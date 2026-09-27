@@ -5,6 +5,56 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.3.82] - 2026-09-28
+
+**扩充跨端 fixture 的覆盖**（承接 2.3.81）。这一批没有改任何生产代码 —— 只让那条契约
+真正盖住"本会话修过的分歧点"。
+
+### Added
+
+fixture 从 **3 个样本扩到 6 个**（`tests/fixtures/pdu-samples.json`），前端断言 12 → **21 项**：
+
+| 新样本 | 为什么需要它 |
+| :-- | :-- |
+| DCS `0xC8`（0xC 组、bit3=1 → UCS2） | 覆盖 `dcs_encoding` 的 **0xC/0xD/0xE 组**分支（原来只测到 `0x08`） |
+| **DCS `0xF4`**（0xF 组 → 必须 GSM7） | **这是旧算式 `(dcs>>2)&3` 的分歧点**：它会算成 8bit，两端结果就分叉。2.3.75 修的就是这里，但当时的 fixture 里没有能触发它的样本 |
+| 字母数字发送方 `CMCC`（`TOA=0xD0` → TON=5） | `decodeAddress` 的**字母数字分支**（真机从未覆盖：10086 走 BCD，`TOA=0xA0`）。顺带钉住"TON=5 的长度字段是**半字节数**而非字节数" |
+
+**两端一致**：前端 21 项通过、后端 `pdu_共享样本两端一致` ok（44 passed）。
+
+**变异验证（证明新样本真的抓住了那个分歧点）**：把后端 `dcs_encoding` 改回
+`(dcs >> 2) & 0x03` → 跨端测试立刻判红，并**指名道姓**地说出是哪条样本：
+
+```
+DCS 0xF 组（bit3-2 是消息类别、不是编码 → 必须按 GSM7）……: 正文不一致
+  left: "mK\u{8b}Õ"    ← 旧算式按 8bit 解出的乱码
+ right: "mΠ-,"          ← 按 GSM7 解出的（正确）
+```
+
+还原后 —— **按 2.3.81 记下的教训，先 `cargo clean -p at-webserver` 强制重编译**再跑 ——
+44 passed / 0 failed。
+
+### 诚实边界
+
+- **本轮零生产代码改动**，只扩充了测试数据。价值全部在"防漂移"上，没有用户可见收益。
+- 仍未覆盖：`decodeTimestamp` 的"畸形日期"（如 2 月 31 日）——它需要一个**非法日期**的
+  SCTS 样本，构造起来要逐字节算 7 个 BCD 字节，本轮没做；那一处目前只靠前后端各自的
+  单元测试与人工核对。
+- 也仍未覆盖：`DCS 0x01`（8bit 编码）这条分支。
+- fixture 现 6 样本，新增只需改这一个文件，两端自动生效。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| `node tests/pdu-cross-end-contract.test.js` | **21 项通过**（12 → 21） |
+| `cargo test --all-targets`（`clean -p` 后） | **44 passed / 0 failed** |
+| 新样本的变异验证 | 判红 1 处，且失败信息指出具体样本；还原后全绿 |
+| `node tests/run-all.js` | 全部测试文件通过 |
+| `python tools/verify-guards.py` | 变异全判红 + 还原逐字节一致 + 基线绿 |
+| `git diff --stat src/rust/src/pdu.rs` | 空（本轮未动后端源码，符合预期） |
+
+
 ## [2.3.81] - 2026-09-28
 
 **补上本仓一个结构性缺口：跨端 PDU 一致性测试。**

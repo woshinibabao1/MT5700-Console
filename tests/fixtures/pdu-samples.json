@@ -30,6 +30,24 @@
       "sender": "10086",
       "contentPrefix": "尊敬的客户",
       "partial": { "reference": 32, "parts_count": 4, "part_number": 1 }
+    },
+    {
+      "name": "DCS 0xC 组（bit3=1 → UCS2；与 0x08 组应给出同一结果）",
+      "hex": "00040B913108108300F000C852805221000023046D4B8BD5",
+      "sender": "+13800138000",
+      "content": "测试"
+    },
+    {
+      "name": "DCS 0xF 组（bit3-2 是消息类别、不是编码 → 必须按 GSM7）—— 旧算式 (dcs>>2)&3 会算成 8bit，两侧结果就分叉",
+      "hex": "00040B913108108300F000F452805221000023046D4B8BD5",
+      "sender": "+13800138000",
+      "content": "mΠ-,"
+    },
+    {
+      "name": "字母数字发送方（TOA=0xD0 → TON=5，如 CMCC）—— 长度字段是**半字节数**，不是字节数",
+      "hex": "000407D0C3E6700800005280522100002302C834",
+      "sender": "CMCC",
+      "content": "Hi"
     }
   ]
 }
