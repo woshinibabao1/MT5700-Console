@@ -5,6 +5,66 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.5] - 2026-09-28
+
+### Fixed
+
+**103. ★ 短信未读徽章"点了会话当场消失、刷新后又出现"**
+
+**用户报告**：「短信处明明已读，但是刷新后依旧显示未读」；追问后补充：
+**「点了会话，徽章当场消失，但刷新页面后又出现」**，且**刷新期间没有新短信**。
+
+**根因是 `sms_center.js` 里的一处不对称**：
+
+```js
+function clearUnread(num) {
+	num = normalizeNumber(num || '');
+	var i = unreadNumbers.indexOf(num);
+	if (i >= 0) { unreadNumbers.splice(i, 1); saveUnread(); }   // ← localStorage：有条件写
+	...
+	for (...) { msgs[mi].unread = false; c.unreadCount = 0; c.unread = false; }  // ← 内存：无条件清
+}
+```
+
+**只要 `i === -1`，就会出现「内存已清、localStorage 未清」**：徽章当场消失（内存生效），
+刷新页面后从 localStorage 重读又冒出来 —— 与用户描述的现象完全一致。
+
+**而 `i === -1` 是真实可达的**：名单**跨版本持久化**（键名 `mt5700_sms_unread_numbers`
+一直没变），读取侧原来只过滤 `typeof x === 'string'`、**不做归一化**，而
+`markUnread` / `clearUnread` / `isUnread` 一律用 `Parse.normalizePhoneNumber()` 的结果做键。
+历史数据里存的是非归一化号码（如 `"+8610086"`），查询用归一化值（`"10086"`）就永远查不到。
+
+已修两处：
+1. **`clearUnread` 改为无条件 `saveUnread()`** —— 即使这次没在名单里找到，也把当前名单
+   写回去，保证存储与内存始终一致；
+2. **读取侧归一化 + 去重（自愈）** —— 就地收敛历史数据，而不是指望某个分支去兜。
+
+### 验证
+
+| 项 | 结果 |
+| :-- | :-- |
+| **复现**（用真机 `AT+CMGL=4` 数据 + 真实 `Parse.normalizePhoneNumber`） | 名单 `["+8610086"]`、`clearUnread('10086')` → 修复前 `indexOf=-1`、**落盘 false ⇒ 刷新后徽章回来**；修复后归一化为 `["10086"]`、`indexOf=0`、**无条件落盘 ⇒ 不再回来** |
+| 新增 `tests/sms-center-unread-contract.test.js` | **17 项通过**（含 2 条反向自证） |
+| **变异：把 `saveUnread()` 塞回 `if (i >= 0)` 分支** | **FAILED（通过 16 项，失败 1 项）** ✓ |
+| `node tests/run-all.js` | **74 个文件 0 失败** |
+| `TZ=UTC node tests/run-all.js` | 0 失败 |
+| `node tests/syntax-check.js` | 20 个文件 0 错误 |
+| `python tools/verify-guards.py` | 160 条判红、**0 放过** |
+
+### 诚实边界
+
+- **我没有 100% 确认这就是你遇到的那一次**：问题在你排查中途自行恢复了，而 `localStorage`
+  在浏览器里、我读不到。我修的是**排查中确证存在的一处不对称**，它能精确产生你描述的现象
+  （已用真机数据复现），但如果你之后再次遇到、且控制台里
+  `localStorage.getItem('mt5700_sms_unread_numbers')` 是空的，那就说明还有第二条路径，
+  请把结果告诉我。
+- 排查中我先后猜了 6 个方向（`markUnread`/`clearUnread` 的归一化不一致、号码混淆、
+  `+CMTI` 重复上报、`known` 误删、`saveUnread` 的 `slice(-200)`、已发记录的迁移分支），
+  **前 5 个都被数据否定了**，只有这一处站得住。这也说明**先用真机数据把候选逐个打掉**
+  比直接改代码有效。
+- 真机上 `10086`（40 条）与 `100860009832`（20 条）是**两个不同号码**，`normalizePhoneNumber`
+  不会合并它们（已用真机数据验证）。如果它们在你看来应该算一个会话，那是**产品问题**
+  而不是 bug，需要你确认后再动。
 ## [2.4.4] - 2026-09-28
 
 ### Performance

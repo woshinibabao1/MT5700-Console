@@ -113,7 +113,28 @@ return L.view.extend({
 		var unreadNumbers = (function () {
 			try {
 				var arr = JSON.parse(localStorage.getItem(UNREAD_KEY) || '[]');
-				return Array.isArray(arr) ? arr.filter(function (x) { return typeof x === 'string'; }) : [];
+				if (!Array.isArray(arr)) return [];
+				/*
+				 * ★ 2026-09-28 加归一化 + 去重（自愈）。
+				 *
+				 * 这里原来只过滤 `typeof x === 'string'`，把**原样的字符串**收进名单。
+				 * 而下面 markUnread / clearUnread / isUnread 一律用
+				 * `Parse.normalizePhoneNumber()` 的结果做键 —— 两者形态不一致时，
+				 * `indexOf` 会返回 -1：
+				 *   · isUnread() 查不到 → 该号码的未读徽章「时有时无」；
+				 *   · clearUnread() 里 `if (i >= 0)` 不成立 → **localStorage 不写**，
+				 *     但函数后半段的内存清理是**无条件**执行的（见那里的注释）。
+				 *     于是当场看着清了、刷新后从 localStorage 重读又冒出来。
+				 * 名单是跨版本持久化的（键名一直没变），历史数据里出现非归一化号码
+				 * 完全可能，所以这里在读取时就地收敛，而不是等某个分支去兜。
+				 */
+				var out = [];
+				for (var i = 0; i < arr.length; i++) {
+					if (typeof arr[i] !== 'string') continue;
+					var n = normalizeNumber(arr[i]);
+					if (n && out.indexOf(n) < 0) out.push(n);
+				}
+				return out;
 			} catch (e) { return []; }
 		})();
 
@@ -131,7 +152,17 @@ return L.view.extend({
 		function clearUnread(num) {
 			num = normalizeNumber(num || '');
 			var i = unreadNumbers.indexOf(num);
-			if (i >= 0) { unreadNumbers.splice(i, 1); saveUnread(); }
+			if (i >= 0) unreadNumbers.splice(i, 1);
+			/*
+			 * ★ 2026-09-28：原来 saveUnread() 写在 `if (i >= 0)` 里面，而下面的内存清理
+			 *   （msg.unread / c.unreadCount / c.unread）是**无条件**的。这个不对称会在
+			 *   `i === -1` 时留下一份「内存已清、localStorage 未清」的状态：
+			 *   徽章当场消失（内存生效），刷新页面后从 localStorage 重读又回来 ——
+			 *   用户报的就是这个现象（"点了会话，徽章当场消失，但刷新页面后又出现"）。
+			 *   现在无条件落盘：即使这次没在名单里找到，也把当前名单写回去，
+			 *   保证存储与内存始终一致。读取侧同时还做了归一化自愈（见上面）。
+			 */
+			saveUnread();
 			/*
 			 * 同时清掉内存里这些短信自带的未读标记。否则同一次会话内再调
 			 * buildContacts 时，来源 B 会依据仍是 true 的 msg.unread 把它们标回未读，
