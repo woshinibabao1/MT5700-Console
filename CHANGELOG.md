@@ -5,6 +5,45 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.2] - 2026-09-28
+
+### Changed
+
+**98. `parse.js` 的"未完成迁移"注释改为**真机实测结论**：不是待办，是做不了**
+
+上一批把 `MEAS_TYPES` / `NR_INVALID` / `LTE_BANDWIDTHS` 标为"尚未完成的迁移"。
+本轮用**真机只读探针**（经 SSH 走 `ubus call mt5700 at`）确认了它们的实际状态：
+
+```
+$ ubus call mt5700 at '{"cmd":"AT^CASCELLINFO?"}'   → ERROR
+$ ubus call mt5700 at '{"cmd":"AT^CASCELLINFO=?"}'  → ERROR     ← 连测试命令都不支持
+$ ubus call mt5700 at '{"cmd":"AT^MONSSC"}'         → ^MONSSC: NONE
+$ ubus call mt5700 at '{"cmd":"AT^MONSSC=?"}'       → ERROR
+```
+
+按 3GPP 惯例，`AT+XXX=?` 返回 `ERROR` 基本等同于「该命令不存在」：
+
+- **`^CASCELLINFO` 在本固件没有实现** —— 为它写解析器**永远拿不到数据**；
+- **`^MONSSC` 存在**，但手册 13.27 说它只用于 **NSA** 下的 5G 辅连接服务小区。
+  本机 `AT^LENDC?` 为 `^LENDC: 1,0,0,0,0`（**DC 状态全 0，没有 NSA 双连接**），
+  此时返回 `NONE` 正是正确行为 —— 它只有在 NSA 建立后才有内容；
+- 另外 `rpc.js` 的 `parseHFREQINFO` 走 `^HFREQINFO`（手册 13.16.3 的 `<dl_bw>`/`<ul_bw>`
+  **本身就是数值**，直接 `int(c[3])` 取用），**不需要码表** ⇒ `LTE_BANDWIDTHS` 也用不上。
+
+**结论：这三个常量当前全仓无引用，且对应通路在本固件上不可用。** 没有删除，是因为它们
+逐项都有手册出处（13.18.3 / 13.27），换个固件或插上 NSA 场景后可能又有意义；
+但注释已明确写出「**不要以为它们正在生效**」，省掉后来者为一个拿不到数据的通路写解析器的无用功。
+
+### 验证
+
+`node tests/syntax-check.js` 0 错误 · `node tests/run-all.js` **0 失败**。
+
+### 诚实边界
+
+- 本批只有 1 项，且是**注释**，不改任何行为。
+- 真机探针**全部只读**（`?` 查询与 `=?` 测试命令），未下发任何写命令。
+- 上一批我写的是"尚未完成的迁移"——**那是在没有实测的情况下下的判断**；本轮实测推翻了它。
+  这也是本项目反复出现的模式：**用不够精确的判据下结论**。已按实测更正。
 ## [2.4.1] - 2026-09-28
 
 ### Performance
