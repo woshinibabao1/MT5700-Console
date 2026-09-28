@@ -16,9 +16,17 @@ name: Build OpenWrt packages (apk + ipk)
 #   - 标签推送 → 使用该标签名（如 v1.2.0）
 #   - main 推送 → 使用 Makefile 的 PKG_VERSION（如 v1.2.0），同名则覆盖更新
 
+# ★ 2026-09-28：**关闭 push 到 main 的自动打包**（用户要求）。
+#   本仓库日常是「改一行也推一次」的高频迭代，而每次打包要跑两个 aarch64 docker
+#   组合（实测约 5 分钟墙钟 / 8 个计费分钟），绝大多数推送只是中间状态、产物没人要。
+#   现在 push 到 main **只跑 rust-check / contract-check**（几十秒），不再打包、不再发 Release。
+#   【需要产物时】用这两种方式之一：
+#     · 手动 workflow_dispatch
+#     · 打 v* 标签（发版，仍会自动打包并发布 Release）
+#   要恢复「push 即打包」，把下面 push 段的 `branches: [ main ]` 加回来，
+#   并把 build 的 if 改回 `github.event_name != 'pull_request' && needs.needs_code.outputs.code == 'true'`。
 on:
   push:
-    branches: [ main ]
     tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
@@ -153,7 +161,14 @@ jobs:
     # 闸门：rust-check / contract-check 挂了就不打包、更不发布。没有 needs 的话
     # 两个 job 并行跑，检查结果只能靠人盯着看，等于没拦。
     needs: [rust-check, contract-check, needs_code]
-    if: github.event_name != 'pull_request' && needs.needs_code.outputs.code == 'true'
+    # ★ 2026-09-28：只在**打标签**或**手动触发**时打包；push 到 main 不打包（见文件头 on: 段）。
+    #   注意仍然 needs rust-check / contract-check —— 检查挂了就不打包、更不发布。
+    #   needs_code（「本次是否只动了 tests/tools/文档」）保留在 needs 里：它在 tag/手动
+    #   之外的场景不再决定要不要打包，但判断结果仍会打进日志，且恢复 push 自动打包时
+    #   把上面这行 if 改回去即可，不必再去找这段闸门。
+    if: |
+      always() &&
+      (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -247,11 +262,13 @@ jobs:
   # 同名文件在同一 Release 内必然冲突。用 gh CLI 替代 softprops 避免元数据更新 404 竞态。
   release:
     needs: build
-    # 只在 push / 打标签时发布：PR 触发时 build 已被跳过，这里必须显式挡住，
-    # 否则每个 PR 都会去创建或覆盖同名的 Release。
-    # ★ 2026-09-28：build 因「只动了 tests/tools/文档」被跳过时，release 自然也不会跑
-    #   （needs 未成功即不执行）—— 那正是不该发 Release 的情形。
-    if: github.event_name == 'push'
+    # 发布时机：打标签（用标签名）或**手动触发**（用 Makefile 的 PKG_VERSION，
+    # 同名则覆盖更新）。PR 必须显式挡住 —— 否则每个 PR 都会去创建或覆盖同名 Release；
+    # 而 build 在 PR / push 到 main 时本来就被跳过，release 因 needs 未成功也不会跑，
+    # 这里是第二道闸。
+    # ★ 2026-09-28：push 到 main 不再自动打包（见文件头 on: 段），所以本 job 实际只在
+    #   「打 v* 标签」和「手动 workflow_dispatch」两种情况下执行。
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write

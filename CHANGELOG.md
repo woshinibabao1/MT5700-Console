@@ -5,6 +5,50 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.7] - 2026-09-28
+
+### Changed
+
+**107. ★ 关闭 push 到 main 的自动编译（改为按需打包）**
+
+按用户要求关闭自动打包。原因是本仓库的使用方式是「**改一行也推一次**」的高频迭代，
+而每次打包要跑两个 aarch64 docker 组合 —— 实测**约 5 分钟墙钟 / 8 个计费分钟**
+（`build` 两个矩阵 247s + 173s 并行，加检查 job）。绝大多数推送只是中间状态，
+产物没人要，Release 还会被同名覆盖一遍。
+
+**现在**：
+
+| 触发方式 | 行为 |
+| :-- | :-- |
+| `push` 到 `main` | **只跑 `rust-check` / `contract-check` / `needs_code`**（几十秒），**不打包、不发 Release** |
+| `push` 打 `v*` 标签 | 完整打包 + 发布 Release（发版路径不变） |
+| `workflow_dispatch`（手动） | 完整打包 + 发布 Release（用 Makefile 的 `PKG_VERSION`，同名覆盖更新） |
+| `pull_request` | 只跑 `rust-check` / `contract-check`，不打包（原有行为） |
+
+**检查没有一起关掉**：`rust-check`（`cargo check --all-targets`）与 `contract-check`
+（74 个契约测试 + 160 条变异验证）只要几十秒，是防止「测试代码编译错误溜进 main」
+和「回归」的唯一闸门，留着不构成负担。
+
+**三处改动**（`.github/workflows/build-openwrt.yml`）：
+1. `on.push` 去掉 `branches: [ main ]`，只留 `tags: [ 'v*' ]`；
+2. `build.if` 由 `github.event_name != 'pull_request' && needs.needs_code.outputs.code == 'true'`
+   改为 `always() && (workflow_dispatch || 打 v* 标签)`；
+3. `release.if` 由 `github.event_name == 'push'` 改为 `github.event_name != 'pull_request'`
+   —— 这样手动触发也能发布（原来手动只能出 artifact，不发 Release）。
+
+`needs_code`（判断「本次是否只动了 tests/tools/文档」）**保留**在 `build.needs` 里：
+它在 tag/手动场景下不再决定要不要打包，但判断结果仍会打进日志；
+恢复「push 即打包」时把上面第 2 条改回去即可，不必重新找这段闸门。
+
+### 验证
+
+本次推送本身就是验证：`push` 到 `main` 后，运行里应当只有
+`rust-check` / `contract-check` / `needs_code` 三个 job，**`build` 与 `release` 被 skip**。
+
+### 回退
+
+把 `on.push` 的 `branches: [ main ]` 加回来，并把 `build.if` 改回
+`github.event_name != 'pull_request' && needs.needs_code.outputs.code == 'true'`。
 ## [2.4.6] - 2026-09-28
 
 ### Fixed
