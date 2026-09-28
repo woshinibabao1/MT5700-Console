@@ -47,7 +47,7 @@
 | R4 | 中 | `hexToBase64('')` 抛 `EUICC_BAD_HEX`：空串代表零字节，不该判非法 | `euicc.js` | `5eea613` |
 | R5 | 中 | 「处理待发回执」按钮**必然失败**：它拿不到 host，而目标地址其实写在通知里（`BF2F` 的 `0C`） | `euicc.js` / `view/.../esim.js` | `5eea613` |
 | R6 | **中（安全）** | ES9+ 转发的临时文件名**可预测**（`/tmp/mt5700-es9p-<tag>-<秒>.tmp`），`/tmp` 是 1777 → 本地用户可预先放符号链接，让 `fs.open`/`curl -o` 以 root 覆盖任意文件。改用 `mktemp`（`O_EXCL` + 0600） | `root/usr/share/rpcd/ucode/mt5700.uc` | 本轮 |
-| R7 | 低 | 连接状态三张表重复展示同一地址（实测 CID 1 与 `AT^DHCP` 都是 `10.117.101.195`），CID / 来源两列无信息量 | `view/at-webserver/network_status.js` | `9f946f2` |
+| R7 | 低 | 连接状态三张表重复展示同一地址（实测 CID 1 与 `AT^DHCP` 都是 `10.0.0.5`），CID / 来源两列无信息量 | `view/at-webserver/network_status.js` | `9f946f2` |
 
 **R1 的真机取证**（这是本轮唯一上机实测的项，Hiveton H5000M / MT5700M，经 8765 RPC）：
 

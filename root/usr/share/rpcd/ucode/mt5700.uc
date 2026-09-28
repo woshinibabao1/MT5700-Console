@@ -965,7 +965,7 @@ const EPDG_POS_FQDN = 'epdg.epc.mnc280.mcc310.pub.3gppnetwork.org';
 
 /*
  * ---- 身份链：MNC 到底是 2 位还是 3 位，由卡自己说了算 ----
- * IMSI 里看不出 MNC 长度（460009711127691 既可读成 460/00 也可读成 460/000）。
+ * IMSI 里看不出 MNC 长度（460001234567890 既可读成 460/00 也可读成 460/000）。
  * 参考 VoCat 的 readExplicitMNCLength：读 EF_AD（0x6FAD）第 4 字节低 4 位。
  * 读不到就如实标注 "ambiguous"（两种写法都查，不挑一个当真）。
  * ★ 不猜：猜出来的 MNC 会拼出一个错的域名，而错的域名必然 NXDOMAIN，
@@ -1460,7 +1460,7 @@ function dohLookup(fqdn, ecs) {
  *      Address:	223.5.5.5:53      ← ★ 带端口！
  *
  *      Name:		epdg.epc.mnc260.mcc310.pub.3gppnetwork.org
- *      Address 1:	208.54.5.195
+ *      Address 1:	198.51.100.9
  *   开头那两行是**输入**（DNS 服务器自己），不是结果。而且它是 "223.5.5.5:53"，
  *   跟传入的 dns 常量并不相等 —— 原来用「值 != dns」过滤**根本滤不掉它**。
  *   后果是灾难性的：任何一个域名（哪怕是必然不存在的 mnc999）都会「解析到地址」，

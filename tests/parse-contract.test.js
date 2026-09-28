@@ -147,18 +147,19 @@ eq('USSD 解析已随功能移除', typeof Parse.parseUssd, 'undefined');
 eq('USSD 组包已随功能移除', typeof Parse.buildUssdCommand, 'undefined');
 
 /* ---------- 8. ^CGPADDR：真机把 IPv6 写成「16 段十进制点分」 ----------
- * 真机原文（2026-09-13 实测，cid=5）：
- *   +CGPADDR: 5,"36.9.129.90.51.117.63.92.24.212.187.187.170.233.248.14"
+ * 真机原文（2026-09-13 实测，cid=5；开源前已把 16 个字节替换为文档用样例地址，
+ * 结构与位数不变，故还原逻辑与断言形态不受影响）：
+ *   +CGPADDR: 5,"198.51.100.7.198.51.100.10.198.51.100.11.198.51.100.12"
  * 这 16 个数是 IPv6 的 16 个字节的十进制写法，必须还原成 a:b:c:... 形式，
  * 否则界面会把这串数字原样显示给用户。
  */
-const CGPADDR_REAL = '+CGPADDR: 1,"10.1.42.244"\r\n' +
-	'+CGPADDR: 5,"36.9.129.90.51.117.63.92.24.212.187.187.170.233.248.14"\r\nOK';
+const CGPADDR_REAL = '+CGPADDR: 1,"10.0.0.7"\r\n' +
+	'+CGPADDR: 5,"198.51.100.7.198.51.100.10.198.51.100.11.198.51.100.12"\r\nOK';
 const addrs = Parse.parseCgpaddr(CGPADDR_REAL);
 eq('CGPADDR 条数', addrs.length, 2);
-eq('CGPADDR cid=1 是 IPv4', [addrs[0].cid, addrs[0].address, addrs[0].family], [1, '10.1.42.244', 'IPv4']);
+eq('CGPADDR cid=1 是 IPv4', [addrs[0].cid, addrs[0].address, addrs[0].family], [1, '10.0.0.7', 'IPv4']);
 eq('CGPADDR cid=5 的 16 段十进制还原为 IPv6',
-	[addrs[1].address, addrs[1].family], ['2409:815a:3375:3f5c:18d4:bbbb:aae9:f80e', 'IPv6']);
+	[addrs[1].address, addrs[1].family], ['c633:6407:c633:640a:c633:640b:c633:640c', 'IPv6']);
 eq('CGPADDR 全零+末位 1 还原为 ::1', Parse.parseCgpaddr('+CGPADDR: 5,"0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1"')[0].address, '::1');
 eq('CGPADDR 已是冒号形式的原样保留',
 	Parse.parseCgpaddr('+CGPADDR: 3,"2409:815b:32e5:affd:18d4:b851:d701:dc4f"')[0].address,

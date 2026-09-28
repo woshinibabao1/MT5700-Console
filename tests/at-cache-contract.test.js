@@ -173,10 +173,10 @@ function newClient() {
 }
 
 const c1 = newClient();
-c1._cachePut('AT+CGSN', { success: true, data: '864640060359112' });
+c1._cachePut('AT+CGSN', { success: true, data: '356938035643809' });
 ok('写入后可命中', c1._cacheGet('AT+CGSN') !== null);
 ok('命中返回原值',
-	c1._cacheGet('AT+CGSN') && c1._cacheGet('AT+CGSN').data === '864640060359112');
+	c1._cacheGet('AT+CGSN') && c1._cacheGet('AT+CGSN').data === '356938035643809');
 ok('大小写不同也能命中', c1._cacheGet('at+cgsn') !== null);
 
 /* 失败不缓存 */
@@ -205,7 +205,7 @@ ok('标识档超过 10 分钟也失效（换卡后能自愈）', veryOld._cacheG
 
 const c4 = newClient();
 c4._cachePut('AT+CPIN?', { success: true, data: 'READY' });
-c4._cachePut('AT+CGSN', { success: true, data: '864640060359112' });
+c4._cachePut('AT+CGSN', { success: true, data: '356938035643809' });
 c4._cachePut('AT^HCSQ?', { success: true, data: 'NR' });
 c4._dropStateCache();
 ok('写命令后状态类缓存被清掉', c4._cacheGet('AT+CPIN?') === null);

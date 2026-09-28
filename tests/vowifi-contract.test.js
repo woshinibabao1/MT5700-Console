@@ -191,8 +191,8 @@ eq('★★ NXDOMAIN 输出（真机格式）一个地址都不产生',
 		'223.5.5.5'), []);
 eq('★★ 阳性对照（真机格式）：Server 段被排除，只留真正的 A 记录',
 	run(pick, NS_SRV.concat(['', 'Name:\tepdg.epc.mnc260.mcc310.pub.3gppnetwork.org',
-		'Address 1: 208.54.5.195']),
-		'223.5.5.5'), ['208.54.5.195']);
+		'Address 1: 198.51.100.9']),
+		'223.5.5.5'), ['198.51.100.9']);
 eq('★★ 阴性对照（真机格式）：只回 127.0.0.1 —— 通配污染的原貌',
 	run(pick, NS_SRV.concat(['', 'Name:\tepdg.epc.mnc999.mcc460.pub.3gppnetwork.org',
 		'Address 1: 127.0.0.1']),
@@ -202,7 +202,7 @@ eq('★★ 阴性对照（真机格式）：只回 127.0.0.1 —— 通配污染
 
 const epdgState = ucFn(['isLoopbackAddr', 'epdgState'], 'epdgState');
 
-/* 2026-09-24 真机：中国移动卡（IMSI 460009711127691） */
+/* 2026-09-24 真机：中国移动卡（IMSI 460001234567890） */
 eq('真机回归：本卡 ePDG 查不到 → not_published',
 	run(epdgState, { addrs: [], nx: true, cname: '' }), 'not_published');
 eq('真机回归：阳性对照解析到 208.54.39.163 → available',
@@ -224,8 +224,8 @@ ok('★ isLoopbackAddr 不误杀 182.239.118.1（真机 CSL ePDG）', run(isLoop
 
 /* IMSI 提取：AT 应答里夹着 \r\nOK，只取第一段够长的数字串 */
 const exImsi = ucFn(['extractImsi'], 'extractImsi');
-eq('extractImsi 从「460009711127691\\r\\nOK」里取出 IMSI',
-	run(exImsi, '460009711127691\r\nOK'), '460009711127691');
+eq('extractImsi 从「460001234567890\\r\\nOK」里取出 IMSI',
+	run(exImsi, '460001234567890\r\nOK'), '460001234567890');
 eq('★ extractImsi 遇到没有 IMSI 的应答返回空串（不许返回 OK 里的杂数）',
 	run(exImsi, 'ERROR'), '');
 
@@ -419,12 +419,12 @@ eq('mnc3Of 三位不动', run(mnc3Of, '123'), '123');
 eq('★ mnc3Of 对空串返回空（不许补成 "0000"）', run(mnc3Of, ''), '');
 
 const deriveImpi = ucFn(['deriveImpi'], 'deriveImpi');
-/* 真机：IMSI 460009711127691，MCC 460，MNC 00（EF_AD 定长 2） */
+/* 真机：IMSI 460001234567890，MCC 460，MNC 00（EF_AD 定长 2） */
 eq('★★ deriveImpi 按 TS 23.003 拼出真机 IMPI',
-	run(deriveImpi, '460009711127691', '460', '000'),
-	'460009711127691@ims.mnc000.mcc460.3gppnetwork.org');
+	run(deriveImpi, '460001234567890', '460', '000'),
+	'460001234567890@ims.mnc000.mcc460.3gppnetwork.org');
 eq('★ deriveImpi 参数不全返回空串（不许拼半个 IMPI 出来）',
-	run(deriveImpi, '460009711127691', '460', ''), '');
+	run(deriveImpi, '460001234567890', '460', ''), '');
 eq('★ deriveImpi 对 MCC 不是三位也返回空串', run(deriveImpi, '460', '46', '000'), '');
 
 /*

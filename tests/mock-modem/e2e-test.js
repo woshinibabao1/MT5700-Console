@@ -103,7 +103,7 @@ async function main() {
 		const r1 = await at('ATI');
 		check('ATI 应答', r1.result && r1.result.success && String(r1.result.data).indexOf('MT5700M') >= 0, String(r1.result && r1.result.data).slice(0, 40));
 		const r2 = await at('AT+CGSN');
-		check('AT+CGSN 应答', r2.result && r2.result.success && String(r2.result.data).indexOf('862234051234567') >= 0, String(r2.result && r2.result.data).slice(0, 24));
+		check('AT+CGSN 应答', r2.result && r2.result.success && String(r2.result.data).indexOf('356938035643809') >= 0, String(r2.result && r2.result.data).slice(0, 24));
 		const r3 = await at('AT^HCSQ?');
 		check('AT^HCSQ? 应答', r3.result && r3.result.success && String(r3.result.data).indexOf('^HCSQ') >= 0, String(r3.result && r3.result.data).slice(0, 32));
 	}

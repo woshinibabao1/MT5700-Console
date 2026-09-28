@@ -191,7 +191,7 @@ eq('NDIS stat=0 → bad', judge('拨号连接', '^NDISSTATQRY: 1,0\r\nOK').level
 eq('NDIS 无应答 → bad（不是 warn）', judge('拨号连接', 'ERROR').level, 'bad');
 
 eq('CGPADDR 有地址 → ok',
-	judge('拿到 IP 地址', '+CGPADDR: 1,"10.117.101.195"\r\nOK').level, 'ok');
+	judge('拿到 IP 地址', '+CGPADDR: 1,"10.0.0.5"\r\nOK').level, 'ok');
 eq('CGPADDR 空地址 → bad',
 	judge('拿到 IP 地址', '+CGPADDR: 1,""\r\nOK').level, 'bad');
 
@@ -364,9 +364,9 @@ eq('CGSMS 真机默认 3', Parse.parseCgsms('+CGSMS: 3').service, 3);
 eq('CGSMS 3 → 优先 CS', [Parse.parseCgsms('+CGSMS: 3').preferCs, Parse.parseCgsms('+CGSMS: 3').preferPs], [true, false]);
 eq('CGSMS 无匹配 → null', Parse.parseCgsms('ERROR'), null);
 
-/* 地址汇聚与去重（真机三来源） */
-const CGPADDR_REAL = '+CGPADDR: 1,"10.117.101.195"\r\n'
-	+ '+CGPADDR: 5,"36.9.129.90.50.117.112.78.24.213.207.104.52.213.185.122"\r\nOK';
+/* 地址汇聚与去重（真机三来源；16 段十进制 = IPv6 的 16 个字节，已脱敏为样例地址） */
+const CGPADDR_REAL = '+CGPADDR: 1,"10.0.0.5"\r\n'
+	+ '+CGPADDR: 5,"198.51.100.7.198.51.100.10.198.51.100.11.198.51.100.12"\r\nOK';
 function makeAddrList(st) {
 	return new Function('state',
 		extractFn(nsSrc, 'addrKey') + '\n' + extractFn(nsSrc, 'buildAddrList')
@@ -374,13 +374,13 @@ function makeAddrList(st) {
 }
 const addrState = {
 	diag: { addrs: Parse.parseCgpaddr(CGPADDR_REAL) },
-	dhcpv4: { ipv4Address: '10.117.101.195' },
+	dhcpv4: { ipv4Address: '10.0.0.5' },
 	dhcpv6: null
 };
 const addrList = makeAddrList(addrState)();
 eq('去重后只剩 2 条（IPv4 与 IPv6）', addrList.length, 2);
 eq('IPv4 排在 IPv6 前', [addrList[0].family, addrList[1].family], ['IPv4', 'IPv6']);
-eq('IPv6 还原成冒号形式', addrList[1].address, '2409:815a:3275:704e:18d5:cf68:34d5:b97a');
+eq('IPv6 还原成冒号形式', addrList[1].address, 'c633:6407:c633:640a:c633:640b:c633:640c');
 eq('同地址不同 CID → 1 行',
 	makeAddrList({
 		diag: { addrs: [{ cid: 1, address: '10.0.0.2', family: 'IPv4' }, { cid: 7, address: '10.0.0.2', family: 'IPv4' }] },

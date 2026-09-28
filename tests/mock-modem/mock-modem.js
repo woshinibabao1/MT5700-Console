@@ -23,7 +23,7 @@ const state = {
 	clip: 1,
 	cmee: 2,
 	csca: '+8613800755500',
-	imei: '862234051234567',
+	imei: '356938035643809',
 	rsrp: -95,      // 动态变化用于信号 URC
 	ims: '1,1,1',
 	smsSeq: 0
@@ -60,7 +60,7 @@ function replyFor(cmd) {
 	if (c === 'AT^LENDC?') return '^LENDC: 1,0,0,0,0\r\nOK';
 	if (c === 'AT^TXPOWER?') return 'ERROR';   // 手册 §13.23 仅 GUL 有效；本机 NR SA 实测 0/3 恒 ERROR
 	if (c === 'AT^NTXPOWER?') return '^NTXPOWER: 2,6,12,-10,2644800\r\nOK';
-	if (c === 'AT+CGPADDR') return '+CGPADDR: 1,"10.1.42.244"\r\n+CGPADDR: 5,"36.9.129.90.51.117.63.92.24.212.187.187.170.233.248.14"\r\nOK';
+	if (c === 'AT+CGPADDR') return '+CGPADDR: 1,"10.0.0.7"\r\n+CGPADDR: 5,"198.51.100.7.198.51.100.10.198.51.100.11.198.51.100.12"\r\nOK';
 	if (c === 'AT^CHIPTEMP?') return '^CHIPTEMP: 408,405,400,410,390,390,410,410,410,420,400,400\r\nOK';
 	if (c === 'AT+CPIN?') return '+CPIN: READY\r\nOK';
 	if (c === 'AT+CMGL=4') {
@@ -108,7 +108,7 @@ function replyFor(cmd) {
 	if (c === 'AT^CONNECT?') return 'ERROR';   // 真机不支持；AT+CONNECT? 是 Rust 后端伪命令
 	if (c === 'AT^SYSCFGEX?') return '^SYSCFGEX: "080302",2000000680380,1,2,1E200000095\r\nOK';
 	if (c.startsWith('AT^SYSCFGEX=')) return 'OK';
-	if (c === 'AT^PHYNUM?') return '^PHYNUM:IMEI,864640060359112\r\n^PHYNUM:MACWLAN,\r\n^PHYNUM:SVN,00\r\nOK';
+	if (c === 'AT^PHYNUM?') return '^PHYNUM:IMEI,356938035643809\r\n^PHYNUM:MACWLAN,\r\n^PHYNUM:SVN,00\r\nOK';
 	if (c === 'AT^SCICHG?') return '^SCICHG: 0,1\r\nOK';
 	if (c.startsWith('AT^SCICHG=')) return 'OK';
 	if (c === 'AT^HVSST?') return '^HVSST: 1,1,0,1\r\nOK';

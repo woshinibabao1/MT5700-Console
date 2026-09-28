@@ -265,7 +265,7 @@ asyncTests.push((function () {
 		[Euicc.csimCommand(Euicc.openChannelApdu())]: { success: true, data: csimAnswer('029000') },
 		[Euicc.csimCommand(Euicc.selectIsdrApdu(2))]: { success: true, data: csimAnswer('6A82') },
 		[Euicc.csimCommand(Euicc.selectIsdrApdu(0))]: { success: true, data: csimAnswer('9000') },
-		[Euicc.csimCommand(Euicc.buildGetEid(0))]: { success: true, data: csimAnswer('BF3E125A10890860302022000000260001733269599000') },
+		[Euicc.csimCommand(Euicc.buildGetEid(0))]: { success: true, data: csimAnswer('BF3E125A10890490320012345678901234567890129000') },
 		[Euicc.csimCommand(Euicc.buildGetProfiles(0))]: { success: true, data: csimAnswer('BF2D02A0009000') }
 	});
 	return Euicc.listProfiles(send).then(function (list) {
@@ -678,7 +678,7 @@ ok('★ P07 反向：删掉缺省回显分支则 es10ResultText(999) 不再含�
 /* ---------- P08：probe 复用探活 EID，BF3E 只下发一次 ---------- */
 
 asyncTests.push((function () {
-	var eid = '89086030202200000026000173326959';
+	var eid = '89049032001234567890123456789012';
 	var counter = [];
 	var send = mockSend({
 		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },
@@ -701,7 +701,7 @@ asyncTests.push((function () {
 /* ★ P08 反向：把「复用探活 EID」的分支去掉（强制每次现取），BF3E 必须变成 2 次 ——
  *   证明上面那条 ==1 的断言真在测复用，而不是恒绿。 */
 asyncTests.push((function () {
-	var eid = '89086030202200000026000173326959';
+	var eid = '89049032001234567890123456789012';
 	var negSrc = src.split('pingInfo && pingInfo.eid').join('false');
 	if (negSrc === src) { fails.push('P08 反向用例未打中源码（替换失效）'); return Promise.resolve(); }
 	var neg = eval('(' + negSrc.match(/var Euicc = \((function[\s\S]*?\n\})\)\(\);/)[1] + ')')();
@@ -733,7 +733,7 @@ asyncTests.push((function () {
 		counter.push(cmd);
 		if (cmd === Euicc.csimCommand(Euicc.openChannelApdu())) return Promise.resolve({ success: true, data: csimAnswer('019000') });
 		if (cmd === Euicc.csimCommand(Euicc.selectIsdrApdu(1))) return Promise.resolve({ success: true, data: csimAnswer('9000') });
-		if (cmd === Euicc.csimCommand(Euicc.buildGetEid(1))) return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10890860302022000000260001733269599000') });
+		if (cmd === Euicc.csimCommand(Euicc.buildGetEid(1))) return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10890490320012345678901234567890129000') });
 		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildGetProfiles(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer(KORE + '9000') });
 		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildListNotification(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer(NOTIF + '9000') });
 		if (cmd === Euicc.csimCommand(Euicc.closeChannelApdu(1))) return Promise.resolve({ success: true, data: csimAnswer('9000') });
@@ -761,7 +761,7 @@ asyncTests.push((function () {
 		counter.push(cmd);
 		if (cmd === Euicc.csimCommand(Euicc.openChannelApdu())) return Promise.resolve({ success: true, data: csimAnswer('019000') });
 		if (cmd === Euicc.csimCommand(Euicc.selectIsdrApdu(1))) return Promise.resolve({ success: true, data: csimAnswer('9000') });
-		if (cmd === Euicc.csimCommand(Euicc.buildGetEid(1))) return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10890860302022000000260001733269599000') });
+		if (cmd === Euicc.csimCommand(Euicc.buildGetEid(1))) return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10890490320012345678901234567890129000') });
 		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildGetProfiles(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer(KORE + '9000') });
 		/* 回执读取失败（SW≠9000）：必须返回空 items，绝不抛、不误读 */
 		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildListNotification(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer('6A88') });
@@ -787,7 +787,7 @@ asyncTests.push((function () {
 	var send = function (cmd) {
 		if (cmd === Euicc.csimCommand(Euicc.openChannelApdu())) return Promise.resolve({ success: true, data: csimAnswer('019000') });
 		if (cmd === Euicc.csimCommand(Euicc.selectIsdrApdu(1))) return Promise.resolve({ success: true, data: csimAnswer('9000') });
-		if (cmd === Euicc.csimCommand(Euicc.buildGetEid(1))) return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10890860302022000000260001733269599000') });
+		if (cmd === Euicc.csimCommand(Euicc.buildGetEid(1))) return Promise.resolve({ success: true, data: csimAnswer('BF3E125A10890490320012345678901234567890129000') });
 		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildGetProfiles(1))) === 0) return Promise.resolve({ success: true, data: csimAnswer(KORE + '9000') });
 		/* AT 服务未就绪：不是「卡上没有回执」，必须原样上抛 */
 		if (cmd.indexOf(Euicc.csimCommand(Euicc.buildListNotification(1))) === 0) {
@@ -819,7 +819,7 @@ ok('R06 probe 侧 pingInfo.eid 为空时退回现发 BF3E（不会把空 EID 当
 	/var eidReady = \(pingInfo && pingInfo\.eid\)[\s\S]{0,200}?buildGetEid\(ch\)/.test(src));
 
 asyncTests.push((function () {
-	var eid = '89086030202200000026000173326959';
+	var eid = '89049032001234567890123456789012';
 	var counter = [];
 	var send = mockSend({
 		'AT^SIMSQ?': { success: true, data: '^SIMSQ: 0,1' },

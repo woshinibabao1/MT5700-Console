@@ -89,10 +89,10 @@ function truthyTable(fnBody) {
 }
 const evalBind = truthyTable(safeBind);
 ok('★ safeBindIp("") → 不绑定（空串合法，多出口时可不绑）', evalBind('', (x) => x.length, (a, b, c) => a.substr(b, c)) === '');
-ok('★ safeBindIp("10.68.233.15") 放行',
-	evalBind('10.68.233.15', (x) => x.length, (a, b, c) => a.substr(b, c)) === '10.68.233.15');
-ok('★ safeBindIp("10.68.233.15; rm -rf /") 拒绝（分号/空格/斜杠一律 null）',
-	evalBind('10.68.233.15; rm -rf /', (x) => x.length, (a, b, c) => a.substr(b, c)) === null);
+ok('★ safeBindIp("10.0.0.6") 放行',
+	evalBind('10.0.0.6', (x) => x.length, (a, b, c) => a.substr(b, c)) === '10.0.0.6');
+ok('★ safeBindIp("10.0.0.6; rm -rf /") 拒绝（分号/空格/斜杠一律 null）',
+	evalBind('10.0.0.6; rm -rf /', (x) => x.length, (a, b, c) => a.substr(b, c)) === null);
 ok('★ safeBindIp("1.2.3.4 && curl evil") 拒绝',
 	evalBind('1.2.3.4 && curl evil', (x) => x.length, (a, b, c) => a.substr(b, c)) === null);
 ok('★ safeBindIp("....") 拒绝（3 个点但 0 位数字）',
