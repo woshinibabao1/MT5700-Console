@@ -623,7 +623,16 @@ var Parse = (function () {
 			if (!av) {
 				row.state = 'unknown';
 			} else if (f.bitmap) {
-				if (normHexForCompare(wv) === normHexForCompare(av)) row.state = 'exact';
+				/*
+				 * ★ 位图分支必须先判「能不能比」——normHexForCompare 对非十六进制返回空串，
+				 *   而 hexMaskSubset 拿到空串会**直接 return false**。若不加这层守卫，
+				 *   回读值只要不是合法十六进制（模组异常应答、被别处写成乱码），
+				 *   就会一路落到 'rejected'，被消费端断言成「模组未接受：该取值本机不支持」
+				 *   —— 那是**凭空替模组背了个书面结论**，而真实情况是「根本没法比较」。
+				 *   与上面 !av 的处理同构：拿不到可比的值，就诚实报 unknown，交给上层提示复核。
+				 */
+				if (!normHexForCompare(wv) || !normHexForCompare(av)) row.state = 'unknown';
+				else if (normHexForCompare(wv) === normHexForCompare(av)) row.state = 'exact';
 				else if (hexMaskSubset(wv, av)) row.state = 'clipped';
 				else row.state = 'rejected';
 			} else {
@@ -664,7 +673,13 @@ var Parse = (function () {
 		if (!t) return '未设置';
 		if (t === '99') return '不修改（保持原有接入次序）';
 		var out = [];
-		for (var i = 0; i + 1 < t.length + 1; i += 2) {
+		/*
+		 * 每 2 位一组。原判据是 `i + 1 < t.length + 1`（两边同减 1 即 `i < t.length`），
+		 * 多写的 +1 会让人误以为边界更宽泛。直接写 `i < t.length`，末组不足 2 位时
+		 * 由下面 `code.length < 2` 丢弃 —— 畸形的半个制式码不该被译成制式。
+		 * 已实测：等价改写后对 '01'/'0103'/'010304'/'01 03' 输出完全一致。
+		 */
+		for (var i = 0; i < t.length; i += 2) {
 			var code = t.substr(i, 2);
 			if (code.length < 2) break;
 			out.push(ACQ_CODES[code] || ('未知(' + code + ')'));

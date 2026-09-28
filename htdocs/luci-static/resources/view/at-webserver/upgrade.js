@@ -238,20 +238,20 @@ return L.view.extend({
 
 		function queryState() {
 			return AtWs.client.sendCommand('AT^FOTASTATE?').then(function (res) {
-			if (res.success && typeof res.data === 'string') {
-				var raw = AtWs.extractATData(res.data, '^FOTASTATE') || res.data.split(':')[1];
-				if (raw == null) return null;
-				// 应答形如 `10`、`13,13`、`12,V100R001C00B002,6129664,1.product_name=...`
-				// —— 第一个字段是状态，13 时第二个字段是子错误码。
-				var parts = String(raw).split(',');
-				var st = parseInt(parts[0], 10);
-				if (isNaN(st)) return null;
-				fotaState = st;
-				stateDetail = (st === 13 && parts.length > 1) ? (parseInt(parts[1], 10) || 0) : 0;
-				return st;
-			}
-			return null;
-		});
+				if (res.success && typeof res.data === 'string') {
+					var raw = AtWs.extractATData(res.data, '^FOTASTATE') || res.data.split(':')[1];
+					if (raw == null) return null;
+					// 应答形如 `10`、`13,13`、`12,V100R001C00B002,6129664,1.product_name=...`
+					// —— 第一个字段是状态，13 时第二个字段是子错误码。
+					var parts = String(raw).split(',');
+					var st = parseInt(parts[0], 10);
+					if (isNaN(st)) return null;
+					fotaState = st;
+					stateDetail = (st === 13 && parts.length > 1) ? (parseInt(parts[1], 10) || 0) : 0;
+					return st;
+				}
+				return null;
+			});
 		}
 
 		/**
@@ -334,7 +334,28 @@ return L.view.extend({
 					now = lines[0] || '';
 				}
 				upgrading = false;
-				if (now && baseVersion && now !== baseVersion) {
+				/*
+				 * ★ 三态判定：成功 / 版本未变化 / 无法判定。
+				 *
+				 * 原判据是 `now && baseVersion && now !== baseVersion`，它把「基准缺失」这一态
+				 * 混进了「失败」：升级前这次 AT+CGMR 若没取到（首屏失败、或用户抢在版本回来前
+				 * 就点了开始），baseVersion 就是空串；此时即使升级**真的成功**（now 已是新版本），
+				 * 那个 `baseVersion &&` 也会短路成假，一路落到下面报「固件版本未变化」。
+				 * —— 把「不知道基准」说成了「没变化」，等于替设备背了个没观测到的结论。
+				 *
+				 * 拿不到基准时无法自动判定成败，就诚实说无法判定，并指引用 AT^VERSION? 复核
+				 * —— 与全项目「解析不了就明说解析不了」的红线一致。
+				 */
+				if (!baseVersion) {
+					step = 0;
+					renderVersion();
+					renderUpgrade();
+					Mt5700.info('升级流程已结束。升级前未能读到固件版本，无法自动判定是否成功'
+						+ '（当前版本 ' + (now || '未知')
+						+ '）—— 请到终端用 AT^FOTASTATE? 与 AT^VERSION? 复核');
+					return;
+				}
+				if (now && now !== baseVersion) {
 					version = now;
 					step = 4;
 					renderVersion();
