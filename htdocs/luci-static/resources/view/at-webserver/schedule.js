@@ -353,23 +353,23 @@ return L.view.extend({
 				statusLine.appendChild(E('span', { 'class': 'mt5700-hint' }, '暂无运行状态'));
 			}
 
-		// 总开关状态：卡片始终显示——未启用时给出可行动的提示，而不是把整张卡藏掉
-		formCard.style.display = '';
-		formBody.innerHTML = '';
-		if (!cfg || !cfg.enabled || !draft) {
-			formBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-				'定时锁频未启用：打开上方「启用定时锁频」开关后即可编排时段。'));
-			return;
-		}
+			// 总开关状态：卡片始终显示——未启用时给出可行动的提示，而不是把整张卡藏掉
+			formCard.style.display = '';
+			formBody.innerHTML = '';
+			if (!cfg || !cfg.enabled || !draft) {
+				formBody.appendChild(E('div', { 'class': 'mt5700-hint' },
+					'定时锁频未启用：打开上方「启用定时锁频」开关后即可编排时段。'));
+				return;
+			}
 
-		if (!expanded) {
-			formBody.appendChild(Mt5700.primaryButton('展开配置', function () {
-				expanded = true;
+			if (!expanded) {
+				formBody.appendChild(Mt5700.primaryButton('展开配置', function () {
+					expanded = true;
+					buildForm();
+				}));
+			} else {
 				buildForm();
-			}));
-		} else {
-			buildForm();
-		}
+			}
 	}
 
 		/* ---------- 初始化 ---------- */

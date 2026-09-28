@@ -273,17 +273,17 @@ return L.view.extend({
 		var pdpCard = Mt5700.card('PDP 上下文', 'CGDCONT 列表：新增、编辑、删除、激活 / 去激活（CID 0 为默认承载：可改不可删，状态随网络附着）');
 		body.appendChild(pdpCard);
 
-		/*
-	 * 手册 16.18 注 3：APN 建议只用 ^SETAUTODIAL 配，不要再用 CGDCONT 同时配，
-	 * 否则实际生效的 APN 可能与预期不一致。本卡片改的就是 CGDCONT，先把话说在前面。
-	 */
-	pdpCard._body.appendChild(E('div', { 'class': 'mt5700-hint' },
-		'APN 建议只在上方「自动拨号与 APN」里设置；此处改 CGDCONT 只用于 IMS / 专线等特殊承载。'));
+			/*
+		 * 手册 16.18 注 3：APN 建议只用 ^SETAUTODIAL 配，不要再用 CGDCONT 同时配，
+		 * 否则实际生效的 APN 可能与预期不一致。本卡片改的就是 CGDCONT，先把话说在前面。
+		 */
+		pdpCard._body.appendChild(E('div', { 'class': 'mt5700-hint' },
+			'APN 建议只在上方「自动拨号与 APN」里设置；此处改 CGDCONT 只用于 IMS / 专线等特殊承载。'));
 
-	pdpCard._body.appendChild(Mt5700.panelActions(
-			Mt5700.primaryButton('+ 新增', function () { openEdit(null); }),
-			Mt5700.ghostButton('刷新', function () { fetchPDPContexts(); })
-		));
+		pdpCard._body.appendChild(Mt5700.panelActions(
+				Mt5700.primaryButton('+ 新增', function () { openEdit(null); }),
+				Mt5700.ghostButton('刷新', function () { fetchPDPContexts(); })
+			));
 		var pdpBody = E('div');
 		pdpCard._body.appendChild(pdpBody);
 
@@ -413,14 +413,14 @@ return L.view.extend({
 		/* 0/1/2 都是手册里的合法值（0=模组内部拨号），只有读不回来时才兜底 1 */
 		if (wantMode !== '0' && wantMode !== '1' && wantMode !== '2') wantMode = '1';
 
-			var curEnable = L.uci.get('at-webserver', 'config', 'autodial_enable');
-			var curMode = L.uci.get('at-webserver', 'config', 'autodial_mode');
-			if (curEnable === wantEnable && curMode === wantMode) return;
-			if (curEnable == null && wantEnable === '1' && curMode == null) return;
+		var curEnable = L.uci.get('at-webserver', 'config', 'autodial_enable');
+		var curMode = L.uci.get('at-webserver', 'config', 'autodial_mode');
+		if (curEnable === wantEnable && curMode === wantMode) return;
+		if (curEnable == null && wantEnable === '1' && curMode == null) return;
 
-			L.uci.set('at-webserver', 'config', 'autodial_enable', wantEnable);
-			L.uci.set('at-webserver', 'config', 'autodial_mode', wantMode);
-			AtWs.uci.uciCommit('at-webserver').catch(function () { /* 不阻断页面 */ });
+		L.uci.set('at-webserver', 'config', 'autodial_enable', wantEnable);
+		L.uci.set('at-webserver', 'config', 'autodial_mode', wantMode);
+		AtWs.uci.uciCommit('at-webserver').catch(function () { /* 不阻断页面 */ });
 		}
 
 		function handleAutoDialChange(checked) {

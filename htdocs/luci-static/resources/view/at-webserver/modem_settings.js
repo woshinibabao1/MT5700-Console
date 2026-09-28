@@ -1273,9 +1273,9 @@ return L.view.extend({
 						var clipped = rows.filter(function (r) { return r.state === 'clipped'; });
 						var unclear = rows.filter(function (r) { return r.state === 'unknown'; });
 						if (!rejected.length && !clipped.length && !unclear.length) {
-						Mt5700.success('网络系统配置已更新，模组将重新搜网');
-							return;
-					}
+							Mt5700.success('网络系统配置已更新，模组将重新搜网');
+								return;
+						}
 						if (rejected.length) {
 							Mt5700.warning('模组未接受：' + rejected.map(function (r) {
 								return r.label + '（下发 ' + r.want + '，实际仍是 ' + r.got + '）';

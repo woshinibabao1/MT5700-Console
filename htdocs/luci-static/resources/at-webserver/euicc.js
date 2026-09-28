@@ -2050,11 +2050,11 @@ api.tlvTotalBytes = function (hex) {
 };
 
 api.buildEs10b = function (ch, tag, derHex) {
-		if (ES10B_TAGS.indexOf(tag) < 0) {
-			throw makeError('EUICC_BAD_APDU', '不允许的 ES10b tag：' + tag);
-		}
-		if (derHex && !api.isHex(derHex)) throw makeError('EUICC_BAD_HEX', 'derHex 非法');
-		return api.storeDataApdu(ch, api.hexToBytes(tlvHex(tag, derHex || '')));
+	if (ES10B_TAGS.indexOf(tag) < 0) {
+		throw makeError('EUICC_BAD_APDU', '不允许的 ES10b tag：' + tag);
+	}
+	if (derHex && !api.isHex(derHex)) throw makeError('EUICC_BAD_HEX', 'derHex 非法');
+	return api.storeDataApdu(ch, api.hexToBytes(tlvHex(tag, derHex || '')));
 	};
 
 	/*
@@ -2772,31 +2772,31 @@ api.buildEs10b = function (ch, tag, derHex) {
 						return sendApdu(api.buildRetrieveNotificationList(ch, n.seqHex))
 							.then(function (r) {
 								if (r.sw !== '9000') throw makeSwError('EUICC_OP_FAILED', r.sw);
-									/*
-									 * 每条回执发回**它自己的** SM-DP+：
-									 * 地址就写在通知里（BF2F 的 0C，见 parseNotifications），
-									 * 比调用方猜的 host 准。只有通知里没带时才用 host 兜底。
-									 *
-									 * 早先这里只看 host，而「处理待发回执」按钮拿不出 host
-									 * （用户没在下载，也就没有 SM-DP+ 地址），于是只要卡上真有
-									 * 待发回执就必然抛 EUICC_NO_ES9P —— 按钮等于摆设。
-									 */
-									var target = n.address || host;
-									if (!target || typeof es9p !== 'function') {
-										throw makeError('EUICC_NO_ES9P', '缺少 ES9+ 通道，回执发不出去');
-									}
-									var req = api.es9pRequest('handleNotification', {
-										pendingNotification: api.hexToBase64(r.data || '')
-									});
-									return es9p(target, req.path, req.json).then(function (resp) {
-									var st = resp && resp.status;
-									/* lpac：handleNotification 期望 204，其余 2xx 也认 */
-									if (st == null || st < 200 || st >= 300) {
-										throw makeError('EUICC_ES9P_FAILED',
-											'回执失败（HTTP ' + st + '）');
-									}
-									return sendApdu(api.buildRemoveNotificationFromList(ch, n.seqHex));
+								/*
+								 * 每条回执发回**它自己的** SM-DP+：
+								 * 地址就写在通知里（BF2F 的 0C，见 parseNotifications），
+								 * 比调用方猜的 host 准。只有通知里没带时才用 host 兜底。
+								 *
+								 * 早先这里只看 host，而「处理待发回执」按钮拿不出 host
+								 * （用户没在下载，也就没有 SM-DP+ 地址），于是只要卡上真有
+								 * 待发回执就必然抛 EUICC_NO_ES9P —— 按钮等于摆设。
+								 */
+								var target = n.address || host;
+								if (!target || typeof es9p !== 'function') {
+									throw makeError('EUICC_NO_ES9P', '缺少 ES9+ 通道，回执发不出去');
+								}
+								var req = api.es9pRequest('handleNotification', {
+									pendingNotification: api.hexToBase64(r.data || '')
 								});
+								return es9p(target, req.path, req.json).then(function (resp) {
+								var st = resp && resp.status;
+								/* lpac：handleNotification 期望 204，其余 2xx 也认 */
+								if (st == null || st < 200 || st >= 300) {
+									throw makeError('EUICC_ES9P_FAILED',
+										'回执失败（HTTP ' + st + '）');
+								}
+								return sendApdu(api.buildRemoveNotificationFromList(ch, n.seqHex));
+							});
 							})
 							.then(function () { return done + 1; });
 					});

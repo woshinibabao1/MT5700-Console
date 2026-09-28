@@ -434,10 +434,10 @@ return L.view.extend({
 		card._body.appendChild(Mt5700.errorState(
 			'读取 eSIM 信息失败：' + (detail || hint || '请稍后重试。'),
 			function () { render(); }));
-			body.appendChild(card);
-			if (code && typeof console !== 'undefined' && console.warn) {
-				console.warn('[esim] 探测错误 code=' + code);
-			}
+		body.appendChild(card);
+		if (code && typeof console !== 'undefined' && console.warn) {
+			console.warn('[esim] 探测错误 code=' + code);
+		}
 		}
 
 		/*
