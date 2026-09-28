@@ -162,8 +162,8 @@ eq('CGPADDR cid=5 的 16 段十进制还原为 IPv6',
 	[addrs[1].address, addrs[1].family], ['c633:6407:c633:640a:c633:640b:c633:640c', 'IPv6']);
 eq('CGPADDR 全零+末位 1 还原为 ::1', Parse.parseCgpaddr('+CGPADDR: 5,"0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1"')[0].address, '::1');
 eq('CGPADDR 已是冒号形式的原样保留',
-	Parse.parseCgpaddr('+CGPADDR: 3,"2409:815b:32e5:affd:18d4:b851:d701:dc4f"')[0].address,
-	'2409:815b:32e5:affd:18d4:b851:d701:dc4f');
+	Parse.parseCgpaddr('+CGPADDR: 3,"2001:db8:32e5:affd:18d4:b851:d701:dc4f"')[0].address,
+	'2001:db8:32e5:affd:18d4:b851:d701:dc4f');
 
 /* ---------- 9. ^NRRCCAPQRY 语法（手册 §13.26 / 真机实测） ----------
  * 只有 AT^NRRCCAPQRY=<mode> 形式；? 形式恒 ERROR。
