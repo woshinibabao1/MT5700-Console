@@ -5,7 +5,7 @@
 **鼎桥 MT5700M-CN 5G 模组 · OpenWrt LuCI 管理控制台**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v2.4.6-blue)](https://github.com/woshinibabao1/MT5700-Console/releases)
+[![Release](https://img.shields.io/github/v/release/woshinibabao1/MT5700-Console?label=release)](https://github.com/woshinibabao1/MT5700-Console/releases)
 [![OpenWrt](https://img.shields.io/badge/OpenWrt-23.05%20%7C%2024.10%2B-brightgreen)](https://openwrt.org/)
 
 信号 · 短信 · 锁频 · 拨号 · eSIM —— 常驻在路由器后台，浏览器只是它的操作台。
