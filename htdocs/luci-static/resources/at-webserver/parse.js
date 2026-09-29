@@ -1327,8 +1327,19 @@ var Parse = (function () {
 		 */
 		var enc = dcsEncoding(dcs);
 		var udLen;
-		if (enc === 1) udLen = udl;
-		else if (enc === 2) udLen = udl * 2;
+		/*
+		 * ★ 2026-09-30：UCS2 / 8bit 的 udl 计**八位组**，不是字符 —— 原先写 `udl * 2`
+		 * （按字符计）是隐患：它只靠下面 `Math.min(pos + udLen, raw.length)` 的越界钳制
+		 * 才在本仓常见输入上"碰巧"正确。一旦 raw 的 UD 之后还有字节（多行应答拼接、
+		 * 调用方多传、将来的解析改动），`udl * 2` 就会把那段数据当成正文吞进来。
+		 *
+		 * 依据（2026-09-30 对 tests/fixtures/pdu-samples.json 全量测算）：4 条 UCS2 样本的
+		 * udl 分别为 4 / 4 / 136 / 4，**逐条等于实到 UD 字节数**（按字符计会是 8 / 8 / 272 / 8），
+		 * 其中 136 那条是**真机样本**（10086 的 UCS2 长短信首段）；8bit 样本（DCS 0x04）
+		 * 同为 udl=4 == 4 字节。Rust 侧 src/rust/src/pdu.rs 同一处已按八位组校验并裁剪，
+		 * 两侧口径必须一致（tests/pdu-udl-unit-contract.test.js 钉住这一点）。
+		 */
+		if (enc === 1 || enc === 2) udLen = udl;
 		else udLen = Math.ceil(udl * 7 / 8);
 		var ud = raw.slice(pos, Math.min(pos + udLen, raw.length));
 

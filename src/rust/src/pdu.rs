@@ -227,10 +227,39 @@ pub fn decode_incoming_pdu(pdu_hex: &str) -> Result<Sms, String> {
     let dcs = cut(&raw, &mut pos, 1)?[0];
     let ts_bytes = cut(&raw, &mut pos, 7)?;
     let udl = cut(&raw, &mut pos, 1)?[0] as usize;
-    let ud = &raw[pos..];
 
     // DCS → 编码。见 dcs_encoding 的说明：不能只写 (dcs >> 2) & 0x03。
     let encoding = dcs_encoding(dcs);
+
+    // ★ 2026-09-30：按 udl **交叉校验并裁剪**用户数据。
+    //
+    //   为什么必须做：udl 是 PDU **自己声明的**长度，而 ud 是**实到字节**，此前两者不交叉校验：
+    //     · 数据不足（`AT+CMGL=4` 被 2 秒应答预算截断、串口半包）时，GSM7 会静默少解几个码位、
+    //       UCS2/8 位会丢掉尾部字节，最后仍然返回 `Ok` —— 调用方拿到一条"看起来正常"的短信，
+    //       尾部被悄悄吃掉，且会原样进通知与企业微信推送；
+    //     · 数据多于声明长度时，多余字节会被当成正文追加到末尾（垃圾字符进正文）。
+    //
+    //   口径：**不足即 Err**（显式失败，与本仓"不许静默"的约定一致，也与 gsm7 解码里
+    //   "宁可截断也不要造字"那条注释同一取向：能判断出错误就必须报出来）；
+    //   **多余则按声明长度裁剪** —— 3GPP 23.040 里 udl 才是 UD 的权威长度。
+    //
+    //   单位随编码不同，且**不能想当然**：
+    //     · GSM7（默认）：udl 计**码位**，字节数向上取整 = (udl*7+7)/8；
+    //     · UCS2 / 8 位：udl 计**八位组**（不是字符）—— 仓库自己的真机样本
+    //       `test_decode_concatenated_pdu` 就是 udl=8 对应「UDH 6 字节 + “测” 2 字节」。
+    //       若按 udl*2 校验，会把所有合法 UCS2 短信判成"数据不足"。
+    let ud = &raw[pos..];
+    let ud_need = match encoding {
+        0x02 | 0x01 => udl,
+        _ => (udl * 7 + 7) / 8,
+    };
+    if ud.len() < ud_need {
+        return Err(format!(
+            "用户数据不足：声明 {ud_need} 字节（udl={udl}），实到 {}",
+            ud.len()
+        ));
+    }
+    let ud = &ud[..ud_need];
 
     let mut udh_len = 0usize;
     let mut partial: Option<PartialInfo> = None;
@@ -425,6 +454,31 @@ mod tests {
     fn test_decode_gsm7_pdu() {
         let sms = decode_incoming_pdu(GSM7_PDU).unwrap();
         assert_eq!(sms.content, "hello");
+    }
+
+    /*
+     * ★ 2026-09-30 新增两条边界契约：udl（PDU 声明的长度）与实到字节的交叉校验。
+     *
+     * 触发路径是真实存在的那条：`AT+CMGL=4` 的应答超过 2 秒应答预算被截断 → 半截 PDU
+     * 进到解码器。旧行为下 UCS2 会少几个字符、GSM7 会少几个码位，**仍然返回 Ok**，
+     * 调用方无法区分"短信就这么长"与"数据被截断了"。
+     */
+    #[test]
+    fn pdu_用户数据不足必须报错而不是静默截断() {
+        // 砍掉 UCS2 样本最后 2 个字节，而它声明的 udl 没变 → 属于"数据不足"
+        let truncated = &UCS2_PDU[..UCS2_PDU.len() - 4];
+        let err = decode_incoming_pdu(truncated).expect_err("数据不足必须报错，不能静默截断");
+        assert!(err.contains("用户数据不足"), "错误信息要说明原因，实际：{err}");
+    }
+
+    #[test]
+    fn pdu_多余字节按声明长度裁剪() {
+        // 在合法 PDU 后追加 2 字节垃圾（"4142"）：udl 没变，所以它们不属于正文，
+        // 必须被裁掉 —— 旧行为会把它们解成正文尾部的乱码并一路推到通知里。
+        let with_junk = format!("{UCS2_PDU}4142");
+        let base = decode_incoming_pdu(UCS2_PDU).unwrap();
+        let got = decode_incoming_pdu(&with_junk).unwrap();
+        assert_eq!(got.content, base.content, "多余字节不得进入正文");
     }
 
     #[test]

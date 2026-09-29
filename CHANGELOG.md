@@ -5,6 +5,49 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.11] - 2026-09-30
+
+### Fixed
+
+**114. PDU 解码：udl（PDU 声明的用户数据长度）与实到字节不交叉校验 —— 半截 PDU 会被静默解成"看起来正常"的短信**
+
+触发路径真实存在：`AT+CMGL=4` 的应答超过 2 秒应答预算被截断（本仓 `pdu.rs` 与 `atclient.rs` 的注释都记录过这个前提），
+半截 PDU 直接进入解码器。修复前：
+
+| 编码 | 修复前行为 | 后果 |
+| :-- | :-- | :-- |
+| GSM7 | `unpack_septets(ud, total)` 数据不足时少解几个码位，仍返回 `Ok` | 正文尾部被悄悄吃掉 |
+| UCS2 / 8bit | 把 `ud` 剩余全部字节当正文（无长度校验） | 数据不足时丢尾字节；**数据多于声明长度时把多余字节当正文追加** |
+
+**修法（`src/rust/src/pdu.rs`）**：按 `udl` 计算字节需求并交叉校验 —— **不足即 `Err("用户数据不足…")`**
+（显式失败，与本仓"不许静默"的约定一致），**多余则按声明长度裁剪**（3GPP 23.040 里 `udl` 才是 UD 的权威长度）。
+
+**单位口径用真机样本定，不照抄推断**：`tests/fixtures/pdu-samples.json` 里 4 条 UCS2 样本的 `udl`
+分别为 4 / 4 / **136** / 4，逐条等于实到 UD 字节数（136 那条是 10086 的 UCS2 长短信首段，真机样本），
+8bit 样本同为 `udl=4 == 4` 字节 ⇒ UCS2/8bit 的 `udl` 计**八位组**（不是字符），GSM7 计**码位**。
+（"UCS2 按字符 = udl×2"这一说法在本模组上不成立；照它写会把合法 UCS2 短信全判成"数据不足"。）
+
+### Changed
+
+**前端 `parse.js` 同源对齐（全局同类排查）**：`decodeIncomingPdu` 原先在 UCS2 分支写 `udLen = udl * 2`
+（按字符计），只靠 `Math.min(pos + udLen, raw.length)` 的越界钳制才在常见输入上"碰巧"正确 ——
+一旦 raw 的 UD 之后还有字节（多行应答拼接、调用方多传），多出来的部分会被当正文吞进来。
+现改为与 Rust 侧同一口径（8bit/UCS2 取 `udl`，GSM7 取 `ceil(udl*7/8)`）。
+
+### Added
+
+`tests/pdu-udl-unit-contract.test.js`：把"udl 的**长度单位** + **前后端同源**"钉成契约
+（只认代码形态、不认注释 —— 本仓 find-orphans 自证清单里就有「C 注释不算使用」这一条）。
+
+### 验证
+
+| 项 | 方法 | 结果 |
+| :-- | :-- | :-- |
+| Rust 单测 | `cd src/rust && cargo test` | ✅ **47 passed / 0 failed**（原 45 + 新增 2 条边界契约：数据不足必须 Err、多余字节必须裁剪） |
+| Rust 编译 | `cargo check --all-targets` | ✅ rc=0 |
+| 长度单位契约 | `node tests/pdu-udl-unit-contract.test.js` | ✅ 8 项通过；把 `parse.js` 改回 `udl * 2` → 判红；改掉 `pdu.rs` 报错文案 → 判红；还原后通过 |
+| CI 全量复刻 | `sh tools/ci-local.sh`（本机提供 node） | ✅ 退出码 0：run-all 全部测试文件通过、syntax-check 20 个 JS 0 错误、verify-guards 164 条变异判红且还原逐字节一致、ucode 顺序 / 行尾 LF / AT 读写分类 / find-orphans 自证 14/14 全过 |
+
 ## [2.4.10] - 2026-09-30
 
 ### Fixed
