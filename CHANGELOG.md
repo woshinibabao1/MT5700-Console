@@ -37,6 +37,30 @@ UnicodeEncodeError: 'gbk' codec can't encode character '\u2713' in position 2
 临时撤掉 `find-orphans.py` 的兜底后 **rc=1 判红**（非恒绿），还原后通过；
 `node tools/run-tests-inproc.js` 全绿；`tools/verify-guards.py` **164/164 条变异判红、还原逐字节一致**。
 
+**113. 新增的 AT 拼写契约测试在 CI 上假红：把"没哑火"自检写成了依赖检出环境的数量阈值**
+
+CI 实际报错（`contract-check` → 「跑全部契约测试」，2026-09-30）：
+
+```
+FAIL      6 at-thermal-status-spelling-contract.test.js
+        ✗ 1. 扫到了生产代码文件（否则本测试等于没跑） —— 只扫到 38 个
+```
+
+**根因**：该测试首版用 `files.length > 50` 当反向自检（"扫不到就说明路径写错了"）。
+这个阈值**依赖检出环境** —— 本地工作树扫到 >50 个，CI 的 `actions/checkout` 只扫到 38 个，
+于是断言假红，整步 `node tests/run-all.js` 以 exit 1 结束，后续四条扫描器步骤全被跳过。
+
+**性质**：与本仓反复防的「守卫恒绿」是同一类错误的镜像 —— 恒绿是"永远不红"，
+写死环境相关阈值是"永远红/随机红"，两者都让守卫失去意义。
+
+**修法**（复用本仓既有惯例，见 `assert-signature-contract.test.js` / `undefined-fn-contract.test.js`）：
+把数量阈值换成 **`MUST_SCAN` 具体文件清单**（必须扫到 `modem_settings.js`），
+路径写错或目录改名才判红，与文件总数无关；并保留一条纯内存的反向自检
+（用必然不存在的路径验证"缺文件检测"真的有效）。
+
+**验证**：修正后 8 项全通过；把 `MUST_SCAN` 指向不存在的文件 → **rc=1、2 项判红**（非恒绿）；
+还原后全量契约测试 rc=0。本提交只动 `tests/` 与 `*.md`，按 `needs_code` 规则不触发打包。
+
 ### Added
 
 **AT 拼写契约（真机实证）**：`tests/at-thermal-status-spelling-contract.test.js`

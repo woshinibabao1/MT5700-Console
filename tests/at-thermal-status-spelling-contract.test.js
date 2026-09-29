@@ -63,8 +63,31 @@ function walk(dir, out) {
 
 const files = [];
 PROD_DIRS.forEach(function (d) { walk(path.join(ROOT, d), files); });
-ok('扫到了生产代码文件（否则本测试等于没跑）', files.length > 50,
-	'只扫到 ' + files.length + ' 个');
+
+/*
+ * ★ 2026-09-30 修正：这里原先写死 `files.length > 50` 当"没哑火"的反向自检，
+ *   结果 **CI 上只扫到 38 个文件**（本地工作树 >50）→ 假红，contract-check 的
+ *   「跑全部契约测试」整步挂掉。数量阈值本质上依赖检出环境（actions/checkout 的
+ *   文件集与本地工作树可以不同），属于**环境相关的断言** —— 与本仓反复防的
+ *   「守卫恒绿」是同一类错误的镜像。
+ *   改为本仓既有惯例（见 assert-signature-contract / undefined-fn-contract）：
+ *   钉住**必须扫到的具体文件**，路径写错或目录名改了才判红，与文件总数无关。
+ */
+const MUST_SCAN = [
+	'htdocs/luci-static/resources/view/at-webserver/modem_settings.js'
+];
+const scanned = new Set(files.map(function (p) {
+	return path.relative(ROOT, p).split(path.sep).join('/');
+}));
+const notScanned = MUST_SCAN.filter(function (n) { return !scanned.has(n); });
+ok('扫到了必须覆盖的生产文件（路径写错会让本测试恒绿）', notScanned.length === 0,
+	'没扫到：' + notScanned.join('、'));
+
+/* 反向自检：缺文件检测逻辑真的有效（拿一个必然不存在的路径试，恰好缺 1 个） */
+ok('★ 反向自检：缺文件检测有效（不是恒绿）',
+	MUST_SCAN.concat(['htdocs/__definitely_missing__.js']).filter(function (n) {
+		return !scanned.has(n);
+	}).length === 1);
 
 const WRONG = /AT\^THERMLDAUTOSTAT\?/;          /* 少一个 US —— 真机回 ERROR */
 const RIGHT = /AT\^THERMLDAUTOSTATUS\?/;        /* 真机回 ^THERMLDAUTOSTATUS: … */
