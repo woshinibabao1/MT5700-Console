@@ -1306,16 +1306,70 @@ return L.view.extend({
 			return hasPsService(null, cell);
 		}
 
-		function systemModeLabel(sysMode, carrierCount, registered) {
+		/*
+		 * 载波表里 **NR 载波**的条数。
+		 * ★ NSA(EN-DC) 下 ^HFREQINFO **同时**上报 LTE 锚点与 NR 辅载波
+		 *   （2026-09-29 真机：`0,6,3,…` + `0,7,41,…`），所以
+		 *   `state.carriers.length`（=2）不等于 NR 载波数（=1）——
+		 *   后者才是 5GA 判据的分母，也是「NR 到底在不在用」的证据。
+		 */
+		function nrCarrierCount(carriers) {
+			return (carriers || []).filter(function (c) {
+				return String((c && c.sysMode) || '').trim().toUpperCase() === 'NR';
+			}).length;
+		}
+
+		function systemModeLabel(sysMode, nrCarrierNum, registered, nrActive) {
 			if (registered === false) return '—';
 			var m = String(sysMode || '').trim().toUpperCase();
-			if (m === 'NR' || m === 'NR-5GC' || m === '5G') {
-				return (carrierCount >= 2 ? '5GA' : '5G') + '-NR';
+			/*
+			 * ★ 2026-09-29 真机 bug：NSA(EN-DC) 下 ^MONSC 报的是 **LTE 锚点**小区
+			 *   （`^MONSC: LTE,460,00,…`），只吃它的 <sysmode> 就会把 5G 显示成
+			 *   「4G-LTE」。而此刻 NR 其实已经在用 —— 同一轮里 ^LENDC 报
+			 *   `<nr_pscell>=1`（EN-DC 已建立）、^HFREQINFO 里有 sysmode=7 的载波、
+			 *   ^MONSSC 报出 NR 辅连接小区。
+			 *   所以「是不是 5G」由第四参 <nrActive>（NR 侧真的在用）决定，
+			 *   而不是锚点制式。第四参缺省时为假 → 老调用方与纯 LTE 行为不变。
+			 */
+			var isNr = m === 'NR' || m === 'NR-5GC' || m === '5G' || (m === 'LTE' && nrActive);
+			if (isNr) {
+				return (nrCarrierNum >= 2 ? '5GA' : '5G') + '-NR';
 			}
 			if (m === 'LTE') return '4G-LTE';
 			if (m === 'WCDMA') return '3G-WCDMA';
 			if (m === 'GSM') return '2G-GSM';
 			return m || '—';
+		}
+
+		/*
+		 * 「网络制式」唯一判定入口：把三路证据（^MONSC 的制式、^HFREQINFO 的载波、
+		 * ^LENDC 的 EN-DC 状态）合成一个标签。
+		 *
+		 * ★ 抽成纯函数不是为好看 —— 这段判定原先直接写在 renderConn 里，测试够不到
+		 *   （视图闭包），NSA 就是从这道缝里漏过去的。判据本身也容易漏东西，
+		 *   只有能被真数据驱动才守得住（见 tests/sysmode-label.test.js 的 NSA 段）。
+		 */
+		function ratDisplay(sysMode, carriers, endc, registered) {
+			if (registered === false) return '—';
+			var nrCcs = nrCarrierCount(carriers);
+			var dcActive = !!(endc && endc.established);
+			return systemModeLabel(sysMode, nrCcs, registered, nrCcs > 0 || dcActive);
+		}
+
+		/*
+		 * 「载波与聚合」徽章文案。
+		 * ★ 1 条 LTE + 1 条 NR 是**双连接（DC）**，不是载波聚合 —— 聚合要求
+		 *   同一制式内 ≥2 条载波。原判据是 `count > 1`，NSA 下 count=2，徽章
+		 *   于是把 EN-DC 说成「2 载波聚合中」，与本块注释「避免把 EN-DC 双连接
+		 *   与 NR 载波聚合混为一谈」自相矛盾（2026-09-29 真机）。
+		 */
+		function aggregationBadge(carrierCount, nrCount, dcActive) {
+			if (!carrierCount) return '不可用';
+			var caActive = carrierCount - nrCount > 1 || nrCount > 1;
+			if (dcActive && caActive) return 'EN-DC 双连接 + ' + carrierCount + ' 载波';
+			if (dcActive) return 'EN-DC 双连接';
+			if (caActive) return carrierCount + ' 载波聚合中';
+			return '单载波';
 		}
 
 		function renderConn() {
@@ -1334,11 +1388,14 @@ return L.view.extend({
 			var grid = E('div', { 'class': 'mt5700-metrics' });
 			[
 				{ label: '网络状态', value: state.networkStatus, color: 'info' },
-			/* 制式改成「5GA-NR / 5G-NR / 4G-LTE」写法，判定规则见 systemModeLabel。
-			   载波数是 ^HFREQINFO 聚合出来的载波条数（state.carriers）。
-			   第三个参数是「是否真的驻留上」：未注册时显示「—」，不把模组的
-			   残留制式字段当成正在用的网络（真机依据见 systemModeLabel 注释）。 */
-			{ label: '网络制式', value: systemModeLabel(state.cell.sysMode, state.carriers.length, hasAnyPsService(state.psRegStatEps, state.psRegStat, state.cell)) },
+			/* 制式「5GA-NR / 5G-NR / 4G-LTE」由 ratDisplay 统一判定（规则与真机依据见那里）。
+			   ★ 不能再传 `state.carriers.length` —— NSA 下它把 LTE 锚点与 NR 辅载波一起
+			   数进来，分母就错了；ratDisplay 内部按 per-carrier <sysmode> 自己取 NR 条数。
+			   第四参是「是否真的驻留上」：未注册时显示「—」，不把模组的残留制式字段
+			   当成正在用的网络（真机依据见 systemModeLabel 注释）。 */
+			{ label: '网络制式', value: ratDisplay(state.cell.sysMode, state.carriers,
+				state.diag && state.diag.endc,
+				hasAnyPsService(state.psRegStatEps, state.psRegStat, state.cell)) },
 				/* 信号强度不在此重复：上方环形仪表与顶部状态条已各有一处 */
 				{ label: 'APN', value: state.apn },
 				{ label: 'QCI', value: state.qci },
@@ -1426,13 +1483,16 @@ return L.view.extend({
 			var list = state.carriers || [];
 			var count = list.length;
 			var c0 = state.cell || {};
-			var caActive = count > 1;
+			/*
+			 * ★ 判据交给 aggregationBadge：NSA 下 count 里含 **LTE 锚点**，
+			 *   用 `count > 1` 会把 EN-DC 双连接误报成「2 载波聚合中」
+			 *   （2026-09-29 真机：1 LTE + 1 NR）。聚合要同制式内 ≥2 载波。
+			 */
 			var endc = state.diag && state.diag.endc;
 			var dcActive = !!(endc && endc.established);
-			var badge = !count ? '不可用'
-				: caActive ? (count + ' 载波聚合中')
-				: dcActive ? 'EN-DC 双连接'
-				: '单载波';
+			var nrCcs = nrCarrierCount(list);
+			var caActive = count - nrCcs > 1 || nrCcs > 1;
+			var badge = aggregationBadge(count, nrCcs, dcActive);
 
 			/* 头部与上游快照一致：先「当前载波数：N 个」，再聚合状态徽章 */
 			var head = E('div', { 'class': 'mt5700-carrier-head' });
@@ -2380,10 +2440,14 @@ return L.view.extend({
 		function loadSecondary() {
 			/*
 			 * 辅载波/邻区信号已统一由 ^NRSSBID 提供（见 renderCarriers 的 nrssbidMatch）：
-			 *   - ^MONSSC 手册注明「非 NSA 返回查询失败」，本机 SA 组网恒回 NONE；
-			 *   - ^CASCELLINFO? 仅 LTE CA 有效，本机 NR CA 下恒回 ERROR。
-			 * 这两条在本机属于无效功能，已删除查询（每轮省 2 次串口往返），
-			 * 其解析函数也从 parse.js 一并移除。
+			 *   - ^CASCELLINFO? 仅 LTE CA 有效，本机 NR CA 下恒回 ERROR；
+			 *   - ^MONSSC 只用于 NSA 下的 NR 辅连接小区。
+			 *     ★ 2026-09-29 更正：本段原先写「^MONSSC 本机 SA 组网恒回 NONE」——
+			 *     那是 SA 时期的实测。本机切到 NSA(EN-DC) 后它**实回真实数据**
+			 *     （`^MONSSC: NR,504990,114,-74,-10,14,0`）。**别因为这条注释就以为
+			 *     它在本机无效**。之所以仍不查它，是因为 ^NRSSBID 已覆盖辅载波的
+			 *     PCI/RSRP/SINR（每轮省 2 次串口往返），而不是「查不到」。
+			 * 其解析函数已从 parse.js 一并移除。
 			 */
 			return AtWs.client.sendCommand('AT^NRSSBID?').then(function (ssbid) {
 				state.nrssbid = ssbid.success && ssbid.data ? Parse.parseNrssbid(String(ssbid.data)) : null;

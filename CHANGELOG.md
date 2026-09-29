@@ -5,6 +5,67 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.9] - 2026-09-29
+
+### Fixed
+
+**110. ★ NSA(EN-DC) 下「网络制式」把 5G 显示成 `4G-LTE`**
+
+真机现象：设备已经跑在 5G 上（n41，EN-DC 双连接已建立），「连接状态」里的
+**网络制式**却显示 **`4G-LTE`**；同时「载波与聚合」徽章显示 **`2 载波聚合中`**
+（实际是 EN-DC 双连接，根本未发生载波聚合）。
+
+**根因** —— NSA 下 `^MONSC` 报的是 **LTE 锚点**小区，而制式判定只吃了它的 `<sysmode>`。
+真机原文（2026-09-29）：
+
+```
+^MONSC:     LTE,460,00,1300,…            ← ★ 锚点小区，报的就是 LTE
+^HFREQINFO: 0,6,3,1300,18150,…           ← LTE 载波
+^HFREQINFO: 0,7,41,513000,2565000,…      ← ★ NR 载波（sysmode=7）
+^LENDC:     1,1,1,0,1                    ← ★ <nr_pscell>=1，EN-DC 已建立
+^MONSSC:    NR,504990,114,-74,-10,14,0   ← ★ NR 辅连接服务小区
+```
+
+判据必须落到「**NR 侧是否真的在用**」，锚点制式不是答案。
+
+**修法（四处，缺一处都不成立）**：
+
+1. 新增 `nrCarrierCount(carriers)`：按 `^HFREQINFO` 的 **per-carrier `<sysmode>`** 数 NR 载波。
+   ★ NSA 下 `state.carriers.length`（=2）**不等于** NR 载波数（=1），不能拿总数当 5GA 判据的分母。
+2. `systemModeLabel` 增加第四参 `<nrActive>`：锚点是 LTE 但 NR 在用 → 仍按 5G 出标签；
+   **缺省为假**，老调用方与纯 LTE 行为不变（向后兼容有断言守着）。
+3. 新增统一判定入口 `ratDisplay(sysMode, carriers, endc, registered)`，由它合成
+   `^MONSC` / `^HFREQINFO` / `^LENDC` 三路证据。★ 抽成纯函数不是为了好看 ——
+   这段判定原先直接写在 `renderConn` 里（视图闭包），**测试够不到，NSA 就是从这道缝漏过去的**。
+4. 新增 `aggregationBadge(carrierCount, nrCount, dcActive)`：聚合要求**同一制式内 ≥2 载波**，
+   1 LTE + 1 NR 是双连接。原判据 `count > 1` 会把 EN-DC 说成「2 载波聚合中」，
+   与同块注释「避免把 EN-DC 双连接与 NR 载波聚合混为一谈」自相矛盾。
+
+**两处同类隐患一并勘误**（同一病根：SA 时期的假设在 NSA 下失效）：
+
+- `network_status.js` 里「`^MONSSC` 本机 SA 组网恒回 NONE」的注释**已过期** ——
+  切到 NSA 后它实回真实数据。仍不查它是因为 `^NRSSBID` 已覆盖辅载波的 PCI/RSRP/SINR，
+  **而不是「查不到」**。不改这句会让后来者把 NSA 下可用的通路误判成无效功能。
+- `parseHCSQ` 补注释：NSA 下 `^HCSQ?` 回**两行**（LTE 锚点 + NR 辅载波），
+  `extractATData` 只取第一行、恒按 LTE 解析。这在本机是**自洽的**（布局由该行自己的
+  `<sysmode>` 选，混用会让 SINR/RSRQ 两项同时错），但**不能改成「优先取 NR 行」**：
+  会让 `fillSignalFromHCSQ` 的一致性守卫立刻不成立（`'NR' !== 'LTE'`），
+  4G 下 SINR 永远补不上、界面留「—」。
+
+### Changed
+
+**111. ★ 制式判定的测试接缝补齐：`tests/sysmode-label.test.js` 40 → 60 条断言**
+
+- 用**真机原始回显**驱动（`^MONSC` + `^HFREQINFO` 经 `parseHFREQINFO` → `ratDisplay`），
+  链路里任何一环回归都转红；`<Cell_ID>` / `<TAC>` 已替换为合成值（它们能粗略定位台站）。
+- 反向断言：纯 LTE / LTE 载波聚合 / EN-DC 能力可用但未建立 / 未注册，都必须**不**变 5G
+  （防矫枉过正 —— 「把 4G 修成 5G」和「把 5G 显示成 4G」一样是错的）。
+- `HFREQ_SYS_MODE` 直接从 `rpc.js` 源码抽那一行，**不在测试里再造一套同名表**
+  （rpc.js 与 parse.js 曾各存一套、改一处另一处纹丝不动的教训）。
+- 变异验证新增 4 处锚点并全部判红，已并入 `tools/verify-guards.py`（**160 → 164 条**）：
+  ① 判定入口漏传 NR 证据 ② 纯函数丢掉「锚点 LTE 但 NR 在用」这一支
+  ③ **调用点没接线**（改了纯函数却没接上，最常见的半程修复）④ 徽章判据退回 `count > 1`。
+
 ## [2.4.8] - 2026-09-28
 
 ### Changed

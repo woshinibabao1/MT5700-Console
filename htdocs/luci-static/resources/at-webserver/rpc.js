@@ -1252,6 +1252,18 @@ function formatDuration(seconds, showDays) {
 /* ---- ^HCSQ / 信号 ---- */
 
 function parseHCSQ(data) {
+	/*
+	 * ★ NSA(EN-DC) 下 `AT^HCSQ?` 会回 **两行**（2026-09-29 真机）：
+	 *     ^HCSQ: "LTE",81,73,146,24     ← LTE 锚点
+	 *     ^HCSQ: "NR",68,176,30         ← NR 辅载波
+	 *   而 extractATData 只取**第一行**，所以这里恒按 LTE 解析。
+	 *   本机这套是**自洽**的、不是 bug：布局由该行自己的 <sysmode> 选
+	 *   （LTE 比 NR 前面多一个 RSSI，SINR/RSRQ 位置也不同，混用会两项全错），
+	 *   不会串位；调用方 fillSignalFromHCSQ 还要求 networkMode 与 ^MONSC 的
+	 *   sysMode 一致，NSA 下两边都是 LTE，补空缺的语义仍然成立。
+	 *   ⚠ 改这里之前先想清楚：若改成「优先取 NR 行」，上面那条一致性守卫会
+	 *   立刻不成立（'NR' !== 'LTE'）→ 4G 下 SINR 永远补不上、界面留「—」。
+	 */
 	var str = extractATData(data, '^HCSQ');
 	if (!str) return null;
 	var p = str.split(',');

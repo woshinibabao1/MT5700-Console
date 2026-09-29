@@ -21,6 +21,14 @@ const JS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources',
 	'view', 'at-webserver', 'network_status.js');
 const src = fs.readFileSync(JS, 'utf8');
 
+/*
+ * NSA 判据要吃 rpc.js 的载波解析：^HFREQINFO 的 **per-carrier <sysmode>**
+ * 才是「NR 侧是否真的在用」的证据（见本文件末尾的 NSA 段）。
+ */
+const RPC = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources',
+	'at-webserver', 'rpc.js');
+const rpcSrc = fs.readFileSync(RPC, 'utf8');
+
 const log = [];
 function say(s) { log.push(s); }
 
@@ -58,6 +66,26 @@ const hasAny = new Function(
 	extractFn(src, 'hasAnyPsService') + '\nreturn hasAnyPsService;')();
 const norm = new Function(
 	extractFn(src, 'normStat') + '\nreturn normStat;')();
+
+/*
+ * 制式判定的四件套。★ `HFREQ_SYS_MODE` 直接从 rpc.js 源码抽那一行，**不在这里再造
+ * 一套同名表** —— 早前 rpc.js 与 parse.js 各存一套、改一处另一处纹丝不动的教训
+ * （见 rpc.js:1243 的删除说明）就是这么来的。
+ */
+const hfreqVar = rpcSrc.match(/var HFREQ_SYS_MODE = \{[^}]*\};/);
+if (!hfreqVar) throw new Error('找不到 HFREQ_SYS_MODE（是否改过名？请同步本测试）');
+const parseHFREQINFO = new Function(
+	extractFn(rpcSrc, 'extractATDataMultiline') + '\n' + hfreqVar[0] + '\n' +
+	extractFn(rpcSrc, 'parseHFREQINFO') + '\nreturn parseHFREQINFO;')();
+
+const R = new Function(
+	extractFn(src, 'hasPsService') + '\n' +
+	extractFn(src, 'nrCarrierCount') + '\n' +
+	extractFn(src, 'systemModeLabel') + '\n' +
+	extractFn(src, 'aggregationBadge') + '\n' +
+	extractFn(src, 'ratDisplay') + '\n' +
+	'return { systemModeLabel: systemModeLabel, ratDisplay: ratDisplay,'
+	+ ' nrCarrierCount: nrCarrierCount, aggregationBadge: aggregationBadge };')();
 
 say('=== 制式文案（后缀必须跟随真实 sysMode） ===');
 
@@ -142,8 +170,92 @@ ok('未知运营商不拼进标题（免得标题变长还无意义）',
 	/state\.operator\s*!==\s*'未知运营商'/.test(src));
 ok('renderConn 里刷新标题（运营商是慢档才拿到的）',
 	extractFn(src, 'renderConn').indexOf('connTitleEl') !== -1);
-ok('★ 网络制式把「是否真驻留」传给 systemModeLabel（未注册不显示残留制式）',
-	/systemModeLabel\(state\.cell\.sysMode,\s*state\.carriers\.length,\s*hasAnyPsService\(/.test(src));
+ok('★ 网络制式走统一判定入口 ratDisplay，并传齐四路输入（制式 / 载波 / EN-DC / 是否真驻留）',
+	/ratDisplay\(state\.cell\.sysMode,\s*state\.carriers,\s*state\.diag\s*&&\s*state\.diag\.endc,\s*hasAnyPsService\(/.test(src));
+
+/*
+ * ===========================================================================
+ * ★ 2026-09-29 真机 bug：NSA(EN-DC) 下界面把 5G 显示成「4G-LTE」
+ * ---------------------------------------------------------------------------
+ * 根因：AT^MONSC 在 NSA 下报的是 **LTE 锚点**小区，而制式判定只吃了它的
+ *   <sysmode>，于是判成 LTE。此刻 NR 其实已经在用，同一轮三条独立证据：
+ *     ^LENDC: 1,1,1,0,1   → <nr_pscell>=1，EN-DC 已建立
+ *     ^HFREQINFO: 0,7,41,…→ 上报了 sysmode=7(NR) 的载波
+ *     ^MONSSC: NR,504990,…→ NR 辅连接服务小区
+ *   → 判据必须是「NR 侧是否真的在用」，不能只看锚点制式。
+ *
+ * 下面用**真机原始回显**驱动，而不是手搓中间态 —— 链路里任何一环（^HFREQINFO
+ * 的分组 / 载波 sysMode / 判定入口）回归都会让这一段转红。
+ * ===========================================================================
+ */
+
+/* 真机原文（2026-09-29，NSA/EN-DC）。★ <Cell_ID>/<TAC> 已替换为合成值：
+   它们能粗略定位台站，而本仓已公开；制式判定与它们无关。 */
+const NSA_MONSC = '^MONSC: LTE,460,00,1300,00A1B2C3E,128,00A1B2C,-70,-6,-44\r\nOK';
+const NSA_HFREQ = '^HFREQINFO: 0,6,3,1300,18150,20000,19300,17200,20000\r\n'
+	+ '^HFREQINFO: 0,7,41,513000,2565000,100000,513000,2565000,100000\r\nOK';
+/* 纯 LTE 对照：只有一条 LTE 载波、没有 NR */
+const LTE_ONLY_HFREQ = '^HFREQINFO: 0,6,3,1300,18150,20000,19300,17200,20000\r\nOK';
+
+const nsCarriers = parseHFREQINFO(NSA_HFREQ);
+
+say('');
+say('=== ★ NSA(EN-DC)：^MONSC 报 LTE 锚点也不能显示成 4G ===');
+
+ok('前置：真机 ^MONSC 在 NSA 下报的确实是 LTE（误判的来源）',
+	/^\^MONSC: LTE,/.test(NSA_MONSC), NSA_MONSC.slice(0, 22));
+ok('前置：^HFREQINFO 解出 2 条载波（LTE 锚点 + NR 辅载波）',
+	nsCarriers.length === 2, 'got ' + nsCarriers.length);
+ok('前置：其中恰好 1 条是 NR —— 所以「载波数」不能直接当 5GA 判据',
+	R.nrCarrierCount(nsCarriers) === 1, 'got ' + R.nrCarrierCount(nsCarriers));
+ok('前置：NR 载波的频段是 n41（band=41）',
+	nsCarriers.some(function (c) { return c.sysMode === 'NR' && c.band === 41; }));
+
+ok('★ LTE 锚点 + NR 在用 → 5G-NR（修复前这里出 4G-LTE）',
+	R.ratDisplay('LTE', nsCarriers, null, true) === '5G-NR',
+	R.ratDisplay('LTE', nsCarriers, null, true));
+ok('★ ^HFREQINFO 没给 NR 载波时，仅凭 ^LENDC 的 EN-DC 已建立也要判 5G',
+	R.ratDisplay('LTE', [], { established: true }, true) === '5G-NR',
+	R.ratDisplay('LTE', [], { established: true }, true));
+ok('★ 2 条 NR 载波 + LTE 锚点 → 5GA-NR（真 NR 载波聚合）',
+	R.ratDisplay('LTE', nsCarriers.concat([{ sysMode: 'NR' }]), null, true) === '5GA-NR',
+	R.ratDisplay('LTE', nsCarriers.concat([{ sysMode: 'NR' }]), null, true));
+
+say('');
+say('=== 反向：不许矫枉过正，纯 LTE 必须还是 4G ===');
+
+ok('★ 纯 LTE（无 NR 载波、无 EN-DC）→ 4G-LTE',
+	R.ratDisplay('LTE', parseHFREQINFO(LTE_ONLY_HFREQ), null, true) === '4G-LTE',
+	R.ratDisplay('LTE', parseHFREQINFO(LTE_ONLY_HFREQ), null, true));
+ok('★ LTE 载波聚合（2 条 LTE 载波）仍是 4G-LTE —— 载波数不是升代依据',
+	R.ratDisplay('LTE', [{ sysMode: 'LTE' }, { sysMode: 'LTE' }],
+		{ established: false }, true) === '4G-LTE');
+ok('★ EN-DC 能力可用但没建立（<nr_pscell>=0）且无 NR 载波 → 4G-LTE',
+	R.ratDisplay('LTE', [], { available: true, plmnAvailable: true, established: false },
+		true) === '4G-LTE');
+ok('未注册时仍优先显示 —（NSA 也不例外）',
+	R.ratDisplay('LTE', nsCarriers, { established: true }, false) === '—');
+ok('第四参缺省时行为与从前一致（老调用方不受影响）',
+	label('LTE', 2) === '4G-LTE', label('LTE', 2));
+ok('NR 制式下第四参缺省照常出 5G（不依赖新参数）',
+	label('NR', 1) === '5G-NR', label('NR', 1));
+
+say('');
+say('=== ★ NSA 下聚合徽章不得把「双连接」说成「载波聚合」 ===');
+
+ok('★ 1 LTE + 1 NR → EN-DC 双连接（不是「2 载波聚合中」）',
+	R.aggregationBadge(2, 1, true) === 'EN-DC 双连接', R.aggregationBadge(2, 1, true));
+ok('2 条 NR 载波（真 CA）→ 2 载波聚合中',
+	R.aggregationBadge(2, 2, false) === '2 载波聚合中', R.aggregationBadge(2, 2, false));
+ok('2 条 LTE 载波（LTE CA）→ 2 载波聚合中',
+	R.aggregationBadge(2, 0, false) === '2 载波聚合中', R.aggregationBadge(2, 0, false));
+ok('EN-DC + 额外的 NR 载波聚合 → 两者都要说',
+	R.aggregationBadge(3, 2, true) === 'EN-DC 双连接 + 3 载波',
+	R.aggregationBadge(3, 2, true));
+ok('单载波', R.aggregationBadge(1, 1, false) === '单载波', R.aggregationBadge(1, 1, false));
+ok('无载波 → 不可用', R.aggregationBadge(0, 0, false) === '不可用');
+ok('★ renderCarriers 改用 aggregationBadge（不再用 count>1 直接判聚合）',
+	/aggregationBadge\(count,\s*nrCcs,\s*dcActive\)/.test(src));
 
 say('');
 if (fails.length) {

@@ -158,6 +158,11 @@ TARGETS = {
     "smssetjs4": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
     "msjs3": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
     "nsjs2": ATWB.parent / "view" / "at-webserver" / "network_status.js",
+    # ★ 再挂一个键（2026-09-29「NSA 下把 5G 显示成 4G」）：
+    #   制式判定的守卫在自己的 sysmode-label-contract 里。
+    #   ★ 复用 nsjs / nsjs2 会**跑错测试**（它们分别固定跑 warm-cache-contract 与
+    #     ui-consistency-contract），变异生效却没人判红 —— 红线 16b。
+    "nsjs3": ATWB.parent / "view" / "at-webserver" / "network_status.js",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -231,6 +236,8 @@ TARGET_TEST = {
     "smssetjs4": ROOT / "tests" / "ui-consistency-contract.test.js",
     "msjs3": ROOT / "tests" / "ui-consistency-contract.test.js",
     "nsjs2": ROOT / "tests" / "ui-consistency-contract.test.js",
+    # ★ 制式判定（NSA 下 ^MONSC 只报 LTE 锚点）—— 别复用 nsjs / nsjs2。
+    "nsjs3": ROOT / "tests" / "sysmode-label.test.js",
 }
 
 def _resolve_node() -> str:
@@ -1681,6 +1688,39 @@ MUTATIONS = [
         "'AT^DSFLOWQRY'     /* getFlow */",
         "'AT+COPS?'         /* getFlow */",
         "头段＝连接状态与载波表要用的那 6 条",
+    ),
+    # ★ 2026-09-29 NSA 下把 5G 显示成「4G-LTE」。
+    #   真机根因：^MONSC 在 NSA 下报 **LTE 锚点**小区（^LENDC 却已报 <nr_pscell>=1、
+    #   ^HFREQINFO 里有 sysmode=7 的 NR 载波），而制式判定只吃了锚点的 <sysmode>。
+    #   四处锚点分别锁：判定入口漏证据 / 纯判定函数漏分支 / 调用点没接线 / 徽章判据。
+    (
+        "判定入口 ratDisplay 不把 NR 证据传下去（NSA 又退回 4G-LTE）",
+        "nsjs3",
+        "return systemModeLabel(sysMode, nrCcs, registered, nrCcs > 0 || dcActive);",
+        "return systemModeLabel(sysMode, nrCcs, registered, false);",
+        "★ LTE 锚点 + NR 在用 → 5G-NR",
+    ),
+    (
+        "systemModeLabel 丢掉「锚点是 LTE 但 NR 在用」这一支",
+        "nsjs3",
+        "var isNr = m === 'NR' || m === 'NR-5GC' || m === '5G' || (m === 'LTE' && nrActive);",
+        "var isNr = m === 'NR' || m === 'NR-5GC' || m === '5G';",
+        "★ LTE 锚点 + NR 在用 → 5G-NR",
+    ),
+    (
+        "renderConn 没把载波表交给 ratDisplay（改了纯函数却没接线 —— 最常见的半程修复）",
+        "nsjs3",
+        "ratDisplay(state.cell.sysMode, state.carriers,",
+        "ratDisplay(state.cell.sysMode, [],",
+        "走统一判定入口 ratDisplay",
+    ),
+    (
+        "聚合徽章退回 count>1（NSA 下把 EN-DC 双连接说成「2 载波聚合中」）",
+        "nsjs3",
+        "var badge = aggregationBadge(count, nrCcs, dcActive);",
+        "var badge = (!count ? '不可用' : count > 1"
+        " ? (count + ' 载波聚合中') : dcActive ? 'EN-DC 双连接' : '单载波');",
+        "renderCarriers 改用 aggregationBadge",
     ),
 ]
 
