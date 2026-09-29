@@ -705,6 +705,16 @@ def main():
 
 
 if __name__ == '__main__':
+    # ★ GBK 控制台兜底（复刻 tools/verify-guards.py:1906-1910 的同一做法）。
+    #   自证段（下面）与 main() 里都要打印 ✓ / ✗，而 Windows 控制台默认 GBK：
+    #   Python 会抛 UnicodeEncodeError 并**中断整个检查**、以 rc=1 结束 —— 本脚本
+    #   正是 CI 用来当闸门的自证，编码崩溃会被误读成「自证失败」。
+    #   verify-guards.py 早在 2026-09-28 就踩过同一坑并加了兜底 —— 当时只修了那一处。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     if SELF_TEST_ONLY:
         # 只跑自证：全过退 0，任一失败退 1（CI 用它当闸门）
         _st = self_test()

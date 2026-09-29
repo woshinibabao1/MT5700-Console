@@ -121,4 +121,15 @@ def main():
 
 
 if __name__ == '__main__':
+    # ★ GBK 控制台兜底（复刻 tools/verify-guards.py:1906-1910 的同一做法）。
+    #   本脚本要打印 ✓ / ✗，而 Windows 控制台默认 GBK：Python 会抛
+    #   UnicodeEncodeError 并**中断整个检查**、以 rc=1 结束 —— 而本脚本 rc=1 的
+    #   语义是「发现未登记的真机标识」，于是编码崩溃会被误读成安全隐患告警。
+    #   2026-09-30 在 GBK 控制台复现：崩在第 107 行 print('  ✓ …')。
+    #   verify-guards.py 早在 2026-09-28 就踩过同一坑并加了兜底 —— 当时只修了那一处。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     sys.exit(main())
