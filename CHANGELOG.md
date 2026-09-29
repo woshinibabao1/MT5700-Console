@@ -81,7 +81,24 @@ AT^THERMLDAUTOSTATUS? → {"data":"^THERMLDAUTOSTATUS: 1, 0, 0, 0, 0, 0, 11\r\nO
 `AT+CSQ?` 回 ERROR、`AT+CSQ` 值区为空（本仓走 `AT^HCSQ?`，`tests/mock-modem/mock-modem.js:49-51`
 已按真机形态建模）。
 
+**本地步骤集固化 + CI 一致性守卫**：`tools/ci-local.sh` + `tests/ci-parity-contract.test.js`
+
+事故复盘落到工程上：2026-09-30 的 CI 红（见 113）之所以"本地全绿"也能同时成立，是因为
+**本地与 CI 跑的步骤集不同** —— 本地只用 `tools/run-tests-inproc.js`，而 CI 的 `run-all.js`
+会追加 `tests/syntax-check.js`，这一步本地从未跑过。
+
+- `tools/ci-local.sh`：按 CI 顺序复刻 contract-check 的 6 条步骤（`--with-cargo` 另跑 rust-check）。
+  退出码沿用本仓既有约定 **0 = 全过 / 1 = 真失败 / 2 = 有步骤未能真跑**；受限环境无法 `spawn` 时
+  改用同进程 runner 并**显式打印 NOTE**，且单独补跑那条被漏掉的 `syntax-check.js` ——
+  不静默降级、不给有歧义的绿。
+- `tests/ci-parity-contract.test.js`：把 workflow 里 contract-check 的 `run:` 命令与
+  `ci-local.sh` 的 `# CI-STEP:` 标记**双向核对**（CI 加了步骤本地没跟 → 判红；本地留了幽灵步骤 → 判红），
+  带 3 条反向自检，且不依赖文件数量或行号（吸取 113 的教训）。
+
 ### Docs
+
+README 的「开发」段：把写死的"38 个测试文件"（实际 76 个）改为不依赖数量的表述，并补上
+`tools/ci-local.sh` 的用法与 NORUN 语义 —— 数字型断言与文档都会随仓库长大而失真。
 
 README 的「许可」补上**上游改证边界**：上游 `cbc9233`（2026-09-15）改为 GPLv3，本仓分叉点
 `3059f15`（2026-09-12）早于该改证，故按分叉时 MIT 继承；并写明由此产生的硬约束 ——

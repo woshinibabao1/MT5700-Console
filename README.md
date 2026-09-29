@@ -195,9 +195,19 @@ logread -e at-webserver | tail -30
 ## 开发
 
 ```sh
-node tests/run-all.js          # 38 个测试文件，全部静态断言 + mock，无需真机
+node tests/run-all.js          # 全部契约测试（静态断言 + mock，无需真机）
+sh tools/ci-local.sh           # 按 CI 的顺序复刻 contract-check 的全部步骤
+sh tools/ci-local.sh --with-cargo   # 另跑 rust-check（需要本机有 cargo）
 cd src/rust && cargo test      # Rust 侧
 ```
+
+> `tools/ci-local.sh` 存在的理由是 2026-09-30 的一次真实事故：本地一直只用
+> `tools/run-tests-inproc.js`（沙箱禁止 spawn 抓管道），而 CI 跑 `tests/run-all.js`，
+> 后者会**额外追加 `tests/syntax-check.js`** —— 这一步本地从没跑过，于是"本地全绿、
+> CI 判红"能同时成立（详见 CHANGELOG 113）。该脚本把 CI 的步骤集固化成本地一条命令：
+> **某一步没能真跑（缺 node/python/cargo）时报 `NORUN` 并以退出码 2 结束**，
+> 不给可能有歧义的绿（0 全过 / 1 真失败 / 2 结果不可信，与 `tests/run-all.js` 同一约定）。
+> 它与 workflow 的一致性由 `tests/ci-parity-contract.test.js` 双向守卫。
 
 推 `main` 或打 `v*` 标签会触发 GitHub Actions 云编译（官方 SDK + zig 交叉编译 musl 静态链接），成功后自动发布 Release。`main` 推送用 `Makefile` 里的 `PKG_VERSION` 作版本号，四处需同步（`Makefile` / `src/rust/Cargo.toml` / `Cargo.lock` / `CHANGELOG.md`）—— 用 `python tools/bump-version.py <版本>`。
 
