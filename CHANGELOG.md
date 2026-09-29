@@ -5,6 +5,64 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.10] - 2026-09-30
+
+### Fixed
+
+**111. 工具链：打印 ✓/✗ 的 python 工具在 GBK 控制台下崩溃，且 rc=1 会被误读成"检查发现问题"**
+
+真机/本机复现（2026-09-30，Windows 默认 GBK 控制台）：
+
+```
+$ python tools/audit-at-reads.py
+UnicodeEncodeError: 'gbk' codec can't encode character '\u2713' in position 19
+$ python tools/find-private-ids.py
+UnicodeEncodeError: 'gbk' codec can't encode character '\u2713' in position 2
+```
+
+**根因** —— 这两个脚本的 `rc=1` 语义分别是「AT 读写分类有问题」「发现未登记的真机标识」，
+而编码崩溃同样以 rc=1 中断整个检查：**假告警盖住真问题**，在本地与 CI 日志里都难以分辨
+（`find-orphans.py` 的自证段同理，它还是 CI 闸门）。
+
+**同类排查** —— `tools/verify-guards.py` 早在 2026-09-28 就踩过同一坑
+（其 1900-1910 行有完整记录与兜底），但当时**只修了那一处**。全仓检索 `✓`/`✗` 字面量后确认
+漏了三个文件：`audit-at-reads.py`（5 处 print）、`find-orphans.py`（自证段 + main）、
+`find-private-ids.py`（3 处 print）。
+
+**改动** —— 三处在 `if __name__ == '__main__':` 内**复刻 `verify-guards.py` 的同一段兜底**
+（`reconfigure(encoding="utf-8", errors="replace")`，两个流都设），错误码语义不变；
+新增 `tests/tool-gbk-encoding-contract.test.js` 把"新工具再漏"变成判红。
+
+**验证** —— 修复前两者崩溃、修复后三者 rc=0 且产出正常报告；新契约测试 4 项通过，
+临时撤掉 `find-orphans.py` 的兜底后 **rc=1 判红**（非恒绿），还原后通过；
+`node tools/run-tests-inproc.js` 全绿；`tools/verify-guards.py` **164/164 条变异判红、还原逐字节一致**。
+
+### Added
+
+**AT 拼写契约（真机实证）**：`tests/at-thermal-status-spelling-contract.test.js`
+
+同源项目 FAN789/luci-app-mt5700m 用 `AT^THERMLDAUTOSTAT?`，本仓用 `AT^THERMLDAUTOSTATUS?`。
+2026-09-30 在 MT5700M-CN（Revision `V200R001C20B025`）上逐条实测，**本仓正确**：
+
+```
+AT^THERMLDAUTOSTAT?  → {"data":null,"error":"ERROR","success":false}
+AT^THERMLDAUTOSTATUS? → {"data":"^THERMLDAUTOSTATUS: 1, 0, 0, 0, 0, 0, 11\r\nOK","success":true}
+```
+
+契约钉三件事：发送侧必须是正确拼写、解析侧必须按 `^THERMLDAUTOSTATUS:` 取字段、
+生产代码里不得出现错误拼写；并带反向自检（错误拼写要被抓到、正确拼写不得被误伤），
+避免正则写成前缀匹配导致恒绿或恒红。
+
+同一轮真机核对还确认了两条**本仓早已正确**的行为，记在此处避免以后被"照抄上游"改错：
+`AT+CSQ?` 回 ERROR、`AT+CSQ` 值区为空（本仓走 `AT^HCSQ?`，`tests/mock-modem/mock-modem.js:49-51`
+已按真机形态建模）。
+
+### Docs
+
+README 的「许可」补上**上游改证边界**：上游 `cbc9233`（2026-09-15）改为 GPLv3，本仓分叉点
+`3059f15`（2026-09-12）早于该改证，故按分叉时 MIT 继承；并写明由此产生的硬约束 ——
+**该提交之后的上游代码不得复制进本仓**，借鉴只能取思路与行为约定。
+
 ## [2.4.9] - 2026-09-29
 
 ### Fixed
