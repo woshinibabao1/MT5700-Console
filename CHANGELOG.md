@@ -5,6 +5,28 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.18] - 2026-09-30
+
+### Fixed（测试自身缺陷，产品代码不变）
+
+**121. `sms-unread-refresh-loop.test.js` 的夹具时间写死字面量 → CI 在 UTC 下判红**
+
+CI `contract-check` 报：
+
+```
+FAIL 6 sms-unread-refresh-loop.test.js
+  ✗ ★ ⑤ 重放【旧的】推送… —— 重放旧推送后 count=1
+```
+
+根因是**测试的时区缺陷**，不是产品缺陷：夹具把消息时间写死为 `26/09/30,19:53:50`。
+本地（CST/UTC+8）该串解析成"过去"✓；CI 跑在 **UTC**，同一串按本地解析就成了**未来**
+（CI 13:42Z < 19:53Z）→ 水位线比较判成未读 → 只有依赖"消息时间早于水位线"的 ⑤ 判红，本地全绿。
+
+修法：夹具时间改为**相对 `Date.now()` 推导**（`T_OLD = now-2h`、`T_NEW = now+1min`），并加一条**夹具自守**
+（`T_OLD` 必须真的早于现在，否则直接判不可信）—— 这类"时区相关的假红/假绿"以后不会再出现。
+
+**验证**：同一条回路在 **CST / UTC / Asia/Tokyo / America/Los_Angeles** 四种时区下均通过；
+`node tests/run-all.js`（CI 同款）全部通过。
 ## [2.4.17] - 2026-09-30
 
 ### Fixed

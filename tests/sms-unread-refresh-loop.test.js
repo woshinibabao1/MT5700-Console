@@ -91,6 +91,28 @@ function parseMessageTime(t) {
 	return new Date(2000 + +m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
 }
 
+/*
+ * ★ 夹具时间必须**相对当前时刻推导**，不能写死字面量（2026-09-30 CI 上摔过）：
+ *   写死 '26/09/30,19:53:50' 时，本地（CST/UTC+8）解析成"过去"，而 CI 在 **UTC** 下
+ *   同一字符串按本地解析就成了"未来"（CI 13:42Z < 19:53Z），水位线比较随之判成未读
+ *   → 只有依赖"消息时间早于水位线"的那条断言判红，本地却全绿。
+ *   用 now 的偏移量就与时区无关。
+ */
+function fmtLocal(t) {
+	const p = n => String(n).padStart(2, '0');
+	return p(t.getFullYear() % 100) + '/' + p(t.getMonth() + 1) + '/' + p(t.getDate()) + ','
+		+ p(t.getHours()) + ':' + p(t.getMinutes()) + ':' + p(t.getSeconds());
+}
+const NOW = Date.now();
+const T_OLD = fmtLocal(new Date(NOW - 2 * 3600e3));   // 2 小时前：用户早已读过
+const T_NEW = fmtLocal(new Date(NOW + 60e3));         // 后于"读"的时刻：真·新到
+
+/* 夹具自守：T_OLD 必须真的早于现在，否则本回路会变成时区相关的假绿/假红 */
+if (!(parseMessageTime(T_OLD).getTime() < NOW)) {
+	console.log('  ✗ 夹具时间异常：T_OLD 不在过去（时区/时钟问题），本回路不可信');
+	process.exit(1);
+}
+
 function makePage(src, store) {
 	const localStorage = {
 		getItem: k => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
@@ -158,10 +180,10 @@ const src = fs.readFileSync(SMS, 'utf8');
 function scenario(src) {
 	const store = {};
 	let page = makePage(src, store);
-	const msgs = [{ unread: false, content: '【订购成功提醒】…', time: '26/09/30,19:53:50' }];
+	const msgs = [{ unread: false, content: '【订购成功提醒】…', time: T_OLD }];
 	const step1 = page.countOf('10086', msgs);
 	page.api.markUnread('10086');
-	const step2 = page.countOf('10086', msgs.concat([{ unread: true, content: '新短信', time: '26/09/30,20:38:20' }]));
+	const step2 = page.countOf('10086', msgs.concat([{ unread: true, content: '新短信', time: T_NEW }]));
 	page.readWhileWatching('10086');
 	const step3 = page.countOf('10086', msgs);
 	page = makePage(src, store);
@@ -174,15 +196,15 @@ function scenarioReplayPush(src) {
 	const store = {};
 	let page = makePage(src, store);
 	const msgs = [
-		{ unread: false, content: '较早的一条', time: '26/09/30,19:00:00' },
-		{ unread: false, content: '【订购成功提醒】…', time: '26/09/30,19:53:50' }
+		{ unread: false, content: '较早的一条', time: T_OLD },
+		{ unread: false, content: '【订购成功提醒】…', time: T_OLD }
 	];
 	/* 用户打开会话把这条读了 */
 	page.readWhileWatching('10086');
 	page.api.clearUnread('10086');
 	/* 刷新页面：重放一条【旧】推送（时间 19:53:50，用户早已读过） */
 	page = makePage(src, store);
-	const pushed = { number: '10086', content: '【订购成功提醒】…', time: '26/09/30,19:53:50', unread: false };
+	const pushed = { number: '10086', content: '【订购成功提醒】…', time: T_OLD, unread: false };
 	const watching = false;
 	new Function('msg', 'watching', 'markUnread', extractPushLines(src))(pushed, watching, page.api.markUnread);
 	return page.countOf('10086', msgs.concat([pushed]));
