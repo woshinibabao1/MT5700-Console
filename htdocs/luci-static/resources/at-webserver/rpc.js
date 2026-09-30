@@ -212,7 +212,21 @@ function ATClient() {
 	this.commandQueue = Promise.resolve();
 	this.pollTimer = null;
 	this.pollInterval = 1500;         // 事件轮询间隔（毫秒）
-	this.eventSeq = 0;
+	/*
+	 * ★ 2026-09-30：事件游标必须**持久化**。原先只存在内存里，刷新页面后从 0 重新拉取，
+	 *   服务端就把缓冲里的历史事件（含旧的 `+CMTI`）整批重投一遍。真机探针（[DEBUG-7f3a]）
+	 *   抓到的调用栈证明这正是「已读短信刷新后又变未读」的触发源：
+	 *     push → newSmsHandler → 把早已读过的短信标成 unread → buildContacts 算成未读。
+	 *   首轮 `firstPoll` 只跳过"本次会话的第一次轮询"，挡不住后续往返，也挡不住重连。
+	 *   游标持久化后，刷新是**续读**而不是重放；服务端重启导致序号回退时，
+	 *   下一次响应里的 seq 会被采纳（下方 self.eventSeq = seq），可自愈。
+	 */
+	this.eventSeq = (function () {
+		try {
+			var v = parseInt(localStorage.getItem('mt5700_events_seq') || '0', 10);
+			return (isFinite(v) && v > 0) ? v : 0;
+		} catch (e) { return 0; }
+	})();
 	this.firstPoll = true;
 	this.host = '127.0.0.1';
 	this.port = 8765;
@@ -314,6 +328,8 @@ ATClient.prototype.pollEvents = function () {
 		var seq = typeof resp.seq === 'number' ? resp.seq : self.eventSeq;
 		var events = Array.isArray(resp.events) ? resp.events : [];
 		self.eventSeq = seq;
+		// ★ 持久化游标：刷新后续读，不再重放历史事件（见构造函数里的说明）
+		try { localStorage.setItem('mt5700_events_seq', String(seq)); } catch (e) {}
 		if (self.firstPoll) {
 			// 首次连接只对齐序号，不重放服务启动前的事件（与原 WS 连接语义一致）
 			self.firstPoll = false;

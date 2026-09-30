@@ -163,6 +163,8 @@ return L.view.extend({
 			 *   保证存储与内存始终一致。读取侧同时还做了归一化自愈（见上面）。
 			 */
 			saveUnread();
+			// ★ 同时抬高水位线：会话被读到"现在"，此前到达的消息一律视为已读（见 isMsgUnread）
+			markReadUpto(num);
 			/*
 			 * 同时清掉内存里这些短信自带的未读标记。否则同一次会话内再调
 			 * buildContacts 时，来源 B 会依据仍是 true 的 msg.unread 把它们标回未读，
@@ -185,6 +187,46 @@ return L.view.extend({
 
 		function isUnread(num) {
 			return unreadNumbers.indexOf(normalizeNumber(num || '')) >= 0;
+		}
+
+		/* ---------- 已读水位线（2026-09-30，真机探针定位后新增）----------
+		 *
+		 * 为什么需要它：真机探针（[DEBUG-7f3a]）抓到的调用栈显示，每次**页面加载**都会重放旧的
+		 * `+CMTI` 推送 → `newSmsHandler` 把那条**早已读过**的消息标成 `unread = true` →
+		 * `buildContacts` 依此算出「未读 1」→ 徽章复现。而设备审计同时显示 `+CPMS` 未变、
+		 * `AT+CMGL=0` 为空（模组侧没有任何未读）—— 即未读完全是前端被推送重放"唤醒"的。
+		 *
+		 * 为什么不能只治推送路径：`unread` 这个标志会被三条路径碰到（推送重放、列表解析、
+		 * 内存缓存）。只堵一条必然漏。水位线把判定收敛成一句**与来源无关**的规则：
+		 *   用户读过某会话的时刻之前到达的消息，永远算已读。
+		 * 这样无论谁把 `unread` 置上，旧消息都不会再变成未读；而**真正新到**的（晚于水位线）
+		 * 依旧显示未读 —— 不会把新短信吞掉（tests/sms-unread-refresh-loop.test.js 场景①②守着）。
+		 */
+		var READ_UPTO_KEY = 'mt5700_sms_read_upto';
+		var readUptoMap = (function () {
+			try {
+				var m = JSON.parse(localStorage.getItem(READ_UPTO_KEY) || '{}');
+				return (m && typeof m === 'object') ? m : {};
+			} catch (e) { return {}; }
+		})();
+
+		function readUptoOf(num) {
+			return readUptoMap[normalizeNumber(num || '')] || 0;
+		}
+
+		function markReadUpto(num) {
+			var n = normalizeNumber(num || '');
+			if (!n) return;
+			readUptoMap[n] = Date.now();
+			try { localStorage.setItem(READ_UPTO_KEY, JSON.stringify(readUptoMap)); } catch (e) {}
+		}
+
+		/* 与来源无关的未读判定：只有「未读标志 + 晚于水位线」才算未读 */
+		function isMsgUnread(c, m) {
+			if (!m || !m.unread) return false;
+			var t = Parse.parseMessageTime(m.time);
+			if (!t) return true;                       // 时间解析不出来时保守显示未读
+			return !(readUptoOf(c && c.number) >= t.getTime());
 		}
 
 		// 长短信拼接：把同一发件人、同一拼接引用号的各段合并为一条完整消息
@@ -667,7 +709,12 @@ return L.view.extend({
 				 */
 				var unreadN = 0;
 				for (var mi = 0; mi < c.messages.length; mi++) {
-					if (c.messages[mi].unread) unreadN++;
+					/*
+					 * ★ 2026-09-30：不走 `c.messages[mi].unread` 裸判，改用 isMsgUnread（水位线）。
+					 *   真机探针确认：推送重放会把**早已读过**的消息标回 unread=true，
+					 *   裸判就会让"读了刷新又变未读"永远复现。判定规则见 isMsgUnread 处注释。
+					 */
+					if (isMsgUnread(c, c.messages[mi])) unreadN++;
 				}
 				/*
 				 * ★ 名单自动收敛：列表已经带来了该会话的消息、且里面一条未读都没有

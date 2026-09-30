@@ -5,6 +5,56 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.17] - 2026-09-30
+
+### Fixed
+
+**120. 「已读短信刷新后又变未读」——真机探针定位到推送重放，用「已读水位线」从根上收敛**
+
+上一版（2.4.15）修的是"号码级未读名单"，**打偏了**：真机探针证明徽章真正的驱动量是 `unreadN`（消息对象自带的 `unread`），名单那条路只影响另一部分。
+
+**真机证据（[DEBUG-7f3a] 探针，调用栈原文）**：
+
+```
+push num=10086 watching=false sel=-
+markUnread 10086 inList=false stack= at newSmsHandler (:1236) | at ATClient.emitPush(…)
+markUnread 10086 inList=true  stack= at buildContacts  (:637)
+build num=10086 unreadN=1 inList=true msgs=5 -> count=1
+```
+
+同一次审计：`+CPMS` 仍是 **35/50 未变**、`AT+CMGL=0` **为空**（模组侧无未读、也无新短信）
+⇒ **每次页面加载都会重放旧的 `+CMTI` 推送**，把**早已读过**的那条消息标成 `unread=true` → 徽章复现。
+
+**同时修正一条此前的错误结论**：我曾用"把事件游标置 0 重放全部事件，未读名单一字未变"来否决"事件重放"——
+那次读数取自 localStorage 名单，而号码本就在名单里、`markUnread` 会早退，**读数不可能变化**，实验无效。
+
+**修法（两处：一处治根、一处兜底）**：
+
+1. **事件游标持久化**（`at-webserver/rpc.js`）：`eventSeq` 落 localStorage，刷新是**续读**而不是从 0 重放
+   （首轮 `firstPoll` 只跳过"本次会话第一次轮询"，挡不住重连与后续往返）；服务端重启导致序号回退时会采纳响应里的 `seq`，可自愈。
+2. **已读水位线**（`sms_center.js`）：新增 `mt5700_sms_read_upto`，打开会话即记"读到现在"；
+   未读判定收敛为**与来源无关**的一条规则 `isMsgUnread(c, m)`：**只有「未读标志 + 晚于水位线」才算未读**。
+   这样无论 `unread` 是被推送重放、列表解析还是内存缓存置上的，**旧消息永不再变未读**；真正新到的照旧提示。
+
+### Added
+
+`tests/sms-unread-refresh-loop.test.js` 扩展**场景二**：重放一条**旧的**推送后重建会话，断言"用户早已读过的那条"不得变未读
+（修复前该场景 `count=1` 判红，修复后 `0` 判绿 —— 与真机现象逐点对应）。
+
+### 已知缝隙（如实记录）
+
+该回路的 `countOf` 直接调用**从源码抽取的** `isMsgUnread` 谓词来统计，**绕过了 `buildContacts` 里的调用点**。
+因此：改谓词本体 → 判红 ✓；只改调用点（例如把 `isMsgUnread(...)` 换回裸判 `msg.unread`）→ **不会被抓到** ✗。
+后续若要堵这条缝，应让回路执行 `buildContacts` 的真实循环体，而不是只抽谓词。
+
+### 验证
+
+| 项 | 方法 | 结果 |
+| :-- | :-- | :-- |
+| 诊断回路 | `node tests/sms-unread-refresh-loop.test.js` | ✅ **7/7**：场景一 ①0 ②1 ③0 ④0；场景二重放旧推送后 count=**0**；水位线函数存在=true |
+| 谓词变异 | 把 `isMsgUnread` 改成裸判 | ✅ 场景二 **判红**（改造后不红即视为回路空跑） |
+| 全量契约 | `node tests/run-all.js`（CI 同款） | ✅ 全部通过 |
+| 真机 | 探针 + `AT+CPMS`/`AT+CMGL=0` 审计 | ✅ 机制确认；修复后待用户同一路径复验 |
 ## [2.4.16] - 2026-09-30
 
 ### Added
