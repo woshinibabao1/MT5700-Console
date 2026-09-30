@@ -1,0 +1,2 @@
+out/aarch64_cortex-a53/luci-app-mt5700-2.4.19-r1.apk
+out/aarch64_cortex-a53/luci-i18n-mt5700-zh-cn-0.260930.50989.apk
