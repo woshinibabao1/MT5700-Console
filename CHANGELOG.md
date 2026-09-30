@@ -5,6 +5,45 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.16] - 2026-09-30
+
+### Added
+
+**119. 诊断回路：把「已读短信刷新后又变未读」变成一条可判红的命令**
+
+`tests/sms-unread-refresh-loop.test.js` —— 按用户真实操作序列驱动 `sms_center.js` 里**真正决定未读的那几段代码**
+（不是另写一份模型）：`unreadNumbers` 初始化 IIFE、`markUnread`/`clearUnread`/`isUnread`、
+`buildContacts` 里那句 `c.unreadCount = …` 表达式、`renderConversation` 里的清理调用。
+序列：① 列表刷新（模组侧全已读）→ ② 新短信推送到达 → ③ 用户读到（会话正处于显示状态）→ ④ **刷新页面**，断言 ④ 后不得显示未读。
+
+**红能力已证明**（同一回路跑 git 上一版源码，逐字对照）：
+
+| 源码 | ①列表 | ②推送 | ③读到 | ④刷新后 | 存储 |
+| :-- | :-- | :-- | :-- | :-- | :-- |
+| 修复前（`8760403`） | 0 | 1 | **1** | **1** | `["10086"]` |
+| 修复后 | 0 | 1 | 0 | 0 | `[]` |
+
+即：该回路在旧代码上**精确复现用户症状**（判红 3 项），在修复后转绿 —— 这才是"修复有效"的证据，而不是"代码看起来对"。
+文件内另含一条**红能力自检**：把两处改回旧写法后必须复现"刷新后仍未读"，否则回路视为空跑。
+
+### Fixed（运维/发布路径，非代码缺陷）
+
+**「修复已合入却始终不生效」的真因：设备上的 `sms_center.js` 是旧版本。**
+
+排查中发现设备（192.168.10.1，包标 2.4.15、后端 `at-webserver` 报 2.4.15）里
+`/www/luci-static/resources/view/at-webserver/sms_center.js` **不含 v2.4.15 的修复**：
+`clearUnread` 只出现 2 次且无 `selectedContact) clearUnread`，而同目录其它前端文件均正常
+（`parse.js` 已是新版 —— 用户能看到 `[彩信通知]` 标注）。**即：此前所有前端修复都没有被真正加载过。**
+该文件曾因一次误操作成为 overlay 上层副本（`链接数 0 / mtime 20:42`，其它文件均为 `链接数 1 / ROM 时间`），
+遮蔽了包内新文件；清除时又遇到 overlayfs 的 `Stale file handle`，需 `mount -o remount /` 才复原。
+
+**以后遇到"改了却不见效"，先按这三条确认文件真的换了**：
+
+```sh
+ls -l /www/luci-static/resources/view/at-webserver/<文件>.js   # 链接数应为 1；mtime 应为 ROM/包时间
+ls -l /overlay/upper/www/luci-static/resources/view/at-webserver/  # 不该有同名文件（有就是 overlay 副本在遮蔽）
+grep -c '<本次新增的代码特征>' /www/luci-static/resources/view/at-webserver/<文件>.js
+```
 ## [2.4.15] - 2026-09-30
 
 ### Fixed
