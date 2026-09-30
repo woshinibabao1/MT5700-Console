@@ -5,6 +5,30 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.14] - 2026-09-30
+
+### Fixed
+
+**117. AT 透传只挡 `\r\n\0`：改按"只放行可打印字符"从严校验**
+
+`rpcserver.rs` 的 `at` 方法原先只拒绝 CR/LF/NUL。但 AT 虽是行协议，**模组自身的行编辑语义还认别的控制字符**：
+`0x1A`(Ctrl-Z) 在多数模组上是数据态 / PDU 取数的终止符，`0x08` / `0x7F` 是退格。于是
+`"AT+CMGS=20\r<PDU>\u{1a}AT+CFUN=0"` 这类构造仍可能被模组解释成两条命令（真实注入面）。
+
+**修法**：抽出 `at_cmd_has_control_char()`，判据改为 `b < 0x20 || b == 0x7F` —— **只放行可打印字符**。
+`0x1A` 的确切语义应以厂商《AT 命令手册》为准，此处按**输入校验从严**处理：宁可拒绝，也不赌模组怎么解释。
+
+**为什么不会误伤既有功能**（有据，非推断）：
+- 产品自身产生的命令都不含控制字符 —— 短信通道用的「字面 \r」是两个**可打印**字符 `0x5C 0x72`（`AT+CMGS=19\r<PDU>`），真正的换行由传输层写入时统一追加；
+- 既有契约测试 `sms-text-injection` / `syscfg-command-contract`（断言命令剥掉换行后仍是单行）在本次修改后**全部仍然通过** —— 说明前端确实从不发送裸控制字符。
+
+### 验证
+
+| 项 | 方法 | 结果 |
+| :-- | :-- | :-- |
+| Rust 编译 | `cargo check --all-targets` | ✅ rc=0 |
+| Rust 单测 | `cargo test` | ✅ **51 passed / 0 failed**（新增断言：`\n`/`\r\n`/NUL/`0x1A`/`0x08`/`0x7F`/TAB 一律拒绝；`AT+CSQ`、`AT^HCSQ?`、`AT+CMGS=19\r<PDU>`、含引号的 `AT+CGDCONT`/`AT+CSIM` 全部放行） |
+| 全量 JS 契约 | `node tests/run-all.js` | ✅ 全部通过（含短信注入与 syscfg 单行断言） |
 ## [2.4.13] - 2026-09-30
 
 ### Fixed

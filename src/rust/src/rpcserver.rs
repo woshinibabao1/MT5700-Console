@@ -366,7 +366,14 @@ impl RpcServer {
                 // 例如 "AT+CSQ\r\nAT+CFUN=0"。项目在 cmti_capture 与
                 // normalize_syscfgex 都防过这个，主命令通道此前漏了。
                 // 短信用的「字面 \r」是两个字符(0x5C 0x72)，不受此过滤影响。
-                if cmd.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+                //
+                // ★ 2026-09-30 收紧：原先只挡 \r \n \0，但模组自身的行编辑语义还认别的控制字符 ——
+                //   `0x1A`(Ctrl-Z) 是许多模组数据态/PDU 取数的终止符、`0x08`/`0x7F` 是退格，
+                //   于是 `"AT+CMGS=20\r<PDU>\u{1a}AT+CFUN=0"` 这类构造仍可能被解释成两条命令。
+                //   改为**只放行可打印字符**（任何 C0 控制字符或 DEL 一律拒绝）。
+                //   产品自身产生的命令都不含控制字符（短信通道用字面 `\r` 两字符），
+                //   换行由传输层统一追加，因此从严不会影响既有功能。
+                if at_cmd_has_control_char(cmd) {
                     // ★ 同样脱敏：被拒的命令也可能带 PIN/APDU（拒绝原因本身不受影响）
                     log_warn!(
                         "拒绝含控制字符的 AT 命令: {:?}",
@@ -926,6 +933,21 @@ where
     Ok(Some((String::from_utf8_lossy(&raw).into_owned(), overlong)))
 }
 
+/// AT 命令里是否含**控制字符**（任何 C0 控制字符或 DEL）。
+///
+/// 判定口径是"只放行可打印字符"，而不是"挡掉已知的几个"：
+///   AT 是行协议，但模组的行编辑语义还认别的控制字符 —— `0x1A`(Ctrl-Z) 在多数模组上是
+///   数据态/PDU 取数的终止符、`0x08`/`0x7F` 是退格，只挡 CR/LF/NUL 时，
+///   `"AT+CMGS=20\r<PDU>\u{1a}AT+CFUN=0"` 这类构造仍可能被模组解释成两条命令。
+///   （`0x1A` 的确切语义应以厂商《AT 命令手册》为准；此处按**输入校验从严**处理，
+///     宁可拒绝，也不赌模组怎么解释。）
+///
+/// 为什么不会误伤：产品自身产生的命令都不含控制字符 —— 短信通道用的「字面 \r」是
+/// 两个可打印字符 `0x5C 0x72`，真正的换行由传输层在写入时统一追加。
+fn at_cmd_has_control_char(cmd: &str) -> bool {
+    cmd.bytes().any(|b| b < 0x20 || b == 0x7f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -973,6 +995,21 @@ mod tests {
         assert!(is_sms_data_command("at+cmgw=20"));
         assert!(is_sms_data_command("0011000B916800000000F00008AA0CE8329BFD06"));
         assert!(!is_sms_data_command("AT+CSQ"));
+
+        // ★ 2026-09-30：AT 透传的控制字符判定（原先只挡 \r\n\0）
+        assert!(at_cmd_has_control_char("AT+CSQ\nAT+CFUN=0"), "换行仍必须被拒");
+        assert!(at_cmd_has_control_char("AT+CSQ\r\nAT+CFUN=0"));
+        assert!(at_cmd_has_control_char("AT+CSQ\u{0}"), "NUL 仍必须被拒");
+        assert!(at_cmd_has_control_char("AT^RESET\u{1a}"), "0x1A 数据态终止符必须被拒");
+        assert!(at_cmd_has_control_char("AT+CSQ\u{8}"), "退格(0x08)必须被拒");
+        assert!(at_cmd_has_control_char("AT+CSQ\u{7f}"), "DEL(0x7F)必须被拒");
+        assert!(at_cmd_has_control_char("AT+CSQ\t"), "TAB 也必须被拒（AT 命令不需要它）");
+        // 正常命令与短信通道的「字面 \r」（0x5C 0x72 两个字符）必须放行
+        assert!(!at_cmd_has_control_char("AT+CSQ"));
+        assert!(!at_cmd_has_control_char("AT^HCSQ?"));
+        assert!(!at_cmd_has_control_char(r"AT+CMGS=19\r0891683108901705F1"));
+        assert!(!at_cmd_has_control_char("AT+CGDCONT=1,\"IP\",\"apn\""));
+        assert!(!at_cmd_has_control_char("AT+CSIM=10,\"00A4040002\""));
         assert!(!is_sms_data_command(""));
     }
 }
