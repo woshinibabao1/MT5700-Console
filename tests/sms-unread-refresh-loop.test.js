@@ -155,20 +155,28 @@ function makePage(src, store) {
 		isMsgUnread = function (c, m) { return !!(m && m.unread); };
 	}
 	const countExpr = extractCountExpr(src);
-	const countOf = new Function('unreadN', 'c', 'isUnread', 'return (' + countExpr + ');');
+	let hasMsgNewerThanRead;
+	try {
+		hasMsgNewerThanRead = new Function('readUptoOf', 'Parse', extractFn(src, 'hasMsgNewerThanRead') + '\nreturn hasMsgNewerThanRead;')(readUptoOf, Parse);
+	} catch (e) {
+		hasMsgNewerThanRead = function () { return true; };
+	}
+	const countOf = new Function('unreadN', 'c', 'isUnread', 'newerThanRead', 'return (' + countExpr + ');');
 	return {
 		api: api, state: state, hasWatermark: hasWatermark,
 		countOf: function (number, messages) {
 			const c = { number: number, messages: messages };
 			let unreadN = 0;
 			for (let i = 0; i < messages.length; i++) if (isMsgUnread(c, messages[i])) unreadN++;
-			return countOf(unreadN, c, api.isUnread);
+			const ntr = hasMsgNewerThanRead(c);
+			return countOf(unreadN, c, api.isUnread, ntr);
 		},
 		clearOnRender: extractClearOnRender(src),
 		readWhileWatching: function (number) {
 			if (!this.clearOnRender) return false;
 			this.state.selectedContact = number;
 			new Function('state', 'clearUnread', 'return ' + this.clearOnRender + ';')(this.state, api.clearUnread);
+			markReadUpto(number);   // 会话被显示 = 用户读到 → 盖水位线（真实现见 renderConversation）
 			return true;
 		}
 	};
@@ -225,7 +233,7 @@ ok('★ ⑤ 重放【旧的】推送不得把用户早已读过的那条标成�
 const OLD_SRC = src
 	.replace(/c\.unreadCount\s*=\s*unreadN\s*\|\|\s*\(\(c\.messages\.length\s*===\s*0\s*&&\s*isUnread\(c\.number\)\)\s*\?\s*1\s*:\s*0\);/,
 		'c.unreadCount = unreadN || (isUnread(c.number) ? 1 : 0);')
-	.replace(/if \(state\.selectedContact\) clearUnread\(state\.selectedContact\);/, '/* 旧版：会话显示时不清未读 */');
+	.replace(/if \(state\.selectedContact\) \{[\s\S]*?markReadUpto\(state\.selectedContact\);\n\t\t\t\}/, '/* 旧版：会话显示时不清未读 */');
 ok('★ 红能力自检：把会话即已读改回旧写法 → 场景一必须复现"刷新后仍未读"',
 	scenario(OLD_SRC).step4 === 1, '旧写法 step4=' + scenario(OLD_SRC).step4);
 

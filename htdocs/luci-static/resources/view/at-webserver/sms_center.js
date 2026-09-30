@@ -163,8 +163,7 @@ return L.view.extend({
 			 *   保证存储与内存始终一致。读取侧同时还做了归一化自愈（见上面）。
 			 */
 			saveUnread();
-			// ★ 同时抬高水位线：会话被读到"现在"，此前到达的消息一律视为已读（见 isMsgUnread）
-			markReadUpto(num);
+			/* clearUnread 不盖水位线：调用方含 buildContacts 的名单收敛（用户并没读） */
 			/*
 			 * 同时清掉内存里这些短信自带的未读标记。否则同一次会话内再调
 			 * buildContacts 时，来源 B 会依据仍是 true 的 msg.unread 把它们标回未读，
@@ -227,6 +226,20 @@ return L.view.extend({
 			var t = Parse.parseMessageTime(m.time);
 			if (!t) return true;                       // 时间解析不出来时保守显示未读
 			return !(readUptoOf(c && c.number) >= t.getTime());
+		}
+
+		/*
+		 * 该会话是否还有"晚于已读水位线"的消息 —— 号码级信号是否仍然有效。
+		 * messages 为空时也算 true：那是"推送已到、列表未刷新"的真未读。
+		 * 单独提成函数，便于诊断回路抽取（tests/sms-unread-refresh-loop.test.js 场景③）。
+		 */
+		function hasMsgNewerThanRead(c) {
+			if (!c || !c.messages || c.messages.length === 0) return true;
+			for (var i = 0; i < c.messages.length; i++) {
+				var t = Parse.parseMessageTime(c.messages[i].time);
+				if (t && t.getTime() > readUptoOf(c.number)) return true;
+			}
+			return false;
 		}
 
 		// 长短信拼接：把同一发件人、同一拼接引用号的各段合并为一条完整消息
@@ -341,7 +354,11 @@ return L.view.extend({
 			 *   真机复现（2026-09-30）：10086 的【订购成功提醒】全文已被用户读过，仍显示未读。
 			 *   clearUnread 是幂等的（名单里没有时只多做一次落盘），放在渲染入口无副作用。
 			 */
-			if (state.selectedContact) clearUnread(state.selectedContact);
+			if (state.selectedContact) {
+				clearUnread(state.selectedContact);
+				/* ★ 水位线只在这里盖章：会话被显示 == 用户读到了 */
+				markReadUpto(state.selectedContact);
+			}
 			convHead.innerHTML = '';
 			convHead.appendChild(E('div', { 'class': 'mt5700-sms-item-number' },
 				state.selectedContact ? '与 ' + state.selectedContact + ' 的会话' : '请选择联系人'));
@@ -723,10 +740,11 @@ return L.view.extend({
 				 *   注意只在 `c.messages.length > 0` 时收敛：消息对象还没到时不能剔，
 				 *   否则会把"推送已到、列表未刷新"的真未读一起清掉。
 				 */
-				if (c.messages.length > 0 && isUnread(c.number) && unreadN === 0) {
+				var newerThanRead = hasMsgNewerThanRead(c);
+				if (c.messages.length > 0 && isUnread(c.number) && unreadN === 0 && !newerThanRead) {
 					clearUnread(c.number);
 				}
-				c.unreadCount = unreadN || ((c.messages.length === 0 && isUnread(c.number)) ? 1 : 0);
+				c.unreadCount = unreadN || ((isUnread(c.number) && newerThanRead) ? 1 : 0);
 				c.unread = c.unreadCount > 0;
 				list2.push(c);
 			}
