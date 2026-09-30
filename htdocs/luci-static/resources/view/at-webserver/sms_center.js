@@ -290,6 +290,16 @@ return L.view.extend({
 		}
 
 		function renderConversation() {
+			/*
+			 * ★ 2026-09-30：会话被**显示**就视为已读，不再只认"点击左侧联系人行"。
+			 *   原先只有 selectContact（联系人行的点击回调）会 clearUnread，于是：
+			 *     · 刷新后自动恢复上次会话、或会话本就处于打开状态时，用户明明读了内容，
+			 *       号码却一直留在未读名单里；
+			 *     · 名单里那条又通过下面的 unreadCount 回退显示成"未读 1"，刷新也不会消。
+			 *   真机复现（2026-09-30）：10086 的【订购成功提醒】全文已被用户读过，仍显示未读。
+			 *   clearUnread 是幂等的（名单里没有时只多做一次落盘），放在渲染入口无副作用。
+			 */
+			if (state.selectedContact) clearUnread(state.selectedContact);
 			convHead.innerHTML = '';
 			convHead.appendChild(E('div', { 'class': 'mt5700-sms-item-number' },
 				state.selectedContact ? '与 ' + state.selectedContact + ' 的会话' : '请选择联系人'));
@@ -643,11 +653,33 @@ return L.view.extend({
 				 * 未读数优先按短信自身的状态位统计；一条都没标时，若该号码被新短信
 				 * 推送标过未读，至少算 1 条（那种情况只知道号码、不知道具体哪几条）。
 				 */
+				/*
+				 * ★ 2026-09-30 修「读了刷新又未读」（幻影未读）：
+				 *
+				 *   原写法 `c.unreadCount = unreadN || (isUnread(c.number) ? 1 : 0)` 里，
+				 *   那个"名单里有号码就至少算 1"的回退是幻影未读的来源 ——
+				 *   会话里其实一条未读都没有（用户读过、模组侧也全是 stat=1），
+				 *   但只要号码还留在名单里，徽章就永远显示"未读 1"，刷新也照旧
+				 *   （列表重建时又走一遍这条回退）。真机复现：10086 的【订购成功提醒】已读仍显示未读。
+				 *
+				 *   现在只按**短信自身的状态位**统计；回退收窄到唯一真正需要它的场景：
+				 *   新短信推送已到达、但列表还没刷新回来（此时该会话**一条消息对象都没有**）。
+				 */
 				var unreadN = 0;
 				for (var mi = 0; mi < c.messages.length; mi++) {
 					if (c.messages[mi].unread) unreadN++;
 				}
-				c.unreadCount = unreadN || (isUnread(c.number) ? 1 : 0);
+				/*
+				 * ★ 名单自动收敛：列表已经带来了该会话的消息、且里面一条未读都没有
+				 *   → 名单里的该号码是残留（用户读过 / 模组侧已置读），就地剔除并落盘。
+				 *   没有这一步，残留会一直挂着，每次重建都把徽章算回来。
+				 *   注意只在 `c.messages.length > 0` 时收敛：消息对象还没到时不能剔，
+				 *   否则会把"推送已到、列表未刷新"的真未读一起清掉。
+				 */
+				if (c.messages.length > 0 && isUnread(c.number) && unreadN === 0) {
+					clearUnread(c.number);
+				}
+				c.unreadCount = unreadN || ((c.messages.length === 0 && isUnread(c.number)) ? 1 : 0);
 				c.unread = c.unreadCount > 0;
 				list2.push(c);
 			}
