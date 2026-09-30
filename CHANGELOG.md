@@ -5,6 +5,44 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.12] - 2026-09-30
+
+### Fixed
+
+**115. 「12520115 的短信乱码」—— 实为彩信通知（WAP Push），被当成 8bit 文本显示**
+
+用户报障：收到 12520115 的短信是乱码。真机取证（设备收件箱逐条 `AT+CMGR` 读原始 PDU，共 33 条）：
+
+| IDX | 发件人 | DCS | 编码 | udl | UD 实到 | 判定 |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+| 23 | 12520115 | 0x04 | 8bit | 140 | 140 | ★ 彩信通知第 1/2 段 |
+| 24 | 12520115 | 0x04 | 8bit | 23 | 23 | ★ 彩信通知第 2/2 段 |
+| 其余 31 条 | 10086 / 10658… | 0x08 | UCS2 | — | 与 udl 相等 | 正常 |
+
+**根因**：这两条不是文本短信，而是 **WAP Push / 彩信通知**（`AT+CMGL` 会把它们列出来）：
+- UDH = `05 04 0b 84 23 f0 …` → IEI 0x05（16 位端口寻址）**目的端口 0x0B84 = 2948**（WAP Push 端口）；
+- 载荷是二进制报头，ASCII 里可见 `application/vnd.wap.mms-message`、`http://[2409:8077:801::1:311]:80/E6UJeHm6eG`、`12520088`、`/TYPE=PLMN`；
+- 而本仓 8bit 分支按 **Latin-1** 逐字节映射（`b as char`）→ 二进制字段全变成 `Ã¤Â¸Â` 之类的乱码。
+
+**修法**（不猜字符集 —— GBK/UTF-16 都要引入编码表依赖，而本模组的 8bit 文本短信极罕见）：
+按 **UDH 目的端口 2948/2949** 精确识别，前后端统一改为标注 `[彩信通知] 本机不支持彩信，请用手机查看该条内容`。
+- Rust：`src/rust/src/pdu.rs` 新增 `udh_app_port()`（IEI 0x05 目的端口）与 `WAP_PUSH_PORTS` / `MMS_NOTICE_TEXT`；
+- 前端：`htdocs/.../parse.js` 复用既有的 UDH 遍历循环取出同一端口，文案与 Rust **逐字一致**；
+- 共享样本：把这两条**真机原样 PDU** 加进 `tests/fixtures/pdu-samples.json`，两端各自断言同一结果（本仓既有的"前后端不漂移"机制）。
+
+### Added
+
+- Rust 单测 `wap_push_目的端口解析`（含"端口 IE 在分段 IE 之后"的真机顺序、长度越界不 panic）、
+  `彩信通知按明文标注而不是乱码`（用真机原样 PDU 断言发件人 / 文案 / 分段信息）。
+
+### 验证
+
+| 项 | 方法 | 结果 |
+| :-- | :-- | :-- |
+| 真机取证 | 逐条 `AT+CMGR=1..34` 读原始 PDU（只读） | ✅ 33 条全部解析；**`udl` 逐条等于 UD 实到字节数**，同时反证 2.4.11 的长度校验在全部真实样本上正确 |
+| Rust 单测 | `cargo test` | ✅ **49 passed / 0 failed**（含共享样本一致、两条新彩信测试） |
+| 前后端一致性 | `node tests/pdu-cross-end-contract.test.js` | ✅ **32 项全部通过**，两条真机彩信样本"正文完全一致" |
+| 全量 JS | `node tests/run-all.js` | ✅ 全部通过 |
 ## [2.4.11] - 2026-09-30
 
 ### Fixed

@@ -273,7 +273,23 @@ pub fn decode_incoming_pdu(pdu_hex: &str) -> Result<Sms, String> {
 
     let content = match encoding {
         0x02 => decode_ucs2(&ud[udh_len..]),
-        0x01 => ud[udh_len..].iter().map(|&b| b as char).collect(),
+        0x01 => {
+            /*
+             * 8bit 载荷默认按 Latin-1 逐字节映射（1 字节 = 1 字符，不丢信息）。
+             * 但 **WAP Push / 彩信通知**走的也是 8bit，载荷是二进制报头 ——
+             * 真机实测（2026-09-30，设备收件箱 IDX 23/24，发件人 12520115，两条是同一通知的 1/2 段）：
+             *   UDH 目的端口 `0x0B84` = **2948**（WAP Push），载荷里是 ASCII 可见的
+             *   `application/vnd.wap.mms-message`、`http://[2409:…]:80/E6UJeHm6eG`、`12520088`、`/TYPE=PLMN`。
+             * 按文本显示就是一串 `Ã¤Â¸Â` 之类的乱码（用户报的"短信乱码"就是这个）。
+             * 这里**不猜字符集**（GBK/UTF-16 都要引入编码表依赖，而本模组的 8bit 文本短信极罕见），
+             * 而是按端口把它明确标注出来：用户看到"这是彩信通知"，而不是乱码。
+             */
+            let wap_port = if udh_len > 0 { udh_app_port(&ud[1..udh_len]) } else { None };
+            match wap_port {
+                Some(p) if WAP_PUSH_PORTS.contains(&p) => MMS_NOTICE_TEXT.to_string(),
+                _ => ud[udh_len..].iter().map(|&b| b as char).collect(),
+            }
+        }
         _ => {
             // 7 位编码里 UDH 也按码位计数，且正文需要对齐到 7 位边界。
             let udh_septets = (udh_len * 8 + 6) / 7;
@@ -296,6 +312,36 @@ pub fn decode_incoming_pdu(pdu_hex: &str) -> Result<Sms, String> {
         date: decode_timestamp(ts_bytes),
         partial,
     })
+}
+
+/// WAP Push 的目的端口：2948 = 无连接 WAP Push（彩信通知走这个），2949 = 同上（安全）。
+///
+/// 真机依据（2026-09-30，设备 192.168.10.1 收件箱 33 条中的 IDX 23/24，发件人 12520115）：
+///   UDH = `05 04 0b 84 23 f0 …` → IEI 0x05（16 位端口寻址），**目的端口 0x0B84 = 2948**，
+///   源端口 0x23F0 = 9200；载荷是 MMS 通知报头（ASCII 可见 `application/vnd.wap.mms-message`
+///   与 `/TYPE=PLMN`）。这类报文不是文本，按 8bit→Latin-1 显示即为乱码。
+const WAP_PUSH_PORTS: [u16; 2] = [2948, 2949];
+
+/// 彩信通知在本控制台里的显示文案。**前端 parse.js 必须与此逐字一致**
+/// （`tests/fixtures/pdu-samples.json` 的共享样本会在两侧同时校验）。
+const MMS_NOTICE_TEXT: &str = "[彩信通知] 本机不支持彩信，请用手机查看该条内容";
+
+/// 从 UDH 里取"16 位端口寻址"（IEI 0x05）的**目的端口**；没有该 IE 时返回 None。
+fn udh_app_port(udh: &[u8]) -> Option<u16> {
+    let mut i = 0;
+    while i + 1 < udh.len() {
+        let iei = udh[i];
+        let ie_len = udh[i + 1] as usize;
+        let body = i + 2;
+        if body + ie_len > udh.len() {
+            break; // 长度越界：按"没有该 IE"处理，交给上层现有的 UDH 校验
+        }
+        if iei == 0x05 && ie_len >= 2 {
+            return Some(u16::from_be_bytes([udh[body], udh[body + 1]]));
+        }
+        i = body + ie_len;
+    }
+    None
 }
 
 /// 从 UDH 中取出长短信分段信息（IEI 0x00 为 8 位序号，0x08 为 16 位）。
@@ -479,6 +525,38 @@ mod tests {
         let base = decode_incoming_pdu(UCS2_PDU).unwrap();
         let got = decode_incoming_pdu(&with_junk).unwrap();
         assert_eq!(got.content, base.content, "多余字节不得进入正文");
+    }
+
+    /*
+     * ★ 2026-09-30 新增：WAP Push / 彩信通知的识别。
+     * 用户报"12520115 的短信乱码"，真机取证实为彩信通知（8bit + UDH 目的端口 2948），
+     * 按 Latin-1 显示成二进制报头即乱码。下面两条用**真机原样 PDU** 钉住行为。
+     */
+    #[test]
+    fn wap_push_目的端口解析() {
+        // 真机 UDH 片段：IEI 0x05 + len 4 + 目的端口 0x0B84(2948) + 源端口 0x23F0(9200)
+        assert_eq!(udh_app_port(&[0x05, 0x04, 0x0b, 0x84, 0x23, 0xf0]), Some(2948));
+        // 端口 IE 在长短信分段头**之后**时也要能找到（真机 IDX 23 就是这个顺序）
+        assert_eq!(
+            udh_app_port(&[0x00, 0x03, 0xbd, 0x02, 0x01, 0x05, 0x04, 0x0b, 0x84, 0x23, 0xf0]),
+            Some(2948)
+        );
+        // 只有长短信分段头时不得误判成端口
+        assert_eq!(udh_app_port(&[0x00, 0x03, 0xbd, 0x02, 0x01]), None);
+        // 长度越界时按"没有该 IE"处理，不 panic
+        assert_eq!(udh_app_port(&[0x05, 0x04, 0x0b]), None);
+    }
+
+    #[test]
+    fn 彩信通知按明文标注而不是乱码() {
+        // 真机原样 PDU（设备收件箱 IDX 24，发件人 12520115，同一通知的第 2/2 段）
+        let pdu = "0891683108901705F16408A121251051000462900371808223170B05040B8423F00003BD0202\
+                   2F545950453D504C4D4E00";
+        let sms = decode_incoming_pdu(pdu).unwrap();
+        assert_eq!(sms.sender, "12520115");
+        assert_eq!(sms.content, MMS_NOTICE_TEXT, "彩信通知必须被标注，不能显示二进制报头");
+        let part = sms.partial.expect("两条都是长短信分段（UDH ref=0xBD，共 2 段）");
+        assert_eq!((part.reference, part.parts_count, part.part_number), (0xBD, 2, 2));
     }
 
     #[test]

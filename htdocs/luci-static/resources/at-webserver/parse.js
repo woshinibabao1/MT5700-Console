@@ -1348,6 +1348,15 @@ var Parse = (function () {
 		var udhi = (firstOctet & 0x40) !== 0;
 		var userData = ud;
 		var headerLen = 0;
+		/*
+		 * 16 位端口寻址（IEI 0x05）的**目的端口**。真机依据（2026-09-30，设备收件箱
+		 * IDX 23/24，发件人 12520115）：UDH = `05 04 0b 84 23 f0 …` → 目的端口
+		 * 0x0B84 = **2948**（WAP Push / 彩信通知），载荷是二进制报头
+		 * （ASCII 里可见 `application/vnd.wap.mms-message`、`/TYPE=PLMN`）。
+		 * 这类报文不是文本：8bit 按 Latin-1 逐字节显示就是 `Ã¤Â¸Â` 之类的乱码。
+		 * 与 Rust 侧 src/rust/src/pdu.rs 的 udh_app_port() 同一口径。
+		 */
+		var wapPort = null;
 
 		if (udhi && ud.length > 0) {
 			headerLen = ud[0];
@@ -1363,6 +1372,8 @@ var Parse = (function () {
 					partial = { reference: ieData[0], parts_count: ieData[1], part_number: ieData[2] };
 				} else if (iei === 0x08 && iel >= 4) {
 					partial = { reference: ((ieData[0] << 8) | ieData[1]), parts_count: ieData[2], part_number: ieData[3] };
+				} else if (iei === 0x05 && iel >= 2) {
+					wapPort = (ieData[0] << 8) | ieData[1];
 				}
 				p += 2 + iel;
 			}
@@ -1371,9 +1382,20 @@ var Parse = (function () {
 		if (enc === 2) {
 			content = decodeUcs2Bytes(userData);
 		} else if (enc === 1) {
-			var c8 = '';
-			for (var k = 0; k < userData.length; k++) c8 += String.fromCharCode(userData[k]);
-			content = c8;
+			/*
+			 * 8bit 默认按 Latin-1 逐字节映射（1 字节 = 1 字符，不丢信息）。
+			 * 但 WAP Push / 彩信通知走同一编码、载荷是二进制报头 —— 按文本显示即乱码
+			 * （用户报的"12520115 短信乱码"就是这个）。这里按目的端口明确标注，
+			 * 文案必须与 Rust 侧 pdu.rs 的 MMS_NOTICE_TEXT **逐字一致**：
+			 * tests/fixtures/pdu-samples.json 的共享样本会在两侧同时校验。
+			 */
+			if (wapPort === 2948 || wapPort === 2949) {
+				content = '[彩信通知] 本机不支持彩信，请用手机查看该条内容';
+			} else {
+				var c8 = '';
+				for (var k = 0; k < userData.length; k++) c8 += String.fromCharCode(userData[k]);
+				content = c8;
+			}
 		} else {
 			/*
 			 * 7-bit：UDH 占用的 septet 数按其八位组长度折算，
