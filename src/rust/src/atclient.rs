@@ -472,14 +472,19 @@ impl AtClient {
         let mut applied = false;
         match self.send_command(ctx, &cmd, COMMAND_TIMEOUT, None).await {
             Ok(resp) if resp.ok() => {
-                log_info!("已{}自动拨号（{}）", if desired { "开启" } else { "关闭" }, cmd);
+                // ★ 脱敏：`AT^SETAUTODIAL` 的完整参数里含 APN 的用户名与口令
+                log_info!(
+                    "已{}自动拨号（{}）",
+                    if desired { "开启" } else { "关闭" },
+                    crate::logger::redact_at_for_log(&cmd)
+                );
                 applied = true;
             }
             Ok(resp) => {
                 log_warn!("自动拨号设置未返回 OK: {}", resp.text());
             }
             Err(e) => {
-                log_warn!("自动拨号设置失败: {}（命令 {}）", e, cmd);
+                log_warn!("自动拨号设置失败: {}（命令 {}）", e, crate::logger::redact_at_for_log(&cmd));
             }
         }
 
@@ -701,7 +706,8 @@ impl AtClient {
                     log_warn!(
                         "写入 AT 命令超时({}s)，模组可能卡在数据输入态: {}",
                         WRITE_TIMEOUT.as_secs(),
-                        command.trim()
+                        // ★ 脱敏：数据态卡住的多半就是 `AT+CMGS`/`AT+CGLA` 这类带内容的命令
+                        crate::logger::redact_at_for_log(command)
                     );
                     self.pending.lock().await.take();
                     return Err(format!(
@@ -745,7 +751,9 @@ impl AtClient {
                 "模组无响应（已等待 {}ms，收到 {} 行不完整数据）: {}",
                 timeout.as_millis(),
                 lines.len(),
-                command.trim()
+                // ★ 脱敏：msg 既进日志、也作为错误返回给 RPC 调用方，
+                //   而它会经 rpcserver 的"AT 命令失败"日志再打一遍 —— 不脱敏等于绕过那里的脱敏。
+                crate::logger::redact_at_for_log(command)
             );
             /*
              * ★ 末行摘要（2026-09-20）：「收到 N 行」只说明没等到结束码，说明不了
@@ -768,7 +776,10 @@ impl AtClient {
         }
         if lines.is_empty() {
             // 收到过结束码但没攒到任何内容（例如模组只回一个空结束码）。
-            return Err(format!("模组未返回内容: {}", command.trim()));
+            return Err(format!(
+                "模组未返回内容: {}",
+                crate::logger::redact_at_for_log(command)
+            ));
         }
         Ok(AtResponse { lines })
     }

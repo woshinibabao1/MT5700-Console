@@ -33,6 +33,90 @@ pub fn set_level(level: Level) {
     CURRENT_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
+/// 日志脱敏：把**敏感 AT 命令**的参数部分替换成 `***`，其余命令原样返回。
+///
+/// 为什么必须有（2026-09-30 全局同类排查后的统一出口）：
+///   本服务的日志既进内存环形缓冲（1200 条，可经 `logs` RPC 取回）也打到 stderr/syslog，
+///   而 AT 命令里带着这些**排障并不需要、泄露后果却明确**的内容：
+///     · `AT+CPIN=` / `AT+CPWD=` / `AT+CLCK=`：PIN / PUK；
+///     · `AT+CSIM=` / `AT+CGLA=`：完整 APDU（可读出 ICCID / EID）；
+///     · `AT^PHYNUM=IMEI,…`：IMEI 写入；
+///     · `AT^SETAUTODIAL=` / `AT+CGDCONT=`：APN 的用户名与口令；
+///     · `AT+CSCA=`：短信中心号。
+///   命令名本身足以定位"是哪条命令出的问题"，参数一律不记。
+///
+/// 口径（刻意保守，避免把排障信息一起遮掉）：
+///   · 大小写不敏感（`at+cpin=` 同样被遮）；
+///   · **只遮名单里的命令** —— `AT+CMGS=20` 这类"长度也是参数"的命令原样保留；
+///   · `?` 结尾的纯查询没有参数；无 `=` 的命令（`AT`/`ATI`/`AT+CSQ`）也原样返回；
+///   · 首尾空白裁掉，空串安全返回空串。
+pub fn redact_at_for_log(cmd: &str) -> String {
+    const SENSITIVE: [&str; 9] = [
+        "AT+CPIN",
+        "AT+CPWD",
+        "AT+CLCK",
+        "AT+CSIM",
+        "AT+CGLA",
+        "AT+CSCA",
+        "AT^PHYNUM",
+        "AT^SETAUTODIAL",
+        "AT+CGDCONT",
+    ];
+    let s = cmd.trim();
+    let eq = match s.find('=') {
+        Some(i) => i,
+        None => return s.to_string(),
+    };
+    let name = s[..eq].trim_end();
+    let upper = name.to_ascii_uppercase();
+    if SENSITIVE.iter().any(|c| upper == *c) {
+        format!("{name}=***")
+    } else {
+        s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_at_for_log;
+
+    /// 敏感命令的参数（PIN/PUK/APDU/IMEI/APN 口令/短信中心号）必须被遮掉
+    #[test]
+    fn 敏感参数被遮掉() {
+        assert_eq!(redact_at_for_log("AT+CPIN=\"1234\""), "AT+CPIN=***");
+        assert_eq!(redact_at_for_log("AT+CPWD=\"SC\",\"1234\",\"5678\""), "AT+CPWD=***");
+        assert_eq!(redact_at_for_log("AT+CLCK=\"SC\",1,\"1234\""), "AT+CLCK=***");
+        assert_eq!(redact_at_for_log("AT+CGLA=0,18,\"00A40804047FFF6F07\""), "AT+CGLA=***");
+        assert_eq!(redact_at_for_log("AT+CSIM=10,\"00A4040002\""), "AT+CSIM=***");
+        assert_eq!(redact_at_for_log("AT^PHYNUM=IMEI,864640060359112"), "AT^PHYNUM=***");
+        assert_eq!(
+            redact_at_for_log("AT^SETAUTODIAL=1,0,\"IP\",\"apn\",\"user\",\"pass\",1"),
+            "AT^SETAUTODIAL=***"
+        );
+        assert_eq!(
+            redact_at_for_log("AT+CGDCONT=1,\"IP\",\"apn\",\"u\",\"p\""),
+            "AT+CGDCONT=***"
+        );
+        assert_eq!(redact_at_for_log("AT+CSCA=\"+8613800100500\""), "AT+CSCA=***");
+        // 大小写不敏感
+        assert_eq!(redact_at_for_log("at+cpwd=\"SC\",\"1\",\"2\""), "at+cpwd=***");
+        // 首尾空白不影响判定
+        assert_eq!(redact_at_for_log("  AT+CPIN=\"1\"  "), "AT+CPIN=***");
+    }
+
+    /// 非敏感命令必须原样保留（否则排障关键信息被误伤）
+    #[test]
+    fn 非敏感命令原样保留() {
+        assert_eq!(redact_at_for_log("AT+CMGS=20"), "AT+CMGS=20");
+        assert_eq!(redact_at_for_log("AT^HCSQ?"), "AT^HCSQ?");
+        assert_eq!(redact_at_for_log("AT+CSQ"), "AT+CSQ");
+        assert_eq!(redact_at_for_log("AT+CPIN?"), "AT+CPIN?");
+        assert_eq!(redact_at_for_log("AT^SETAUTODIAL?"), "AT^SETAUTODIAL?");
+        assert_eq!(redact_at_for_log("AT"), "AT");
+        assert_eq!(redact_at_for_log(""), "");
+    }
+}
+
 pub fn level() -> Level {
     match CURRENT_LEVEL.load(Ordering::Relaxed) {
         0 => Level::Debug,

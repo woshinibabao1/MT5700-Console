@@ -5,6 +5,41 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.4.13] - 2026-09-30
+
+### Fixed
+
+**116. 日志脱敏：PIN/PUK、APDU、IMEI、APN 口令被原样写进日志，且可经 `logs` RPC 取回**
+
+本服务的日志既进**内存环形缓冲（1200 条，可经 RPC 取回）**也打到 stderr/syslog。
+全局同类排查（不是只修一处）后确认 **5 处**直接打印整条 AT 命令：
+
+| 位置 | 原文 | 泄露面 |
+| :-- | :-- | :-- |
+| `rpcserver.rs` 收到命令 | `log_debug!("收到 AT 命令: {}", command.trim())` | 任意，含 `AT+CSIM`/`AT+CGLA` 的 APDU（可读 ICCID/EID）、`AT^PHYNUM=IMEI,…`、`AT+CPIN=` |
+| `rpcserver.rs` 命令失败 | `log_debug!("AT 命令失败: {} -> {}", command.trim(), e)` | 同上（失败路径同样留痕） |
+| `rpcserver.rs` 拒绝控制字符 | `log_warn!("拒绝含控制字符的 AT 命令: {:?}", cmd)` | 同上 |
+| `atclient.rs` 写超时 | `log_warn!("写入 AT 命令超时…: {}", …, command.trim())` | 卡数据态的正是 `AT+CMGS`/`AT+CGLA` 这类带内容的命令 |
+| `atclient.rs` 超时文案 / 无应答 | `format!("模组无响应…: {}", …, command.trim())`、`format!("模组未返回内容: {}", command.trim())` | 该文案既进日志、也作为错误返回，会**经上面的"AT 命令失败"日志再泄露一次**（绕过脱敏） |
+| `atclient.rs` 自动拨号 | `log_info!("已…自动拨号（{}）", …, cmd)` / `log_warn!("…（命令 {}）", e, cmd)` | `AT^SETAUTODIAL=…,"apn","user","pass"` → **APN 口令明文** |
+
+**修法**：`logger.rs` 新增统一出口 `redact_at_for_log()` —— 只对**敏感名单**（`+CPIN`/`+CPWD`/`+CLCK`/`+CSIM`/`+CGLA`/`+CSCA`/`^PHYNUM`/`^SETAUTODIAL`/`+CGDCONT`）把参数换成 `=***`，
+其余命令**原样保留**（避免误伤 `AT+CMGS=20` 这类"长度也是参数"的排障信息）；大小写不敏感，`?` 查询与无参命令原样返回。5 处调用点全部改走它，**错误字符串里嵌的命令一并脱敏**（否则会绕过日志处的脱敏）。
+
+### Added
+
+- `logger.rs` 两条单测：敏感参数被遮掉（PIN/APDU/IMEI/APN 口令/短信中心号、大小写与空白）、非敏感命令原样保留。
+- `tests/at-log-redaction-contract.test.js`：把"这 5 处必须经统一出口"钉成契约（含 3 条反向自检，
+  并如实写明一条**已知局限**：判据是逐条列具体旧形态的字面匹配，注释里若原样照抄旧写法也会被判违规 —— 刻意保守）。
+
+### 验证
+
+| 项 | 方法 | 结果 |
+| :-- | :-- | :-- |
+| Rust 单测 | `cargo test` | ✅ **51 passed / 0 failed**（49 + 2 条脱敏单测） |
+| Rust 编译 | `cargo check --all-targets` | ✅ rc=0（首次编译即被借用检查拦下一处 `String`/`&str` 不匹配，已修） |
+| 脱敏契约 | `node tests/at-log-redaction-contract.test.js` | ✅ 11 项通过；把任一处改回直接打印 → **判红** |
+| 全量 JS | `node tests/run-all.js` | ✅ 全部通过 |
 ## [2.4.12] - 2026-09-30
 
 ### Fixed

@@ -367,7 +367,11 @@ impl RpcServer {
                 // normalize_syscfgex 都防过这个，主命令通道此前漏了。
                 // 短信用的「字面 \r」是两个字符(0x5C 0x72)，不受此过滤影响。
                 if cmd.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
-                    log_warn!("拒绝含控制字符的 AT 命令: {:?}", cmd);
+                    // ★ 同样脱敏：被拒的命令也可能带 PIN/APDU（拒绝原因本身不受影响）
+                    log_warn!(
+                        "拒绝含控制字符的 AT 命令: {:?}",
+                        crate::logger::redact_at_for_log(&cmd)
+                    );
                     return serde_json::json!({ "id": id, "error": { "code": -32602, "message": "cmd 不允许包含换行或控制字符" } });
                 }
                 let resp = self.run_command(cmd).await;
@@ -402,7 +406,9 @@ impl RpcServer {
 
     /// 把前端发来的字符串当作 AT 命令执行并整理成应答。
     pub async fn run_command(&self, command: &str) -> AtCommandResponse {
-        log_debug!("收到 AT 命令: {}", command.trim());
+        // ★ 日志脱敏（2026-09-30）：命令里会带 PIN/PUK、APDU、IMEI、APN 口令等，
+        //   而这条记录会进内存环形缓冲并可经 logs RPC 取回 —— 只记命令名。
+        log_debug!("收到 AT 命令: {}", crate::logger::redact_at_for_log(command));
 
         // AT+CONNECT? 不是真的 AT 命令，用来让前端知道当前走网络还是串口。
         if command.trim() == "AT+CONNECT?" {
@@ -473,7 +479,8 @@ impl RpcServer {
                 AtCommandResponse { success: true, data: Some(text), error: None }
             }
             Ok(Err(e)) => {
-                log_debug!("AT 命令失败: {} -> {}", command.trim(), e);
+                // 失败路径同样要脱敏：审计日志不该因为"排障"而留下敏感参数
+                log_debug!("AT 命令失败: {} -> {}", crate::logger::redact_at_for_log(&command), e);
                 AtCommandResponse { success: false, data: None, error: Some(e) }
             }
             Err(_) => AtCommandResponse { success: false, data: None, error: Some("命令执行超时".into()) },
