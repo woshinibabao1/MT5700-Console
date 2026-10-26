@@ -10,26 +10,25 @@
  * 网络状态 - 上游原版视觉 + 基准 v1.3.4 功能
  *
  * 等价迁移原 WebUI network/Info.tsx。当前版式（2026-10-27 起）是**一列到底**：
- *   ① 结论卡       一句话结论 + 四段链路 + chips（调制/APN/QCI/签约）+ 连接明细表
+ *   ① 结论卡       一句话结论 + 四段链路 + chips（调制/APN/QCI/签约）
  *   ② KPI ×4       下行/上行速率、RSRP、SINR、本月流量（各带趋势线与副标）
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
  *   ④ 设备与身份   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
  *   ⑤ 常用动作     连接自检 / 清零流量 / 锁定频段 / 运行日志 / 服务与升级
  *   ⑥ 断网排查     **默认收起的抽屉**：点「连接自检」才展开并开跑（三层体检）
  *
- * ★ 三次「合并/删除」的口径，别再拆回去：
+ * ★ 四次「合并/删除」的口径，别再拆回去：
  *   · 信号质量卡（2026-10-26）：RSRP/RSRQ/SINR 在结论卡、KPI、载波表已各有一处，
  *     环表只是同一件事的第四遍；调制搬进结论卡 chips。
  *   · 速率与流量卡（2026-10-27）：当前值在 KPI、累计在 KPI 副标，曲线是唯一独有物，
  *     为它养一张大卡不值。★ 每秒采样不能停 —— KPI 与趋势线都吃 state.rtDown/rtUp。
- *   · 连接状态卡（2026-10-27）：APN/QCI/签约 → 结论卡 chips，明细表 → 结论卡内部。
+ *   · 连接状态卡（2026-10-27）：APN/QCI/签约 → 结论卡 chips。
  *     独立再开一张卡，只是把「已连接 · 地址 · 网关」排版第二遍。
- *
- * ★ 为什么把「连接诊断 / 地址与 DNS」两张表合成一张（2026-09-18）：
- *   三者的行都是「项目 → 值」，拆三张只是多出两行表头、把同类信息切三刀；
- *   而「CID」「来源」两列又是纯内部概念 —— CID 1/5 用户无从干预，
- *   PDP 与 WAN 本来就是同一个地址，标了来源反而让人以为有两份地址。
- *   合并后按「连接诊断 / 地址与 DNS」两个分组标题行分隔。
+ *   · 连接明细表（2026-10-27，连接诊断 + 地址与 DNS 共 11 行）：整块删除。
+ *     地址与网关结论卡那句话里已经有了；注册/IMS/RRC 属于「出问题时才看」，
+ *     归「断网排查」抽屉；DNS 是**配置**，挪到「网络设置」页。
+ *     ★ 连带停发 4 条只为这些行存在的 AT（C5GREG/CEREG/CIREG/RRCSTAT），
+ *       但 AT+CGPADDR 与 AT^DHCP? 必须留 —— 结论卡的地址与网关吃它们。
  *
  * ★ 为什么把「连接质量」整卡换成「连接工具」（2026-09-18）：
  *   旧卡四项里，会话均速重复「速率与流量」、信号波动重复「信号质量」、
@@ -99,8 +98,6 @@ return L.view.extend({
 		 *   · APN / QCI / 签约速率 → 结论卡 chips（与调制并排）
 		 *   · 连接明细表（诊断 + 地址与 DNS）→ 结论卡内部（node._body）
 		 * 卡片本身不再创建，也不再有自己的标题。 */
-		var connDetailBox = E('div', { 'class': 'mt5700-verdict-table' });
-		verdict._body.appendChild(connDetailBox);
 
 		/* ③ 载波聚合：^HFREQINFO 载波列表 + 聚合状态（原「载波聚合」+「辅载波信号」合并）
 		 * 标题按 v9 原型改回「载波聚合」，与预览图逐字一致。 */
@@ -229,7 +226,7 @@ return L.view.extend({
 			carriers: [],
 			nrssbid: null,
 			monnc: [],
-			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, addrs: [] },
+			diag: { endc: null, addrs: [] },
 			tools: {
 				/* 断网排查：atSteps = L1 的 AT 逐步结果，items = L2/L3 由系统事实判定的结果。
 				   facts 是后端 diag-probe.sh 回的 key=value，factsErr 非空说明后端没升级。 */
@@ -244,7 +241,7 @@ return L.view.extend({
 				modem1: 0, modem2: 0, bbp1: 0, bbp2: 0
 			},
 			flow: { lastDsTime: 0, lastTxFlow: 0, lastRxFlow: 0, totalDsTime: 0, totalTxFlow: 0, totalRxFlow: 0 },
-			dhcpv4: null, dhcpv6: null, ipv6Cap: null,
+			dhcpv4: null, dhcpv6: null,
 			uplinkMCS: null, downlinkMCS: null,
 			activeCid: null,
 			networkStatus: '等待状态中',
@@ -1454,8 +1451,9 @@ return L.view.extend({
 		}
 
 		/* renderConn 已删除（2026-10-27）：连接状态卡并入结论卡后，
-		   APN / QCI / 签约速率改由 renderVerdict 的 chips 直接给（同一处判定、同一处显示），
-		   明细表由 renderConnDetail 负责。这里不再有独立的渲染步骤。 */
+		   APN / QCI / 签约速率改由 renderVerdict 的 chips 直接给（同一处判定、同一处显示）。
+		   renderConnDetail 也已删除（同日）：连接诊断 + 地址与 DNS 明细表整块下线，
+		   需要的两项（EN-DC、PDP 地址）由 loadDiagnostics 直接喂结论卡。 */
 
 		/* ================= 结论区（一句结论 + 四段链路） =================
 		 *
@@ -1909,57 +1907,6 @@ return L.view.extend({
 		 *            让人以为有两份地址（2026-09-18 实测两者完全相同）。
 		 */
 
-		function buildDiagRows() {
-			var d = state.diag;
-			/*
-			 * 2026-10-27 精简（用户质疑「这一屏是不是多余无意义」）：
-			 * 判据只有一条 —— **看完这一行，用户能不能做出一个决定**。
-			 *
-			 * 删掉的 4 行：
-			 *   · ENDC 双连接：本机 SA 组网下恒为「小区不支持」，而它读的是
-			 *     模组/网络能力值 <en_dc avail>，说成「小区不支持」本身也不准确。
-			 *     ★ 只删显示，^LENDC? 仍要查 —— 结论卡的制式判定要吃它的 endc。
-			 *   · 网络切片（01）：NSSAI 默认值，没有对应操作，也不影响能不能上网。
-			 *   · 选网模式：与卡头「中国移动 · 5G-NR · n41」重复；而且手动锁网
-			 *     在「无线与频段」页能看能改，总览再列一遍没有新信息。
-			 *   · NR CC1 PUSCH：模组内部发射功率，用户无从干预；载波一多还会
-			 *     变成好几行。为它单独发一条 AT^NTXPOWER? 更不划算。
-			 *
-			 * 留下的每一行都有明确的下一步：5G/EPS 注册（为什么上不了网）、
-			 * IMS 注册（为什么打不了电话）、RRC（为什么看不到载波聚合）。
-			 */
-			var regVal = d.reg ? (d.reg.statText + (d.reg.act ? ' · ' + d.reg.act : '')) : '未注册 5GC';
-			var rows = [
-				['5G 核心网注册', regVal]
-			].filter(function (r) {
-				/* 取不到数据的项直接不显示：一排「—」「不适用」只占版面、没有信息量 */
-				return r[1] && r[1] !== '—' && r[1] !== '不适用';
-			});
-			if (d.creg) rows.push(['4G(EPS) 注册', d.creg.statText]);
-			/*
-			 * ★ 原先是 `d.cireg.info ? '（VoLTE/VoNR/IMS 短信可用）' : '（语音/IMS 短信不可用）'`，
-			 *   两处都是谎报：
-			 *   ① `info === 1` 只表示「IMS 已注册」，**不等于**语音/短信能力可用 ——
-			 *      能开什么要看 `ext_info`（IMS 域能力值，手册 7.6）。注册上了但能力值里
-			 *      没有 voice，「IMS 注册 OK 但打不了 VoLTE」是真实存在的故障态，
-			 *      旧文案会把它报成可用。
-			 *   ② 反过来，`info === null`（固件回了十六进制之类解析不了）时走进 else，
-			 *      直接甩一句「语音/IMS 短信不可用」—— 那是把「我没读明白」说成「你不能用」。
-			 *   现在的口径：能定的才定，定不了就写明「未上报 / 无法判定」。
-			 */
-			if (d.cireg) {
-				var t = d.cireg.text;
-				if (d.cireg.info === 1) {
-					t += d.cireg.ext ? ('（IMS 能力值 ' + d.cireg.ext + '）') : '（IMS 能力值未上报）';
-				} else if (d.cireg.info !== 0) {
-					t += '（可用性无法判定）';
-				}
-				rows.push(['IMS 注册', t]);
-			}
-			if (d.rrc) rows.push(['RRC 状态', d.rrc.rrcText + (d.rrc.campText ? ' · ' + d.rrc.campText : '')]);
-			return rows;
-		}
-
 		/* 地址去重：三个来源会给**同一个地址**：
 		 *   ① AT+CGPADDR  PDP 上下文地址（CID 1 → IPv4，CID 5 → IPv6）
 		 *   ② AT^DHCP?    运营商 DHCP 下发的 IPv4（本机与 CID 1 完全相同）
@@ -1995,60 +1942,6 @@ return L.view.extend({
 			});
 			return order;
 		}
-
-		function buildAddrRows() {
-			return buildAddrList().map(function (e) {
-				/* 类型并进项目名（「IPv4 地址」），不再单独占一列 */
-				return [e.family + ' 地址', e.address];
-			});
-		}
-
-		function buildDhcpRows() {
-			var rows = [];
-			var v4 = state.dhcpv4, v6 = state.dhcpv6;
-			if (v4) {
-				/* IPv4/IPv6 地址本身不在这里重复：已并进上方「地址」分组。
-				   子网掩码（运营商侧 /8）与「DHCP 服务器」已删（2026-10-27）：
-				   前者看不出能做什么，后者与「网关」恒为同一个值 —— 同一行说两遍。
-				   「IPv6 支持 支持 · 双栈」也删了：上面 IPv6 地址有值就已经说明支持。 */
-				rows.push(['网关', v4.gateway]);
-				rows.push(['主 DNS', dnsCell(0, v4.primaryDNS)]);
-				rows.push(['备 DNS', dnsCell(1, v4.secondaryDNS)]);
-			}
-			if (v6) {
-				rows.push(['IPv6 前缀', v6.netmask]);
-				rows.push(['IPv6 网关', v6.gateway]);
-				rows.push(['IPv6 DNS', v6.primaryDNS + ' / ' + v6.secondaryDNS]);
-			}
-			/* 这一行留着：「同一 APN / 分用 APN」是地址本身看不出来的差别，
-			   判断能不能同时跑 v4/v6 双栈要靠它。 */
-			if (state.ipv6Cap) rows.push(['IPv6 支持', state.ipv6Cap.description]);
-			return rows;
-		}
-
-		function renderConnDetail() {
-			if (!connDetailBox) return;
-			connDetailBox.innerHTML = '';
-			var rows = [];
-			function pushGroup(title, list) {
-				if (!list.length) return;   /* 整组没数据就别留一个空标题 */
-				rows.push({ group: title });
-				list.forEach(function (r) { rows.push(r); });
-			}
-			pushGroup('连接诊断', buildDiagRows());
-			pushGroup('地址与 DNS', buildAddrRows().concat(buildDhcpRows()));
-			if (!rows.length) {
-				connDetailBox.appendChild(E('div', { 'class': 'mt5700-hint' }, '暂无连接明细数据。'));
-				return;
-			}
-			connDetailBox.appendChild(Mt5700.table(['项目', '值'], rows, { striped: true }));
-			if (dnsEditable) {
-				connDetailBox.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-					'点击「主 DNS / 备 DNS」可修改，写入 network.' + netIface +
-					'.dns 并重新连接网络（短暂断网）；两项都留空即恢复运营商下发的 DNS。'));
-			}
-		}
-
 
 		/*
 		 * 两个面板的渲染互相独立，各自只认自己的数据源：
@@ -2115,156 +2008,6 @@ return L.view.extend({
 			/* 各路温度已并入「SIM 与设备」卡的那一张表（见 renderDevCard），
 			   这里只触发重绘，不再单独占一块磁贴区。 */
 			renderDevCard();
-		}
-
-		/* ---------- 自定义 DNS（UCI network.<iface>.dns） ----------
-		 *
-		 * ★ 必须先分清两个「DNS」来源，否则改完会发现界面没变化：
-		 *   ① 表格里的「主/备 DNS」原本来自 AT^DHCP? —— 那是**运营商通过 DHCP 下发的**，
-		 *      模组自己报的，改 UCI 不会让它变。
-		 *   ② 真正能改的是 UCI 里 network.<iface>.dns 的静态项，由 netifd 写入
-		 *      /tmp/resolv.conf.d/resolv.conf.auto，优先级高于运营商下发的。
-		 *   所以显示值取「自定义 ?? 运营商下发」，改完显示立刻跟着自定义项走。
-		 *
-		 * 接口名的来源：原先读服务配置页里那个「监控接口」UCI 键，
-		 * 但连接看门狗功能已于 2026-09-20 整体移除，那个键随之删除，
-		 * 继续读只会恒为空、静默退回默认值。改为从 network 配置自己反查，
-		 * 见 detectNetIface。
-		 *
-		 * 权限：rpcd ACL 的 uci 读写白名单必须含 network，否则 L.uci.load 会被拒。
-		 * 被拒时这里**静默降级为只读**（dnsEditable=false），页面其余部分照常工作 ——
-		 * 老版本 ACL 的机器上不会出现报错或空白。
-		 */
-		var netIface = 'MT5700M';
-
-		/*
-		 * 反查模组所在的逻辑接口名。
-		 *
-		 * ① 本机默认就叫 MT5700M，命中直接返回 —— 绝大多数情况走这条，零风险。
-		 * ② 改名过的场景兜底：取 device 形如 ethN 的那个（模组是 USB 网口，
-		 *    LAN 侧通常是 br-lan / 交换机端口，不会是 ethN 这种裸设备名）。
-		 * ③ 全都拿不到（ACL 拒绝、旧版 uci 没有 sections）→ 回退 MT5700M。
-		 *
-		 * ★ 只做**读**判断，不会写 network；这里选错接口会导致 DNS 改到别的
-		 *   接口上，所以宁可回退默认也不要瞎猜。
-		 */
-		function detectNetIface() {
-			var fallback = 'MT5700M';
-			try {
-				var secs = (L.uci && L.uci.sections) ? (L.uci.sections('network', 'interface') || []) : [];
-				var i, name;
-				for (i = 0; i < secs.length; i++) {
-					name = secs[i]['.name'];
-					if (name === fallback) return fallback;
-				}
-				for (i = 0; i < secs.length; i++) {
-					if (/^eth\d+$/.test(String(secs[i].device || '').trim())) return secs[i]['.name'];
-				}
-			} catch (e) { /* 读不到就用默认值，不影响页面其余部分 */ }
-			return fallback;
-		}
-
-		var dnsCustom = [];      /* UCI 已配置的自定义 DNS：[主, 备] */
-		var dnsEditable = false; /* ACL 允许写 network 才为 true */
-
-		function isIPv4(v) {
-			var p = String(v).trim().split('.');
-			if (p.length !== 4) return false;
-			for (var i = 0; i < 4; i++) {
-				if (!/^\d{1,3}$/.test(p[i])) return false;
-				var n = parseInt(p[i], 10);
-				if (isNaN(n) || n < 0 || n > 255) return false;
-			}
-			return true;
-		}
-
-		function loadDnsConfig() {
-			if (!L.uci || !L.uci.load) return Promise.resolve();
-			return L.uci.load('network').then(function () {
-				netIface = detectNetIface();
-				var dns = L.uci.get('network', netIface, 'dns');
-				dnsCustom = Array.isArray(dns) ? dns.slice(0, 2)
-					: (dns ? String(dns).split(/\s+/).filter(Boolean).slice(0, 2) : []);
-				dnsEditable = true;
-			}).catch(function () {
-				dnsEditable = false;
-				dnsCustom = [];
-			});
-		}
-
-		/* 保存自定义 DNS：写 UCI → save → apply。
-		 * apply 会触发 netifd reload，接口重新协商（**短暂断网**），
-		 * 所以按钮文案直接写明「会重连」，不另加确认弹窗（用户偏好少拦一层）。
-		 * 两项都清空 = 删掉 dns 项并把 peerdns 还原成 1，彻底交回运营商下发。 */
-		function saveDns(list) {
-			var cfg = 'network', sec = netIface;
-			if (list.length) {
-				L.uci.set(cfg, sec, 'dns', list);
-				/* peerdns=0：只认用户填的，避免「主/备」语义被下发的 DNS 冲淡 */
-				L.uci.set(cfg, sec, 'peerdns', '0');
-			} else {
-				if (L.uci.unset) L.uci.unset(cfg, sec, 'dns');
-				else L.uci.set(cfg, sec, 'dns', '');
-				L.uci.set(cfg, sec, 'peerdns', '1');
-			}
-			AtWs.uci.markDirty();
-			return AtWs.uci.uciSave('network').then(function () {
-				dnsCustom = list;
-				AtWs.uci.clearDirty();
-				Mt5700.info('已保存并应用，网络正在重连');
-			}, function (err) {
-				AtWs.uci.clearDirty();
-				Mt5700.error('保存失败：' + ((err && err.message) || '未知错误'));
-				throw err;
-			});
-		}
-
-		/* 单元格：常态显示值（自定义优先）＋「自定义」徽章；可编辑时点击变输入框 */
-		function dnsCell(idx, peerValue) {
-			var custom = dnsCustom[idx] || '';
-			var wrap = E('span', { 'class': 'mt5700-dns-cell' });
-			wrap.appendChild(E('span', { 'class': 'mt5700-dns-value' }, custom || peerValue || '—'));
-			if (custom) wrap.appendChild(Mt5700.badge('自定义', 'primary'));
-			if (!dnsEditable) return wrap;   /* 老版本 ACL：只读，不给点击假象 */
-			wrap.classList.add('is-editable');
-			wrap.title = '点击修改（保存会重新连接网络）';
-			wrap.addEventListener('click', function () {
-				startDnsEdit(wrap, idx, custom || '');
-			});
-			return wrap;
-		}
-
-		function startDnsEdit(cell, idx, current) {
-			var form = E('span', { 'class': 'mt5700-dns-edit' });
-			var input = Mt5700.input('text', current);
-			input.value = current;
-			input.setAttribute('placeholder', '留空=恢复自动');
-			input.style.width = '132px';
-
-			var finish = function () { renderConnDetail(); };
-			var commit = function () {
-				var v = input.value.trim();
-				if (v && !isIPv4(v)) {
-					Mt5700.error('请填 IPv4 地址，例如 223.5.5.5（留空表示恢复运营商下发）');
-					return;
-				}
-				var next = dnsCustom.slice();
-				next[idx] = v;
-				var list = next.filter(Boolean);   /* 主空备非空时，备自动前提 */
-				input.disabled = true;
-				saveDns(list).then(finish, finish);
-			};
-
-			input.addEventListener('keydown', function (ev) {
-				if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
-				else if (ev.key === 'Escape') { ev.preventDefault(); finish(); }
-			});
-			form.appendChild(input);
-			form.appendChild(Mt5700.primaryButton('保存并应用', commit));
-			form.appendChild(Mt5700.ghostButton('取消', finish));
-			cell.parentNode.replaceChild(form, cell);
-			input.focus();
-			input.select();
 		}
 
 		/* 调制方式展示：256QAM MCS 27 · 1 层（大小写与格式固定） */
@@ -2458,18 +2201,10 @@ return L.view.extend({
 						}
 					}
 				}
-				return AtWs.client.sendCommand('AT^IPV6CAP?');
-			}).then(function (cap) {
-				if (cap.success && cap.data) {
-					var str = AtWs.extractATData(cap.data, '^IPV6CAP');
-					if (str) {
-						var value = parseInt(str.trim(), 10);
-						if (!isNaN(value)) state.ipv6Cap = { capValue: value, description: Parse.ipv6CapDescription(value) };
-					}
-				}
-				/* 地址表吃 dhcpv4/dhcpv6，DHCP 拿到新值后要跟着重绘（它与 PDP 地址去重合并） */
-			}).then(function () {
-				renderConnDetail();
+				/* ★ 2026-10-27 停发 AT^IPV6CAP?：它只喂「IPv6 支持」那一行，而明细表已整块删除。
+				   ★ 但 AT^DHCP?/AT^DHCPV6? 必须留着：结论卡那句「已获取地址 … 网关 …」
+				     吃的就是 dhcpv4/dhcpv6（与 AT+CGPADDR 的地址去重合并）。 */
+				renderVerdict();
 			});
 		}
 
@@ -2619,34 +2354,27 @@ return L.view.extend({
 		}
 
 		function loadDiagnostics() {
-			// 这几条都可能因为「当前不是那个组网」而失败，属于正常情况，静默处理
+			/*
+			 * 2026-10-27：明细表（连接诊断 + 地址与 DNS）整块删除后，这条链从 6 条 AT
+			 * 砍到 2 条 —— 只留结论卡真正要用的两项：
+			 *   · AT^LENDC?     → EN-DC 能力，制式判定（5G-NR / 4GA-NR）要吃它的 endc
+			 *   · AT+CGPADDR    → PDP 地址，结论卡「已获取地址 …」与链路 04 要吃
+			 *
+			 * 删掉的 4 条（都只喂已删除的表格行）：
+			 *   · AT+C5GREG?   → 「5G 核心网注册」行
+			 *   · AT+CEREG?    → 「4G(EPS) 注册」行，★ 而且它与 getPSReg() 里的那条重复，
+			 *                    真实的注册判定用的是 psRegStatEps（见 hasAnyPsService）
+			 *   · AT+CIREG?    → 「IMS 注册」行
+			 *   · AT^RRCSTAT?  → 「RRC 状态」行
+			 * 串口独占、每条 65–133ms，慢档每轮省 4 次往返（≈260–530ms）。
+			 */
 			return AtWs.client.sendCommand('AT^LENDC?').then(function (lendc) {
 				state.diag.endc = lendc.success && lendc.data ? Parse.parseLendc(lendc.data) : null;
-				return AtWs.client.sendCommand('AT+C5GREG?');
-			}).then(function (c5g) {
-				state.diag.reg = c5g.success && c5g.data ? Parse.parseC5greg(c5g.data) : null;
-				/* ★ 2026-10-27 停发 AT^NTXPOWER?（NR 发射功率）：
-				   它只喂「NR CCn PUSCH」那一行，而那行已删 —— 用户改不了发射功率，
-				   载波一多还会占好几行。前端名单与解析函数一并清掉，
-				   别留一条「没人读还在跑」的只读查询（串口独占，每条 65–133ms）。 */
-				return AtWs.client.sendCommand('AT+CEREG?');
-			}).then(function (creg) {
-				state.diag.creg = creg.success && creg.data ? Parse.parseRegStat(String(creg.data), '+CEREG') : null;
-				/* IMS 注册：直接决定 VoLTE / VoNR / IMS 短信能不能用 */
-				return AtWs.client.sendCommand('AT+CIREG?');
-			}).then(function (cireg) {
-				state.diag.cireg = cireg.success && cireg.data ? Parse.parseCireg(String(cireg.data)) : null;
-				/* RRC 状态：连接态/空闲态 —— 也解释了「空闲时看不到载波聚合」 */
-				return AtWs.client.sendCommand('AT^RRCSTAT?');
-			}).then(function (rrc) {
-				state.diag.rrc = rrc.success && rrc.data ? Parse.parseRrcstat(String(rrc.data)) : null;
-				/* ★ 2026-10-27 停发 AT+COPS?（选网模式）：它只喂「选网模式」那一行，
-				   而那行与卡头「中国移动 · 5G-NR」重复，且手动锁网在
-				   「无线与频段」页能看能改。省一次串口往返。 */
 				return AtWs.client.sendCommand('AT+CGPADDR');
 			}).then(function (pdp) {
 				state.diag.addrs = pdp.success && pdp.data ? Parse.parseCgpaddr(pdp.data) : [];
-				renderConnDetail();
+				/* 地址进了 state，结论卡那句话要跟着变 */
+				renderVerdict();
 			});
 		}
 
@@ -2852,20 +2580,22 @@ return L.view.extend({
 			'AT^NRSSBID?',     /* loadSecondary：辅载波与 SSB 邻区 */
 			'AT^MONNC',        /* loadSecondary：给 SSB 邻区补 RSRQ */
 			'AT+CGREG?',       /* getPSReg */
-			'AT+CEREG?',       /* getPSReg + loadDiagnostics（同一轮复用同一份） */
+			'AT+CEREG?',       /* getPSReg（loadDiagnostics 不再问它，注册判定只看这里） */
 			'AT^DSFLOWQRY'     /* getFlow */
 		];
+		/*
+		 * ★ 这份清单必须**与实际发送的慢档命令一一对应**：warmCache 是真发命令
+		 *   （rpcAtBatch），多写一条就多一次串口往返，而串口是独占的。
+		 *   2026-10-27 实测发现它落后了两轮改动：NTXPOWER / COPS 在 v2.5.3 已停发，
+		 *   C5GREG / CIREG / RRCSTAT / IPV6CAP 在明细表下线后也没人读了 ——
+		 *   六条白跑，每轮慢档白搭 0.4–0.8 秒。清单永远跟着「真的还发什么」走。
+		 */
 		var SLOW_WARM_REST = [
 			'AT^DHCPV6?',      /* getDHCP */
 			'AT^DHCP?',        /* getDHCP */
-			'AT^IPV6CAP?',     /* getDHCP */
 			'AT^CHIPTEMP?',    /* getTemp */
-			'AT^LENDC?',       /* loadDiagnostics */
-			'AT+C5GREG?',      /* loadDiagnostics */
-			'AT^NTXPOWER?',    /* loadDiagnostics */
-			'AT+CIREG?',       /* loadDiagnostics */
-			'AT^RRCSTAT?',     /* loadDiagnostics */
-			'AT+COPS?'         /* loadDiagnostics */
+			'AT^LENDC?',       /* loadDiagnostics：EN-DC，制式判定要吃 */
+			'AT+CGPADDR'       /* loadDiagnostics：PDP 地址 → 结论卡「已获取地址」 */
 		];
 
 		/* 慢档各任务的失败记录：逐步兜错后失败不再阻断后续，但要留痕，
@@ -2998,16 +2728,13 @@ return L.view.extend({
 		renderSignal();
 		renderCarriers();
 		renderVerdict();
-		renderConnDetail();    /* 连接明细：诊断 + 地址与 DNS（一张表），挂在结论卡内 */
 		renderTools();   /* 断网排查抽屉的内容（默认收起，点「连接自检」才展开） */
 		renderSpeed();
 		renderFlow();
 		renderTemp();
 
-		/* 自定义 DNS 是 UCI 侧的静态配置，跟 AT 无关，单独加载；
-		   拿到后重绘一次，让「主/备 DNS」显示成自定义值并带上「自定义」徽章。
-		   ACL 不含 network 时静默降级为只读，不影响上面任何渲染。 */
-		loadDnsConfig().then(renderConnDetail);
+		/* 自定义 DNS 已迁到「网络设置」页（2026-10-27）：它是对 network.<iface>.dns 的
+		   配置写入，和 APN / 锁频同属「怎么连」，不该挂在只读的总览上。 */
 
 		Mt5700.connectThen(function () {
 			refreshAll();

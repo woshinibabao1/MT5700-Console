@@ -181,14 +181,13 @@ const initEnd = nsCode.indexOf('self._dispose');
 const initStart = nsCode.lastIndexOf('renderSignal();', initEnd);
 const initBlock = (initStart >= 0 && initEnd > initStart) ? nsCode.slice(initStart, initEnd) : '';
 ok('能定位初始化段', initBlock.length > 0);
-const detailCalls = (initBlock.match(/renderConnDetail\(\)/g) || []).length;
-ok('★ 初始化段只渲染一次连接明细（原先连着调了两次）',
-	detailCalls === 1, '实测 ' + detailCalls + ' 次');
 const verdictCalls = (initBlock.match(/renderVerdict\(\)/g) || []).length;
-ok('★ 初始化段只渲染一次结论卡（chips + 明细表不重复重建）',
+ok('★ 初始化段只渲染一次结论卡（原先连着调了两次，第二次是原样重建）',
 	verdictCalls === 1, '实测 ' + verdictCalls + ' 次');
-ok('DNS 配置到位后仍会重绘一次（自定义 DNS 要显示出来）',
-	/loadDnsConfig\(\)\.then\(renderConnDetail\)/.test(nsCode));
+/* 连接明细表已整块下线（2026-10-27），它的加载与重绘不该再出现在这一页：
+   多留一条 loadDnsConfig 就是多一次 uci 往返 + 一次无人消费的重绘。 */
+ok('★ 总览页不再加载 DNS 配置（那块搬去网络设置页了）',
+	!/loadDnsConfig/.test(nsCode) && !/renderConnDetail/.test(nsCode));
 
 /* ---------- 5. P05' 确定性失败的命令不重试 ---------- */
 

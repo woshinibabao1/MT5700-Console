@@ -265,16 +265,10 @@ ok('缓存条目不超过上限 64',
 	c5.cacheStats().entries <= 64, '实际 ' + c5.cacheStats().entries);
 
 /*
- * ★ 2026-09-28：IPV6CAP 必须是「物理标识类」（10 分钟档）。
- *   手册 16.7.2 自己写着「后台启动时，调用此 AT 查询当前 MT 的 IPV6 能力」，
- *   16.7.1 说明它「由 NV 项定制」—— 是**能力**不是状态，会话内不会变。
- *   它曾落在默认 2.5 秒档，而慢档轮询间隔是 30 秒（2.5s < 30s ⇒ 缓存等于不存在），
- *   等于每轮白搭一条串口往返（实测 ≈100ms，每小时 120 条）。
- *   ★ 对照：AT^DHCPV6? 是**状态**（随拨号变化），**不得**进这一档。
+ * ★ 2026-10-27：AT^IPV6CAP? 已停发（「IPv6 支持」那一行随连接明细表下线），
+   静态档里不再登记它，这里也不再断言它的 TTL —— 不再发送的命令没有 TTL 可言。
+   反向的守卫在 at-read-classification 与 ui-consistency（预热清单必须真在发）。
  */
-ok('★ AT^IPV6CAP? 在物理标识档（NV 定制的能力，不必每轮问）',
-	cacheTtlFor('AT^IPV6CAP?') === R.CACHE_TTL_IDENTIFIER,
-	'实际 TTL ' + cacheTtlFor('AT^IPV6CAP?'));
 ok('★ AT^DHCPV6? 不在物理标识档（它是状态，会随拨号变化）',
 	cacheTtlFor('AT^DHCPV6?') !== R.CACHE_TTL_IDENTIFIER,
 	'实际 TTL ' + cacheTtlFor('AT^DHCPV6?'));

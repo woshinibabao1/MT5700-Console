@@ -183,26 +183,6 @@ var Parse = (function () {
 	 * 现在两边共用这一张表 —— 改文案只改这里。
 	 */
 	api.REG_STATES = REG_STATES;
-	var ACT_TYPES = { 10: 'EUTRAN-5GC', 11: 'NR-5GC' };
-
-	// AT+C5GREG?
-	api.parseC5greg = function (text) {
-		var match = String(text == null ? '' : text).match(/\+C5GREG:\s*(.+)/);
-		if (!match) return null;
-		var f = match[1].split(',').map(function (s) { return s.trim().replace(/^"|"$/g, ''); });
-		if (f.length < 2) return null;
-		var stat = Number(f[1]);
-		if (!isFinite(stat)) return null;
-		var act = Number(f[4]);
-		return {
-			stat: stat,
-			statText: REG_STATES[stat] || ('状态 ' + stat),
-			registered: stat === 1 || stat === 5,
-			tac: f[2] || '', ci: f[3] || '',
-			act: ACT_TYPES[act] || '',
-			nssai: f[6] || ''
-		};
-	};
 
 	var compressIPv6 = function (groups) {
 		var bestStart = -1, bestLen = 0, start = -1, len = 0;
@@ -412,7 +392,7 @@ var Parse = (function () {
 	api.parseCHIPTEMP = function (text) {
 		/*
 		 * ★ 先包一层 String(text == null ? '' : text) —— 与同文件的 parseCgsms /
-		 *   parseCsDomain / parseC5greg 等保持一致。
+		 *   parseCsDomain 等保持一致。
 		 *
 		 *   本函数唯一的调用点是 `network_status.js` 的
 		 *   `Parse.parseCHIPTEMP(res.data)`，而 `res.data` 在请求失败时可能是
@@ -476,32 +456,6 @@ var Parse = (function () {
 		if (mcs <= 16) return '16QAM';
 		if (mcs <= 25) return '64QAM';
 		return '256QAM';
-	};
-
-	/* ================= IPv6 CAP ================= */
-
-	/*
-	 * IPv6 能力值（手册 16.7.3）：
-	 *   0x01 = IPV4 ONLY
-	 *   0x02 = IPV6 ONLY
-	 *   0x07 = IPV4 ONLY + IPV6 ONLY + IPV4V6 使用相同 APN（双栈，同一 APN）
-	 *   0x0B = IPV4 ONLY + IPV6 ONLY + IPV4V6 使用不同 APN（双栈，分用 APN）
-	 *   其它值（含 0x00）手册标「保留」，一律按「未知能力值 N」原样展示，不编造支持/不支持。
-	 *
-	 * ★ 两处历史坑：
-	 *   ① 旧代码把 0 判成「不支持 IPv6」、1 判成「支持 IPv6」—— 按手册 1 是**仅 IPv4**，
-	 *      恰好译反。已纠正，守卫见 tests/connection-tools-contract.test.js 第 8 节。
-	 *   ② 界面此前直接显示「能力值 7」，用户看不懂。真机 ^IPV6CAP: 7 就是双栈同 APN。
-	 * 行名保持「IPv6 支持」；「能力」与「当前是否已取到 IPv6 地址」是两回事，这里只给能力。
-	 */
-	api.ipv6CapDescription = function (v) {
-		/* 手册只定义了 1 / 2 / 7 / 11 四个取值，其余（含 0）一律原样给裸值 ——
-		   0 不在码表里，「未获取能力值」是我们编的解读，不干这事。 */
-		if (v === 1) return '仅 IPv4';
-		if (v === 2) return '仅 IPv6';
-		if (v === 7) return '支持 · 双栈（同一 APN）';
-		if (v === 11) return '支持 · 双栈（分用 APN）';
-		return '未知能力值 ' + v;
 	};
 
 	/* ================= 系统配置解读（SYSCFGEX，手册 13.2） =================
@@ -959,30 +913,10 @@ var Parse = (function () {
 		};
 	};
 
-	/* ^RRCSTAT?：<enable>,<rrc_status>[,<camp_status>]（手册 13.21） */
-	api.RRC_TEXT = { 0: '空闲（非连接态）', 1: '连接态', 2: 'INACTIVE（NR 非激活）', 3: '无效' };
-	api.CAMP_TEXT = { 98: '已驻留', 99: '未驻留' };
-	api.parseRrcstat = function (text) {
-		var m = String(text).match(/\^RRCSTAT:\s*([^\r\n]*)/);
-		if (!m) return null;
-		var f = m[1].split(',').map(function (x) { return x.trim(); });
-		var rrc = Number(f[1]);
-		var camp = f[2] !== undefined ? Number(f[2]) : null;
-		return {
-			enable: Number(f[0]),
-			rrc: isFinite(rrc) ? rrc : null,
-			/*
-			 * rrc 解析失败时不能拼出「状态 NaN」：NaN 是解析失败的产物，
-			 * 不是模组报上来的状态值，显示出来只会让人以为是某种未知状态。
-			 * 真机 AT^RRCSTAT? 常回 `^RRCSTAT: 0,1` —— 只有 <enable>,<rrc> 两段、没有 <camp>，
-			 * 此时 camp 为 undefined、走的就是这条路径（2026-09-28 实测确证；原文举的例子
-			 * 写的是「只有一个字段」，与真机形态不符，已订正）。
-			 */
-			rrcText: isFinite(rrc) ? (api.RRC_TEXT[rrc] || ('状态 ' + rrc)) : null,
-			camp: (camp != null && isFinite(camp)) ? camp : null,
-			campText: api.CAMP_TEXT[camp] || null
-		};
-	};
+	/* ^RRCSTAT? / ^C5GREG? 的解析随总览「连接明细」表一起删除（2026-10-27）：
+	   那两个字段只喂「RRC 状态」「5G 核心网注册」两行。注册态的真实判定走
+	   AT+CGREG?/AT+CEREG?（见 network_status.js 的 hasAnyPsService），
+	   本文件的 REG_STATES 与 parseRegStat 仍在服役，别一起删。 */
 
 
 	/* ^VERSION?：多行 ^VERSION:<KEY>:<value>；挑有用的几项 */

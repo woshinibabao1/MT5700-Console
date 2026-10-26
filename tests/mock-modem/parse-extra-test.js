@@ -139,10 +139,7 @@ try {
 		ncTrail && ncTrail.pci === 0x100 && !Number.isNaN(ncTrail.pci),
 		'pci=' + (ncTrail && ncTrail.pci));
 
-	const rrcOne = Parse.parseRrcstat('^RRCSTAT: 1');
-	check('RRC 只有单字段时状态文案不含 NaN',
-		!!rrcOne && rrcOne.rrc === null && String(rrcOne.rrcText).indexOf('NaN') < 0,
-		rrcOne ? String(rrcOne.rrcText) : 'null');
+	/* RRCSTAT 解析已随「连接明细」表删除（2026-10-27），对应用例一并移除。 */
 
 	/* 3GPP 字符串参数带引号：^MONSC 的 <sysmode> 会回 "NR" */
 	const monQuoted = AtWs.parseMONSC('^MONSC: "NR",460,00,524910,1,C027F5065,114,14225C,-73,-9,24');

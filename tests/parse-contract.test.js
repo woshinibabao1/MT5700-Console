@@ -105,8 +105,8 @@ eq('MONNC 频段反推', [monnc[0].band, monnc[2].band, monnc[3].band], [41, 28,
 /* ---------- 4. 注册/连接状态 ---------- */
 eq('CEREG 已注册', Parse.parseRegStat('+CEREG: 2,1', '+CEREG').statText, '已注册');
 eq('CIREG IMS 已注册', Parse.parseCireg('+CIREG: 1,1').text, '已注册');
-eq('RRCSTAT 连接态', [Parse.parseRrcstat('^RRCSTAT: 0,1').rrcText,
-	Parse.parseRrcstat('^RRCSTAT: 1,0,99').campText], ['连接态', '未驻留']);
+/* RRCSTAT 的解析随总览「连接明细」表一起删除（2026-10-27）：那一行没了，
+   解析函数也一并下线，不留「没人调用的解析器 + 没人调用的断言」。 */
 
 /* ---------- 5. SYSCFGEX 解码（含 32 位位运算陷阱） ---------- */
 eq('接入次序 080302', Parse.decodeAcqOrder('080302'), 'NR → LTE → WCDMA');

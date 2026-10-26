@@ -5,6 +5,75 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.5.5] - 2026-10-27
+
+### Changed — 连接明细表整块下线；DNS 编辑搬到「网络设置」
+
+用户点名删掉结论卡里那张「项目 / 值」表（连接诊断 4 行 + 地址与 DNS 7 行）。
+
+删之前逐行过了一遍「这行的信息去哪」，没有一行是凭空消失的：
+
+| 原行 | 现在在哪 |
+|:--|:--|
+| IPv4 / 网关 | 结论卡那句话：「已获取地址 10.43.194.226，网关 10.0.0.1」 |
+| 5G / EPS / IMS 注册、RRC | 「断网排查」抽屉（L1/L2 体检本来就在查这些，`mt5700.uc` 的 sysdiag 也仍读 CIREG） |
+| 主 / 备 DNS | **「网络设置」页新增「自定义 DNS」卡**（可改、可恢复运营商下发） |
+| IPv6 地址 / 前缀 / DNS | 随行删除：IPv6 有地址就说明支持，重复陈述 |
+
+### Performance — 连带停发 4 条 AT，慢档每轮省 4 次串口往返
+
+这些命令的唯一消费者就是被删的行（串口独占、每条 65–133 ms）：
+
+- `AT+C5GREG?`（5G 核心网注册行）
+- `AT+CEREG?` —— ★ 而且它和 `getPSReg()` 里那条**重复**，真实判定用的是
+  `state.psRegStatEps`（见 `hasAnyPsService`）
+- `AT+CIREG?`（IMS 注册行）
+- `AT^RRCSTAT?`（RRC 状态行）
+- `AT^IPV6CAP?`（IPv6 支持行）
+
+`loadDiagnostics()` 从 6 条降到 2 条（只留 `AT^LENDC?` 制式判定 + `AT+CGPADDR`
+结论卡地址）。解析函数 `parseC5greg` / `parseRrcstat` / `ipv6CapDescription`
+及其码表、测试断言一并删除（`parseCireg` 保留 —— 短信设置页还在用）。
+
+### Fixed — 三处「删了会静默坏」的地方
+
+1. **预热清单落后两轮没跟上**：`SLOW_WARM_REST` 里还留着 6 条已停发的命令
+   （NTXPOWER/COPS 是 v2.5.3 停的，C5GREG/CIREG/RRCSTAT/IPV6CAP 是这次停的）。
+   ★ `warmCache` 是**真发命令**（走 `rpcAtBatch`），不是只占缓存位 ——
+   等于每轮慢档白发 0.4–0.8 秒，界面只是「有点慢」，毫无症状。
+   清单从 10 条改到 5 条，并新增守卫：**清单里每条都必须能在源码里找到对应的
+   `sendCommand`**，否则判红。
+2. **`L.uci` 不会凭空出现**：DNS 卡搬到 `network_settings.js` 后必须自己
+   `'require uci'`，漏了会被 `loadDnsConfig` 的判据当成「没有权限」，
+   表现为一张只读的「当前账号没有写权限」提示 —— 静默丢功能。
+3. **「重启模组」按钮红字压红底**（真机实测 `color rgb(242,88,91)` /
+   `background rgb(245,54,92)`，对比度 ≈1.1:1，四个字等于看不见）：
+   Argon 给 `.btn.danger` 钉了实心红底，把我们的淡红底盖掉了。
+   同强度 `!important` 钉回，并给禁用态一个可读的灰。
+   ★ 规则必须写在 `END v9-shell` **之后** —— 上面那段由 `tools/gen-shell-css.py`
+     生成，写进去下次 `bump-css` 就被原型覆盖（本次第一版就踩了这个坑）。
+
+### 代码清理
+
+- 结论卡组件里的详情挂载点（`.mt5700-verdict-detail`）删除：唯一消费者是被删的表，
+  留一个永远为空的挂载点，下一个人会以为还能往里塞内容。
+- 样式表：DNS 单元格那套（`.mt5700-dns-cell` / `.mt5700-dns-edit`）换成表单行
+  （`.mt5700-dns-row` / `.mt5700-dns-label`）；`verdict-detail` / `verdict-table`
+  两条规则删除。
+- `STATIC_COMMANDS` 移除 `AT^IPV6CAP?`（不再发送的命令不该占据静态档）。
+
+### 契约测试（要求不放松，只换定位）
+
+- `connection-tools` 第 8 节整段重写：从「两表已合并」改为「表已下线且不许回来」，
+  同时钉住结论卡还需要的两项（`buildAddrList`/`firstV4Addr`、`AT^LENDC?`/`diag.endc`）。
+- `dns-edit-contract` 全部改指 `network_settings.js`，并把「自己 require uci」钉成断言。
+- `at-cache` / `ui-consistency`：清单条目与 TTL 断言同步到「5 条尾段 / 合计 11 条」。
+- `network-perf`、`parse-contract`、`parse-extra`：删掉针对已删函数的用例。
+
+真机核对：总览只剩 结论卡 → KPI ×4 → 载波聚合 | 设备与身份 → 常用动作；
+DNS 卡在网络设置页正常显示当前配置（空 = 走运营商），「重启模组」灰字可读。
+验证：`run-all` 全绿、守卫变异 ✗ 0 且还原逐字节一致、锚点 189/189、全 LF。
+
 ## [2.5.4] - 2026-10-27
 
 ### Changed — 总览再收一层：连接状态并进结论卡，速率卡与断网排查出首屏

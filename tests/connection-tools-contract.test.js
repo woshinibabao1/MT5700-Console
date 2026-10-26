@@ -403,21 +403,31 @@ eq('同地址不同 CID → 1 行',
 	})().length, 1);
 eq('全空 → 0 行', makeAddrList({ diag: { addrs: [] }, dhcpv4: null, dhcpv6: null })().length, 0);
 
-/* ---------- 8. 沿用：两表合并（连接诊断 + 地址与 DNS） ---------- */
+/* ---------- 8. 连接明细表已整块下线（2026-10-27），但两个消费者还在 ---------- */
 
-ok('两张表已合并成一个渲染入口 renderConnDetail', /function renderConnDetail\(\)/.test(nsSrc));
-ok('旧的 renderDiag / renderAddr / renderDHCP 已下线',
-	!/function renderDiag\(/.test(nsSrc)
-	&& !/function renderAddr\(/.test(nsSrc)
-	&& !/function renderDHCP\(/.test(nsSrc));
-/* 2026-09-18 用户反馈：「地址 不就是 IP 与 DNS 中的 ip 么为啥要分开」。
-   PDP 地址与 ^DHCP 下发的本来就是同一个地址，拆两组只是多一条分组标题。 */
-ok('★「地址」与「IP 与 DNS」已合并为一组「地址与 DNS」',
-	/pushGroup\('地址与 DNS', buildAddrRows\(\)\.concat\(buildDhcpRows\(\)\)\)/.test(nsSrc)
-	&& !/pushGroup\('IP 与 DNS'/.test(nsSrc));
-ok('只剩两个分组标题行', /pushGroup\('连接诊断'/.test(nsSrc));
-ok('地址表不再有 CID 列', !/Mt5700\.table\(\['CID'/.test(nsSrc));
-ok('地址表不再有来源列', !/'来源'/.test(nsSrc));
+/* 这张表（连接诊断 4 行 + 地址与 DNS 7 行）连同它的渲染链一起删除。
+   删掉的每一行都要说清「信息去哪了」，否则下次有人会把它们当成被误删又加回来：
+     · 地址 / 网关 → 结论卡那句「已获取地址 …，网关 …」
+     · 注册 / IMS / RRC → 「断网排查」抽屉（L1/L2 体检本来就在查）
+     · DNS → 「网络设置」页的自定义 DNS 卡（它是配置，不是读数）
+   所以这里取反钉死「表不许回来」，同时钉住「结论卡要的两项必须还在」。 */
+ok('★ 明细表渲染入口已彻底删除（renderConnDetail / 两张构造表）',
+	!/renderConnDetail/.test(nsCodeOnly)
+	&& !/function buildDiagRows\(/.test(nsCodeOnly)
+	&& !/function buildDhcpRows\(/.test(nsCodeOnly));
+/* ★ 不能拿 `Mt5700.table(['项目','值'])` 当判据 —— 「设备与身份」卡用的是同一张
+   表头，那样会误判。判据落在**分组标题行**上：明细表是唯一用 pushGroup 的地方。 */
+ok('★ 分组标题行（连接诊断 / 地址与 DNS）不许重新出现',
+	!/pushGroup\(/.test(nsCodeOnly));
+ok('★ 结论卡还要 PDP 地址：buildAddrList 与 firstV4Addr 必须留着',
+	/function buildAddrList\(/.test(nsSrc) && /function firstV4Addr\(/.test(nsSrc));
+ok('★ 结论卡还要 EN-DC 判定：AT^LENDC? 与 diag.endc 必须留着',
+	/sendCommand\('AT\^LENDC\?'\)/.test(nsSrc) && /state\.diag\.endc/.test(nsSrc));
+/* ★ 只读命令的对账：停发的命令不许留在预热清单里 —— warmCache 是**真发命令**，
+   多留一条就是每轮慢档白发一次串口往返。 */
+ok('★ 预热清单里没有已停发的 AT（C5GREG/CIREG/RRCSTAT/IPV6CAP/NTXPOWER/COPS）',
+	!/(C5GREG|CIREG|RRCSTAT|IPV6CAP|NTXPOWER|\+COPS)/.test(
+		(nsSrc.match(/var SLOW_WARM_REST = \[[\s\S]*?\];/) || [''])[0]));
 
 /* R05 原是钉 readAdcPins（ADC 链）必须返回 Promise；ADC 整块下线后，
    这条语义平移到 runDiagnosis：它是进页面自动跑的那条链，busy 时必须返回
@@ -432,17 +442,12 @@ ok('★ R04 自动链可被页面卸载中断（disposed 标记，反复进出�
 	&& /if \(!disposed\) renderTools\(\);/.test(nsSrc)
 	&& /_dispose[\s\S]{0,300}disposed = true;/.test(nsSrc));
 
-/* IPv6 能力值文案（手册 16.7.3） */
-eq('★ IPV6CAP 0 不在码表里 → 给裸值不编造（旧代码编了个「未获取能力值」）',
-	Parse.ipv6CapDescription(0), '未知能力值 0');
-eq('IPV6CAP 1 → 仅 IPv4（旧代码错译成「支持 IPv6」，已按手册纠正）',
-	Parse.ipv6CapDescription(1), '仅 IPv4');
-eq('IPV6CAP 2 → 仅 IPv6', Parse.ipv6CapDescription(2), '仅 IPv6');
-eq('IPV6CAP 7 → 支持 · 双栈（同一 APN）（真机就是这个值）',
-	Parse.ipv6CapDescription(7), '支持 · 双栈（同一 APN）');
-eq('IPV6CAP 11 → 支持 · 双栈（分用 APN）',
-	Parse.ipv6CapDescription(11), '支持 · 双栈（分用 APN）');
-ok('★ 未定义的值不许编造成支持/不支持', /未知能力值 999/.test(Parse.ipv6CapDescription(999)));
+/* IPv6 能力值（^IPV6CAP）随「IPv6 支持」那一行一起下线（2026-10-27）：
+   有 IPv6 地址就说明支持，再问一遍能力值属于同一件事说两遍。
+   AT^IPV6CAP? 已停发，本文件随之不再断言它的文案。
+   ★ 但「IPv4/IPv6 地址能否同时拿到」仍由结论卡那句话与地址来源把守。 */
+ok('★ AT^IPV6CAP? 已停发（只喂已删的那一行）',
+	!/AT\^IPV6CAP\?/.test(nsCodeOnly));
 
 /* ---------- 9. 网络设置页「网络拒绝」卡（^REJINFO 迁移后的归宿） ---------- */
 

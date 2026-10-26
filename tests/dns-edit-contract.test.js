@@ -2,7 +2,9 @@
 /*
  * 自定义 DNS 就地编辑 契约测试（无需真机）
  * ---------------------------------------------------------------------------
- * 背景：用户要「主 DNS / 备 DNS 点一下就能改」。这里钉住几条容易做错的约定：
+ * 背景：用户要能改「主 DNS / 备 DNS」。2026-10-27 之前它是总览「地址与 DNS」
+ * 明细表里两格可点的单元格；明细表整块下线后迁到「网络设置」页的独立卡片。
+ * 落点换了，下面的约定一条没放松：
  *
  *   1) 这两个值原来来自 AT^DHCP?，是**运营商下发的**，改 UCI 不会让它变。
  *      所以显示必须「自定义 ?? 运营商下发」，否则改完界面纹丝不动，
@@ -25,7 +27,11 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 const JS = path.join(ROOT, 'htdocs', 'luci-static', 'resources',
+	'view', 'at-webserver', 'network_settings.js');
+/* 反向钉子：这套东西不许再出现在总览页（明细表已整块下线） */
+const STATUS_JS = path.join(ROOT, 'htdocs', 'luci-static', 'resources',
 	'view', 'at-webserver', 'network_status.js');
+const statusJs = fs.readFileSync(STATUS_JS, 'utf8');
 const ACL = path.join(ROOT, 'root', 'usr', 'share', 'rpcd', 'acl.d', 'luci-app-mt5700.json');
 
 const js = fs.readFileSync(JS, 'utf8');
@@ -66,27 +72,36 @@ const loadSrc = extractFn(js, 'loadDnsConfig');
 ok('loadDnsConfig 有 catch 兜底（ACL 拒绝时不能抛）', /\.catch\(function \(\) \{/.test(loadSrc));
 ok('降级时把 dnsEditable 置 false（不给点了没反应的假按钮）',
 	/dnsEditable = false;/.test(loadSrc));
-ok('只有 dnsEditable 为真才挂点击', /if \(!dnsEditable\) return wrap;/.test(js));
+ok('★ 降级时整张卡只给一句说明，不给假输入框',
+	/if \(!dnsEditable\) \{[\s\S]{0,200}没有写 network 配置的权限/.test(js));
 
 /* ---------- 3. 接口名不写死，且不能依赖已删除的看门狗配置 ---------- */
 const detectSrc = extractFn(js, 'detectNetIface');
 ok('接口名由 detectNetIface 反查（不写死）', /function detectNetIface\(/.test(js));
-ok('优先命中 MT5700M 原名', /if \(name === fallback\) return fallback;/.test(detectSrc));
+ok('优先命中 MT5700M 原名',
+	/if \(name === DNS_IFACE_FALLBACK\) return DNS_IFACE_FALLBACK;/.test(detectSrc));
 ok('改名过的机器按 ethN 设备名兜底', /\/\^eth\\d\+\$\/\.test\(/.test(detectSrc));
-ok('拿不到时回退 MT5700M', /var netIface = 'MT5700M';/.test(js));
+ok('拿不到时回退 MT5700M', /var DNS_IFACE_FALLBACK = 'MT5700M';/.test(js)
+	&& /var netIface = DNS_IFACE_FALLBACK;/.test(js));
 /* ★ 反向：watch_iface 随看门狗一并删除，再读只会恒为空（项目红线 16） */
 ok('★ 反向：不再读 at-webserver.config.watch_iface',
 	!/watch_iface/.test(js));
 ok('★ 反向：不再为取接口名而加载 at-webserver 配置',
 	!/L\.uci\.load\('at-webserver'\)/.test(js));
+/* L.uci 由 `'require uci'` 提供；漏了它 → L.uci 不存在 → loadDnsConfig 直接返回，
+   dnsEditable 恒 false，卡片显示「没有写权限」——静默丢功能，最难查。 */
+ok('★ network_settings.js 自己 require uci（L.uci 不会凭空出现）',
+	/'require uci';/.test(js));
 
-/* ---------- 4. 显示值：自定义优先于运营商下发 ---------- */
-ok('单元格显示取「自定义 ?? 运营商下发」',
-	/custom \|\| peerValue \|\| '—'/.test(js));
-ok('自定义生效时打「自定义」徽章', /Mt5700\.badge\('自定义'/.test(js));
-ok('连接明细表里的 主/备 DNS 走 dnsCell 而不是裸值',
-	/\['主 DNS', dnsCell\(0, v4\.primaryDNS\)\]/.test(js) &&
-	/\['备 DNS', dnsCell\(1, v4\.secondaryDNS\)\]/.test(js));
+/* ---------- 4. 显示值：输入框预填 UCI 里的自定义值 ---------- */
+/* 旧实现在表格单元格里显示「自定义 ?? 运营商下发」并打徽章；现在是一张独立表单，
+   输入框里就是 UCI 里的自定义 DNS（空 = 走运营商下发，由副标题说明）。 */
+ok('输入框预填自定义值（空则留空 = 走运营商下发）',
+	/Mt5700\.input\('text', spec\[2\], dnsCustom\[spec\[0\]\] \|\| ''\)/.test(js));
+ok('★ 主/备两行都建出来（不写死只给一个输入框）',
+	/\[\[0, '主 DNS'[\s\S]{0,120}\[1, '备 DNS'/.test(js));
+ok('★ 反向：总览页不再有 DNS 编辑（明细表已整块下线）',
+	!/dnsCell|loadDnsConfig|saveDns/.test(statusJs));
 
 /* ---------- 5. 保存语义 ---------- */
 const saveSrc = extractFn(js, 'saveDns');
@@ -101,10 +116,11 @@ ok('保存走 AtWs.uci.uciSave（save + apply，标准「保存并应用」链�
 ok('失败时清 dirty 并提示，不静默', /Mt5700\.error\('保存失败/.test(saveSrc));
 
 /* 保存会断网，必须在界面上写明 —— 不能让人点了个按钮网就断了 */
-ok('单元格 title 写明会重连', /点击修改（保存会重新连接网络）/.test(js));
+ok('卡片副标题写明会重连（点之前就知道会断网）',
+	/保存会重新连接网络（短暂断网）/.test(js));
 ok('按钮文案写明「保存并应用」', /Mt5700\.primaryButton\('保存并应用'/.test(js));
-ok('表下提示写明会断网 + 清空即恢复',
-	/重新连接网络（短暂断网）/.test(js) && /留空即恢复运营商下发的 DNS/.test(js));
+ok('卡内提示写明写入哪个 uci 项 + 清空即恢复',
+	/写入 network\.' \+ netIface \+ '\.dns/.test(js) && /两项都留空 = 恢复运营商下发的 DNS/.test(js));
 
 /* ---------- 6. IPv4 校验真跑一遍 ---------- */
 const isIPv4 = new Function(extractFn(js, 'isIPv4') + '\nreturn isIPv4;')();
@@ -120,8 +136,8 @@ ok('空串非法', isIPv4('') === false);
 ok('1.2.3.-1 非法', isIPv4('1.2.3.-1') === false);
 ok('1.2.3.04 合法（前导零按数值判，不苛刻拒绝）', isIPv4('1.2.3.04') === true);
 
-/* ---------- 7. 页面 require 了 uci ---------- */
-ok('network_status.js 显式 require uci（rpc.js 不代劳）',
+/* ---------- 7. 权限前提：ACL 放行 + 自己 require uci ---------- */
+ok('network_settings.js 显式 require uci（rpc.js 不代劳）',
 	/'require uci';/.test(js));
 
 if (fails.length) {

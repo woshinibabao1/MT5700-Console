@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '6.5.0';
+var MT5700_CSS_VERSION = '6.6.1';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -205,10 +205,9 @@ var Mt5700 = (function () {
 		main.appendChild(nums);
 		node.appendChild(main);
 		node.appendChild(rail);
-		/* 详情挂载点：页面把「一览之外、又不值得单独占一张卡」的内容挂这儿
-		   （如连接明细表），视觉上仍属于结论卡，不再画第二层边框。 */
-		node._body = E('div', { 'class': 'mt5700-verdict-detail' });
-		node.appendChild(node._body);
+		/* ★ 2026-10-27 移除「详情挂载点」（.mt5700-verdict-detail）：它唯一的消费者是
+		   网络状态页的连接明细表，而那张表已整块下线。留一个永远为空的挂载点，
+		   下一个人会以为结论卡里还能再塞内容。 */
 
 		/* 语气修饰符集中在一处拼：CSS 侧 .is-ok/.is-warn/.is-bad 三档 */
 		function toneCls(base, tone) {

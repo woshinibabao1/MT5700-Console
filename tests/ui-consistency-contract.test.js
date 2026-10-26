@@ -139,8 +139,12 @@ has('该开关失败时回滚勾选（否则界面停在一个没生效的状态
 console.log('== C. 慢档两段预热：连接状态不必等尾段 ==');
 
 const EXPECT_HEAD = ['AT+CGACT?', 'AT^NRSSBID?', 'AT^MONNC', 'AT+CGREG?', 'AT+CEREG?', 'AT^DSFLOWQRY'];
-const EXPECT_REST = ['AT^DHCPV6?', 'AT^DHCP?', 'AT^IPV6CAP?', 'AT^CHIPTEMP?', 'AT^LENDC?',
-	'AT+C5GREG?', 'AT^NTXPOWER?', 'AT+CIREG?', 'AT^RRCSTAT?', 'AT+COPS?'];
+/* ★ 2026-10-27：尾段从 10 条缩到 5 条。停发的 5 条分两批 ——
+   NTXPOWER / COPS 在 v2.5.3（对应行已删），C5GREG / CIREG / RRCSTAT / IPV6CAP
+   在总览「连接明细」表整块下线后也没人读了。
+   ★ warmCache 是**真发命令**（rpcAtBatch），清单里多留一条就是每轮慢档
+   白搭一次串口往返（65–133ms），页面上却没有任何人消费它。 */
+const EXPECT_REST = ['AT^DHCPV6?', 'AT^DHCP?', 'AT^CHIPTEMP?', 'AT^LENDC?', 'AT+CGPADDR'];
 
 function takeList(src, name) {
 	const m = src.match(new RegExp('var ' + name + ' = \\[([\\s\\S]*?)\\];'));
@@ -160,7 +164,7 @@ if (Array.isArray(head) && Array.isArray(rest)) {
 	has('头段＝连接状态与载波表要用的那 6 条',
 		same(head, EXPECT_HEAD),
 		'实际：' + head.join(' '));
-	has('尾段＝地址/温度/MCS/诊断那 10 条',
+	has('尾段＝地址/温度/诊断那 5 条',
 		same(rest, EXPECT_REST),
 		'实际：' + rest.join(' '));
 
@@ -170,9 +174,19 @@ if (Array.isArray(head) && Array.isArray(rest)) {
 	 *   所以这里对「并集」做集合级断言，而不是只看字符串在不在。
 	 */
 	const all = head.concat(rest);
-	has('两段合起来仍是完整 16 条（没漏抄）',
-		all.length === 16,
+	has('两段合起来是 11 条（6 头 + 5 尾，没漏抄）',
+		all.length === 11,
 		'总共 ' + all.length + ' 条');
+	/* ★★ 真正防复发的那条：清单里每条都必须**真的还在发**。
+	   历史教训（2026-10-27 实测）：停发命令没从清单里摘掉，warmCache 每轮照样
+	   把它们打进串口批次 —— 6 条白跑、慢档每轮白搭 0.4–0.8 秒，而界面上
+	   毫无症状（只是「有点慢」）。所以判据取「源码里还有没有对应的 sendCommand」。 */
+	const stale = all.filter(function (c) {
+		return STATUS_C.indexOf("sendCommand('" + c + "'") < 0;
+	});
+	has('★ 清单里没有已停发的命令（每条都要能在源码里找到 sendCommand）',
+		stale.length === 0,
+		'已停发：' + stale.join(' '));
 	has('两段之间没有重复条目（没抄重）',
 		new Set(all).size === all.length,
 		'有重复项');

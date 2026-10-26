@@ -2754,37 +2754,29 @@
 }
 
 /* ==========================================================================
-   可编辑的自定义 DNS（CSS v5.5.9）
+   自定义 DNS 表单（CSS v6.6.0）
    --------------------------------------------------------------------------
-   「连接状态」卡的 IP 与 DNS 表里，「主 DNS / 备 DNS」两格可点击就地编辑。
-   ① .mt5700-dns-cell      常态：值 + 「自定义」徽章；可编辑时给指针与 hover 下划线，
-                            让人一眼看出能点（不给任何视觉线索＝没人会去点）
-   ② .mt5700-dns-edit      编辑态：输入框 + 保存/取消，与表格行高对齐（不撑行高）
+   ★ 2026-10-27 从总览迁到「网络设置」页：原来它是明细表里两格可点的单元格
+   （.mt5700-dns-cell / .mt5700-dns-edit），明细表整块下线后改成一独立卡片 ——
+   DNS 是**配置**，和 APN / 锁频同属「怎么连」，不该挂在只读的总览上。
+   布局：一行一个（标签 + 输入框），窄屏也不换行错位；输入框吃掉剩余宽度。
    ========================================================================== */
 
-.mt5700-dns-cell {
-  display: inline-flex;
+.mt5700-dns-row {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  border-radius: 4px;
-}
-.mt5700-dns-cell.is-editable { cursor: pointer; }
-.mt5700-dns-cell.is-editable:hover .mt5700-dns-value {
-  text-decoration: underline;
-  text-decoration-style: dotted;
-  text-underline-offset: 3px;
-  color: var(--mt5700-accent);
+  gap: 10px;
+  margin-bottom: 8px;
 }
 
-/* 编辑态：行内替换单元格，不换行、不撑高表格 */
-.mt5700-dns-edit {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: nowrap;
+.mt5700-dns-label {
+  flex: 0 0 72px;
+  font-size: var(--mt5700-font-size-sm);
+  color: var(--mt5700-text-secondary);
+  white-space: nowrap;
 }
-.mt5700-dns-edit .mt5700-input { min-height: 0; padding: 4px 8px; }
-.mt5700-dns-edit .mt5700-btn { height: auto; padding: 3px 10px; }
+
+.mt5700-dns-row .mt5700-input { flex: 1 1 auto; min-width: 0; }
 
 /* ==========================================================================
    读数胶囊（一排「名称 + 数值 + 单位」的小胶囊）
@@ -3806,6 +3798,27 @@
 }
 /* ==== END v9-shell ==== */
 
+/* ★ 2026-10-27 真机实测：宿主（Argon）对 .btn.danger 钉了**实心红底**，而
+   v9 外壳给它的是「红字 + 淡红底」——背景被宿主盖掉后成红字压红底，
+   computed 值 color rgb(242,88,91) / background rgb(245,54,92)，对比度 ≈1.1:1，
+   「重启模组」四个字等于看不见。同强度 !important 钉回来（红线 40b：宿主从
+   外部钉死颜色，只能用同等强度反钉）。
+   ★ 必须放在 END v9-shell **之后**：上面那段由 tools/gen-shell-css.py 生成，
+     写进去下次 bump-css 就被原型覆盖（本改动第一次就踩了这个坑）。
+   ★ 为什么禁用态也要能读：这个按钮是 disabled 的，它的价值全在
+     「看得见 + 知道为什么不能点」，灰到看不清等于没写。 */
+.mt5700-sh .btn.danger {
+  color: var(--bad) !important;
+  border-color: color-mix(in srgb, var(--bad) 40%, transparent) !important;
+  background: var(--bad-soft) !important;
+}
+.mt5700-sh .btn.danger:disabled {
+  color: var(--ink-3) !important;      /* 本文件只定义了 --ink-3，--text-2 是空的 */
+  border-color: var(--line) !important;
+  background: transparent !important;
+  opacity: 1;
+}
+
 /* ==========================================================================
    v9 外壳：接管整屏（手写段，不参与生成）
    --------------------------------------------------------------------------
@@ -3981,20 +3994,9 @@ body.mt5700-sh-on {
   gap: 10px;
 }
 
-/* ---------- 结论卡内的连接明细表（2026-10-27 连接状态并入结论卡） ----------
-   它是同一张卡里的续接内容，不是第二张卡：只加一条分隔线，不再画边框/底色。 */
-.mt5700-sh .mt5700-verdict-detail { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
-.mt5700-sh .mt5700-verdict-detail:empty { display: none; }
-.mt5700-sh .mt5700-verdict-table .mt5700-table-wrapper { border: 0; background: transparent; }
-.mt5700-sh .mt5700-verdict-table .mt5700-table th {
-  background: transparent;
-  font-size: 11px;
-  letter-spacing: .04em;
-  color: var(--ink-3);
-}
-
-/* 「常用动作」下方默认收起的自检抽屉：展开时与上方卡片同宽、留一点间距 */
-.mt5700-sh .mt5700-diag-drawer { margin-top: 2px; }
+/* 结论卡内那两张表（连接明细 / 地址与 DNS）已于 2026-10-27 整块下线，
+   原先给它们开的分隔线与透明表头样式一并删除 —— 留着只会让人以为
+   「表还在，只是没显示」。收起/展开的抽屉规则见 .mt5700-diag-drawer。 */
 
 /* 顶栏状态徽标的三档配色（原型只画了 ok 一档，warn/bad/mute 是本插件补的：
    真机上这三种状态都会出现，不能只有绿色） */
