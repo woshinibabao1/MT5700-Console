@@ -1847,10 +1847,14 @@ MUTATIONS = [
         "★ LTE 锚点 + NR 在用 → 5G-NR",
     ),
     (
-        "renderConn 没把载波表交给 ratDisplay（改了纯函数却没接线 —— 最常见的半程修复）",
+        # 2026-10-26：连接状态卡的「网络制式」格已删（去重），ratDisplay 的唯一调用点
+        # 搬到了结论卡，签名也从 `state.cell.sysMode` 变成局部变量 `cell.sysMode`。
+        # 变异随之改锚 —— 要求不变：**载波表必须真的传给 ratDisplay**，
+        # 少传这一路，NSA 下的 LTE 锚点就会被判成 4G（2026-09-29 真机 bug）。
+        "结论卡没把载波表交给 ratDisplay（改了纯函数却没接线 —— 最常见的半程修复）",
         "nsjs3",
-        "ratDisplay(state.cell.sysMode, state.carriers,",
-        "ratDisplay(state.cell.sysMode, [],",
+        "ratDisplay(cell.sysMode, state.carriers,",
+        "ratDisplay(cell.sysMode, [],",
         "走统一判定入口 ratDisplay",
     ),
     (
