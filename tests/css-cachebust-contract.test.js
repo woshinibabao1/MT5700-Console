@@ -62,7 +62,7 @@ const js = fs.readFileSync(JSP, 'utf8');
  *              组件（一句结论 + 四段链路 + 需要处理 + 影响预告）；主色改深青绿
  *              #0f766e（白字 5.5:1），信息色改蓝，二者不再同色系 → 5.14.0
  */
-const CSS_FINGERPRINT = 'e49d63f30fbf7b5c';
+const CSS_FINGERPRINT = 'ecf9b147939d40de';
 
 let pass = 0;
 const fails = [];

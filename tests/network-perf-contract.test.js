@@ -4,10 +4,14 @@
 /**
  * 网络状态页 性能与归位契约测试（纯静态，不连设备、不发 AT、不改文件）
  * ---------------------------------------------------------------------------
- * 本轮（2026-09-18）会审的两类改动：
- *   A. 「流量统计清零」从「连接工具」迁到「速率与流量」卡头（P01）
- *      —— 顺带修掉一个真 bug：卡头「实时监测」的文字被 E() 静默丢掉（P15）
- *   B. 前端性能 / 响应速度（P03 / P04 / P05' / P06 / P07 / P10）
+ * 2026-10-27 用户要求「删断网排查、删速率与流量、把连接状态并进结论卡」之后的
+ * 契约口径（本文件随之改写，**要求不放松**）：
+ *   A. 动作归位：清零流量从「速率卡头」迁到「常用动作」——删卡前先问
+ *      「它头上挂着哪些动作」，否则卡一删按钮就地消失。
+ *   B. 性能：1Hz 采样仍受可见性管控（页面隐藏即停、回前台丢基准再补起）；
+ *      初始化不重复渲染（P04）；图表那套宽度缓存/ResizeObserver 随卡片一起删除，
+ *      不许留半截死代码。
+ *   C. 防倒退：速率与流量卡、连接状态卡都不得重新出现（用户口径，别再拆回去）。
  *
  * 全部走「源码级静态断言」：这些是**结构契约**，不是行为，
  * 一旦有人把改动退回去，CI 立刻红，不用等上真机才发现界面变慢或按钮不见了。
@@ -42,21 +46,15 @@ function stripComments(s) {
 const nsCode = stripComments(nsSrc);
 const uiCode = stripComments(uiSrc);
 
-/* ---------- 1. P01 清零入口归位到「速率与流量」卡头 ---------- */
+/* ---------- 1. 清零入口归位到「常用动作」（原在速率卡头） ---------- */
 
-ok('★ 清零按钮挂在速率卡头部容器 rateExtra 上',
-	/rateExtra\.appendChild\(rateBar\)/.test(nsCode)
-	&& /dangerButton\('清零流量', clearFlowStats\)/.test(nsCode),
-	'rateBar 应同时含「实时监测」label 与清零按钮');
-
-ok('★ 卡头容器用 .mt5700-toolbar（零新增样式，且窄屏会换行）',
-	/var rateBar = E\('div', \{ 'class': 'mt5700-toolbar' \}\)/.test(nsCode));
-/* .mt5700-autorefresh 是 Ui.autoRefresh 的私有类（ui.js），自带 margin 6/10px 与
-   硬编码 #555（无深色变体）、且没有 flex-wrap —— 借来当卡头容器会顶高卡头、
-   暗色下发灰、窄屏溢出。防回退钉子打在这里。 */
-ok('★ 卡头容器不再借用 .mt5700-autorefresh（私有类，带硬编码色与外边距）',
-	!/var rateBar = E\('div', \{ 'class': 'mt5700-autorefresh' \}\)/.test(nsCode));
-
+ok('★ 清零按钮挂在「常用动作」的按钮行里（rateClear 由 actionRow 承载）',
+	/actionBtn\('清零流量', false, function \(\) \{ clearFlowStats\(\); \}\)/.test(nsCode),
+	'按钮必须是真回调用，不能是空函数或只有 label');
+/* ★ 删卡最典型的坑：动作跟着卡一起消失。这里连「卡头那套」的残留一起钉死，
+   避免哪天有人把速率卡搬回来时又长出第二个清零入口。 */
+ok('★ 速率卡头那套（rateBar / rateExtra / rateChk）已彻底删除',
+	!/rateBar/.test(nsCode) && !/rateExtra/.test(nsCode) && !/rateChk/.test(nsCode));
 ok('★ 连接工具里不再 append 清零块',
 	!/toolsBody\.appendChild\(buildFlowClearBlock\(\)\)/.test(nsCode));
 ok('★ buildFlowClearBlock 已整体删除（不留孤儿）',
@@ -65,8 +63,9 @@ ok('清零仍走二次确认（不可逆操作）',
 	/function clearFlowStats[\s\S]{0,300}Mt5700\.confirm/.test(nsCode));
 ok('清零仍下发 AT^DSFLOWCLR（手册 16.11）',
 	/sendCommand\('AT\^DSFLOWCLR'\)/.test(nsCode));
-ok('按钮给出 title 说明（迁走后不再有块内说明文字可看）',
-	/flowClearBtn\.title\s*=/.test(nsCode));
+/* 迁走后按钮旁边不再有块内说明文字，title 是唯一的「这会断网吗」提示。 */
+ok('★ 清零按钮给出影响说明（迁走后没有块内文字可看）',
+	/Mt5700\.confirm\('清零流量统计？[\s\S]{0,200}不会断网/.test(nsCode));
 
 /* ---------- 2. P15 E() 静默丢参：全仓不得再有 4 参调用 ---------- */
 
@@ -153,9 +152,9 @@ ok('★ 扫描器自检：3 参的正常调用不算违规',
 ok('★ 扫描器自检：字符串里的逗号不会被误切成多个参数',
 	findMultiArgECalls("E('p', {}, 'a, b, c');").length === 0);
 
-ok('「实时监测」文字改成两步建（先建 label，再 appendChild 文本节点）',
-	/var rateLabel = E\('label', \{\}, rateChk\);/.test(nsCode)
-	&& /rateLabel\.appendChild\(document\.createTextNode\(' 实时监测'\)\)/.test(nsCode));
+/* 「实时监测」开关随速率卡删除（2026-10-27）：它唯一的作用是停掉每秒采样，
+   而 KPI 的下行/上行与趋势线都要吃这份采样 —— 开关留着就是骗人。
+   这条由 connection-tools-contract 的「开关已删除」断言把守，此处不再重复。 */
 
 /* ---------- 3. P03 1Hz 速率采样纳入可见性管控 ---------- */
 
@@ -166,22 +165,28 @@ ok('★ 页面隐藏时一并停掉 1Hz 的 rateTimer（它是唯一不受 reset
 ok('★ 回到前台重开速率采样前先丢弃旧基准 rateSample',
 	/rateSample = null;[\s\S]{0,200}setInterval\(sampleRate, 1000\)/.test(visFn));
 ok('★ 后台标签页打开时不启动 1Hz 采样（否则用户还没看到页面就在刷 RPC）',
-	/if \(rateOn && !document\.hidden\) \{/.test(nsCode));
-ok('★ 回到前台时按 rateOn 补起采样（onVisibility 的 visible 分支）',
-	/if \(rateOn && !rateTimer\) \{[\s\S]{0,300}setInterval\(sampleRate, 1000\)/.test(nsCode));
+	/if \(!document\.hidden\) \{ rateTimer = setInterval\(sampleRate, 1000\);/.test(nsCode));
+ok('★ 回到前台补起采样（onVisibility 的 visible 分支，且不重复叠加定时器）',
+	/if \(!rateTimer\) \{[\s\S]{0,300}setInterval\(sampleRate, 1000\)/.test(nsCode));
 ok('_dispose 里清 rateTimer（防反复进出叠加定时器）',
 	/_dispose[\s\S]{0,600}clearInterval\(rateTimer\)/.test(nsCode));
 
-/* ---------- 4. P04 初始化不再重复渲染连接明细 ---------- */
+/* ---------- 4. P04 初始化不重复渲染 ---------- */
 
-/* 注意：nsCode 已去掉注释，不能拿注释当锚点定位，改用代码本身的首尾。 */
+/* 锚点改用「初始化段」这个稳定标记：原锚点是 renderConn();（该函数已随连接状态卡删除）。
+   块尾仍是 self._dispose 定义之前。 */
 const initEnd = nsCode.indexOf('self._dispose');
-const initStart = nsCode.lastIndexOf('renderConn();', initEnd);
+/* 取「结论区先画一次空态」后面那段连续调用作为初始化块：锚点是 renderSignal()，
+   它在整个文件里只出现在初始化与快档回调两处，用 lastIndexOf 取靠近 _dispose 的那次。 */
+const initStart = nsCode.lastIndexOf('renderSignal();', initEnd);
 const initBlock = (initStart >= 0 && initEnd > initStart) ? nsCode.slice(initStart, initEnd) : '';
 ok('能定位初始化段', initBlock.length > 0);
 const detailCalls = (initBlock.match(/renderConnDetail\(\)/g) || []).length;
 ok('★ 初始化段只渲染一次连接明细（原先连着调了两次）',
 	detailCalls === 1, '实测 ' + detailCalls + ' 次');
+const verdictCalls = (initBlock.match(/renderVerdict\(\)/g) || []).length;
+ok('★ 初始化段只渲染一次结论卡（chips + 明细表不重复重建）',
+	verdictCalls === 1, '实测 ' + verdictCalls + ' 次');
 ok('DNS 配置到位后仍会重绘一次（自定义 DNS 要显示出来）',
 	/loadDnsConfig\(\)\.then\(renderConnDetail\)/.test(nsCode));
 
@@ -193,24 +198,24 @@ ok('其余常规读数没有被顺手降重试（错误恢复能力不能被削�
 	(nsCode.split('attempts: 1').length - 1) === 1,
 	'attempts:1 出现 ' + (nsCode.split('attempts: 1').length - 1) + ' 次');
 
-/* ---------- 6. P06 图表宽度缓存（layout thrashing） ---------- */
+/* ---------- 6. 图表整套随卡片删除（P06 的宽度缓存 / ResizeObserver 一并作废） ---------- */
 
-ok('★ renderChart 不再每次读 chart.clientWidth',
-	!/width:\s*chart\.clientWidth/.test(nsCode));
-ok('★ 宽度只在缓存未命中时读一次，且量到 0 时不缓存（没上屏时会是 0）',
-	/if \(!chartWidth\) \{\s*var measured = chart\.clientWidth;\s*if \(measured\) chartWidth = measured;\s*\}/.test(nsCode));
-ok('★ 失效源优先用 ResizeObserver（滚动条/断点/侧栏折叠不一定派发 window resize）',
-	/chartRO = new ResizeObserver\(onResize\);/.test(nsCode)
-	&& /chartRO\.observe\(chart\)/.test(nsCode)
-	&& /typeof ResizeObserver === 'function'/.test(nsCode));
-ok('★ 不支持 ResizeObserver 的浏览器退回 window.resize（功能不打折）',
-	/else \{\s*window\.addEventListener\('resize', onResize\);\s*\}/.test(nsCode));
-ok('★ 监听在 _dispose 里成对移除（防泄漏）',
-	/_dispose[\s\S]{0,900}chartRO\.disconnect\(\)/.test(nsCode)
-	&& /_dispose[\s\S]{0,900}removeEventListener\('resize', onResize\)/.test(nsCode));
-ok('★ 不可见时不重建图表 / 不采样（切后台瞬间在飞的那次也要挡）',
-	/function renderChart\(\) \{\s*[\s\S]{0,200}if \(document\.hidden\) return;/.test(nsCode)
-	&& /function sampleRate\(\) \{\s*[\s\S]{0,200}if \(document\.hidden\) return/.test(nsCode));
+/* 这些断言是「反过来钉」：迁移完成后最容易留下的坏味道就是半截死代码 ——
+   没人调用的 renderChart、从没被 observe 的 ResizeObserver、永远走不到的分支。
+   它们不报错、不占页面，但会让人以为「曲线还在，只是没显示」，改起来反复试。
+   所以要求是：一个都不许剩。 */
+ok('★ renderChart 已彻底删除（含函数定义与全部调用）',
+	!/renderChart/.test(nsCode));
+ok('★ 图表宽度缓存与 ResizeObserver 已删除（无 chartWidth / chartRO / onResize）',
+	!/chartWidth/.test(nsCode) && !/chartRO/.test(nsCode) && !/new ResizeObserver/.test(nsCode));
+ok('★ 不再有 .mt5700-chart 容器（页面里没有第二处图表宿主）',
+	!/'mt5700-chart'|"mt5700-chart"/.test(nsCode));
+/* 但采样本身不能跟着删：KPI 的下行/上行与趋势线都吃 state.rtDown / rtUp。 */
+ok('★ 采样仍在（renderSpeed 把 rtDown/rtUp 推给 KPI，趋势线靠它）',
+	/function renderSpeed\(\)/.test(nsCode)
+	&& /sparkDown\.set\(/.test(nsCode) && /sparkUp\.set\(/.test(nsCode));
+ok('★ 不可见时不采样（切后台瞬间在飞的那次也要挡）',
+	/function sampleRate\(\) \{[\s\S]{0,200}if \(document\.hidden\) return/.test(nsCode));
 
 /* ---------- 7. P07 曲线 tooltip 的 rect 缓存 ---------- */
 
@@ -227,21 +232,35 @@ ok('★ 缓存为空时有兜底（元素在光标下被重建时不会拿不到
 
 ok('★ 清零后重取流量失败时，把 state.flow 置空再重绘（不能留旧数字）',
 	/getFlow\(\)\.then\(renderFlow, function \(\) \{\s*state\.flow = \{\};/.test(nsCode));
-ok('★ 清零成功后峰值一并归零（否则会出现「累计 0 但峰值 300 Mbps」的矛盾画面）',
-	/Mt5700\.success\('已清零'\);[\s\S]{0,600}state\.peakDown = 0;\s*state\.peakUp = 0;/.test(nsCode));
-ok('★ 流量格式化对空值显示「—」（formatFlow(undefined) 会算出 NaN TB）',
-	/function durText\(v, showDays\) \{ return v == null \? '—'/.test(nsCode)
-	&& /function flowText\(v\) \{ return v == null \? '—'/.test(nsCode));
+/* 峰值（peakDown/peakUp）唯一的显示点是速率卡的流量明细，卡删后它变成
+   「没人读还在累加」的死字段 —— 一并删除。留着的话清零后还得同步归零，
+   是纯粹为不存在的东西维护一致性。 */
+ok('★ 峰值字段已删除（无人显示就不该继续累加）',
+	!/state\.peakDown/.test(nsCode) && !/state\.peakUp/.test(nsCode));
+/* 流量明细那 8 项随卡片删除，formatFlow/durText/flowText 一起走了。
+   留下的是 KPI「本月流量」：取不到时必须写「—」，不能写 0（0 与「没读到」
+   是两件事），也不能让 undefined 走进 formatFlow 算出 NaN。 */
+ok('★ KPI 流量取不到时显示「—」而不是 0 / NaN',
+	/var totB = \(f\.totalRxFlow == null && f\.totalTxFlow == null\) \? null/.test(nsCode)
+	&& /if \(totB == null\) \{\s*kpiFlow\.set\('—', '', ''\);/.test(nsCode));
 
-/* ---------- 9. 防倒退：这些既有契约不许被本轮改动破坏 ---------- */
+/* ---------- 9. 防倒退：用户口径，两张卡都不许重新出现 ---------- */
 
-ok('「速率与流量」卡片仍在', /Mt5700\.card\('速率与流量'/.test(nsCode));
-/* 2026-09-19：本卡已升级为「断网排查」（三层 32 项），标题随之改变。
-   ★ 2026-09-19 v2.3.15：排查**不再进页面自动跑**，改成只有用户点「一键排查」才跑
-   （自动跑会占住独占的 AT 通道十几秒，和页面轮询、手动 AT 抢通道），故断言取反。 */
-ok('「断网排查」卡片仍在（原「连接工具」升级而来）',
+/* 2026-10-26 删信号质量卡、2026-10-27 删速率与流量卡与连接状态卡 ——
+   依据是「同一页里同一件事只排一次」，不是口味。回来的话整页又会变成
+   同一个数字出现在三处，所以这里取反钉死。 */
+ok('★ 「速率与流量」卡片不得重新出现（当前速率在 KPI，累计在 KPI 副标）',
+	!/Mt5700\.card\('速率与流量'/.test(nsCode));
+ok('★ 「连接状态」卡片不得重新出现（已并入结论卡）',
+	!/Mt5700\.card\('连接状态'/.test(nsCode));
+ok('★ 「信号质量」卡片不得重新出现（2026-10-26 已删）',
+	!/Mt5700\.card\('信号质量'/.test(nsCode));
+/* 断网排查仍在，但**不占页面区块**：卡片节点照建、默认收起。
+   ★ 2026-09-19 v2.3.15：排查不进页面自动跑，只有用户点按钮才跑
+   （自动跑会占住独占的 AT 通道十几秒，和页面轮询、手动 AT 抢通道）。 */
+ok('「断网排查」卡片节点仍在（默认收起的抽屉，能力不许丢）',
 	/Mt5700\.card\('断网排查', '三层体检 · 一键定位'\)/.test(nsCode));
-ok('★ 排查不进页面自动跑（只在用户点「一键排查」时才走）',
+ok('★ 排查不进页面自动跑（只在用户点「连接自检」时才走）',
 	!/runDiagnosis\(\)\.catch/.test(nsCode) && !/readAdcPins/.test(nsCode));
 ok('明细折叠状态不进 state.tools.diag（无 t.expanded，无向导式「展开步骤」）',
 	!/t\.expanded/.test(nsCode) && !/展开步骤/.test(nsCode));

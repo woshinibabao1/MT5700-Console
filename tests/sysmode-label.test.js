@@ -162,18 +162,20 @@ ok('null → null', norm(null) === null);
 ok('非数字 → null', norm('abc') === null);
 
 say('');
-say('=== 连接状态标题带运营商 ===');
+	say('=== 结论卡卡头带运营商 ===');
 
-ok('connCard 取了标题节点', /connTitleEl\s*=\s*connCard\.querySelector\('\.mt5700-card-title'\)/.test(src));
-ok('标题拼成「连接状态 ・ <运营商>」', /'连接状态 ・ '\s*\+\s*op/.test(src));
-ok('未知运营商不拼进标题（免得标题变长还无意义）',
-	/state\.operator\s*!==\s*'未知运营商'/.test(src));
-ok('renderConn 里刷新标题（运营商是慢档才拿到的）',
-	extractFn(src, 'renderConn').indexOf('connTitleEl') !== -1);
-/* 2026-10-26 去重：连接状态卡里的「网络制式」格已删（结论卡卡头已在显示制式），
-   这条不放松，只是改盯**现存的调用点** —— 结论卡里的那次 ratDisplay。
-   四路输入仍要齐：制式 / 载波 / EN-DC / 是否真驻留（本处由 registered 传入，
-   而 registered 必须来自 hasAnyPsService 的判定，不能是别的近似值）。 */
+	/* 2026-10-27：连接状态卡并入结论卡，「中国移动 · 5GA-NR · n41」这行现在由
+	   结论卡的 eyebrow 一次拼成。断言改盯现存落点，要求不放松：
+	   运营商 / 制式 / 频段三路都要进，且运营商为「未知运营商」时不许拼进去。 */
+	ok('★ 卡头 eyebrow 由 运营商 / 制式 / 频段 三路拼成',
+		/eyebrow:\s*\[op,\s*rat[\s\S]{0,80}band\]\.filter\(/.test(src));
+	ok('未知运营商不拼进卡头（免得标题变长还无意义）',
+		/state\.operator\s*!==\s*'未知运营商'/.test(src));
+	ok('★ 卡头由 renderVerdict 产出（运营商是慢档才拿到的，必须跟着重绘）',
+		extractFn(src, 'renderVerdict').indexOf('eyebrow') !== -1);
+	ok('★ 旧连接状态卡的标题拼装已彻底删除（不留第二条路径）',
+		!/connTitleEl/.test(src) && !/'连接状态 ・ '/.test(src));
+
 ok('★ 制式走统一判定入口 ratDisplay，并传齐四路输入（制式 / 载波 / EN-DC / 是否真驻留）',
 	/ratDisplay\(cell\.sysMode,\s*state\.carriers,\s*state\.diag\s*&&\s*state\.diag\.endc,\s*registered\s*===\s*true\)/.test(src));
 ok('★ 第四路「是否真驻留」来自 hasAnyPsService（不是随手取个布尔）',

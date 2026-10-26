@@ -7,10 +7,12 @@
  * 钉住三个「不报错、但功能静默失效」的坑，它们都是真实踩过一次的：
  *
  *   ① **QCI 永远显示「未知」**
- *      state.qci 在 getQCI() 里赋值，而 renderConn() 只在 getAMBR() 末尾和页面
- *      初始化时调用过。慢档顺序是 … getAMBR → getQCI → …，getQCI 在渲染之后才写
- *      值，且它后面再没有任何重渲染 → QCI 永远停在初始值「未知」。
+ *      state.qci 在 getQCI() 里赋值，而负责显示它的渲染函数在慢档靠后的位置才跑。
+ *      慢档顺序是 … getAMBR → getQCI → …，getQCI 在渲染之后才写值，
+ *      且它后面再没有任何重渲染 → QCI 永远停在初始值「未知」。
  *      真机 AT+CGEQOSRDP 其实有数据（1,6 / 5,5），纯粹是渲染时机问题。
+ *      ★ 2026-10-27 起 QCI 的显示点在**结论卡 chips**（连接状态卡已并入结论卡），
+ *        所以重新渲染的落点是 renderVerdict，不是原来的 renderConn。
  *
  *   ② **刷新只会跑一次**
  *      `chain.catch(fn)` 换行接着写 `then(fn)`（中间漏了点号）不会报语法错：
@@ -80,11 +82,21 @@ function collectJs(dir) {
 const getQci = extractFunction(statusJs, 'getQCI()');
 ok('能定位到 getQCI 函数定义', getQci.length > 0);
 ok('getQCI 确实写入了 state.qci', /state\.qci\s*=/.test(getQci));
-ok('getQCI 写完 state.qci 后必须重渲染连接状态面板（否则 QCI 永远「未知」）',
-	/renderConn/.test(getQci), '当前 getQCI 内没有 renderConn');
+ok('★ getQCI 写完 state.qci 后必须重渲染结论卡（否则 QCI 永远「未知」）',
+	/\.then\(renderVerdict\)/.test(getQci), '当前 getQCI 内没有 renderVerdict');
 
-/* renderConn 必须定义在 getQCI 之前可引用（函数声明提升，这里只确认它存在） */
-ok('renderConn 函数存在', /function renderConn\(\)/.test(statusJs));
+/* QCI 的唯一显示点是结论卡 chips。这里钉两件事：
+   ① renderVerdict 里确实把 state.qci 写进了 chip（不是只在别处赋值）；
+   ② 旧的连接状态卡渲染函数已删除 —— 留着一个半删的 renderConn 会让人以为
+      还有第二条显示路径，改 chips 时容易只改一半。 */
+ok('★ QCI 由结论卡 chips 显示（唯一显示点）',
+	/\{ label: 'QCI', value: String\(state\.qci/.test(statusJs));
+/* 只查代码，不查注释：头部/说明里为了讲清来历保留了「renderConn」这个字面量，
+   直接对原文跑正则会被自己的注释命中（踩过）。 */
+const statusCode = statusJs.replace(/\/\*[\s\S]*?\*\//g, '')
+	.replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1');
+ok('★ 旧 renderConn 已彻底删除（不留第二条显示路径）',
+	!/renderConn\b(?!Detail)/.test(statusCode));
 
 /* ---------- ② 刷新链不能出现漏点号的 then ---------- */
 

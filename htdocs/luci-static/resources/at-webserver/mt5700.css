@@ -376,26 +376,6 @@
   padding: 0;
 }
 
-/* ★ 页面自带的双列容器（网络状态页的「连接状态 | SIM+断网」）一律摊成单列：
-   两列内容长度天然不等，短的那列下方必然留一个空洞 —— 用户唯一要求是「整齐」，
-   所以宁可页面长一点，也要保证每个区的左边界与分隔线严格对齐。
-   容器盒子本身也去掉（display:block + 无边距），子区照常画自己的分隔线。 */
-.mt5700-page-body > .mt5700-cards,
-.mt5700-page-body > .mt5700-stack {
-  display: block;
-  border: 0;
-  padding: 0;
-  margin: 0;
-}
-
-.mt5700-page-body > .mt5700-cards > .mt5700-card,
-.mt5700-page-body > .mt5700-cards > .mt5700-stack > .mt5700-card,
-.mt5700-page-body > .mt5700-stack > .mt5700-card {
-  border-top: 1px solid var(--mt5700-divider);
-  padding-top: 14px;
-  margin-top: 0;
-}
-
 /* ==========================================================================
    L2.5 - 结论区（verdict）· 链路条（rail）· 影响预告（impact）
    --------------------------------------------------------------------------
@@ -2743,41 +2723,15 @@
    ⑤ .mt5700-diag-*：一键诊断卡的总体结论块与结论列配色
    ========================================================================== */
 
-/* 「矮的那张卡底部一片空白」与「右列底边对不齐」是一对矛盾，两次取舍：
-   - v5.5.8 曾把 stretch 改成 start：卡按自身内容定高，空白消失，但两列底边不齐；
-   - 2026-09-19 用户明确要「右列底部与左列连接状态底部对齐」，改回 stretch。
-     这次矮的那侧多出来的高度不再浪费：右列由「断网排查」卡吸收（见文件末尾
-     .mt5700-card-fill），富余空间整块给明细区（内部滚动），既是内容又不撑高。 */
-.mt5700-cards { align-items: stretch; }
+/* 2026-10-27：总览改成「结论卡 + KPI + 载波 | 设备 + 动作」单列流后，
+   双列容器（.mt5700-cards / .mt5700-stack）、流量 8 项定列（.mt5700-metrics-flow）
+   与「速率卡头」相关规则全部作废，一并删除 —— 留着就是永不命中的死选择器，
+   还会让「这个类到底谁在用」永远查不清。 */
 
-/* ② 窄屏：单列流 + 与宽屏一致的间距 */
-@media (max-width: 1099px) {
-  .mt5700-cards {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--mt5700-space-lg);
-  }
-}
-
-/* ③ 只命中卡片正文内的工具条（网络状态页 SIM 卡那一条） */
+/* 只命中卡片正文内的工具条（网络状态页 SIM 卡那一条） */
 .mt5700-card-body > .mt5700-toolbar { margin-bottom: var(--mt5700-space-sm); }
 
-/* ④ 流量区定列（窄屏仍走 .mt5700-metrics 的 auto-fit） */
-@media (min-width: 1100px) {
-  .mt5700-metrics-flow { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-}
-
-/* 右列纵向堆叠（SIM 与设备 → 一键诊断）。
-   这个容器早先用来堆「速率与流量」，因 170px 曲线把右列顶高而废弃；
-   现在换纯表格的诊断卡，高度正好，重新启用。min-width:0 防表格把网格撑破。 */
-.mt5700-stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--mt5700-space-lg);
-  min-width: 0;
-}
-
-/* ⑤ 一键诊断 */
+/* 一键诊断 */
 
 /* 结论列：配色取在浅底与深底上都还能看清的中亮度值，不复用 accent 蓝
    （蓝色在项目里已代表「信息/中性」，拿来当「正常」会和告警色混淆）
@@ -2878,69 +2832,20 @@
   max-height: 520px;
   overflow-y: auto;
 }
-/* 窄屏单列（<1100px）放宽到 520px，给说明列更多空间，且无右列对称问题 */
-@media (max-width: 1099px) {
-  .mt5700-diag-detail .mt5700-diag-scroll { flex: 0 0 auto; max-height: 520px; }
-}
 
 /* ==========================================================================
-   断网排查卡：右列底边拉平 + 占地固化（2026-09-19）
-   ------------------------------------------------------------------
-   用户要求：排查卡的占地空间固化（不随排查数据多少变化），且右列底部
-   与左列「连接状态」底部对齐。两条一起做：
-     ① .mt5700-cards 改回 stretch（取舍说明见上方 v5.5.8 那条注释）——
-        两列等高，底边自然齐平；
-     ② 右列最后一张卡（断网排查，带 .mt5700-card-fill）吃掉剩余高度：
-        卡体改纵向 flex → 富余空间整块给 .mt5700-diag-detail →
-        明细表格区再 flex 吸收并内部滚动。
-   于是排查出 4 项还是 17 项、说明文字长短，都不改变卡片总高。
-   只在 >=1100px 的双列版式下生效：窄屏单列没有「拉平」的对象。
+   断网排查 = 默认收起的抽屉（2026-10-27）
+   --------------------------------------------------------------------------
+   用户要求「删除断网排查」：它是总览里唯一一块「不是读数」的内容，却和读数
+   平权占一整块。卡片节点保留（诊断逻辑全在它里面，删掉等于删能力），
+   但不参与首屏：默认 display:none，点「常用动作 → 连接自检」才展开。
+   开合判据只写在样式表这一处 —— JS 只 toggle('is-open')，不写内联 display
+   （两处判据迟早对不上，这是踩过的坑）。
+   页面上限：明细表格区自己滚动（max-height 见 .mt5700-diag-scroll），
+   展开后不把整页顶长。
    ========================================================================== */
-@media (min-width: 1100px) {
-  /* ① 最关键的一环：卡**自己**必须能在右列里长高。
-     上一版只写了「卡体 flex + 明细区吸收」，漏了这条，结果整条链是断的：
-     .mt5700-stack 是纵向 flex，子项默认 flex:0 1 auto **不增长**，
-     于是富余空间留在断网排查卡**的下面**（stack 内的空白），
-     表现就是「右列最后一张卡的底边比左列连接状态高一截」。
-     卡长高后，多出来的高度经卡体传导给明细区，由它内部滚动吸收。 */
-  .mt5700-stack > .mt5700-card-fill {
-    flex: 1 1 auto;
-    min-height: 0;
-  }
-  .mt5700-card-fill {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .mt5700-card-fill > .mt5700-card-body {
-    flex: 1 1 auto;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  /* 卡体内除明细区外的元素（总控块）保持自身高度，空间紧张时不被压缩 */
-  .mt5700-card-fill > .mt5700-card-body > * { flex: 0 0 auto; }
-  /* ② 明细区给**固定基准高度**，不能写 auto。
-     参与「这一行有多高」计算的是 flex-basis：写 auto 时它就取内容高度，
-     收起 ≈34px、展开 ≈450px，行高跟着数据抖 —— 这正是上一版没做到「固化」的原因。
-     写成 340px 后，无论收起/展开、无论一层 4 项还是 17 项，卡片对行高的贡献恒定；
-     富余时再 grow（底边跟左列齐平），紧张时 shrink（min-height:0，内部滚动顶上）。 */
-  .mt5700-card-fill > .mt5700-card-body > .mt5700-diag-detail {
-    flex: 1 1 340px;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  /* 明细区内除滚动表格外的元素（分段控件 / 底部说明）保持自身高度，
-     既不压缩也不拉伸 */
-  .mt5700-diag-detail > * { flex: 0 0 auto; }
-  /* 明细区纵向 flex：只有滚动表格吸收富余高度（明细恒展开，不再有收起态入口）。 */
-  .mt5700-diag-detail > .mt5700-diag-scroll { flex: 1 1 auto; }
-  /* 富余高度既然交给 flex 分配，就不能再拿 max-height 封顶 ——
-     否则 grow 出来的那一段被 340px 卡住，多余部分退回成卡内空白。
-     窄屏单列（无拉平需求）仍保留封顶。 */
-  .mt5700-diag-detail .mt5700-diag-scroll { max-height: none; }
-}
+.mt5700-diag-drawer { display: none; }
+.mt5700-diag-drawer.is-open { display: block; }
 
 /* ==========================================================================
    eSIM 管理页（2026-09-20 重排）
@@ -4075,6 +3980,21 @@ body.mt5700-sh-on {
   align-items: center;
   gap: 10px;
 }
+
+/* ---------- 结论卡内的连接明细表（2026-10-27 连接状态并入结论卡） ----------
+   它是同一张卡里的续接内容，不是第二张卡：只加一条分隔线，不再画边框/底色。 */
+.mt5700-sh .mt5700-verdict-detail { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
+.mt5700-sh .mt5700-verdict-detail:empty { display: none; }
+.mt5700-sh .mt5700-verdict-table .mt5700-table-wrapper { border: 0; background: transparent; }
+.mt5700-sh .mt5700-verdict-table .mt5700-table th {
+  background: transparent;
+  font-size: 11px;
+  letter-spacing: .04em;
+  color: var(--ink-3);
+}
+
+/* 「常用动作」下方默认收起的自检抽屉：展开时与上方卡片同宽、留一点间距 */
+.mt5700-sh .mt5700-diag-drawer { margin-top: 2px; }
 
 /* 顶栏状态徽标的三档配色（原型只画了 ok 一档，warn/bad/mute 是本插件补的：
    真机上这三种状态都会出现，不能只有绿色） */

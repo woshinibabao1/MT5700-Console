@@ -35,6 +35,11 @@ const CSS = path.join(__dirname, '..', 'htdocs', 'luci-static', 'resources', 'at
 const parseSrc = fs.readFileSync(PARSE_JS, 'utf8');
 const nsSrc = fs.readFileSync(NS_JS, 'utf8');
 const setSrc = fs.readFileSync(SET_JS, 'utf8');
+/* .mt5700-stack 是否仍被前端使用（查代码不查注释：注释里为讲清来历会提到它） */
+function mt5700StackUsed(src) {
+	const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1');
+	return /'mt5700-stack|"mt5700-stack|mt5700-stack /.test(code);
+}
 const cssSrc = fs.readFileSync(CSS, 'utf8');
 
 const pm = parseSrc.match(/var Parse = \((function[\s\S]*?\n\})\)\(\);/);
@@ -277,34 +282,38 @@ ok('★ 不新增任何独立明细卡片（明细容器挂在 diagCard._body �
 	!/Mt5700\.card\('断网排查明细'/.test(nsSrc)
 	&& /diagCard\._body\.appendChild\(diagDetailBody\)/.test(nsSrc));
 
-/* ★ 2026-09-19 第二轮（v2.3.13）+ 第三轮修正（v2.3.14）：
-   排查卡「占地固化」+「右列底边与左列对齐」。
-   两列拉平（stretch）后，矮的那侧多出来的高度必须有人吃掉，否则就是当初被
-   抱怨的「卡底一片空白」。吸收链一共三节，缺任何一节都静默失效：
-       stack → 卡（.mt5700-card-fill 必须能增长）
-       → 卡体 → 明细区（flex-basis 必须是**固定值**）
-       → 表格区（内部滚动，且宽屏下不得用 max-height 封顶）
-   ★ v2.3.13 漏的正是第一节：只让卡体内部 flex，卡**自己**在 stack 里不增长
-     （flex 子项默认 0 1 auto），富余空间留在卡下面，底边照样差一截；
-     同时明细区写的是 flex:1 1 auto（basis 取内容高度，收起 34px / 展开 450px），
-     行高依旧跟着数据抖。下面每条断言各钉一节。 */
-ok('★ 排查卡带 .mt5700-card-fill（吃掉右列剩余高度，底边才能拉平）',
-	/diagCard\.classList\.add\('mt5700-card-fill'\)/.test(nsSrc));
-ok('★ 双列卡区 align-items: stretch（两列等高；start 会让底边对不齐）',
-	/\.mt5700-cards \{ align-items: stretch; \}/.test(cssSrc));
-ok('★ ① 卡自己在 .mt5700-stack 里必须能增长（漏这条＝富余空间留在卡下方，底边差一截）',
-	/\.mt5700-stack > \.mt5700-card-fill \{[\s\S]*?flex: 1 1 auto;[\s\S]*?min-height: 0;/.test(cssSrc));
-ok('★ ② 明细区 flex-basis 必须是固定值（写 auto 就取内容高度，收起/展开行高会变）',
-	/\.mt5700-card-fill > \.mt5700-card-body > \.mt5700-diag-detail \{[\s\S]*?flex: 1 1 340px;/.test(cssSrc));
-ok('★ ③ 表格区 flex 吸收 + 宽屏解除 max-height 封顶（否则 grow 出的高度被卡住，退回空白）',
-	/\.mt5700-diag-detail > \.mt5700-diag-scroll \{ flex: 1 1 auto; \}/.test(cssSrc)
-	&& /\.mt5700-diag-detail \.mt5700-diag-scroll \{ max-height: none; \}/.test(cssSrc));
-ok('★ ④ 表格区仍能滚动（内容多时不把卡片撑高）',
-	/\.mt5700-diag-detail \.mt5700-diag-scroll \{[\s\S]*?overflow-y: auto;/.test(cssSrc));
-/* ★ 明细已恒展开，不再有「收起态入口」这节吸收链；富余高度统一交给滚动表格
-   （.mt5700-diag-scroll）吸收，因此 CSS 里也不该再留 .mt5700-diag-entry。 */
-ok('★ 收起态入口已彻底移除（CSS 里也不留 .mt5700-diag-entry）',
-	!/mt5700-diag-entry/.test(cssSrc));
+/* ★ 2026-10-27 口径变更（用户要求「删除断网排查」）：
+   排查卡不再占页面区块，改为**默认收起的抽屉**（点「常用动作 → 连接自检」展开）。
+   这里钉的不是「卡片删了」（删卡等于删掉唯一的排查入口，能力会一起没掉），
+   而是三件会让抽屉静默失效的事：
+     ① 开合判据只能有一处 —— 写在样式表；JS 一旦写内联 display 就盖掉样式表，
+        两处判据迟早对不上（踩过）；
+     ② 展开后必须仍能自己滚，不许把整页顶长；
+     ③ 旧的双列拉平机制（.mt5700-card-fill / .mt5700-stack）随卡片移出右列作废，
+        不许以任何形式回来 —— 留着就是永不命中的死选择器。 */
+ok('★ 排查卡是默认收起的抽屉（.mt5700-diag-drawer，JS 只加类不写 display）',
+	/diagCard\.classList\.add\('mt5700-diag-drawer'\)/.test(nsSrc)
+	&& !/diagCard\.style\.display/.test(nsSrc));
+ok('★ 收起态写在样式表里（display:none）且展开态由 .is-open 打开',
+	/\.mt5700-diag-drawer \{ display: none; \}/.test(cssSrc)
+	&& /\.mt5700-diag-drawer\.is-open \{ display: block; \}/.test(cssSrc));
+	ok('★ 抽屉只有一个开关 setDiagOpen（按钮与「去排查」共用，防两处状态打架）',
+		/function setDiagOpen\(open, run\) \{/.test(nsSrc)
+		&& /classList\.toggle\('is-open', open\)/.test(nsSrc)
+		&& /if \(run && typeof runDiagnosis === 'function'\) runDiagnosis\(\);/.test(nsSrc));
+	ok('★ 「连接自检」按钮开合都走它：展开即开跑',
+		/setDiagOpen\(!diagCard\.classList\.contains\('is-open'\), true\)/.test(nsSrc));
+	/* ★ 抽屉默认 display:none，结论卡的「去排查」若只 scrollIntoView，等于把用户
+	   滚到一张看不见的卡片上 —— 点了没反应比没按钮更糟。必须一并打开。 */
+	ok('★ 结论卡「去排查」也走同一个开关（不能只滚动）',
+		/function gotoDiag\(\) \{ setDiagOpen\(true, true\); \}/.test(nsSrc));
+ok('★ 抽屉恒满宽（c12），不挤进半栏',
+	/diagCard\.classList\.add\('mt5700-c12'\)/.test(nsSrc));
+ok('★ 展开后明细区自己滚（max-height + overflow-y:auto），不把整页顶长',
+	/\.mt5700-diag-detail \.mt5700-diag-scroll \{[\s\S]*?max-height: 520px;[\s\S]*?overflow-y: auto;/.test(cssSrc));
+ok('★ 双列拉平机制已彻底移除（.mt5700-card-fill / .mt5700-stack 不得残留）',
+	!/mt5700-card-fill/.test(cssSrc) && !/mt5700-card-fill/.test(nsSrc)
+	&& !mt5700StackUsed(nsSrc) && !/\.mt5700-stack \{/.test(cssSrc));
 ok('★ 四档结论都有对应文案（含新增的 idle 待检查）',
 	/var DIAG_VERDICT = \{ ok: '通过', warn: '存疑', bad: '未通过', idle: '待检查' \}/.test(nsSrc));
 ok('★ 待检查有 CSS 配色（不写会掉成继承色，暗色下和「通过」分不出来）',
@@ -320,18 +329,22 @@ ok('流量清零下发 AT^DSFLOWCLR', /sendCommand\('AT\^DSFLOWCLR'\)/.test(nsSr
    这是「失败路径被误读」的一种，所以钉死第二个 handler。 */
 ok('清零后重取流量并重绘（失败分支置空 state.flow 后重绘，不留旧数字）',
 	/getFlow\(\)\.then\(renderFlow, function \(\) \{\s*state\.flow = \{\};/.test(nsSrc));
-const rateBarBlock = (function () {
-	const a = nsSrc.indexOf("var rateChk = E('input'");
-	const b = nsSrc.indexOf('rateExtra.appendChild(rateBar)');
-	return (a >= 0 && b > a) ? nsSrc.slice(a, b) : '';
-})();
-ok('★ 清零入口挂在「速率与流量」卡头（与流量数字同一张卡）',
-	rateBarBlock.length > 0 && /dangerButton\('清零流量', clearFlowStats\)/.test(rateBarBlock));
-ok('★ 连接工具里不再有独立的清零块（已迁走）',
+/* ★ 2026-10-27：速率卡删除后，清零入口迁到「常用动作」。
+   它是**动作**，不该藏在读数卡头里 —— 这也是当初「卡删了按钮就没了」的教训：
+   删一张卡之前先问「它头上挂着哪些动作」。 */
+ok('★ 清零入口在「常用动作」里，且点到真函数（不是空回调）',
+	/actionBtn\('清零流量', false, function \(\) \{ clearFlowStats\(\); \}\)/.test(nsSrc));
+ok('★ 连接工具里不留独立的清零块（更不许留 buildFlowClearBlock 这种半删残骸）',
 	!/toolsBody\.appendChild\(buildFlowClearBlock\(\)\)/.test(nsSrc)
 	&& !/buildFlowClearBlock/.test(nsSrc));
-ok('★ 卡头「实时监测」的文字没有被 E() 静默丢掉（E 只挂第 3 参）',
-	/var rateLabel = E\('label', \{\}, rateChk\);[\s\S]{0,160}createTextNode\(' 实时监测'\)/.test(nsSrc));
+/* 「实时监测」开关随速率卡一起删除。它唯一的作用是停掉每秒采样，而 KPI 的
+   下行/上行与趋势线都要吃这份采样 —— 开关留着只会让人以为能关掉。 */
+/* 只看代码：说明里为交代来历仍会写「实时监测」这四个字，查原文会命中注释。 */
+const nsCodeOnly = nsSrc.replace(/\/\*[\s\S]*?\*\//g, '')
+	.replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1');
+ok('★ 「实时监测」开关已删除（采样不再受开关管辖，KPI 要它）',
+	!/实时监测/.test(nsCodeOnly) && !/rateOn/.test(nsCodeOnly)
+	&& /if \(!document\.hidden\) \{ rateTimer = setInterval\(sampleRate, 1000\);/.test(nsCodeOnly));
 /* 2026-09-19：卡内分段/滚动保留（见上方守卫）。此处只钉死旧代码里误用的
    「展开步骤/收起步骤」向导式字眼不得重现（旧版曾是「逐步展开/收起」的向导式交互，已被否决）。 */
 ok('自检明细不再用「展开步骤/收起步骤」向导式字眼（旧口径已作废）',

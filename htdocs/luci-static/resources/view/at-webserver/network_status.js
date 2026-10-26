@@ -9,15 +9,21 @@
 /**
  * 网络状态 - 上游原版视觉 + 基准 v1.3.4 功能
  *
- * 等价迁移原 WebUI network/Info.tsx，并按「一个主题一张卡片」重新组织，避免信息重叠：
- *   ① 信号质量     主小区 RSRP/RSRQ/SINR + 调制方式(MCS)，头部放刷新控制
- *   ② 连接状态     注册/运营商/签约速率 + 一张合并表（连接诊断 + 地址与 DNS）
+ * 等价迁移原 WebUI network/Info.tsx。当前版式（2026-10-27 起）是**一列到底**：
+ *   ① 结论卡       一句话结论 + 四段链路 + chips（调制/APN/QCI/签约）+ 连接明细表
+ *   ② KPI ×4       下行/上行速率、RSRP、SINR、本月流量（各带趋势线与副标）
  *   ③ 载波与聚合   主小区身份(PLMN/TAC/小区/PCI) + ^HFREQINFO 载波列表 + CA / EN-DC 状态
- *   ④ 速率与流量   实时速率 + 速率曲线 + 累计流量（卡头带「实时监测」开关与「清零」）
- *   ⑤ SIM 与设备   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
- *   ⑥ 断网排查     三层体检（L1 模组 / L2 系统 / L3 端到端），点「一键排查」才跑的只读查询
- * 版式：载波与聚合满宽 → 信号质量满宽 → 双列卡区
- * [连接状态 | 右列（SIM 与设备 → 连接质量）]。
+ *   ④ 设备与身份   SIM 卡、模块标识、5G 模块温度（12 路传感器取最高）
+ *   ⑤ 常用动作     连接自检 / 清零流量 / 锁定频段 / 运行日志 / 服务与升级
+ *   ⑥ 断网排查     **默认收起的抽屉**：点「连接自检」才展开并开跑（三层体检）
+ *
+ * ★ 三次「合并/删除」的口径，别再拆回去：
+ *   · 信号质量卡（2026-10-26）：RSRP/RSRQ/SINR 在结论卡、KPI、载波表已各有一处，
+ *     环表只是同一件事的第四遍；调制搬进结论卡 chips。
+ *   · 速率与流量卡（2026-10-27）：当前值在 KPI、累计在 KPI 副标，曲线是唯一独有物，
+ *     为它养一张大卡不值。★ 每秒采样不能停 —— KPI 与趋势线都吃 state.rtDown/rtUp。
+ *   · 连接状态卡（2026-10-27）：APN/QCI/签约 → 结论卡 chips，明细表 → 结论卡内部。
+ *     独立再开一张卡，只是把「已连接 · 地址 · 网关」排版第二遍。
  *
  * ★ 为什么把「连接诊断 / 地址与 DNS」两张表合成一张（2026-09-18）：
  *   三者的行都是「项目 → 值」，拆三张只是多出两行表头、把同类信息切三刀；
@@ -87,16 +93,14 @@ return L.view.extend({
 		 *   · 自动刷新 + 手动刷新 → 顶栏工具区（本来就是对整页生效的全局设置）
 		 *   · 信号强度百分比 → 删（与 RSRP 是同一件事的两种写法） */
 
-		/* ② 连接状态：注册 / 运营商 / 签约速率 + 一张「连接明细」表。
-		 * 连接诊断、地址与 DNS 两张表已合并成一张（见 renderConnDetail）。 */
-		var connCard = Mt5700.card('连接状态', '注册、诊断与地址');
-		/* 标题节点留个引用：renderConn 里要把它改成「连接状态 ・ 中国移动」 */
-		var connTitleEl = connCard.querySelector('.mt5700-card-title');
-		var connBody = E('div');
-		connCard._body.appendChild(connBody);
-		/* 合并后只剩一个容器：三张表的行都是「项目 → 值」，分组标题行负责分隔。 */
-		var connDetailBox = E('div', { 'class': 'mt5700-mt-md' });
-		connCard._body.appendChild(connDetailBox);
+		/* ② 连接状态：**并入结论卡**（2026-10-27 用户口径）。
+		 * 它原本是一张独立卡片，但「已连接/地址/网关」结论卡已经说了一遍，
+		 * 单独再开一张卡只是把同一件事排版两次。现在：
+		 *   · APN / QCI / 签约速率 → 结论卡 chips（与调制并排）
+		 *   · 连接明细表（诊断 + 地址与 DNS）→ 结论卡内部（node._body）
+		 * 卡片本身不再创建，也不再有自己的标题。 */
+		var connDetailBox = E('div', { 'class': 'mt5700-verdict-table' });
+		verdict._body.appendChild(connDetailBox);
 
 		/* ③ 载波聚合：^HFREQINFO 载波列表 + 聚合状态（原「载波聚合」+「辅载波信号」合并）
 		 * 标题按 v9 原型改回「载波聚合」，与预览图逐字一致。 */
@@ -105,15 +109,10 @@ return L.view.extend({
 		var carrierBox = E('div');
 		carrierCard._body.appendChild(carrierBox);
 
-		/* ④ 速率与流量：实时速率 + 速率曲线 + 收发流量统计（原三张卡合并）
-		 * 头部放「实时监测」开关：关掉后停止每秒采样（不再读接口计数器），
-		 * 流量统计仍随慢档刷新。 */
-		var rateExtra = E('div');
-		var rateCard = Mt5700.card('速率与流量', '实时速率与流量统计', rateExtra);
-		var chart = E('div', { 'class': 'mt5700-chart' });
-		rateCard._body.appendChild(chart);
-		var flowGrid = E('div', { 'class': 'mt5700-metrics mt5700-metrics-flow mt5700-mt-md' });
-		rateCard._body.appendChild(flowGrid);
+		/* ④ 速率与流量卡已删除（2026-10-27 用户口径「多余」）：
+		 * 当前速率在 KPI 里、累计流量在 KPI 副标与「设备与身份」，曲线是唯一独有物，
+		 * 但为了它整页要养一张大卡不值。清零按钮搬进「常用动作」（动作不该藏在读数卡里）。
+		 * ★ 每秒采样**不能停**：KPI 的下行/上行与趋势线都吃 state.rtDown/rtUp。 */
 
 
 		/* ⑤ 设备与身份：SIM 卡、模块标识与 5G 模块温度（同一张表铺开，不跳转、不重复）
@@ -136,10 +135,13 @@ return L.view.extend({
 		 *   和同卡的流量数字放在一起才顺手，不该在「工具」里占一整块。
 		 * ★「网络拒绝原因」已迁到「网络设置 → 网络拒绝」，「服务状态监听」已下线
 		 *   —— 理由见下方连接工具区的注释。 */
+		/* ★ 2026-10-27：断网排查不再占页面区块。卡片节点照建（诊断逻辑全在它里面），
+		   但默认 display:none 挂在「常用动作」下方 —— 点「连接自检」才展开。
+		   这样页面干净，能力也没丢（删掉卡片等于把唯一的排查入口删了）。 */
 		var diagCard = Mt5700.card('断网排查', '三层体检 · 一键定位');
-		/* mt5700-card-fill：让这张卡吃掉右列剩余高度，两列底边齐平。
-		   卡内多出来的空间全给明细区（内部滚动），所以卡片总高不随排查结果多少变化。 */
-		diagCard.classList.add('mt5700-card-fill');
+		/* 收起/展开由 class 决定（样式表里 .mt5700-diag-drawer 默认 display:none），
+		   JS 不写 display —— 内联样式会盖掉样式表，两处判据迟早对不上。 */
+		diagCard.classList.add('mt5700-diag-drawer');
 		var diagBody = E('div');
 		diagCard._body.appendChild(diagBody);
 
@@ -169,10 +171,22 @@ return L.view.extend({
 			actionRow.appendChild(b);
 			return b;
 		}
-		actionBtn('连接自检', true, function () {
-			if (diagCard.scrollIntoView) diagCard.scrollIntoView({ block: 'center', behavior: 'smooth' });
-			if (typeof runDiagnosis === 'function') runDiagnosis();
+		/* 抽屉的**唯一**开关：底部「连接自检」按钮和结论卡里的「去排查」都走这里。
+		   两处各自 toggle 状态迟早对不上（一处开一处关），所以只留一个入口。
+		   ★ block:'start' 不是 'nearest' —— 抽屉是页面最后一块，'nearest' 只会把它
+		     顶到视口下沿，展开后的内容仍在屏幕外，用户以为没打开。 */
+		function setDiagOpen(open, run) {
+			diagCard.classList.toggle('is-open', open);
+			diagBtn.textContent = open ? '收起自检' : '连接自检';
+			if (!open) return;
+			if (diagCard.scrollIntoView) diagCard.scrollIntoView({ block: 'start', behavior: 'smooth' });
+			if (run && typeof runDiagnosis === 'function') runDiagnosis();
+		}
+		var diagBtn = actionBtn('连接自检', true, function () {
+			setDiagOpen(!diagCard.classList.contains('is-open'), true);
 		});
+		/* 清零流量：原在「速率与流量」卡头，卡片删了但动作要留着（手册 16.11 ^DSFLOWCLR）。 */
+		actionBtn('清零流量', false, function () { clearFlowStats(); });
 		actionBtn('锁定频段', false, function () {
 			window.location.href = L.url('admin/modem/5g/network/settings');
 		});
@@ -188,26 +202,21 @@ return L.view.extend({
 			'需要时到「服务与升级」重启服务。'));
 
 		/* ---------- 版式（严格对齐 v9 原型） ----------
-		     结论卡（满宽）
+		     结论卡（满宽，含连接明细表）
 		     KPI ×4（各 3 列）
 		     载波聚合（7） | 设备与身份（5）
-		     常用动作（满宽）
-		     速率与流量（满宽，只留曲线与累计 —— 当前值已在 KPI）
-		     连接状态（满宽）
-		     断网排查（满宽）
+		     常用动作（满宽）—— 其下挂着默认收起的「断网排查」抽屉
+		   2026-10-27 起「速率与流量」「连接状态」「断网排查」三张卡都不再占区块：
+		   前两者的内容并入结论卡与 KPI，后者改成抽屉（点「连接自检」展开）。
 		   全部卡片都是 .mt5700-page-body 的直接子元素 —— 套 .mt5700-cards 之类的
 		   容器会打断 12 列栅格的子选择器，跨列规则就失效（踩过）。 */
 		carrierCard.classList.add('mt5700-c7');
 		devCard.classList.add('mt5700-c5');
-		rateCard.classList.add('mt5700-c12');
-		connCard.classList.add('mt5700-c12');
 		diagCard.classList.add('mt5700-c12');
 
 		body.appendChild(carrierCard);
 		body.appendChild(devCard);
 		body.appendChild(actionCard);
-		body.appendChild(rateCard);
-		body.appendChild(connCard);
 		body.appendChild(diagCard);
 
 		/* ---------- 状态 ---------- */
@@ -262,9 +271,7 @@ return L.view.extend({
 			 */
 			ambrDown: 0, ambrUp: 0,
 			rtDown: 0, rtUp: 0,
-			/* 本轮「实时监测」的峰值速率（字节/秒，与 rtDown/rtUp 同单位）。
-			   只在采样时单向取 max，关掉监测再打开会归零重新累计。 */
-			peakDown: 0, peakUp: 0
+
 		};
 
 		var history = [];
@@ -1272,7 +1279,7 @@ return L.view.extend({
 
 		/*
 		 * ③ 流量统计清零（手册 16.11 ^DSFLOWCLR）
-		 * 入口挂在「速率与流量」卡头的「实时监测」开关后面（见下方 rateExtra 填充处），
+		 * 入口是「常用动作」里的「清零流量」按钮（原在速率卡头，卡删了随之迁移），
 		 * 不占独立卡片：它是个动作按钮，和同一张卡的流量数字放在一起才顺手。
 		 * ★ 不可逆操作，必须走 Mt5700.confirm 二次确认。
 		 */
@@ -1287,12 +1294,6 @@ return L.view.extend({
 						return;
 					}
 					Mt5700.success('已清零');
-					/* 峰值是「本轮实时监测」的极值，计数既然归零，峰值也该跟着归零，
-					   否则界面会同时出现「累计流量 0」和「峰值下行 300 Mbps」这种
-					   自相矛盾的画面。速率曲线（history）不跟着清 —— 它是速率维度
-					   的连续采样，清了只会让图空一大段，没有额外信息量。 */
-					state.peakDown = 0;
-					state.peakUp = 0;
 					/* ★ 成功与失败都要重绘：
 					   失败时把 state.flow 置空，让格子显示成「—」——
 					   计数其实已经归零了，只是没读回来；若照旧显示旧数字，
@@ -1452,38 +1453,9 @@ return L.view.extend({
 			return '单载波';
 		}
 
-		function renderConn() {
-			connBody.innerHTML = '';
-			/* 卡片标题带上运营商（「连接状态 ・ 中国移动」）。
-			   operatorFromCode 拿不到 PLMN 时返回「未知运营商」，这种情况就不拼，
-			   免得标题白白变长还看不出意义。 */
-			if (connTitleEl) {
-				var op = (state.operator && state.operator !== '未知运营商')
-					? state.operator : '';
-				connTitleEl.textContent = op ? ('连接状态 ・ ' + op) : '连接状态';
-			}
-			var c = state.cell;
-			var ambrD = splitSpeedUI(state.ambrDown, 'kbps');
-			var ambrU = splitSpeedUI(state.ambrUp, 'kbps');
-			var grid = E('div', { 'class': 'mt5700-metrics' });
-			[
-			/* 「网络状态 已注册」「网络制式 5G-NR」已删（2026-10-26 去重）：
-			   注册状态在结论卡链路段 03、制式在结论卡卡头（中国移动 · 5G-NR · n41）
-			   与载波表的「制式」列各有一处 —— 同一页说三遍不增加信息。
-			   这里只留别处没有的：APN、QCI、签约速率。 */
-				{ label: 'APN', value: state.apn },
-				{ label: 'QCI', value: state.qci },
-				/* 连接状态面板展示的是签约速率（AT^DSAMBR），不是瞬时速率 */
-				{ label: '下行速率（签约）', value: ambrD.value + ' ' + ambrD.unit },
-				{ label: '上行速率（签约）', value: ambrU.value + ' ' + ambrU.unit }
-			].forEach(function (it) {
-				grid.appendChild(Mt5700.metric(it.label, it.value, it.color));
-			});
-			connBody.appendChild(grid);
-
-			/* PLMN / TAC / 小区 / PCI 已并入「载波与聚合」卡片：那才是描述主小区的地方，
-			   而且原表里的「频点」列其实取的是 TAC（0x14225C），标错了，真频点在载波表里。 */
-		}
+		/* renderConn 已删除（2026-10-27）：连接状态卡并入结论卡后，
+		   APN / QCI / 签约速率改由 renderVerdict 的 chips 直接给（同一处判定、同一处显示），
+		   明细表由 renderConnDetail 负责。这里不再有独立的渲染步骤。 */
 
 		/* ================= 结论区（一句结论 + 四段链路） =================
 		 *
@@ -1533,6 +1505,8 @@ return L.view.extend({
 			var op = (state.operator && state.operator !== '未知运营商') ? state.operator : '';
 			var down = splitSpeedUI(state.rtDown || 0, 'bytes');
 			var up = splitSpeedUI(state.rtUp || 0, 'bytes');
+			var ambD = splitSpeedUI(state.ambrDown, 'kbps');
+			var ambU = splitSpeedUI(state.ambrUp, 'kbps');
 
 			/* ---- 四段链路的判定 ---- */
 			var simTone = simWarnNow() ? 'bad' : (simKnown() ? 'ok' : 'mute');
@@ -1563,11 +1537,7 @@ return L.view.extend({
 				title = '已连接，可以上网';
 				sub = ['已获取地址 ', { b: v4.address }];
 				if (gw) { sub.push('，网关 ', { b: gw }); }
-				/* 「实时监测」关掉时采样根本不在跑，此时 rtDown 是上一轮的残值，
-				   写进结论会变成一句假的现状 —— 那种情况下只说地址，不说速率。 */
-				if (rateOn) {
-					sub.push('，当前下行 ' + down.value + ' ' + down.unit);
-				}
+				sub.push('，当前下行 ' + down.value + ' ' + down.unit);
 				sub.push('。');
 			}
 
@@ -1576,11 +1546,9 @@ return L.view.extend({
 			   分开算迟早出现「顶栏说已连接、卡片说未注册」。 */
 			Mt5700.shellPill(tone, title);
 			var todos = [];
-			function gotoDiag() {
-				if (diagCard && diagCard.scrollIntoView) {
-					diagCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-				}
-			}
+			/* 去排查 = 开抽屉 + 开跑。★ 原来只 scrollIntoView：抽屉现在是 display:none，
+			   点「去排查」会滚到一张看不见的卡片上 —— 按钮点了没反应，比没有按钮更糟。 */
+			function gotoDiag() { setDiagOpen(true, true); }
 			if (simWarnNow()) {
 				todos.push({
 					title: 'SIM 卡未就绪',
@@ -1622,7 +1590,15 @@ return L.view.extend({
 				   累计流量在「流量」面板 —— 放这儿就是同一句话说三遍。
 				   调制方式（MCS/层数）只在这一处出现，所以留它。 */
 				chips: [
-					{ label: '调制', value: mcsDisplay(state.downlinkMCS) }
+					{ label: '调制', value: mcsDisplay(state.downlinkMCS) },
+					/* 以下三项原属「连接状态」卡（2026-10-27 并入结论卡）：
+					   APN / QCI 是排障时要念给客服的值，签约速率是「办了多少档」的凭据。 */
+					{ label: 'APN', value: state.apn || '—' },
+					/* qciLabel() 的返回值自带「QCI」前缀（QCI6 / QCI5 (IMS信令)），
+					   chip 的标签也叫 QCI —— 不去掉前缀就会出现「QCI QCI6」。
+					   只剥前缀，括号里的说明（信令/默认承载）留着，那是有用的。 */
+					{ label: 'QCI', value: String(state.qci || '—').replace(/^QCI\s*/, '') },
+					{ label: '签约', value: ambD.value + ' ' + ambD.unit + ' / ' + ambU.value + ' ' + ambU.unit }
 				],
 				nums: [
 					{ label: 'RSRP', value: cell.rsrp, unit: 'dBm', tone: sigTone(cell.rsrp) },
@@ -2081,18 +2057,7 @@ return L.view.extend({
 		 * 早期版本两者共用一组变量，导致签约速率会盖掉实时速率、反之亦然。
 		 */
 		function renderSpeed() {
-			/* 当前速率只画在 KPI 里（原型就是这么排的）；这张卡只负责曲线与累计，
-			   两个地方各画一遍「0 bps」是在浪费首屏高度。 */
-			if (!rateOn) {
-				chart.innerHTML = '';
-				chart.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'实时速率监测已关闭（不再每秒读取接口计数器）；累计流量统计仍会自动刷新。'));
-				kpiDown.set('—', '');
-				kpiUp.set('—', '');
-				sparkDown.set([]);
-				sparkUp.set([]);
-				return;
-			}
+			/* 速率卡删掉后，renderSpeed 只负责把值推给 KPI（含趋势线）。 */
 			var d = splitSpeedUI(state.rtDown, 'bytes');
 			var u = splitSpeedUI(state.rtUp, 'bytes');
 
@@ -2107,8 +2072,6 @@ return L.view.extend({
 			}
 			sparkDown.set(history.map(function (h) { return maxD ? h.down / maxD : 0; }));
 			sparkUp.set(history.map(function (h) { return maxU ? h.up / maxU : 0; }));
-
-			renderChart();
 		}
 
 		/*
@@ -2125,79 +2088,14 @@ return L.view.extend({
 			return { value: String(Math.round(bits)), unit: 'bps' };
 		}
 
-		/*
-		 * ★ 图表宽度缓存（性能）：
-		 *   renderChart() 每秒被 renderSpeed() 调一次。原实现是
-		 *   `chart.innerHTML = ''` 之后立刻读 `chart.clientWidth` —— 按 MDN 对
-		 *   「强制同步布局（forced synchronous layout / layout thrashing）」的说明，
-		 *   读取 clientWidth 这类布局属性会迫使浏览器**立刻**完成挂起的样式重算与布局，
-		 *   而上一行刚把子树作废。于是每秒都在「作废布局 → 马上算回来」，是教科书式的
-		 *   反向优化；1Hz 下它还会和页面其它重绘抢主线程。
-		 *   失效源用 ResizeObserver 而不是 window.resize：容器宽度还会因为
-		 *   垂直滚动条出现/消失、断点切换、侧栏折叠而变化，这些**不一定**派发
-		 *   window resize（只认 resize 等于把「宽度只随窗口变化」当成了既定事实）。
-		 *   不支持 RO 的老浏览器退回 resize，功能不打折。
-		 */
-		var chartWidth = 0;
-		var chartRO = null;
-		var onResize = function () { chartWidth = 0; };
-		if (typeof ResizeObserver === 'function') {
-			chartRO = new ResizeObserver(onResize);
-			chartRO.observe(chart);
-		} else {
-			window.addEventListener('resize', onResize);
-		}
-
-		function renderChart() {
-			/* 不可见时不做重建：切后台那一刻在飞的 netRate 回来后仍会走到这里，
-			   在看不见的页面里做一次完整子树重建纯属浪费。 */
-			if (document.hidden) return;
-			chart.innerHTML = '';
-			if (!history.length) {
-				chart.appendChild(Mt5700.empty('等待数据…'));
-				return;
-			}
-			/* 只在缓存未命中时读一次布局属性。还没上屏时 clientWidth 为 0，
-			   此时**不缓存**（免得把兜底的 600 当成真实宽度记住），
-			   上屏后由 RO 的首次回调让它失效、下一拍重新量准。 */
-			if (!chartWidth) {
-				var measured = chart.clientWidth;
-				if (measured) chartWidth = measured;
-			}
-			chart.appendChild(Mt5700.lineChart(history, {
-				width: chartWidth || 600,
-				height: 140,
-				tipFormat: function (p) {
-					var d = splitSpeedUI(p.down || 0, 'bytes');
-					var u = splitSpeedUI(p.up || 0, 'bytes');
-					return '↓ ' + d.value + ' ' + d.unit + ' · ↑ ' + u.value + ' ' + u.unit;
-				}
-			}));
-		}
+		/* 速率曲线（renderChart + 宽度缓存）随「速率与流量」卡一起删除（2026-10-27）。
+		   趋势改由 KPI 里的 spark 迷你线表示，不需要每秒重建整棵子树。 */
 
 		function renderFlow() {
-			flowGrid.innerHTML = '';
 			var f = state.flow || {};
 			/* 取不到时统一显示「—」而不是「NaN」：
 			   清零成功后若重读失败，state.flow 会被置空，此时若照旧渲染旧数字，
-			   用户会以为「没清成功」—— 那才是误报。
-			   （AtWs.formatFlow(undefined) 会算出 "NaN TB"，所以必须在这一层挡掉。） */
-			function durText(v, showDays) { return v == null ? '—' : AtWs.formatDuration(v, showDays); }
-			function flowText(v) { return v == null ? '—' : AtWs.formatFlow(v); }
-			/* 峰值是「本轮实时监测」内的最大值（关掉监测再开即归零），
-			   单位与 rtDown/rtUp、state.peakDown/peakUp 一致（字节/秒），显示同样走 splitSpeedUI。 */
-			/* 8 项里删掉 4 项重复/无用的（2026-10-26 去重）：
-			   · 当前下行/上行流量 —— KPI「本月流量」的副标已给本次会话合计；
-			   · 峰值 —— 没流量时恒为「—」，有流量时又只是曲线的极值，看一眼曲线就有。
-			   留下的 4 项都是别处没有的：时长两个维度 + 分方向的累计流量。 */
-			[
-				{ label: '当前会话时长', value: durText(f.lastDsTime, false) },
-				{ label: '累计时长', value: durText(f.totalDsTime, true) },
-				{ label: '累计下行', value: flowText(f.totalRxFlow) },
-				{ label: '累计上行', value: flowText(f.totalTxFlow) }
-			].forEach(function (it) {
-				flowGrid.appendChild(Mt5700.metric(it.label, it.value));
-			});
+			   用户会以为「没清成功」—— 那才是误报。 */
 
 			/* KPI「本月流量」：累计收 + 发，副标题给本次会话。取不到就写「—」，
 			   不能写 0（见上面注释：0 与「没读到」必须区分）。 */
@@ -2500,7 +2398,7 @@ return L.view.extend({
 					 */
 					if (e === 'break') return;   /* 已找到：保留 activeCid 作为缓存 */
 					state.activeCid = null;
-				}).then(renderConn);
+				}).then(renderVerdict);
 			});
 		}
 
@@ -2521,7 +2419,7 @@ return L.view.extend({
 					if (!row && rows.length) row = rows[0];
 					if (row) state.qci = AtWs.qciLabel(row.split(',')[1] ? row.split(',')[1].trim() : '');
 				});
-			}).then(renderConn);
+			}).then(renderVerdict);
 		}
 
 		function getDHCP() {
@@ -2690,7 +2588,6 @@ return L.view.extend({
 				}).then(function () {
 					renderSignal();
 					renderCarriers();
-					renderConn();
 					/* 结论区跟着快档走：信号与注册状态一变，第一句话也要跟着变 */
 					renderVerdict();
 				});
@@ -2768,50 +2665,11 @@ return L.view.extend({
 		 */
 		var rateSample = null;
 		var rateTimer = null;
-		var rateOn = true;
 
-		/* 「实时监测」开关：关闭即停表（不再每秒读接口计数器），重开时重新起基准。
-		   ★ 页面在**后台标签页**里打开时（`document.hidden === true`，例如 Ctrl+点击
-		   新标签页）不起表：看不见的时候每秒读一次网卡计数器是纯浪费，
-		   回到前台由 onVisibility 补起 —— 那里同样会丢弃旧基准。 */
-		function setRateEnabled(on) {
-			rateOn = !!on;
-			try { localStorage.setItem('mt5700.rateOn', rateOn ? '1' : '0'); } catch (e) {}
-			if (rateTimer) { clearInterval(rateTimer); rateTimer = null; }
-			if (rateOn && !document.hidden) {
-				rateSample = null;
-				/* 重新开始一段监测：峰值随之归零，否则上一轮的尖峰会一直挂着 */
-				state.peakDown = 0;
-				state.peakUp = 0;
-				rateTimer = setInterval(sampleRate, 1000);
-				sampleRate();
-			}
-			renderSpeed();
-		}
-
-		var rateChk = E('input', { 'type': 'checkbox' });
-		rateChk.addEventListener('change', function () { setRateEnabled(rateChk.checked); });
-		/* ★ E(tag, attrs, text) 只挂载第 3 个参数，第 4 个起会被**静默丢弃**
-		   （它是全站共用 helper，改成变参影响面太大，footgun 已记在
-		   docs/FRONTEND_REVIEW_REPORT.md）。所以 label 必须分两步建 ——
-		   原来写成 E('label', {}, rateChk, document.createTextNode(' 实时监测'))，
-		   「实时监测」这四个字从来就没显示过，只剩一个光秃秃的勾选框。 */
-		var rateLabel = E('label', {}, rateChk);
-		rateLabel.appendChild(document.createTextNode(' 实时监测'));
-		/* 流量清零归位到这张卡：它清的就是本卡的流量统计，与速率/流量同一问题域，
-		   放在「连接工具」里要跨卡找。
-		   ★ 容器用 .mt5700-toolbar（mt5700.css:2590）而不是 .at-autorefresh：
-		   后者是 Ui.autoRefresh 的私有类（ui.js:347），自带 margin 6px/10px 与
-		   硬编码 #555（无深色变体），放进卡头会把这一排顶高、暗色下发灰；
-		   而且它没有 flex-wrap，窄屏两个子元素不换行而是直接溢出。
-		   .mt5700-toolbar 是 flex + gap + wrap，且「网络设置」页已在用它做卡头
-		   工具条（mt5700.css:2742 的注释承认该用法）—— 零新增样式。 */
-		var flowClearBtn = Mt5700.dangerButton('清零流量', clearFlowStats);
-		flowClearBtn.title = '把本次与累计流量、连接时长全部归零（AT^DSFLOWCLR，手册 16.11）';
-		var rateBar = E('div', { 'class': 'mt5700-toolbar' });
-		rateBar.appendChild(rateLabel);
-		rateBar.appendChild(flowClearBtn);
-		rateExtra.appendChild(rateBar);
+		/* 「实时监测」开关已删除（2026-10-27）：总览不再有速率曲线卡，
+		   这个开关唯一的作用就是停掉每秒采样。KPI 的下行/上行与趋势线还要吃
+		   这份采样，所以采样本体保留 —— 只去掉这个没人再需要关的开关。 */
+		/* 流量清零按钮已迁到「常用动作」面板（动作不该藏在读数卡头里） */
 
 		/*
 		 * 1Hz 采样，但一次 netRate 往返可能长得多（它的超时是 5s）。
@@ -2859,12 +2717,9 @@ return L.view.extend({
 						state.rtUp = dtx >= 0 ? dtx / dt : 0;
 					history.push({ down: state.rtDown, up: state.rtUp });
 					if (history.length > HISTORY_POINTS) history = history.slice(history.length - HISTORY_POINTS);
-					/* 峰值只在本段监测内累计（单位与 rt* 一致：字节/秒） */
-					if (state.rtDown > state.peakDown) state.peakDown = state.rtDown;
-					if (state.rtUp > state.peakUp) state.peakUp = state.rtUp;
-						rateSample = { t: now, rx: r.rx_bytes, tx: r.tx_bytes, device: r.device };
-						renderSpeed();
-						return;
+					rateSample = { t: now, rx: r.rx_bytes, tx: r.tx_bytes, device: r.device };
+					renderSpeed();
+					return;
 					}
 					return;
 				}
@@ -2881,11 +2736,8 @@ return L.view.extend({
 			});
 		}
 
-		/* 恢复上次的开关状态（默认开） */
-		var savedRateOn = '1';
-		try { savedRateOn = localStorage.getItem('mt5700.rateOn') || '1'; } catch (e) {}
-		rateChk.checked = savedRateOn !== '0';
-		setRateEnabled(rateChk.checked);
+		/* 采样不受任何开关管辖：页面可见就每秒一采样（KPI 要）。 */
+		if (!document.hidden) { rateTimer = setInterval(sampleRate, 1000); sampleRate(); }
 
 		/* ---------- 刷新（分级） ----------
 		 *
@@ -3111,16 +2963,15 @@ return L.view.extend({
 			}
 			resetTimers(ar.isEnabled(), ar.getInterval());
 			refreshAll();
-			if (rateOn && !rateTimer) {
-				/* ★ 显式的语义决定：1Hz 速率采样只受「实时监测」开关管辖，
-				   不受「自动刷新」开关约束 —— 前者是这张卡自己的开关（用户勾了
-				   就是要看实时曲线），后者管的是读数类轮询。且它走的是 ubus
-				   netrate（读接口计数器），**不占 AT 串口**，与红线里的
-				   「AT 通道独占」不是一回事，所以不跟着 ar.isEnabled() 一起停。 */
+			if (!rateTimer) {
+				/* ★ 显式的语义决定：1Hz 速率采样只受页面可见性管辖，
+				   不受「自动刷新」开关约束 —— KPI 的下行/上行与趋势线都吃这份
+				   采样，而自动刷新管的是读数类轮询。且它走的是 ubus netrate
+				   （读接口计数器），**不占 AT 串口**，与红线里的「AT 通道独占」
+				   不是一回事，所以不跟着 ar.isEnabled() 一起停。 */
 				/* ★ 回到前台必须丢弃旧基准：否则 dt 等于整段隐藏时长，
 				   字节差除以一个巨大的 dt 会落出一个被摊薄的假谷值，
-				   还会污染峰值判定（峰值只升不降，假谷值虽不抬峰值，
-				   但曲线上会留一段平躺的怪台阶）。 */
+				   趋势线上留一段平躺的怪台阶。 */
 				rateSample = null;
 				rateTimer = setInterval(sampleRate, 1000);
 				sampleRate();
@@ -3140,18 +2991,18 @@ return L.view.extend({
 
 		/* ---------- 初始化 ---------- */
 
-		renderConn();
+		/* 结论区先画一次空态：首屏前几秒数据还没回来，这一块要显示「正在读取」，
+		   而不是一片空白等第一轮刷新（用户会以为页面坏了）。
+		   ★ 这里只画一次：原来末尾还有第二次 renderVerdict()，但两次之间没有任何
+		     数据回填，第二次是把刚建好的 chips + 明细表原样重建一遍（P04 同一类问题）。 */
 		renderSignal();
 		renderCarriers();
-		/* 结论区先画一次空态：首屏前几秒数据还没回来，这一块要显示「正在读取」，
-		   而不是一片空白等第一轮刷新（用户会以为页面坏了）。 */
 		renderVerdict();
-		renderConnDetail();    /* 连接明细：诊断 + 地址与 DNS（一张表） */
-		renderTools();   /* 断网排查：右列总控卡 + 底部满宽明细卡 */
+		renderConnDetail();    /* 连接明细：诊断 + 地址与 DNS（一张表），挂在结论卡内 */
+		renderTools();   /* 断网排查抽屉的内容（默认收起，点「连接自检」才展开） */
 		renderSpeed();
 		renderFlow();
 		renderTemp();
-		renderVerdict();
 
 		/* 自定义 DNS 是 UCI 侧的静态配置，跟 AT 无关，单独加载；
 		   拿到后重绘一次，让「主/备 DNS」显示成自定义值并带上「自定义」徽章。
@@ -3180,9 +3031,6 @@ return L.view.extend({
 			if (rateTimer) clearInterval(rateTimer);
 			timer = slowTimer = rateTimer = null;
 			if (onVisibility) document.removeEventListener('visibilitychange', onVisibility);
-			if (chartRO) { chartRO.disconnect(); chartRO = null; }
-			else if (onResize) { window.removeEventListener('resize', onResize); }
-			onResize = null;
 			if (AtWs.client && AtWs.client.clearReadCache) AtWs.client.clearReadCache();
 		};
 		page._onDispose(self._dispose);
