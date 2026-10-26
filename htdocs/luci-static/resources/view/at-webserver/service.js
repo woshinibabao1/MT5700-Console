@@ -368,7 +368,8 @@ return L.view.extend({
 
 		var phoneNoteInput = Mt5700.input('text', '例如 13800138000', '');
 		wsBody.appendChild(Mt5700.formGroup('本机号码备注', phoneNoteInput,
-			'SIM 卡未写入 MSISDN 时（AT+CNUM 返回 not found），用于「网络状态 / 设备信息」显示'));
+			'纯记录，只在当前输入框里回显（总览不再显示手机号）。'
+			+ 'SIM 卡没写 MSISDN 时（AT+CNUM 回 not found），记这里备查。'));
 
 		/*
 		 * ★ 认证密钥用 password 类型。

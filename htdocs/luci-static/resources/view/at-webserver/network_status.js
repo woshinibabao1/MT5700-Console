@@ -295,11 +295,6 @@ return L.view.extend({
 			return '';
 		}
 
-		function manualPhoneNote() {
-			try { return String(L.uci.get('at-webserver', 'config', 'phone_note') || '').trim(); }
-			catch (e) { return ''; }
-		}
-
 	/* ⑦ 功能归位原则：同一数据不重复查询。
 	 * ^NWTIME（网络时间）已整条移除：手册 §13.8.5 与真机实测都表明，网络未下发
 	 * EMM/GMM/MM information 时模组固定输出占位符 90/01/06，本机正是如此，界面只能显示假日期。
@@ -315,8 +310,8 @@ return L.view.extend({
 			/*
 			 * ★ P15（2026-09-19 会审）：连点「刷新」会叠加两条 9 命令的链。
 			 * refreshAll() 每次都 loadDeviceInfo(true) 强制绕过 60 秒节流，按钮也没有
-			 * disabled，而 commandQueue 是全局单链 —— 撞车时 SIMSQ / CPIN / CNUM /
-			 * TDSIMHP 会实发两次，把本页与其它页面的命令一起堵住。
+			 * disabled，而 commandQueue 是全局单链 —— 撞车时 SIMSQ / CPIN / CIMI
+			 * 会实发两次，把本页与其它页面的命令一起堵住。
 			 * 与 refreshFast / refreshSlow 同一模式：撞车就复用在跑的那条。
 			 */
 			if (devRunning) return devRunning;
@@ -333,14 +328,14 @@ return L.view.extend({
 				return q('AT+CPIN?');
 			}).then(function (r) {
 				st.pin = (String(r && r.data ? r.data : '').match(/CPIN:\s*(\S+)/) || [])[1] || '';
-				return q('AT+CNUM');
-			}).then(function (r) {
-				var m = String(r && r.data ? r.data : '').match(/"([+\d]{5,20})"/);
-				st.phone = m ? m[1] : '';
-				return q('AT^TDSIMHP?');
-			}).then(function (r) {
-				var m = String(r && r.data ? r.data : '').match(/TDSIMHP:\s*(\d+)/);
-				st.hotplug = m ? parseInt(m[1], 10) : null;
+				/*
+				 * ★ 2026-10-27 停发两条（用户删了「手机号」「SIM 热插拔」两行）：
+				 *   · AT+CNUM      只喂「手机号」行，且本机卡上没写 MSISDN，
+				 *                  实测恒回 +CME ERROR: not found（稳定失败）
+				 *   · AT^TDSIMHP?  只喂「SIM 热插拔」行；开关本体在「模组配置 →
+				 *                  SIM 卡」页，那里自己会查一次，不必在总览重复
+				 * 串口独占、每条 65–133ms，这条链每 60 秒跑一轮。
+				 */
 				return q('AT+CIMI');
 			}).then(function (r) {
 				st.imsi = (String(r && r.data ? r.data : '').match(/\d{10,}/) || [''])[0];
@@ -414,16 +409,11 @@ return L.view.extend({
 						: 'SIM 未就绪：请检查卡是否插好、是否被 PIN/PUK 锁定。'));
 			}
 
-			var note = manualPhoneNote();
-			var phone = st.phone ? (st.phone + '（SIM 卡）')
-				: (note ? (note + '（手动备注）')
-					: '未写入（可在「服务配置」手动备注）');
-
+			/* 2026-10-27 用户点名删除「手机号」「SIM 热插拔」两行：
+			   前者本机卡没写 MSISDN（AT+CNUM 恒 not found），显示出来只是一句
+			   「未写入」；后者的开关在「模组配置 → SIM 卡」页能看能改，
+			   总览再列一遍既不能点也改不了。 */
 			var rows = [
-				['手机号', phone],
-				/* 手机号存储位置原来显示 "ON 0/2"（存储位置 ON、0 条记录、容量 2），
-				   既不直观也与上方 SIM 状态重复，已移除；短信与电话能否接入见上方提示。 */
-				['SIM 热插拔', st.hotplug == null ? '—' : (st.hotplug ? '已开启' : '已关闭')],
 				['IMSI', fullNum(st.imsi)],
 				['ICCID', fullNum(st.iccid)],
 				['IMEI', fullNum(st.imei)],
