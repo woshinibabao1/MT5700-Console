@@ -139,11 +139,6 @@ try {
 		ncTrail && ncTrail.pci === 0x100 && !Number.isNaN(ncTrail.pci),
 		'pci=' + (ncTrail && ncTrail.pci));
 
-	const txEmpty = Parse.parseNrTxPower('^NTXPOWER: 1,2,3,,5');
-	check('发射功率缺字段时给 null（不能算成 0dBm）',
-		!txEmpty.length || txEmpty[0].prach === null,
-		'prach=' + (txEmpty.length ? txEmpty[0].prach : 'n/a'));
-
 	const rrcOne = Parse.parseRrcstat('^RRCSTAT: 1');
 	check('RRC 只有单字段时状态文案不含 NaN',
 		!!rrcOne && rrcOne.rrc === null && String(rrcOne.rrcText).indexOf('NaN') < 0,

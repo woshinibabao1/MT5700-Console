@@ -220,7 +220,7 @@ return L.view.extend({
 			carriers: [],
 			nrssbid: null,
 			monnc: [],
-			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, cops: null, nrTx: [], addrs: [] },
+			diag: { endc: null, reg: null, creg: null, cireg: null, rrc: null, addrs: [] },
 			tools: {
 				/* 断网排查：atSteps = L1 的 AT 逐步结果，items = L2/L3 由系统事实判定的结果。
 				   facts 是后端 diag-probe.sh 回的 key=value，factsErr 非空说明后端没升级。 */
@@ -1935,20 +1935,26 @@ return L.view.extend({
 
 		function buildDiagRows() {
 			var d = state.diag;
-			var endcTag = '不适用';
-			if (d.endc) {
-				if (d.endc.established) endcTag = '已建立';
-				else if (!d.endc.available) endcTag = '小区不支持';
-				else if (!d.endc.plmnAvailable) endcTag = '运营商未开通';
-				else if (d.endc.restricted) endcTag = '网络侧受限';
-				else endcTag = '支持但未建立';
-			}
+			/*
+			 * 2026-10-27 精简（用户质疑「这一屏是不是多余无意义」）：
+			 * 判据只有一条 —— **看完这一行，用户能不能做出一个决定**。
+			 *
+			 * 删掉的 4 行：
+			 *   · ENDC 双连接：本机 SA 组网下恒为「小区不支持」，而它读的是
+			 *     模组/网络能力值 <en_dc avail>，说成「小区不支持」本身也不准确。
+			 *     ★ 只删显示，^LENDC? 仍要查 —— 结论卡的制式判定要吃它的 endc。
+			 *   · 网络切片（01）：NSSAI 默认值，没有对应操作，也不影响能不能上网。
+			 *   · 选网模式：与卡头「中国移动 · 5G-NR · n41」重复；而且手动锁网
+			 *     在「无线与频段」页能看能改，总览再列一遍没有新信息。
+			 *   · NR CC1 PUSCH：模组内部发射功率，用户无从干预；载波一多还会
+			 *     变成好几行。为它单独发一条 AT^NTXPOWER? 更不划算。
+			 *
+			 * 留下的每一行都有明确的下一步：5G/EPS 注册（为什么上不了网）、
+			 * IMS 注册（为什么打不了电话）、RRC（为什么看不到载波聚合）。
+			 */
 			var regVal = d.reg ? (d.reg.statText + (d.reg.act ? ' · ' + d.reg.act : '')) : '未注册 5GC';
 			var rows = [
-				['ENDC 双连接', endcTag],
-				['5G 核心网注册', regVal],
-				/* TAC / 小区 / PCI / 频点 已在「注册与运营商」表里给出，此处不再重复 */
-				['网络切片', d.reg && d.reg.nssai ? d.reg.nssai : '—']
+				['5G 核心网注册', regVal]
 			].filter(function (r) {
 				/* 取不到数据的项直接不显示：一排「—」「不适用」只占版面、没有信息量 */
 				return r[1] && r[1] !== '—' && r[1] !== '不适用';
@@ -1975,14 +1981,6 @@ return L.view.extend({
 				rows.push(['IMS 注册', t]);
 			}
 			if (d.rrc) rows.push(['RRC 状态', d.rrc.rrcText + (d.rrc.campText ? ' · ' + d.rrc.campText : '')]);
-			if (d.cops) {
-				var copsTxt = d.cops.modeText + (d.cops.oper ? ' · ' + d.cops.oper : '');
-				if (d.cops.actText) copsTxt += ' · ' + d.cops.actText;
-				rows.push(['选网模式', copsTxt]);
-			}
-			(d.nrTx || []).forEach(function (c, i) {
-				rows.push(['NR CC' + (i + 1) + ' PUSCH', dash(c.pusch, ' dBm') + (c.freq ? ' · ' + (c.freq / 1000).toFixed(1) + ' MHz' : '')]);
-			});
 			return rows;
 		}
 
@@ -2033,10 +2031,11 @@ return L.view.extend({
 			var rows = [];
 			var v4 = state.dhcpv4, v6 = state.dhcpv6;
 			if (v4) {
-				/* IPv4/IPv6 地址本身不在这里重复：已并进上方「地址」分组 */
-				rows.push(['子网掩码', v4.subnetMask]);
+				/* IPv4/IPv6 地址本身不在这里重复：已并进上方「地址」分组。
+				   子网掩码（运营商侧 /8）与「DHCP 服务器」已删（2026-10-27）：
+				   前者看不出能做什么，后者与「网关」恒为同一个值 —— 同一行说两遍。
+				   「IPv6 支持 支持 · 双栈」也删了：上面 IPv6 地址有值就已经说明支持。 */
 				rows.push(['网关', v4.gateway]);
-				rows.push(['DHCP 服务器', v4.dhcpServer]);
 				rows.push(['主 DNS', dnsCell(0, v4.primaryDNS)]);
 				rows.push(['备 DNS', dnsCell(1, v4.secondaryDNS)]);
 			}
@@ -2045,6 +2044,8 @@ return L.view.extend({
 				rows.push(['IPv6 网关', v6.gateway]);
 				rows.push(['IPv6 DNS', v6.primaryDNS + ' / ' + v6.secondaryDNS]);
 			}
+			/* 这一行留着：「同一 APN / 分用 APN」是地址本身看不出来的差别，
+			   判断能不能同时跑 v4/v6 双栈要靠它。 */
 			if (state.ipv6Cap) rows.push(['IPv6 支持', state.ipv6Cap.description]);
 			return rows;
 		}
@@ -2727,12 +2728,10 @@ return L.view.extend({
 				return AtWs.client.sendCommand('AT+C5GREG?');
 			}).then(function (c5g) {
 				state.diag.reg = c5g.success && c5g.data ? Parse.parseC5greg(c5g.data) : null;
-				/* 不再发 AT^TXPOWER?（LTE/GUL 发射功率）：手册 §13.23 注明仅 GUL 有效，
-				   本机 NR SA 下实测 0/3 恒 ERROR，属无效查询。NR 侧用 ^NTXPOWER?。 */
-				return AtWs.client.sendCommand('AT^NTXPOWER?');
-			}).then(function (ntxp) {
-				state.diag.nrTx = ntxp.success && ntxp.data ? Parse.parseNrTxPower(ntxp.data) : [];
-				/* 4G(EPS) 注册：SA/NSA 下 LTE 侧的注册状态，与 CGREG(2/3G)、C5GREG(5G) 互补 */
+				/* ★ 2026-10-27 停发 AT^NTXPOWER?（NR 发射功率）：
+				   它只喂「NR CCn PUSCH」那一行，而那行已删 —— 用户改不了发射功率，
+				   载波一多还会占好几行。前端名单与解析函数一并清掉，
+				   别留一条「没人读还在跑」的只读查询（串口独占，每条 65–133ms）。 */
 				return AtWs.client.sendCommand('AT+CEREG?');
 			}).then(function (creg) {
 				state.diag.creg = creg.success && creg.data ? Parse.parseRegStat(String(creg.data), '+CEREG') : null;
@@ -2744,10 +2743,9 @@ return L.view.extend({
 				return AtWs.client.sendCommand('AT^RRCSTAT?');
 			}).then(function (rrc) {
 				state.diag.rrc = rrc.success && rrc.data ? Parse.parseRrcstat(String(rrc.data)) : null;
-				/* 选网模式（+COPS?）：自动还是手动锁了运营商；读命令，安全 */
-				return AtWs.client.sendCommand('AT+COPS?');
-			}).then(function (cops) {
-				state.diag.cops = cops.success && cops.data ? Parse.parseCops(String(cops.data)) : null;
+				/* ★ 2026-10-27 停发 AT+COPS?（选网模式）：它只喂「选网模式」那一行，
+				   而那行与卡头「中国移动 · 5G-NR」重复，且手动锁网在
+				   「无线与频段」页能看能改。省一次串口往返。 */
 				return AtWs.client.sendCommand('AT+CGPADDR');
 			}).then(function (pdp) {
 				state.diag.addrs = pdp.success && pdp.data ? Parse.parseCgpaddr(pdp.data) : [];

@@ -175,23 +175,6 @@ var Parse = (function () {
 		if (n === null || n === INVALID_POWER) return null;
 		return n;
 	};
-
-	// AT^TXPOWER?
-	api.parseNrTxPower = function (text) {
-		var match = String(text == null ? '' : text).match(/\^NTXPOWER:\s*(.+)/);
-		if (!match) return [];
-		var f = match[1].split(',').map(function (s) { return s.trim(); });
-		var carriers = [];
-		for (var i = 0; i + 4 < f.length && carriers.length < 4; i += 5) {
-			var freq = Number(f[i + 4]);
-			carriers.push({
-				pusch: power(f[i]), pucch: power(f[i + 1]), srs: power(f[i + 2]), prach: power(f[i + 3]),
-				freq: isFinite(freq) && freq !== 0 ? freq : null
-			});
-		}
-		return carriers;
-	};
-
 	var REG_STATES = { 0: '未注册，未搜网', 1: '已注册', 2: '未注册，搜网中', 3: '注册被拒绝', 4: '未知原因', 5: '已注册（漫游）', 8: '仅紧急业务' };
 	/*
 	 * 对外暴露：**注册态文案以这张表为唯一口径**（3GPP TS 27.007 的 +CEREG/+C5GREG stat 定义）。
@@ -1001,27 +984,6 @@ var Parse = (function () {
 		};
 	};
 
-
-	/* +COPS?：<mode>,<format>,"<oper>",<act>（27.007）—— 当前是自动选网还是手动锁了运营商 */
-	api.C0PS_MODE = { 0: '自动选网', 1: '手动选网', 2: '已注销', 3: '仅限手动', 4: '自动/手动' };
-	api.C0PS_ACT = {
-		0: 'GSM', 2: 'UMTS', 3: 'GSM/EGPRS', 4: 'UMTS/HSDPA', 5: 'UMTS/HSUPA', 6: 'UMTS/HSPA',
-		7: 'LTE（E-UTRAN）', 8: 'CDMA2000 HRPD', 9: 'LTE-A', 10: 'LTE NB-IoT', 11: 'NR（5G）', 12: 'NR（5G）'
-	};
-	api.parseCops = function (text) {
-		var m = String(text).match(/\+COPS:\s*([^\r\n]*)/);
-		if (!m) return null;
-		var f = m[1].split(',').map(function (x) { return x.trim().replace(/^"|"$/g, ''); });
-		var mode = Number(f[0]);
-		var act = f[3] !== undefined && f[3] !== '' ? Number(f[3]) : null;
-		return {
-			mode: isFinite(mode) ? mode : null,
-			modeText: api.C0PS_MODE[mode] || ('模式 ' + f[0]),
-			oper: f[2] || '',
-			act: act,
-			actText: (act != null && api.C0PS_ACT[act]) ? api.C0PS_ACT[act] : (act != null ? ('制式 ' + act) : '')
-		};
-	};
 
 	/* ^VERSION?：多行 ^VERSION:<KEY>:<value>；挑有用的几项 */
 	api.parseVersion = function (text) {

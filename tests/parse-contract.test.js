@@ -133,9 +133,7 @@ eq('回读后拼回的命令不含换行', /[\r\n]/.test(rebuilt), false);
 eq('回读后拼回的命令逐字段与原值一致', rebuilt,
 	'AT^SYSCFGEX="080302",2000000680380,1,2,1E200000095,,');
 
-/* ---------- 6. COPS / VERSION ---------- */
-const cops = Parse.parseCops('+COPS: 0,0,"CHINA MOBILE",12');
-eq('COPS 自动选网', [cops.modeText, cops.oper, cops.actText], ['自动选网', 'CHINA MOBILE', 'NR（5G）']);
+/* ---------- 6. VERSION ---------- */
 const ver = Parse.parseVersion('^VERSION:BDT:Jan 28 2026, 18:42:02\n' +
 	'^VERSION:EXTS:1.2.5.0(SP1C02)\n^VERSION:EXTH:MT5700M Ver.A\n' +
 	'^VERSION:ROMSIZE:4Gbit\n^VERSION:RDV:RELEASE\nOK');
