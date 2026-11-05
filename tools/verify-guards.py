@@ -1732,8 +1732,13 @@ MUTATIONS = [
     (
         "ACL 的 write 段没放行 smslog（add/del/clear 全被拒，页面只落「读不到」）",
         "acljson",
-        "\t\t\t\t\t\"events\",\n\t\t\t\t\t\"selfheal\",\n\t\t\t\t\t\"es9p\",\n\t\t\t\t\t\"exitip\",\n\t\t\t\t\t\"vowifi\",\n\t\t\t\t\t\"vowifi_set\",\n\t\t\t\t\t\"smslog\"",
-        "\t\t\t\t\t\"events\",\n\t\t\t\t\t\"selfheal\",\n\t\t\t\t\t\"es9p\",\n\t\t\t\t\t\"exitip\",\n\t\t\t\t\t\"vowifi\",\n\t\t\t\t\t\"vowifi_set\"",
+        # 2026-11-06：ACL 里加了 ttl，原锚点（exitip → vowifi 相邻）被打断；
+        # 而 read / write 两段的后半段完全相同，短锚点会同时命中两处、变异只改到
+        # 第一处（read），write 段的 smslog 仍在 → 守卫假绿。
+        # 改用**整段方法列表**作锚：write 段的 events 后面直接是 selfheal，
+        # read 段是 events → logs → netrate → sysdiag → selfheal，所以整串只在 write 段出现。
+        "\t\t\t\t\t\"at\",\n\t\t\t\t\t\"at_batch\",\n\t\t\t\t\t\"events\",\n\t\t\t\t\t\"selfheal\",\n\t\t\t\t\t\"es9p\",\n\t\t\t\t\t\"exitip\",\n\t\t\t\t\t\"ttl\",\n\t\t\t\t\t\"vowifi\",\n\t\t\t\t\t\"vowifi_set\",\n\t\t\t\t\t\"smslog\"",
+        "\t\t\t\t\t\"at\",\n\t\t\t\t\t\"at_batch\",\n\t\t\t\t\t\"events\",\n\t\t\t\t\t\"selfheal\",\n\t\t\t\t\t\"es9p\",\n\t\t\t\t\t\"exitip\",\n\t\t\t\t\t\"ttl\",\n\t\t\t\t\t\"vowifi\",\n\t\t\t\t\t\"vowifi_set\"",
         "ACL 的 write 允许 mt5700.smslog",
     ),
 

@@ -150,6 +150,19 @@ var rpcVowifi = L.rpc.declare({
 });
 
 /*
+ * 全局统一 TTL：get 读配置与实际生效状态，set 改配置并立即应用。
+ *
+ * ★ 只传 action / enabled / value 三个字符串参数 —— 后端对 value 做 1-255 校验、
+ *   对 enabled 只认 0/1，不接收接口名或命令片段。这条通道不提供"透传任意 nft 命令"。
+ */
+var rpcTtl = L.rpc.declare({
+	object: 'mt5700',
+	method: 'ttl',
+	params: ['action', 'enabled', 'value'],
+	expect: {}
+});
+
+/*
  * VoWiFi 开关：只传一个 0/1。
  *
  * ★ 参数表只有 enable 一项，且后端只接受 0/1（其它一律报错）—— 命令本身
@@ -1866,6 +1879,31 @@ var AtWs = {
 	smsLog: fetchSmsLog,
 	es9p: es9pPost,
 	exitIp: fetchExitIp,
+
+	/*
+	 * 全局 TTL：opts = { action, enabled, value }。
+	 * 返回 Promise<{success, enabled, value, applied, effective, persisted, lan_if, offload_on, error}>。
+	 *
+	 * ★ 不做「成功就重画成开启」这种乐观渲染：实际有没有生效只有 applied 说了算。
+	 *   配置写成功但链被别的东西清掉是真实可能的，前端要能把这种状态说出来。
+	 */
+	ttl: function (opts) {
+		var o = opts || {};
+		/* withTimeout 给 15s：后端最多两次 nft 调用 + 一次写文件，
+		   正常几十毫秒；卡住时不该让界面一直转圈。 */
+		return withTimeout(
+			rpcTtl(o.action || 'get', o.enabled == null ? '' : String(o.enabled),
+				o.value == null ? '' : String(o.value)),
+			15000, 'TTL 操作超时')
+			.then(function (resp) {
+				if (!resp || resp.success === false) {
+					return { success: false, error: (resp && resp.error) || 'rpcd 没有 mt5700.ttl 方法（后端未升级）' };
+				}
+				return resp;
+			}, function (err) {
+				return { success: false, error: (err && err.message) || 'TTL 操作失败' };
+			});
+	},
 	vowifi: fetchVowifi,
 	vowifiSet: fetchVowifiSet,
 	es9pAvailable: es9pAvailable,

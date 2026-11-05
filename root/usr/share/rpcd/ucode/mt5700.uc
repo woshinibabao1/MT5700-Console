@@ -2774,6 +2774,258 @@ function smsLogNextId(list) {
 	return max + 1;
 }
 
+/* ---------- 全局统一 TTL ---------- */
+
+/*
+ * 为什么需要：5G 模组出来的包每经一次路由器转发 TTL 减 1，部分运营商按 TTL
+ * 判定「共享 / 二手流量」后直接丢包或限速。现场表现是**客户端 TCP 全超时、
+ * 但 ICMP 与 DNS 通、路由器自身 TCP 也通** —— 三条同时成立时先查这里，
+ * 别去查 DNS 解析和防火墙放行。
+ *
+ * 实现方式：生成 /etc/mt5700/ttl.nft，并在 firewall 里登记一个 type=nftables 的
+ * include 指向它 —— fw4 每次重载都会把它插进 table inet fw4 的末尾，规则跟着重建。
+ *
+ * ★ 为什么不是 /etc/firewall.d/ 的 shell 脚本（2026-11-06 实测踩过）：
+ *   fw4 的 include 只认 type='nftables'。**script 类型在 fw4 下根本不会被执行**
+ *   （那是 fw3/iptables 时代的能力；fw4.uc 里只有 nftables 分支会生成 include 语句）。
+ *   先写成 firewall.d 脚本 + type=script，登记后 reload 防火墙，规则数是 0。
+ * ★ 为什么是"生成文件"而不是写死一份静态规则：TTL 的值用户可配（128 / 64 / 255），
+ *   而 nft 文件读不了 UCI，只能由这里按配置生成。
+ * ★ 关闭时不删文件、只写注释：fw4 对不存在的 include 路径每次 reload 都会
+ *   打一条 "specifies unreachable path" 警告 —— 日志里天天刷。空规则文件合法。
+ */
+
+const TTL_MIN = 1;
+const TTL_MAX = 255;
+const TTL_DEFAULT = 128;
+const TTL_NFT_DIR = '/etc/mt5700';
+const TTL_NFT_FILE = '/etc/mt5700/ttl.nft';
+/*
+ * 规则挂在自己的 filter hook 链上，**不挂 fw4 的 srcnat**。
+ *
+ * ★ 2026-11-06 实测（8 个 ping 包后的 counter 计数）：
+ *     fw4 的 srcnat 链是 `type nat hook postrouting priority srcnat`
+ *       → packets 0。nat 链只在 conntrack 首包时遍历一次，连接建立后
+ *         后续包根本不经过它，所以挂在那里的 ip ttl set **只改了每个连接的
+ *         第一个包**，等于没生效（而 nft list 里规则看起来好好的）。
+ *     新建 `type filter hook postrouting priority mangle` 的链
+ *       → packets 4。filter 链每个包都过，TTL 才真的被统一。
+ *   这是"规则存在 ≠ 规则生效"的典型：`applied` 只能证明链里有规则，
+ *   不能证明包会经过它 —— 所以位置本身必须是每包路径。
+ * ★ 链名带 mt5700_ 前缀：同 priority 的 hook 链可以与 fw4 的 mangle_postrouting、
+ *   以及其它插件（QModem 的 ttl 包用 `postrouting`）共存，不必共用链名。
+ */
+const TTL_CHAIN = 'mt5700_ttl';
+
+/*
+ * TTL 取值的唯一校验口。
+ *
+ * ★ 这是**命令注入面**：配置里的值会被 /etc/firewall.d/mt5700-ttl 拼进 nft 命令，
+ *   而防火墙脚本无法分辨"用户手改的配置"和"接口写进来的配置"。所以写配置前必须
+ *   在这里卡死：只接受 1-255 的整数，其余一律 null。
+ *   0 尤其要拒 —— TTL=0 的包一出路由器就被丢弃，那是彻底断网，比不改 TTL 严重。
+ * ★ ucode 的 int() 对 '12abc' / '12.5' / '' 都返回 null，天然挡掉非纯数字；
+ *   这里再补范围判断。不用 type() 判字符串是因为 int() 已经把类型收敛了。
+ */
+function ttlValueOk(v) {
+	if (v == null) { return null; }
+
+	/*
+	 * ★ 必须先用正则把"看起来像数字"卡死，再 int()。
+	 *   原写法是 `let n = int(v); if (n == null) return null;` —— 真机实测
+	 *   int('abc') 返回的是 **NaN 而不是 null**，于是 `NaN == null` 为假、
+	 *   `NaN < 1` 与 `NaN > 255` 也**都为假**，三道判断全部穿过，
+	 *   最终把 NaN 写进 UCI（`'' + NaN` 得到字符串 "NaN"）。
+	 *   而防火墙脚本每次重载都会拿这个值拼 nft 命令 —— 一个坏值会反复失败。
+	 *   （同类坑：ucode 判类型只能用 type()，不能用 typeof。）
+	 */
+	let s = '' + v;
+	if (match(s, /^[0-9]{1,3}$/) == null) { return null; }
+
+	let n = int(s);
+	if (type(n) != 'int') { return null; }
+	if (n < TTL_MIN || n > TTL_MAX) { return null; }
+	return n;
+}
+
+/*
+ * 取 LAN 侧接口名，用于限定「只改客户端转发出去的包」。
+ *
+ * ★ 为什么要限定：不限定的话，路由器自己发出的包（DNS / NTP / 更新检查）TTL
+ *   也会被改成目标值。那本身无害，但会让本机抓包时看到"路由器自己的包 TTL 不对"，
+ *   排查网络问题时多一个干扰项。参照 QModem 的做法：只匹配 iifname = LAN 桥。
+ * ★ 接口名会被拼进 nft 命令 —— 走 safeNetDevice 白名单（只认 [A-Za-z0-9._-]），
+ *   拿不到或非法就返回 null，调用方回落成"不限定 iifname"（宁可达也不拼错）。
+ */
+function ttlLanIf() {
+	let dev = null;
+	try {
+		const c = uci.cursor();
+		dev = c.get('network', 'lan', 'device');
+		if (dev == null || dev == '') {
+			dev = c.get('network', 'lan', 'ifname');
+		}
+	} catch (e) { }
+	if (dev == null || dev == '') { dev = 'br-lan'; }
+	return safeNetDevice(dev);
+}
+
+/*
+ * 软件 / 硬件 flow offload 是否开着。
+ *
+ * ★ 开着就等于这个功能**静默失效**：offload 把已建立连接的首包之后全部
+ *   绕过 netfilter，规则挂在 postrouting 上也匹配不到。QModem 的做法是直接
+ *   uci set 关掉并重启防火墙 —— 但那会立刻打断所有连接，属于"改用户的网络配置"。
+ *   这里只**报告**状态，由前端提示用户；要不要关由用户决定。
+ */
+function ttlOffloadOn() {
+	let sw = '0', hw = '0';
+	try {
+		const c = uci.cursor();
+		sw = c.get('firewall', '@defaults[0]', 'flow_offloading') || '0';
+		hw = c.get('firewall', '@defaults[0]', 'flow_offloading_hw') || '0';
+	} catch (e) { }
+	return (sw == '1' || hw == '1');
+}
+
+/* 读配置。缺失或非法一律回落默认值，绝不把坏值原样返回给前端。 */
+function ttlRead() {
+	let enabled = 0;
+	let value = TTL_DEFAULT;
+	try {
+		const c = uci.cursor();
+		if (c.get('at-webserver', 'config', 'ttl_enabled') == '1') { enabled = 1; }
+		let v = ttlValueOk(c.get('at-webserver', 'config', 'ttl_value'));
+		if (v != null) { value = v; }
+	} catch (e) { }
+	return { enabled: enabled, value: value };
+}
+
+/*
+ * 查**实际生效**状态，而不是只看配置。
+ *
+ * 配置说开着、规则却不在（fw4 没重载过、nft 失败、链被别的东西清掉），
+ * 界面必须能看出来 —— 否则又是一个"开关显示已开启、实际没生效"的假象。
+ * 判据是"我们自己的链里有没有 ttl 规则"：链名 mt5700_ttl 是独占的，
+ * 不必再靠 comment 从公共链里挑自己的规则。
+ */
+function ttlApplied() {
+	let applied = false;
+	let effective = null;
+	try {
+		const p = fs.popen('nft list chain inet fw4 ' + TTL_CHAIN + ' 2>/dev/null', 'r');
+		if (p) {
+			let line;
+			while ((line = p.read('line')) != null) {
+				if (index(line, 'mt5700-ttl') < 0) { continue; }
+				applied = true;
+				let m = match(line, /ttl set ([0-9]+)/);
+				if (m != null) { effective = int(m[1]); }
+			}
+			p.close();
+		}
+	} catch (e) { }
+	return { applied: applied, effective: effective };
+}
+
+/*
+ * /etc/mt5700/ttl.nft 的内容。
+ *
+ * 只有在 table 块**内部**才能声明 chain —— fw4 的 include 默认 position 是
+ * table-append（插在 table inet fw4 的末尾），所以这里直接写 `chain mt5700_ttl { … }`，
+ * 包括它的 `type filter hook postrouting priority mangle` 声明。
+ * 若哪天有人把 position 改成 ruleset-append（插在 table 外），这段就会语法失败 ——
+ * 所以登记 include 时**不要**指定 position。
+ *
+ * ★ 这条链是**我们自己的**：fw4 reload 重建 ruleset 时会连同它一起清掉，
+ *   再由本文件重建；关闭时文件里不写 chain，链就不存在。不存在"与 fw4 的链
+ *   合并"这回事（那是我最初挂 srcnat 时的做法，已证明无效，见 TTL_CHAIN 注释）。
+ */
+function ttlNftBody(value, enabled) {
+	let out = '# MT5700 Console 全局统一 TTL\n';
+	out += '# 本文件由 mt5700.ttl RPC 生成，手改会在下次保存设置时被覆盖。\n';
+	if (!enabled) {
+		out += '# 当前已关闭：刻意保留空规则，避免 fw4 每次重载报 unreachable path。\n';
+		return out;
+	}
+	let lan = ttlLanIf();
+	/* 两条规则：IPv4 改 TTL、IPv6 改 hoplimit。运营商侧按 TTL 判共享时，
+	   两者都是同一类特征，只改 v4 会留下 v6 这个口子。 */
+	out += 'chain ' + TTL_CHAIN + ' {\n';
+	out += '\ttype filter hook postrouting priority mangle; policy accept;\n';
+	if (lan != null) {
+		out += '\tiifname "' + lan + '" ip ttl set ' + value + ' comment "mt5700-ttl"\n';
+		out += '\tiifname "' + lan + '" ip6 hoplimit set ' + value + ' comment "mt5700-ttl"\n';
+	} else {
+		/* 拿不到合法接口名：宁可达也不拼错 —— 退化成"对所有出口生效"。
+		   与限定版相比只是多改了路由器自身发出的包，功能本身不受影响。 */
+		out += '\tip ttl set ' + value + ' comment "mt5700-ttl"\n';
+		out += '\tip6 hoplimit set ' + value + ' comment "mt5700-ttl"\n';
+	}
+	out += '}\n';
+	return out;
+}
+
+/*
+ * 落盘。先写 .tmp 再 rename —— 与项目里其它落盘一致：
+ * 直接覆盖时若中途断电/写满，会留下一个半截文件，而 fw4 下次重载读到它
+ * 就是**整个防火墙 reload 失败**（一条语法错送掉全部规则）。
+ */
+function ttlWriteNft(value, enabled) {
+	try { fs.mkdir(TTL_NFT_DIR); } catch (e) { }
+	let tmp = TTL_NFT_FILE + '.tmp';
+	try {
+		if (!fs.writefile(tmp, ttlNftBody(value, enabled))) { return false; }
+		if (!fs.rename(tmp, TTL_NFT_FILE)) {
+			try { fs.unlink(tmp); } catch (e) { }
+			return false;
+		}
+		return true;
+	} catch (e) {
+		try { fs.unlink(tmp); } catch (e2) { }
+		return false;
+	}
+}
+
+/*
+ * 立即生效，不等下一次防火墙重载（reload 会重建 NAT 表，把现有连接全部打断，
+ * 为一个 TTL 值这么做太重）。
+ *
+ * 建链 → flush → 重加，与生成的文件同源，所以 reload 前后状态一致。
+ * flush 是安全的：mt5700_ttl 是独占链，里面只可能是我们上一次加的规则。
+ */
+function ttlApplyNow(value, enabled) {
+	if (!enabled) {
+		/* 先 flush 再 delete：nft 不允许删除非空链。
+		   两步都容忍失败 —— 链本来就不存在时（从没开过），这里什么也不做。 */
+		system('nft flush chain inet fw4 ' + TTL_CHAIN + ' 2>/dev/null');
+		system('nft delete chain inet fw4 ' + TTL_CHAIN + ' 2>/dev/null');
+		return;
+	}
+
+	/* 值在这里**再校验一次**：本函数可能被未来新增的调用方直接调用，
+	   而它要把 value 拼进命令行 —— 唯一的守门人不能只有 set 分支那一处。 */
+	let v = ttlValueOk(value);
+	if (v == null) { return; }
+
+	/* 建链（已存在时报 File exists，忽略）→ 清空 → 重加。
+	   flush 而不是逐个删 handle：链是我们的私有链，里面不可能有别人的规则，
+	   而按 handle 删要多读一次 nft 输出、多一层解析。 */
+	system('nft add chain inet fw4 ' + TTL_CHAIN +
+		" '{ type filter hook postrouting priority mangle; policy accept; }' 2>/dev/null");
+	system('nft flush chain inet fw4 ' + TTL_CHAIN + ' 2>/dev/null');
+
+	/* 与 ttlNftBody 保持同一形状：iifname 限定 + v4/v6 两条。
+	   两处若不同源，会出现"立即生效的"和"重载后重建的"不一致 —— 那种差异
+	   只在重载后才暴露，极难排查。 */
+	let lan = ttlLanIf();
+	let pre = (lan != null) ? 'iifname "' + lan + '" ' : '';
+	system('nft add rule inet fw4 ' + TTL_CHAIN + ' ' + pre + 'ip ttl set ' + v +
+		' comment "mt5700-ttl" 2>/dev/null');
+	system('nft add rule inet fw4 ' + TTL_CHAIN + ' ' + pre + 'ip6 hoplimit set ' + v +
+		' comment "mt5700-ttl" 2>/dev/null');
+}
+
 return {
 	mt5700: {
 		at: {
@@ -3007,6 +3259,92 @@ return {
 					return { success: false, error: 'bind 不是合法 IPv4 地址' };
 				}
 				return exitIpFacts(bind);
+			}
+		},
+		/*
+		 * 全局统一 TTL：get 读配置 + 实际生效状态；set 改配置并立即应用。
+		 *
+		 * args: { action: 'get' | 'set', enabled: '0'|'1', value: '1'-'255' }
+		 * 返回 { success, enabled, value, applied, effective }：
+		 *   enabled/value 是**配置**，applied/effective 是**实际**（nft 里查到的）。
+		 *   两者不一致时前端要能说出来（那说明脚本没跑成功）。
+		 *
+		 * ★ 只接受 action/enabled/value 三个字段，其余忽略；enabled 只认 0/1，
+		 *   value 走 ttlValueOk 白名单校验。不接收命令片段、接口名、链名。
+		 */
+		ttl: {
+			args: { action: 'get', enabled: '', value: '' },
+			call: function (req) {
+				let action = getStr(req.args, 'action');
+				if (action == null || action == '') { action = 'get'; }
+
+				if (action == 'get') {
+					let cfg = ttlRead();
+					let st = ttlApplied();
+					return {
+						success: true,
+						enabled: cfg.enabled,
+						value: cfg.value,
+						applied: st.applied,
+						effective: st.effective,
+						lan_if: ttlLanIf(),
+						offload_on: ttlOffloadOn()
+					};
+				}
+
+				if (action != 'set') {
+					return { success: false, error: '未知的 action：' + action };
+				}
+
+				/* ---- set ---- */
+				let rawEnabled = getStr(req.args, 'enabled');
+				let en = null;
+				if (rawEnabled == '1' || rawEnabled == 1) { en = 1; }
+				else if (rawEnabled == '0' || rawEnabled == 0) { en = 0; }
+				if (en == null) {
+					return { success: false, error: 'enabled 只能是 0 或 1' };
+				}
+
+				/* 不传 value 就保留当前值，避免"只想开关、却把数值重置了" */
+				let cfgNow = ttlRead();
+				let value = cfgNow.value;
+				let rawValue = getStr(req.args, 'value');
+				if (rawValue != null && rawValue != '') {
+					let v = ttlValueOk(rawValue);
+					if (v == null) {
+						return { success: false, error: 'TTL 必须是 1-255 之间的整数' };
+					}
+					value = v;
+				}
+
+				try {
+					const c = uci.cursor();
+					c.set('at-webserver', 'config', 'ttl_enabled', '' + en);
+					c.set('at-webserver', 'config', 'ttl_value', '' + value);
+					c.commit('at-webserver');
+				} catch (e) {
+					return { success: false, error: '写入配置失败' };
+				}
+
+				/*
+				 * 两件事：写规则文件（持久，fw4 重载时读它）+ 立即应用（不等重载）。
+				 * 顺序不能反 —— 先落盘再改运行态，中途失败时文件与运行态最多差一次
+				 * 重载，而反过来的话下次重载会把刚生效的规则抹掉。
+				 */
+				let wrote = ttlWriteNft(value, en == 1);
+				ttlApplyNow(value, en == 1);
+
+				let st = ttlApplied();
+				return {
+					success: true,
+					enabled: en,
+					value: value,
+					applied: st.applied,
+					effective: st.effective,
+					persisted: wrote,
+					lan_if: ttlLanIf(),
+					offload_on: ttlOffloadOn()
+				};
 			}
 		},
 		/*

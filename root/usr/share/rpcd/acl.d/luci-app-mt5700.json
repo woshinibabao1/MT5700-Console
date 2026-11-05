@@ -30,6 +30,7 @@
 					"selfheal",
 					"es9p",
 					"exitip",
+					"ttl",
 					"vowifi",
 					"vowifi_set",
 					"smslog"
@@ -110,6 +111,7 @@
 					"selfheal",
 					"es9p",
 					"exitip",
+					"ttl",
 					"vowifi",
 					"vowifi_set",
 					"smslog"

@@ -5,6 +5,96 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.7.0] - 2026-11-06
+
+### Added — 全局统一 TTL（网络设置页）
+
+把经路由器转发的包统一成同一个 TTL（默认 128），规避部分运营商按 TTL 判定
+「共享 / 二手流量」后丢包或限速。现场特征是**客户端 TCP 全超时、但 ICMP 与 DNS 通、
+路由器自身 TCP 也通** —— 三条同时成立时先查这里。
+
+- 网络设置页新增「出口 TTL」卡片：开关 + TTL 值（1-255）+ 保存并应用；
+- **状态区分「配置」与「实际」**：「已生效：实际 TTL 128」与「配置已开启，但规则
+  没有生效」是两句话 —— 后者真的会发生（fw4 重载失败、链被别的插件清掉）；
+- 同时设置 IPv4 TTL 与 **IPv6 Hop Limit**（运营商的判据对两者一致，只改 v4 会留口子）；
+- 规则只匹配 `iifname br-lan`（只改客户端转发出去的包），路由器自身发出的不受影响；
+- 关闭时不删规则文件、只写注释 —— 否则 fw4 每次重载都会报 `unreachable path`。
+
+### 关键实现决策（三处都是实测踩出来的，不是查文档抄的）
+
+**① 必须挂 `type filter hook postrouting priority mangle`，不能挂 fw4 的 `srcnat`**
+
+最初把 `ip ttl set` 加进 fw4 的 `srcnat` 链，`nft list` 看得见、`applied` 也回 true。
+实测 counter（8 个 ping 包后）：
+
+| 位置 | 链类型 | 计数 |
+|:--|:--|:--|
+| `srcnat` | `type nat hook postrouting` | **packets 0** |
+| 新建 filter hook postrouting | `type filter hook postrouting priority mangle` | **packets 4** |
+
+nat 链只在 conntrack 首包时遍历一次，连接建立后后续包不经过它 —— 挂在那里的
+TTL 改写**只对每个连接的第一个包生效**。这是「规则存在 ≠ 规则生效」的典型：
+`applied` 只能证明链里有规则，不能证明包会经过它。
+
+**② fw4 的 include 只认 `type=nftables`**
+
+先写成 `/etc/firewall.d/` 的 shell 脚本 + `type=script`（fw3 时代的做法），
+登记后 `uci show` 一切正常，`/etc/init.d/firewall reload` 之后规则数是 0 ——
+fw4.uc 里只有 nftables 分支会生成 include 语句，script 类型被接受但从不执行。
+改为：生成 `/etc/mt5700/ttl.nft` + 登记 `type=nftables` 指向它。
+
+另外 `family` / `reload` 这两个选项对 include 是 **UNSUPPORTED**（见 fw4.uc 的
+选项表），写了不报错也毫无作用 —— 不再写。
+
+**③ `int('abc')` 在 ucode 里返回 NaN，不是 null**
+
+取值校验原写成 `let n = int(v); if (n == null) return null; if (n < 1 || n > 255) ...`。
+真机实测 `int('abc')` 返回 NaN：`NaN == null` 为假、`NaN < 1` 与 `NaN > 255` 也
+**都为假**，三道判断全部穿过，最终把 NaN 写进 UCI（`'' + NaN` = `"NaN"`），
+而那个值每次防火墙重载都会被拼进 nft 命令。改为先用 `match(s, /^[0-9]{1,3}$/)`
+卡死、再 `type(n) != 'int'` 兜底。
+
+### 与 QModem（FUjr/modem_feeds 的 luci-app-qmodem-ttlfw4）的异同
+
+参考了它的三点做法并采纳：filter hook postrouting、`iifname` 限定来源、IPv4/IPv6 都改。
+
+**两处刻意不照抄**：
+
+- 它写 `/etc/nftables.d/99-reset-ttl-from-br-lan.nft` 然后指望被 include ——
+  但本机**没有装 nftables 包**（`/etc/nftables.conf`、`/etc/init.d/nftables` 都不存在），
+  `/etc/nftables.d/` 只会被 fw4 通过 UCI include 引用。直接丢文件进去不会生效。
+  本实现走 UCI include，路径明确。
+- 它会 `uci set firewall.@defaults[0].flow_offloading='0'` 并 `firewall restart` ——
+  那会**立刻打断所有连接**，且永久改掉用户的防火墙配置。本实现只**报告** offload 状态，
+  在界面上提示「开着的话规则不生效，请到防火墙关闭」，要不要关由用户决定。
+  （本机实测 offload 本来就是 0，所以功能立刻可用。）
+
+### 测试
+
+`tests/ttl-contract.test.js` 33 项，重点不是「配置写没写进去」，而是「规则在不在
+包的必经路径上」：
+
+- ★ 不得再往 `srcnat`（nat 链）加规则 —— 这条守的就是上面那个实测教训；
+- ★ 取值必须先用正则卡死（附反向：去掉正则必须判红）；
+- ★ 关闭分支必须在 `enabled` 判断之前（否则关不掉）；
+- ★ 落盘必须 `.tmp` + `rename`（半截文件会让整次防火墙重载失败）；
+- ★ 登记必须是 `type=nftables`；offload 只读不写。
+
+两条核心守卫做了**真实变异验证**（改回 srcnat / 删掉正则），确认判红后还原全绿。
+
+### 真机验证（全部通过）
+
+```
+set enabled=1 value=128  → applied true, effective 128, persisted true
+nft list chain inet fw4 mt5700_ttl
+  → type filter hook postrouting priority mangle; policy accept;
+    iifname "br-lan" ip ttl set 128 comment "mt5700-ttl"
+    iifname "br-lan" ip6 hoplimit set 128 comment "mt5700-ttl"
+/etc/init.d/firewall reload → 链与两条规则**自动重建**（持久性）
+set enabled=0 → 链被删除、文件变注释、重载后不重建
+非法值 0 / 300 / abc → 全部拒绝
+```
+
 ## [2.6.4] - 2026-11-06
 
 ### Fixed — 空态图标渲染成 `[object HTMLUnknownElement]`（2.6.1 引入，真机实测）

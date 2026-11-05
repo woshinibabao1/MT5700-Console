@@ -192,6 +192,149 @@ return L.view.extend({
 		dnsBody.appendChild(E('p', { 'class': 'mt5700-hint' }, '正在读取当前配置…'));
 		loadDnsConfig().then(renderDns, renderDns);
 
+		/* ---------- 出口 TTL ---------- */
+		/*
+		 * 为什么需要：5G 模组出来的包每经一次转发 TTL 减 1。部分运营商按 TTL
+		 * 判定「共享 / 二手流量」后直接丢包或限速，现场特征是
+		 * **客户端 TCP 全超时、但 ICMP 与 DNS 通、路由器自身 TCP 也通**。
+		 *
+		 * ★ 状态只信后端回的 applied / effective（真的在 nft 链里查到），
+		 *   不信本地输入框。配置写成开启、规则却没生效是真实可能发生的
+		 *   （fw4 重载失败、链被别的插件清掉），那种情况必须在界面上说出来。
+		 */
+		var ttlCard = Mt5700.card('出口 TTL',
+			'把经路由器转发的包统一成同一个 TTL，规避运营商按 TTL 判定共享流量');
+		var ttlBody = E('div');
+		ttlCard._body.appendChild(ttlBody);
+		body.appendChild(ttlCard);
+
+		var ttlState = { primed: false };
+		var ttlSel = null, ttlInput = null, ttlSaveBtn = null;
+
+		function renderTtl() {
+			ttlBody.innerHTML = '';
+			ttlSel = null;
+			ttlInput = null;
+
+			if (!ttlState.primed) {
+				ttlBody.appendChild(E('p', { 'class': 'mt5700-hint' }, '正在读取当前状态…'));
+				return;
+			}
+
+			var row = E('div', { 'class': 'mt5700-dns-row' });
+			row.appendChild(E('label', { 'class': 'mt5700-dns-label' }, '统一 TTL'));
+			ttlSel = Mt5700.select([
+				{ value: '0', label: '关闭（保持原样）' },
+				{ value: '1', label: '开启' }
+			], ttlState.enabled ? '1' : '0');
+			row.appendChild(ttlSel);
+			ttlBody.appendChild(row);
+
+			var row2 = E('div', { 'class': 'mt5700-dns-row' });
+			row2.appendChild(E('label', { 'class': 'mt5700-dns-label' }, 'TTL 值'));
+			ttlInput = Mt5700.input('text', '1-255，默认 128', String(ttlState.value));
+			row2.appendChild(ttlInput);
+			ttlBody.appendChild(row2);
+
+			var bar = E('div', { 'class': 'mt5700-action-row mt5700-mt-sm' });
+			ttlSaveBtn = Mt5700.primaryButton('保存并应用', commitTtl);
+			bar.appendChild(ttlSaveBtn);
+			ttlBody.appendChild(bar);
+
+			/* ---- 状态行：把「配置」和「实际」分开说 ---- */
+			var cls = 'mt5700-hint mt5700-mt-sm';
+			var text;
+			if (!ttlState.enabled) {
+				text = '当前关闭：转发出去的包保持原 TTL。';
+			} else if (ttlState.applied) {
+				text = '已生效：实际 TTL ' + ttlState.effective
+					+ (ttlState.lan_if ? '，只作用于 ' + ttlState.lan_if + ' 转发出去的流量' : '') + '。';
+				cls = 'mt5700-notice mt5700-mt-sm';
+			} else {
+				/* 最容易被忽略的一种：开关显示开着，规则其实不在 */
+				text = '配置已开启，但规则没有生效 —— 点「保存并应用」重新应用一次。';
+				cls = 'mt5700-notice-warning mt5700-mt-sm';
+			}
+			ttlBody.appendChild(E('div', { 'class': cls }, text));
+
+			/* ★ offload 开着 = 这个功能静默失效：已建立的连接走快路径，不经过 netfilter。
+			   后端只报告状态、不擅自改配置（关 offload 要重启防火墙，会断所有连接）。 */
+			if (ttlState.offload_on) {
+				ttlBody.appendChild(E('div', { 'class': 'mt5700-notice-warning mt5700-mt-sm' },
+					'检测到软件 / 硬件流量分载（flow offloading）处于开启状态：'
+					+ '已建立的连接会绕过本规则，TTL 不会被修改。'
+					+ '需要到「网络 → 防火墙」关闭流量分载后重新应用。'));
+			}
+
+			ttlBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+				'同时设置 IPv4 的 TTL 与 IPv6 的 Hop Limit。'
+				+ '规则挂在防火墙的 postrouting 上，防火墙重载后会自动重建，重启也不丢。'));
+		}
+
+		function ttlApplyState(r) {
+			ttlState = {
+				primed: true,
+				enabled: r && r.enabled ? 1 : 0,
+				value: (r && r.value != null) ? r.value : 128,
+				applied: !!(r && r.applied),
+				effective: (r && r.effective != null) ? r.effective : null,
+				lan_if: (r && r.lan_if) || null,
+				offload_on: !!(r && r.offload_on)
+			};
+			renderTtl();
+		}
+
+		function commitTtl() {
+			if (!ttlSel || !ttlInput) return;
+			var en = ttlSel.value === '1' ? '1' : '0';
+			var val = String(ttlInput.value || '').trim();
+
+			if (en === '1') {
+				/* 前端先挡一道：明显非法的值不必往返后端。
+				   ★ 真正的守门人在后端（ttlValueOk），这里只是省一次网络往返。 */
+				if (!/^[0-9]{1,3}$/.test(val) || Number(val) < 1 || Number(val) > 255) {
+					Mt5700.error('TTL 必须是 1-255 之间的整数');
+					return;
+				}
+			}
+
+			ttlSaveBtn.disabled = true;
+			ttlSel.disabled = true;
+			ttlInput.disabled = true;
+			Mt5700.info(en === '1' ? '正在应用 TTL ' + val + '…' : '正在关闭 TTL…');
+
+			AtWs.ttl({ action: 'set', enabled: en, value: en === '1' ? val : '' })
+				.then(function (r) {
+					if (!r || !r.success) {
+						Mt5700.error('保存失败：' + ((r && r.error) || '未知错误'));
+						ttlApplyState(Object.assign({}, ttlState, { primed: true }));
+						return;
+					}
+					ttlApplyState(r);
+					if (en === '1') {
+						if (r.applied) {
+							Mt5700.info('TTL 已生效：' + r.effective);
+						} else {
+							Mt5700.error('配置已保存，但规则没有生效 —— 请检查防火墙状态后重试');
+						}
+					} else {
+						Mt5700.info('已关闭 TTL 改写');
+					}
+				});
+		}
+
+		ttlBody.appendChild(E('p', { 'class': 'mt5700-hint' }, '正在读取当前状态…'));
+		AtWs.ttl({ action: 'get' }).then(function (r) {
+			if (!r || !r.success) {
+				ttlState = { primed: true, enabled: 0, value: 128, applied: false, error: r && r.error };
+				renderTtl();
+				ttlBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+					'读不到 TTL 状态：' + ((r && r.error) || '后端未升级')));
+				return;
+			}
+			ttlApplyState(r);
+		});
+
 		/* ---------- 锁频设置（4G / 5G 合并到一处） ---------- */
 		var refreshLockBtn = Mt5700.button('刷新锁频状态', function () { fetchCurrent(); });
 		var saveLockBtn = Mt5700.primaryButton('保存设置', function () { saveActiveLock(); });

@@ -26,40 +26,47 @@ uci -q commit at-webserver
 # 关键脚本可执行（包管理器偶发丢失 +x）
 chmod 0755 /etc/hotplug.d/net/99-mt5700-renew 2>/dev/null
 chmod 0755 /etc/init.d/at-webserver 2>/dev/null
-chmod 0755 /etc/firewall.d/mt5700-ttl 2>/dev/null
 
 # ---------------------------------------------------------------------------
-# 全局统一 TTL：把 /etc/firewall.d/mt5700-ttl 登记成 firewall include
+# 全局统一 TTL：登记 nftables include + 预生成规则文件
 # ---------------------------------------------------------------------------
-# ★ 为什么必须走 firewall include：fw4 每次重载都会 flush 整张 ruleset 重建，
-#   挂在 init.d 里的 nft 规则会在任何一次防火墙重载后**静默消失**，而界面上的
-#   开关还显示"已开启"—— 那是"藏起来的失效"，比没有这个功能更糟。
-#   firewall.d 由 fw4 自己调度，永远跟着重建走。
-# ★ 幂等：老版本可能已登记过（或用户手工删了配置），用 `uci -q get` 判存在，
-#   不存在才整节创建；已存在则只校正字段，不重复追加节。
+# ★ 必须是 type='nftables'。fw4（nftables 版防火墙）的 include **只认 nftables**，
+#   script 类型在 fw4 下根本不会被执行 —— 那是 fw3/iptables 时代的能力。
+#   实测踩过：先写成 /etc/firewall.d/ 的 shell 脚本 + type=script，登记后
+#   reload 防火墙，规则数是 0，而 uci show 里一切正常。
+# ★ 不写 family / reload：这两个选项对 include 是 UNSUPPORTED（见 fw4.uc 的
+#   parse_include 选项表），写了不报错但也毫无作用，只会让后来的人以为它们在起作用。
+# ★ 不指定 position：默认 table-append（插在 table inet fw4 内部末尾），
+#   而规则文件里写的是 `chain srcnat { … }` —— 只有在 table 内部才能声明 chain。
+#   改成 ruleset-append 会让那段语法失败，进而**整次防火墙重载失败**。
+mkdir -p /etc/mt5700 2>/dev/null
+if [ ! -f /etc/mt5700/ttl.nft ]; then
+	cat > /etc/mt5700/ttl.nft <<'TTLEOF'
+# MT5700 Console 全局统一 TTL
+# 本文件由 mt5700.ttl RPC 生成，手改会在下次保存设置时被覆盖。
+# 当前已关闭：刻意保留空规则，避免 fw4 每次重载报 unreachable path。
+TTLEOF
+fi
+
+# 幂等：老版本可能已登记过（或用户手工删了配置），用 `uci -q get` 判存在，
+# 不存在才整节创建；已存在则只校正字段，不重复追加节。
 if uci -q get firewall.mt5700_ttl >/dev/null 2>&1; then
-	uci set firewall.mt5700_ttl.type='script'
-	uci set firewall.mt5700_ttl.path='/etc/firewall.d/mt5700-ttl'
-	uci set firewall.mt5700_ttl.family='any'
-	uci set firewall.mt5700_ttl.reload='1'
+	uci set firewall.mt5700_ttl.type='nftables'
+	uci set firewall.mt5700_ttl.path='/etc/mt5700/ttl.nft'
 else
 	uci set firewall.mt5700_ttl=include
-	uci set firewall.mt5700_ttl.type='script'
-	uci set firewall.mt5700_ttl.path='/etc/firewall.d/mt5700-ttl'
-	uci set firewall.mt5700_ttl.family='any'
-	uci set firewall.mt5700_ttl.reload='1'
+	uci set firewall.mt5700_ttl.type='nftables'
+	uci set firewall.mt5700_ttl.path='/etc/mt5700/ttl.nft'
 fi
+# 早期版本写过这两个无效选项，清掉
+uci -q delete firewall.mt5700_ttl.family
+uci -q delete firewall.mt5700_ttl.reload
 uci commit firewall
 
 # 补齐 TTL 默认值（仅补缺失，不覆盖用户已有设置）
 uci -q get at-webserver.config.ttl_enabled >/dev/null || uci -q set at-webserver.config.ttl_enabled='0'
 uci -q get at-webserver.config.ttl_value >/dev/null || uci -q set at-webserver.config.ttl_value='128'
 uci commit at-webserver
-
-# 开启时才立刻应用一次（默认关闭，不碰用户网络）
-if [ "$(uci -q get at-webserver.config.ttl_enabled)" = "1" ]; then
-	/etc/firewall.d/mt5700-ttl >/dev/null 2>&1 || true
-fi
 
 # ---------------------------------------------------------------------------
 # 运行时兜底：timeout 命令（2026-10-07 真机故障，MWRT r33382 / kernel 6.6.94）
