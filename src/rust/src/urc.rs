@@ -182,10 +182,10 @@ impl Dispatcher {
         }
 
         if line.starts_with("+CLIP:") {
-            let number = clip_number(line);
-            let number = match number {
-                Some(n) => n,
-                None => return,
+            // let-else 取代 `match { Some(n) => n, None => return }`：同一个意思，
+            // 但不必先把 Option 绑一次再 shadow 一次。类型与求值顺序都不变。
+            let Some(number) = clip_number(line) else {
+                return;
             };
             let now = Instant::now();
             let same_call = number == self.last_call_number
@@ -213,6 +213,10 @@ impl Dispatcher {
                 "data": {"time": ts, "number": number, "state": "ringing"}
             }));
         } else if line.contains("^CEND:") || line == "NO CARRIER" {
+            /* 这个 if **只包推送**，状态重置在它外面 —— 顺序很重要：
+               通话结束就该回 idle，与"有没有号码可通知"无关。
+               曾经有人把整段（含下面三行重置）一起塞进 if，于是没收到过 CLIP 的
+               通话结束时状态永远停在 ringing，下一次 RING 被判成同一通而丢弃。 */
             if !self.last_call_number.is_empty() {
                 let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
                 let number = self.last_call_number.clone();
@@ -229,6 +233,7 @@ impl Dispatcher {
                     "data": {"time": ts, "number": number, "state": "ended"}
                 }));
             }
+            /* 状态重置无条件执行：通话结束就要回到 idle，与有没有号码无关 */
             self.last_call_number.clear();
             self.last_call_at = Instant::now();
             self.call_state = "idle".into();

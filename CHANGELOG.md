@@ -5,6 +5,37 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.6.2] - 2026-11-06
+
+### Changed — 总览页重排：刷新控制搬回页面、常用动作去卡片框
+
+两处都是用户反馈"位置突兀 / 不协调"：
+
+- **自动刷新从顶栏搬回页面顶部**。它经 `shellSlot('tools')` 被塞进 56px 高的顶栏，
+  而这一组是「复选框 + 标签 + 下拉 + 自定义输入 + 手动刷新」五个控件，窄屏下必然
+  换行把导航挤变形。现在改成页面级工具条（`.mt5700-page-tools`，插在 body 最前面、
+  与结论卡同列对齐），语义仍是"整页的全局开关"，但宽度充裕、不再和导航抢地方。
+- **「常用动作」从满宽卡片改成无框横条**（`.mt5700-actionbar`）。原来一张带边框、
+  内距和标题的卡片只装一行按钮，大片空白，和左右两张实心卡（c7/c5）并排时特别突兀。
+  现在标题缩成小字前缀、按钮贴左、说明文字跟在末尾，整体降到一行高。
+- 断网排查抽屉的位置与展开逻辑不变（仍挂在横条下方、仍由同一个 `setDiagOpen` 控制）。
+
+### Changed — 减少 if/else 的第一批（前端 + Rust）
+
+按"能单独回滚、每步都跑测试"推进，不搞全局替换：
+
+- `euicc.js` 的 `parseProfile`：七段 `if (f.tag === …) else if …` 链 → `TAG_FIELD`
+  查找表。每个分支原本只差一个赋值，表驱动后映射关系一眼可见，新增 tag 只加一行。
+- `urc.rs` 的 `+CLIP` 分支：`match { Some(n) => n, None => return }` → `let-else`，
+  不必先把 Option 绑一次再 shadow 一次。
+- `urc.rs` 的 `^CEND` 分支：补注释钉住"这个 if 只包推送、状态重置在它外面"的顺序
+  不变量（曾经整段被塞进 if，导致没收到 CLIP 的通话结束时状态永远停在 ringing）。
+
+★ Rust 部分本机没有 rustc/cargo，**未经本地编译验证**，只做类型不变的机械改写；
+`cargo check --all-targets` 由 CI 的 rust-check job 兜底。
+
+CSS 6.9.0 → 6.10.0。
+
 ## [2.6.1] - 2026-11-06
 
 ### Fixed — 「读不到通知文件（/tmp/at-notifications.log）：未收到数据」是误报

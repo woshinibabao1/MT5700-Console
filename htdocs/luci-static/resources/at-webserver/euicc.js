@@ -792,25 +792,27 @@ var Euicc = (function () {
 			nickname: '', spName: '', profileName: '', profileClass: null
 		};
 		var fields = parseTlvChildren(value);
-		for (var i = 0; i < fields.length; i++) {
-			var f = fields[i];
-			if (f.tag === '5A') {
-				p.iccidRaw = api.bytesToHex(f.value);
+		/*
+		 * tag → 取值函数表。原来是七段 if/else if 链（每个分支只差一个赋值），
+		 * 读的时候要在七行里找出对应 tag，新增一个 tag 还要在链尾加一段。
+		 * 表驱动之后映射关系一眼可见，未列出的 tag 自然落空（93/94/icon、
+		 * B6/B7/B8/99 等本来就不取、不显示）。
+		 */
+		var TAG_FIELD = {
+			'5A': function (v) {
+				p.iccidRaw = api.bytesToHex(v);
 				p.iccid = api.swapNibbles(p.iccidRaw);
-			} else if (f.tag === '4F') {
-				p.aid = api.bytesToHex(f.value);
-			} else if (f.tag === '9F70') {
-				p.state = (f.value[0] === 0x01) ? 'enabled' : 'disabled';
-			} else if (f.tag === '90') {
-				p.nickname = api.utf8FromBytes(f.value);
-			} else if (f.tag === '91') {
-				p.spName = api.utf8FromBytes(f.value);
-			} else if (f.tag === '92') {
-				p.profileName = api.utf8FromBytes(f.value);
-			} else if (f.tag === '95') {
-				p.profileClass = f.value[0];
-			}
-			/* 93/94/icon、B6/B7/B8/99 等：不取、不显示 */
+			},
+			'4F': function (v) { p.aid = api.bytesToHex(v); },
+			'9F70': function (v) { p.state = (v[0] === 0x01) ? 'enabled' : 'disabled'; },
+			'90': function (v) { p.nickname = api.utf8FromBytes(v); },
+			'91': function (v) { p.spName = api.utf8FromBytes(v); },
+			'92': function (v) { p.profileName = api.utf8FromBytes(v); },
+			'95': function (v) { p.profileClass = v[0]; }
+		};
+		for (var i = 0; i < fields.length; i++) {
+			var take = TAG_FIELD[fields[i].tag];
+			if (take) take(fields[i].value);
 		}
 		return p;
 	}

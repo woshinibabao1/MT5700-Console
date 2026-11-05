@@ -148,17 +148,21 @@ return L.view.extend({
 		var diagDetailBody = E('div', { 'class': 'mt5700-diag-detail mt5700-mt-md' });
 		diagCard._body.appendChild(diagDetailBody);
 
-		/* ---------- 常用动作（v9 原型里的 c12 面板） ----------
+		/* ---------- 常用动作（无框横条，原为满宽卡片） ----------
 		 * 原型放五个按钮，其中「重启模组」是灰的并附一句原因。这里照做，
 		 * 但**每个按钮都必须是真能用的**：
 		 *   · 连接自检 → 滚到下方「断网排查」并直接触发，不新增第二套自检逻辑；
 		 *   · 锁定频段 / 运行日志 / 服务与升级 → 跳对应页面；
 		 *   · 重启模组 → 禁用 + 说明（没有对应后端能力，界面上不许装作能用）。
 		 * 红线 86：动作类控件常驻可见，不可用就灰化并写清原因，不隐藏。 */
-		var actionCard = Mt5700.card('常用动作', '点击后立即执行；会中断连接的动作先说明影响');
-		actionCard.classList.add('mt5700-c12');
+		/* 曾经是一张满宽**卡片**（mt5700-card）装一行按钮：卡片有边框、内距与标题，
+		   而内容只有一行按钮，于是大片空白，和左右两张实心卡（c7/c5）并排时特别突兀。
+		   改成无框横条：标题缩成小字前缀，按钮贴左，整体降到一行高，
+		   视觉重量与"工具"这个定位相称。类名换掉，旧样式规则不再命中。 */
+		var actionBar = E('div', { 'class': 'mt5700-actionbar' });
+		actionBar.appendChild(E('span', { 'class': 'mt5700-actionbar-title' }, '常用动作'));
 		var actionRow = E('div', { 'class': 'mt5700-action-row' });
-		actionCard._body.appendChild(actionRow);
+		actionBar.appendChild(actionRow);
 
 		function actionBtn(label, primary, onClick, disabled) {
 			var cls = 'btn' + (primary ? ' primary' : '') + (disabled ? ' danger' : '');
@@ -194,7 +198,8 @@ return L.view.extend({
 			window.location.href = L.url('admin/modem/5g/tools/config');
 		});
 		actionBtn('重启模组', false, null, true);
-		actionCard._body.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
+		/* 说明文字跟在横条后面，不再占卡片里的一整段 */
+		actionBar.appendChild(E('span', { 'class': 'mt5700-hint mt5700-actionbar-note' },
 			'重启模组需要先停 AT 服务，当前会话会立刻断开；本插件不提供该操作，' +
 			'需要时到「服务与升级」重启服务。'));
 
@@ -202,7 +207,8 @@ return L.view.extend({
 		     结论卡（满宽，含连接明细表）
 		     KPI ×4（各 3 列）
 		     载波聚合（7） | 设备与身份（5）
-		     常用动作（满宽）—— 其下挂着默认收起的「断网排查」抽屉
+		     常用动作（无框横条）—— 其下挂着默认收起的「断网排查」抽屉
+		     页面工具条（刷新控制）—— 插在 body 最前面，不再占用顶栏
 		   2026-10-27 起「速率与流量」「连接状态」「断网排查」三张卡都不再占区块：
 		   前两者的内容并入结论卡与 KPI，后者改成抽屉（点「连接自检」展开）。
 		   全部卡片都是 .mt5700-page-body 的直接子元素 —— 套 .mt5700-cards 之类的
@@ -213,7 +219,7 @@ return L.view.extend({
 
 		body.appendChild(carrierCard);
 		body.appendChild(devCard);
-		body.appendChild(actionCard);
+		body.appendChild(actionBar);
 		body.appendChild(diagCard);
 
 		/* ---------- 状态 ---------- */
@@ -2721,15 +2727,17 @@ return L.view.extend({
 		};
 		document.addEventListener('visibilitychange', onVisibility);
 
-		/* 刷新控制搬到顶栏工具区：它本来就是对整页生效的全局设置，
-		   留在某张卡片头上等于暗示「只管这张卡」，而且那张卡已经删了。
-		   占位容器先留在页面里（渲染阶段外壳还不存在），挂载时整块搬进顶栏。 */
-		var refreshSlot = Mt5700.shellSlot('tools');
-		body.appendChild(refreshSlot);
-		refreshSlot.appendChild(Mt5700.panelActions(
+		/* 刷新控制放页面顶部工具条，**不再塞顶栏**。
+		   顶栏只有 56px 高，而这一组是「复选框 + 标签 + 下拉 + 自定义输入 + 按钮」，
+		   窄屏下必然换行把导航挤变形（用户反馈"位置很突兀"）。
+		   放页面顶部同样满足"它对整页生效"的语义，且宽度充裕、与结论卡同列对齐。
+		   工具条插在 body 最前面：刷新是全局开关，该在内容之前。 */
+		var toolsBar = E('div', { 'class': 'mt5700-page-tools' });
+		toolsBar.appendChild(Mt5700.panelActions(
 			ar.el,
 			Mt5700.primaryButton('刷新', function () { refreshAll(); })
 		));
+		body.insertBefore(toolsBar, body.firstChild);
 
 		/* ---------- 初始化 ---------- */
 
