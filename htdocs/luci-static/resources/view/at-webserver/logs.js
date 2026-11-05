@@ -154,6 +154,25 @@ function entriesFromSyslog(rawList) {
 	return out;
 }
 
+/*
+ * 日志页的常量表。
+ *
+ * ★ 提到模块级：这三个值原本定义在 render 里，而 render 每次切 tab / 每次
+ *   自动刷新都会跑一遍 —— 对象字面量和字符串虽然小，也没有理由跟着重绘反复建。
+ *   （这一页三个视图都有自动刷新，是高频路径。）
+ */
+/* 各 tab 的说明条文案（查表，不再嵌套三元） */
+var TAB_HINT = {
+	dial: '拨号过程（后端内存日志）：拨号对齐、PDP 与网卡、串口探测、URC 分发；重启后清空。',
+	iface: 'syslog 里 at-webserver 相关行：接口拉起、热插拔、DHCP / IPv6 取址。',
+	notify: '通知文件内容（短信、来电、信号变化、存储告警）。级别筛选只对前两个视图生效。'
+};
+
+/* 空态图标（内联 SVG path，无额外请求） */
+var ICON_EMPTY_LOG = 'M7 3h7l4 4v14H7z M10 12h6 M10 16h4';
+var ICON_EMPTY_NOTIFY = 'M21 11.6a8.4 8.4 0 0 1-8.4 8.4H8.3L4 22v-5.6a8.4 8.4 0 0 1 8.4-8.4h.2a8.4 8.4 0 0 1 8.4 8.4z';
+
+
 return L.view.extend({
 	load: function () {
 		return L.uci.load('at-webserver').then(function () {
@@ -434,17 +453,6 @@ return L.view.extend({
 			if (!q) return recs;
 			return recs.filter(function (r) { return r.text.toLowerCase().indexOf(q) >= 0; });
 		}
-
-		/* 各 tab 的说明条文案（查表，不再嵌套三元） */
-		var TAB_HINT = {
-			dial: '拨号过程（后端内存日志）：拨号对齐、PDP 与网卡、串口探测、URC 分发；重启后清空。',
-			iface: 'syslog 里 at-webserver 相关行：接口拉起、热插拔、DHCP / IPv6 取址。',
-			notify: '通知文件内容（短信、来电、信号变化、存储告警）。级别筛选只对前两个视图生效。'
-		};
-
-		/* 空态图标（内联 SVG path，无额外请求） */
-		var ICON_EMPTY_LOG = 'M7 3h7l4 4v14H7z M10 12h6 M10 16h4';
-		var ICON_EMPTY_NOTIFY = 'M21 11.6a8.4 8.4 0 0 1-8.4 8.4H8.3L4 22v-5.6a8.4 8.4 0 0 1 8.4-8.4h.2a8.4 8.4 0 0 1 8.4 8.4z';
 
 		function renderNotify() {
 			/* ★ 读不到文件 ≠ 文件是空的。读失败给红色错误态 + 重试，不降级成空态。 */

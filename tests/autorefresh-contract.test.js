@@ -110,6 +110,23 @@ ok('network_status.js 仍用 ar.getInterval() 重建定时器',
 	statusJs.indexOf('ar.getInterval()') >= 0);
 ok('network_status.js 仍用 ar.isEnabled()',
 	statusJs.indexOf('ar.isEnabled()') >= 0);
+/* ---------- 数据新鲜度（2026-11-06 新增） ---------- */
+
+/*
+ * 新鲜度时钟是**第四个**定时器。它只改一处 textContent、不发请求，
+ * 但漏清理的后果与其它定时器一样：反复进出页面会叠加轮询。
+ * 这条断言盯住它进了 _dispose —— 加了定时器却忘了登记，是本仓踩过的坑。
+ */
+ok('新鲜度定时器登记进 _dispose（漏清会叠加轮询）',
+	/_dispose[\s\S]{0,320}clearInterval\(freshTimer\)/.test(statusJs));
+ok('新鲜度只在数据成功回来后才打戳（失败不许假装新鲜）',
+	/\.then\(function \(\) \{ fastRunning = null; markFresh\(\); \}\)/.test(statusJs)
+	&& /slowRunning = null;\n\t*markFresh\(\);/.test(statusJs));
+ok('新鲜度文案区分「刚刚 / 秒 / 分 / 时」并给出停止原因',
+	/'更新于刚刚'/.test(statusJs)
+	&& /' 秒前'/.test(statusJs)
+	&& /' 分钟前'/.test(statusJs)
+	&& /自动刷新可能已停止/.test(statusJs));
 
 /* ---------- 结果 ---------- */
 

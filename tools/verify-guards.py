@@ -1095,10 +1095,13 @@ MUTATIONS = [
         "不再把 6985 的成因写成 M2M",
     ),
     (
+        # 2026-11-06：状态分流从五段 if/else-if 改成 PROBE_VIEW 查表，锚点跟着改形态。
+        # 变异仍是同一个意图 —— 让 blocked 这一路**掉进兜底**（`|| renderOk`），
+        # 这样 renderBlocked 存在但永不被调用，正是原守卫要防的那件事。
         "阻断面板不再被状态分流调用（新增状态直接掉进兜底分支）",
         "esimjs",
-        "p.state === 'blocked') renderBlocked(p);",
-        "false) renderBlocked(p);",
+        "blocked: renderBlocked,",
+        "blocked: null,",
         "renderBlocked 且被状态分流调用",
     ),
     (

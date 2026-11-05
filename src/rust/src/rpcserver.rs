@@ -513,13 +513,22 @@ impl RpcServer {
         )
         .await;
 
+        /*
+         * 三个分支都是「构造一个响应」，不再有任何一个用 `return` 提前跳出 ——
+         * 混着 return 与表达式求值时，读代码的人要在第一个分支里多停一下才敢改。
+         *
+         * ★ 这里不套 ok_response() / err_response()：它们收 &str 并 to_string()，
+         *   而 `text` 本身就是 String，套一层等于给每条应答多拷一次。eSIM 的
+         *   Profile 列表应答能到几十 KB，那条路径上每多一次拷贝都是白给。
+         */
         match result {
             Ok(Ok(resp)) => {
                 let text = resp.text();
                 if resp.has_error() {
-                    return AtCommandResponse { success: false, data: None, error: Some(text) };
+                    AtCommandResponse { success: false, data: None, error: Some(text) }
+                } else {
+                    AtCommandResponse { success: true, data: Some(text), error: None }
                 }
-                AtCommandResponse { success: true, data: Some(text), error: None }
             }
             Ok(Err(e)) => {
                 // 失败路径同样要脱敏：审计日志不该因为"排障"而留下敏感参数

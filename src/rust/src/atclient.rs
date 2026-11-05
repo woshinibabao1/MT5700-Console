@@ -44,23 +44,40 @@ pub fn apdu_timeout() -> Duration {
     *APDU_TIMEOUT.get().unwrap_or(&DEFAULT_APDU_TIMEOUT)
 }
 
-/// 判定一条 AT 命令是不是「APDU 透传」类 —— 这类命令的应答时间由卡片而非模组决定。
+/// APDU 透传类命令的命令名前缀。
 ///
 /// 只认命令名、不认参数：`AT+CSIM=10,"80E2…"` 与 `AT+CSIM=?` 同属一类
 /// （能力探测本来返回就快，走长超时没有副作用）。
-pub fn is_apdu_command(command: &str) -> bool {
-    // 用 get(..7) 而不是 &c[..7]：后者在字节边界上会 panic，
-    // 而本 crate 的 release 是 panic = "abort"，一次越界就是进程退出。
-    match command.trim().get(..7) {
-        Some(head) => {
-            head.eq_ignore_ascii_case("AT+CSIM")
-                || head.eq_ignore_ascii_case("AT+CGLA")
-                || head.eq_ignore_ascii_case("AT+CCHO")
-                || head.eq_ignore_ascii_case("AT+CCHC")
-                || head.eq_ignore_ascii_case("AT+CCHP")
+const APDU_COMMAND_PREFIXES: [&str; 5] = ["AT+CSIM", "AT+CGLA", "AT+CCHO", "AT+CCHC", "AT+CCHP"];
+
+/// 取前几个字符去比 = 表里最长前缀的长度。
+///
+/// ★ 编译期从表里推出来，**不写死数字**：写死的话，将来有人往表里加了 8 字符
+///   前缀却忘了改这个数，那条命令就静默漏判 —— 后果是它按普通命令走 2 秒预算，
+///   eSIM 下载到一半被掐成「模组无响应」，而代码里两个数都"看起来对"。
+const APDU_PREFIX_LEN: usize = {
+    let mut longest = 0;
+    let mut i = 0;
+    while i < APDU_COMMAND_PREFIXES.len() {
+        if APDU_COMMAND_PREFIXES[i].len() > longest {
+            longest = APDU_COMMAND_PREFIXES[i].len();
         }
-        None => false,
+        i += 1;
     }
+    longest
+};
+
+/// 判定一条 AT 命令是不是「APDU 透传」类 —— 这类命令的应答时间由卡片而非模组决定。
+pub fn is_apdu_command(command: &str) -> bool {
+    // 用 get(..N) 而不是切片索引：后者在字节边界上会 panic，
+    // 而本 crate 的 release 是 panic = "abort"，一次越界就是进程退出。
+    let Some(head) = command.trim().get(..APDU_PREFIX_LEN) else {
+        return false;
+    };
+    // 加一条透传命令只在这里加一行，不必再往一串 || 上接。
+    APDU_COMMAND_PREFIXES
+        .iter()
+        .any(|p| head.eq_ignore_ascii_case(p))
 }
 
 /// 等待命令锁的独立预算。
@@ -430,6 +447,32 @@ impl AtClient {
         }
     }
 
+    /// 「先查，查到目标值就放过；查不到或查询本身失败就 SET」。
+    ///
+    /// 短信上报模式（CNMI）与 PDU 模式（CMGF）是同一个形状，原先是两段逐字
+    /// 重复的 match —— 改一处漏一处是这类重复的必然结局（两处的 warn 文案
+    /// 就曾经不一致过）。合成一个助手后，「加一种开机设置」只加一行调用。
+    ///
+    /// ★ 查询失败也要 SET：模组刚连上时查询可能超时，若因此跳过 SET，
+    ///   模式就永远没启用，而界面看不出任何异常（与 Go 侧行为一致）。
+    async fn ensure_setting(
+        &self,
+        ctx: &tokio::sync::watch::Receiver<bool>,
+        query: &str,
+        set: &str,
+        expect: &str,
+        warn: &str,
+    ) {
+        match self.send_command(ctx, query, COMMAND_TIMEOUT, None).await {
+            Ok(resp) if resp.contains(expect) => {}
+            _ => {
+                if let Err(e) = self.send_command(ctx, set, COMMAND_TIMEOUT, None).await {
+                    log_warn!("{}: {}", warn, e);
+                }
+            }
+        }
+    }
+
     async fn init_modem(self: Arc<Self>, ctx: &tokio::sync::watch::Receiver<bool>) {
         // 手册 3.14：置 2 后错误返回描述字符串，界面上能显示具体原因。
         if let Err(e) = self.send_command(ctx, "AT+CMEE=2", COMMAND_TIMEOUT, None).await {
@@ -437,22 +480,8 @@ impl AtClient {
         }
         // 短信走 PDU 模式并开启新短信主动上报，来电开启号码显示。
         // 与 Go 一致：查询失败或不含目标值时都要 SET，避免模组刚连上超时导致模式未启用。
-        match self.send_command(ctx, "AT+CNMI?", COMMAND_TIMEOUT, None).await {
-            Ok(resp) if resp.contains("+CNMI: 2,1,0,2,0") => {}
-            _ => {
-                if let Err(e) = self.send_command(ctx, "AT+CNMI=2,1,0,2,0", COMMAND_TIMEOUT, None).await {
-                    log_warn!("设置短信上报模式失败: {}", e);
-                }
-            }
-        }
-        match self.send_command(ctx, "AT+CMGF?", COMMAND_TIMEOUT, None).await {
-            Ok(resp) if resp.contains("+CMGF: 0") => {}
-            _ => {
-                if let Err(e) = self.send_command(ctx, "AT+CMGF=0", COMMAND_TIMEOUT, None).await {
-                    log_warn!("设置短信 PDU 模式失败: {}", e);
-                }
-            }
-        }
+        self.ensure_setting(ctx, "AT+CNMI?", "AT+CNMI=2,1,0,2,0", "+CNMI: 2,1,0,2,0", "设置短信上报模式失败").await;
+        self.ensure_setting(ctx, "AT+CMGF?", "AT+CMGF=0", "+CMGF: 0", "设置短信 PDU 模式失败").await;
         if let Err(e) = self.send_command(ctx, "AT+CLIP=1", COMMAND_TIMEOUT, None).await {
             log_warn!("开启来电号码显示失败: {}", e);
         }

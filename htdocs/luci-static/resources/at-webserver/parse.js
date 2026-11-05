@@ -1264,19 +1264,40 @@ var Parse = (function () {
 			headerLen = ud[0];
 			var hdr = ud.slice(1, 1 + headerLen);
 			userData = ud.slice(1 + headerLen);
+			/*
+			 * UDH 里的 IEI → 取哪些字节。原来是三段 if/else if，每段只差一个赋值；
+			 * 表驱动后「哪个 IEI 对应什么字段、至少要几个字节」并排可见。
+			 *
+			 * ★ need 是**该 IEI 的最短有效长度**（不是"用到的最大下标 + 1"的巧合）：
+			 *   0x00 占 3 字节（8bit 分段号）、0x08 占 4 字节（16bit 分段号）、
+			 *   0x05 占 2 字节（16bit 目的端口）。长度不够就整段跳过，
+			 *   与 Rust 侧 src/rust/src/pdu.rs 的 udh_app_port() 同一口径。
+			 * ★ take 直接写外层的 partial / wapPort（闭包赋值），不返回"结果类型"让
+			 *   调用方再判断一次 —— 那会为了省一个分支反而多一层间接。
+			 * 未列出的 IEI 自然落空：协议里还有一堆本插件不用的信息元素。
+			 */
+			var UDH_IEI = {
+				0x00: {
+					need: 3,
+					take: function (d) { partial = { reference: d[0], parts_count: d[1], part_number: d[2] }; }
+				},
+				0x08: {
+					need: 4,
+					take: function (d) { partial = { reference: ((d[0] << 8) | d[1]), parts_count: d[2], part_number: d[3] }; }
+				},
+				0x05: {
+					need: 2,
+					take: function (d) { wapPort = (d[0] << 8) | d[1]; }
+				}
+			};
 			var p = 0;
 			while (p + 1 < hdr.length) {
 				var iei = hdr[p];
 				var iel = hdr[p + 1];
 				if (p + 2 + iel > hdr.length) break;
 				var ieData = hdr.slice(p + 2, p + 2 + iel);
-				if (iei === 0x00 && iel >= 3) {
-					partial = { reference: ieData[0], parts_count: ieData[1], part_number: ieData[2] };
-				} else if (iei === 0x08 && iel >= 4) {
-					partial = { reference: ((ieData[0] << 8) | ieData[1]), parts_count: ieData[2], part_number: ieData[3] };
-				} else if (iei === 0x05 && iel >= 2) {
-					wapPort = (ieData[0] << 8) | ieData[1];
-				}
+				var udhIei = UDH_IEI[iei];
+				if (udhIei && iel >= udhIei.need) udhIei.take(ieData);
 				p += 2 + iel;
 			}
 		}

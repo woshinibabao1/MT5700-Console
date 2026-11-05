@@ -5,6 +5,95 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.6.3] - 2026-11-06
+
+### Changed — 减少 if/else 第二批（前端 2 个文件 + Rust 2 个文件）
+
+延续 2.6.2 的做法：只挑**真正有阅读成本**的分支结构，每处改完立刻跑测试，
+不做全局替换（本仓 87 个契约测试 + 165 个守卫锚点，批量重构的期望收益是负的）。
+
+**`esim.js` 的 `handleErr`：十五段 if/else-if → 有序表**
+
+这是全前端最典型的一处 —— 十几个错误码各映射一句人话文案，其中 `EUICC_OP_FAILED`
+还有两条判据（`e.result != null` 优先于 `e.swText`）。改成 `ERR_TEXT` 有序数组：
+
+- 用数组而不是对象字面量，正因为同一个 code 有多条判据 —— 对象会把它们压成一个键；
+- **顺序即优先级**写成显式注释：`EUICC_POLICY_DENIED` / `EUICC_BUSY` 必须排在两条
+  `EUICC_OP_FAILED` 之前，否则带 result 的操作失败会被 `es10ResultText` 接走，
+  用户看到的是没有意义的「ES10 结果码 3」；
+- `EUICC_AT_ERROR` 内部的五分支（看 message 内容）单独拆成 `AT_ERR_TEXT`，
+  各条真机实测结论（卡慢 / AT 通道堵死 / 末块超时）原样保留。
+
+**`esim.js` 的探测态分流：五段 if/else-if → `PROBE_VIEW` 查表**
+「哪个态由谁画」变成一张清单，`renderOk` 作为 default 也写成显式的一行。
+
+**`esim.js` 的出口 IP 结论：三分支 → 规则表**
+`IP_OBS_VERDICT`（判据 + 样式类 + 文案并排）+ `IP_CHANGE_TEXT`（单条判定词查表）。
+原来「无法判定」的结论藏在 else-if 里，现在三种结论各占一行，没有 default。
+
+**`parse.js` 的 UDH IEI 分派：三段 if/else-if → `UDH_IEI` 表**
+每个 IEI 只差一个赋值，表驱动后「哪个 IEI 取什么字段、至少要几个字节」并排可见。
+与 Rust 侧 `pdu.rs` 的 `udh_app_port()` 仍同一口径（共享样本两侧同验）。
+
+**`atclient.rs` 的 `is_apdu_command`：五个 `||` → 常量表 + `any()`**
+`APDU_COMMAND_PREFIXES` 加一条透传命令只加一行，不必再往一串 `||` 上接。
+`APDU_PREFIX_LEN` 改为**编译期从表里推导**而不是写死 7 —— 写死的话，将来加了
+8 字符前缀却忘了改这个数，那条命令会静默漏判，按普通命令走 2 秒预算，
+eSIM 下载到一半被掐成「模组无响应」，而代码里两个数都"看起来对"。
+
+**`atclient.rs` 的 `init_modem`：CNMI / CMGF 两段同形代码 → `ensure_setting()`**
+两段逐字重复的「查询 → 不含目标值就 SET」，合成一个助手。改一处漏一处是这类
+重复的必然结局（两处的 warn 文案就曾经不一致过）。
+
+**`rpcserver.rs` 的 `match result`：去掉分支里混用的 `return`**
+三个分支都变成「构造一个响应」的表达式。混着 return 与表达式求值时，
+读代码的人要在第一个分支里多停一下才敢改。
+（没有套 `ok_response()` / `err_response()`：它们收 `&str` 并 `to_string()`，
+而 `text` 本身就是 String，套一层等于给每条应答多拷一次 —— Profile 列表应答
+能到几十 KB。）
+
+### Changed — 常量表提升到模块级（性能）
+
+表驱动引入了「每次调用重建常量表」的新问题，一并修掉：
+
+- `esim.js` 的 `ERR_TEXT` / `AT_ERR_TEXT` / `IP_OBS_VERDICT` / `IP_CHANGE_TEXT`
+- `logs.js` 的 `TAB_HINT` / `ICON_EMPTY_LOG` / `ICON_EMPTY_NOTIFY`
+
+这些表原先定义在 `render()` 里，而 `render` 每次切 tab、每次自动刷新都会跑一遍
+（日志页三个视图都有自动刷新，是高频路径）。提升到模块级后只建一次。
+`PROBE_VIEW` 没法提升 —— 它引用 `render` 内的引导态函数，留在原地并注明原因。
+
+### Added — 总览页数据新鲜度指示
+
+开着自动刷新时，页面数字一直在变，但**看不出是多少秒前的** —— 用户无法判断
+「这是实时值还是几分钟前的残留」，尤其在切走再切回、或自动刷新被关掉时，
+读数停在旧值而界面毫无表示。
+
+- 工具条右侧加「更新于 N 秒前」，秒数用 `tabular-nums`（跳动时宽度稳定，不抖布局）；
+- 独立 1 秒定时器只改这一处 `textContent`，不发任何请求（搭车 5 秒数据定时器会让
+  秒数 5 秒一跳，看着像卡了）；
+- 超过 5 分钟变警示色并说明「自动刷新可能已停止」—— 用户得知道该去做什么；
+- 定时器登记进 `_dispose`：漏清的后果与其它三个定时器一样，反复进出会叠加轮询。
+
+### Fixed — 三条契约判据跟随表驱动演进（强度不减）
+
+`esim-contract` 的 P07 / B1 / V3 原先钉的是 `if/else-if` 的字面形态，表驱动后失效。
+判据全部改为等价的新形态，且**强度不降**：
+
+- P07 从「两个符号相距 80 字符」升级为**顺序不变量**（`es10ResultText` 的位置必须
+  早于 `swText` 拼接）—— 比原来的窗口更强，跨多少行、隔多少注释都算；
+- B1/B2、V3/V4 的变异方式保持原意图（让该路**掉进兜底**而不是删掉函数）；
+- `verify-guards.py` 里对应的锚点同步更新（`blocked: renderBlocked,`）。
+
+三条判据都做了**真实变异验证**：故意删掉 result 规则 / 把 `blocked` 改成 `null`，
+断言确实判红，还原后全绿。
+
+### 其它
+
+- CSS 6.10.0 → 6.11.0（新增 `.mt5700-freshness` / `-stale`，指纹 `f0a9b3c77f029544`）。
+- ★ Rust 部分本机没有 rustc/cargo，**未经本地编译验证**，只做类型不变的机械改写；
+  编译兜底交给 CI 的 `rust-check` job（`cargo check --all-targets`）。
+
 ## [2.6.2] - 2026-11-06
 
 ### Changed — 总览页重排：刷新控制搬回页面、常用动作去卡片框

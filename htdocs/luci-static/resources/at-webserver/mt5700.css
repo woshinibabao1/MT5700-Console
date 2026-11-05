@@ -3953,6 +3953,29 @@ body.mt5700-sh-on {
   border: 1px solid var(--mt5700-border-subtle);
 }
 
+/* 数据新鲜度：说明「页面上的数字是多少秒前的」。
+   ★ 秒级变化但不抢眼：默认用最弱的文字色 + 等宽数字（秒数跳动时宽度稳定，
+     不会让右侧控件跟着抖）。 */
+.mt5700-sh .mt5700-freshness {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--mt5700-text-muted);
+  white-space: nowrap;
+}
+
+/* 陈旧态：读数已停更（自动刷新被关 / 切过后台 / 整轮失败）。
+   用警示色 + 文字说明原因，而不只是变色 —— 用户得知道该去做什么。 */
+.mt5700-sh .mt5700-freshness-stale {
+  color: var(--mt5700-warning);
+  font-weight: 560;
+}
+
+/* 窄屏：字号降一档。换行由工具条自己的 flex-wrap 处理，这里不重复指定。 */
+@media (max-width: 720px) {
+  .mt5700-sh .mt5700-freshness { font-size: 11px; }
+}
+
 /* 工具条里的刷新控件压到 32px 高，和顶栏时期一致，避免搬个家还变胖 */
 .mt5700-sh .mt5700-page-tools .mt5700-autorefresh-interval,
 .mt5700-sh .mt5700-page-tools .mt5700-btn {

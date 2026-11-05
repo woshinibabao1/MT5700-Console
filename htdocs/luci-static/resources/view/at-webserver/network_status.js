@@ -159,6 +159,7 @@ return L.view.extend({
 		   而内容只有一行按钮，于是大片空白，和左右两张实心卡（c7/c5）并排时特别突兀。
 		   改成无框横条：标题缩成小字前缀，按钮贴左，整体降到一行高，
 		   视觉重量与"工具"这个定位相称。类名换掉，旧样式规则不再命中。 */
+		var freshness = null;   /* 数据新鲜度指示，见下方「数据新鲜度」区块 */
 		var actionBar = E('div', { 'class': 'mt5700-actionbar' });
 		actionBar.appendChild(E('span', { 'class': 'mt5700-actionbar-title' }, '常用动作'));
 		var actionRow = E('div', { 'class': 'mt5700-action-row' });
@@ -2524,7 +2525,7 @@ return L.view.extend({
 			[updateNetworkInfo]
 				.forEach(function (fn) { chain = chain.then(fn); });
 			fastRunning = chain.catch(function () { /* 刷新失败保留上一次数据 */ })
-				.then(function () { fastRunning = null; });
+				.then(function () { fastRunning = null; markFresh(); });
 			return fastRunning;
 		}
 
@@ -2661,6 +2662,7 @@ return L.view.extend({
 			});
 			slowRunning = chain.then(function () {
 				slowRunning = null;
+				markFresh();
 				/* 地址 / 网关 / 温度 / APN 全在慢档：它们决定结论区的副标题与「需要处理」，
 				   所以慢档整轮跑完再画一次（快档那边已经画过一次，先出的是信号与注册）。 */
 				if (!disposed) renderVerdict();
@@ -2672,6 +2674,41 @@ return L.view.extend({
 		function refreshAll() {
 			loadDeviceInfo(true);
 			return refreshFast().then(refreshSlow);
+		}
+
+		/* ---------- 数据新鲜度 ---------- */
+
+		/*
+		 * lastOkAt = 最后一次「成功拿到一轮数据」的时刻。
+		 *
+		 * ★ 为什么单独一个 1 秒定时器，而不是搭车 5 秒的数据定时器：要的是连续的
+		 *   时间感。跟着数据定时器走的话，秒数会 5 秒一跳，看着像卡了。
+		 *   而这个定时器只改一处 textContent，不发任何请求 —— 成本可以忽略。
+		 * ★ 超阈值变警示色（并说明原因）：自动刷新被关掉、标签页切去过、
+		 *   或某一轮整体失败时，读数停在旧值。此时用户必须知道「这不是实时数据」，
+		 *   否则会把一分钟前的信号强度当成当前状态去判断问题。
+		 */
+		var lastOkAt = Date.now();
+		var freshTimer = null;
+		function markFresh() { lastOkAt = Date.now(); }
+
+		function tickFreshness() {
+			var sec = Math.max(0, Math.round((Date.now() - lastOkAt) / 1000));
+			var text, stale = false;
+			if (sec < 3) {
+				text = '更新于刚刚';
+			} else if (sec < 60) {
+				text = '更新于 ' + sec + ' 秒前';
+			} else if (sec < 3600) {
+				text = '更新于 ' + Math.floor(sec / 60) + ' 分钟前';
+				stale = sec > 300;
+			} else {
+				text = '更新于 ' + Math.floor(sec / 3600) + ' 小时前';
+				stale = true;
+			}
+			if (!freshness) return;
+			freshness.textContent = stale ? text + ' · 自动刷新可能已停止' : text;
+			freshness.classList.toggle('mt5700-freshness-stale', stale);
 		}
 
 		/* ---------- 自动刷新 ---------- */
@@ -2694,6 +2731,8 @@ return L.view.extend({
 		}
 		var ar = Ui.autoRefresh(resetTimers);
 		resetTimers(true, 5);
+		/* 新鲜度时钟：整页常驻（与自动刷新开关无关 —— 关掉刷新时更需要看到「已停止」） */
+		freshTimer = setInterval(tickFreshness, 1000);
 
 		/*
 		 * 标签页不可见时暂停轮询。
@@ -2737,6 +2776,14 @@ return L.view.extend({
 			ar.el,
 			Mt5700.primaryButton('刷新', function () { refreshAll(); })
 		));
+		/*
+		 * 数据新鲜度：开了自动刷新之后，页面上的数字一直在变，但**看不出是多少秒前的**。
+		 * 用户无法判断「现在显示的是实时值还是几分钟前的残留」—— 尤其切走再切回、
+		 * 或自动刷新被关掉时，读数停在旧值而界面毫无表示。
+		 * 放在工具条右侧：它是整页的属性，与刷新控件同属一组。
+		 */
+		freshness = E('span', { 'class': 'mt5700-freshness' }, '更新于刚刚');
+		toolsBar.appendChild(freshness);
 		body.insertBefore(toolsBar, body.firstChild);
 
 		/* ---------- 初始化 ---------- */
@@ -2768,7 +2815,7 @@ return L.view.extend({
 		});
 
 		self._dispose = function () {
-			/* 离开页面必须清干净：三个定时器 + 可见性监听 + 只读缓存，
+			/* 离开页面必须清干净：四个定时器 + 可见性监听 + 只读缓存，
 			   否则反复进出会叠加倍轮询。
 			   disposed 同时让已发起的排查链尽快停下（见其声明处注释）。
 			   （本页已无任何常驻上报开关，不需要再做「关不掉就报警」的收尾） */
@@ -2776,7 +2823,9 @@ return L.view.extend({
 			if (timer) clearInterval(timer);
 			if (slowTimer) clearInterval(slowTimer);
 			if (rateTimer) clearInterval(rateTimer);
+			if (freshTimer) clearInterval(freshTimer);
 			timer = slowTimer = rateTimer = null;
+			freshTimer = null;
 			if (onVisibility) document.removeEventListener('visibilitychange', onVisibility);
 			if (AtWs.client && AtWs.client.clearReadCache) AtWs.client.clearReadCache();
 		};

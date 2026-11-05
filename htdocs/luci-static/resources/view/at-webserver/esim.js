@@ -40,6 +40,169 @@
  *   - P19  禁止行首裸 then（本文件所有 Promise 链均 .then( 形式）
  */
 
+/*
+ * 出口 IP 观测区的两张表。
+ *
+ * ★ 同样在模块级：renderIpObs 每次探测后都会重绘一次（自动探测、切 Profile 后
+ *   复核都会触发），而这两张表是纯常量 —— 跟着重绘反复建数组和闭包没有意义。
+ * ★ text 收 last 作参数（不在定义时拼串），与 when 判据同源、惰性求值。
+ */
+
+	var IP_OBS_VERDICT = [
+		{
+			when: function (l) { return l.changed === 'no'; },
+			cls: 'mt5700-notice-warning mt5700-mt-sm',
+			text: function () {
+				return '换了 Profile 但出口 IP 没变 —— 该运营商/APN 会复用同一个出口地址，'
+					+ '此环境下「靠切 Profile 换出口 IP」不成立（承载地址也可能一样，见上面的记录）。';
+			}
+		},
+		{
+			when: function (l) { return l.changed === 'yes'; },
+			cls: 'mt5700-notice mt5700-mt-sm',
+			text: function () { return '出口 IP 已变化 —— 本机上「切 Profile ⇒ 换出口 IP」成立。'; }
+		},
+		{
+			when: function (l) { return l.exit === '未取到' || l.exit === '后端未升级'; },
+			cls: 'mt5700-notice-warning mt5700-mt-sm',
+			text: function (l) {
+				return '本次没取到出口 IP（' + l.exit + '），因此**无法判定**换没换 —— 这不是「没变」。';
+			}
+		}
+	];
+
+/* 单条记录的判定词（原来嵌套三元读到第三层要数两遍括号） */
+	var IP_CHANGE_TEXT = {
+		yes: '出口 IP 已变',
+		no: '出口 IP 未变'
+	};
+
+/*
+ * 错误码 → 人话文案的两张表。
+ *
+ * ★ 放在模块级而不是 render 里：它们是常量，却每次调用 handleErr / 每次渲染
+ *   出口 IP 观测区都要重建一遍（数组 + 若干闭包）。出口 IP 观测区在每次探测后
+ *   都会重绘，错误提示也可能连弹几次 —— 常量没有理由跟着生命周期反复分配。
+ * ★ 表里的回调都在**调用时**才读 Euicc / 参数，提升作用域不影响求值。
+ */
+
+/*
+ * EUICC_AT_ERROR 的细分：**看 message 内容**而不是看 code。
+ *
+ * R05：与「固件不支持 AT+CSIM」区分开 —— 这里明确是 AT 层没拿到应答。
+ *
+ * ★ 2026-09-20 真机：下载中途最常见的不是「服务挂了」，而是
+ *   「卡还在处理、模组没回结束码」（写卡时卡侧要做密钥运算与非易失
+ *   写入，单条跳到秒级是常态）。把它一律说成「AT 服务未就绪」会误导
+ *   用户去查服务，而实际上服务一直是好的、只是卡慢。这里拆开说。
+ *
+ * when 收归一化后的 message 串（小写无关，全用 indexOf 子串匹配），
+ * 顺序同样是语义：越具体的现象排越前，「超时」这条是兜底判据。
+ */
+var AT_ERR_TEXT = [
+	{
+		when: function (em) { return em.indexOf('查不到') >= 0; },
+		/* 末块超时 + 核验时卡上确实没有这个 Profile → 是真的没装上 */
+		text: function () {
+			return '安装没有完成：卡在处理最后一块时超时，之后重新读取 Profile 列表，'
+				+ '卡上查不到这份 Profile。请整包重下；若反复失败，'
+				+ '多半是这份 Profile 比卡的处理上限大（可试试重启模组后再下）。';
+		}
+	},
+	{
+		when: function (em) { return em.indexOf('AT 通道正常') >= 0; },
+		text: function () {
+			return '卡一直在忙、始终没吐回结果（补取也已用尽），但 AT 通道本身是好的。'
+				+ '收尾安装阶段偶发，等几分钟让卡彻底空闲后整包重下即可。';
+		}
+	},
+	{
+		when: function (em) { return em.indexOf('AT 通道本身也无响应') >= 0; },
+		text: function () {
+			return '模组侧被上一条指令堵住了：连最简单的 AT 都收不到应答。'
+				+ '这与 AT 服务无关（服务一直在跑），需要重启模组或整机断电一次才能恢复。';
+		}
+	},
+	{
+		when: function (em, e) { return !!(Euicc.isAtTimeoutError && Euicc.isAtTimeoutError(e)); },
+		text: function () {
+			return '卡片没有在预期时间内回话。写卡时卡侧要做密钥运算与非易失写入，'
+				+ '偶尔会比预期慢（已尝试向卡补取结果）。'
+				+ '若反复出现，请确认下载期间没有重拨 / 动接口，然后整包重下。';
+		}
+	},
+	{
+		when: function () { return true; },
+		text: function () { return 'AT 服务未就绪（未连接到调制解调器或拒绝了指令），请检查 AT 服务'; }
+	}
+];
+
+/*
+ * 错误码 → 人话文案（**有序表，顺序即优先级**）。
+ *
+ * ★ 为什么用数组而不是对象字面量：同一个 code 可能有多条判据
+ *   （EUICC_OP_FAILED 就有「有 result」与「有 swText」两条，前者优先），
+ *   对象字面量会把它们压成一个键、后写覆盖先写。数组 + 查找顺序天然表达
+ *   "先匹配先用"，改顺序就是改优先级，看得见。
+ * ★ 顺序是语义的一部分，不是随手排的：EUICC_POLICY_DENIED / EUICC_BUSY
+ *   必须排在两条 EUICC_OP_FAILED 之前 —— 否则带 result 的操作失败会被
+ *   es10ResultText 接走，而那句通用回显（「ES10 结果码 3」）对用户没有
+ *   任何意义，策略禁止与忙站的提示就永远出不来（契约 R10 钉的正是这条）。
+ * ★ text 为字符串时直接用，为函数时才拼 e 上的字段 —— 多数提示是固定的，
+ *   不必给每条都包一个 function。
+ */
+var ERR_TEXT = [
+	{ code: 'EUICC_NO_EUICC', text: '这张卡不是 eUICC，无法管理 Profile' },
+	{ code: 'EUICC_POLICY_DENIED', text: '该 Profile 的策略禁止此操作（常见于运营商预置 Profile 禁止删除）' },
+	{ code: 'EUICC_BUSY', text: '卡片工具箱正忙，约 10 秒后重试' },
+	{ code: 'EUICC_NO_CSIM', text: '当前固件不支持 AT+CSIM，无法与卡通信' },
+	{ code: 'EUICC_NO_CARD', text: '卡槽内未检测到 SIM 卡（AT 报 NOCARD），请检查插卡' },
+	{
+		code: 'EUICC_AT_ERROR',
+		text: function (e) {
+			var em = String((e && e.message) || '');
+			for (var i = 0; i < AT_ERR_TEXT.length; i++) {
+				if (AT_ERR_TEXT[i].when(em, e)) return AT_ERR_TEXT[i].text(e);
+			}
+			return 'AT 服务未就绪（未连接到调制解调器或拒绝了指令），请检查 AT 服务';
+		}
+	},
+	{ code: 'EUICC_NO_ES9P', text: '设备侧缺少 ES9+ 通道（rpcd 没有 mt5700.es9p 或设备上没有 curl）'
+		+ '，无法与运营商服务器通信' },
+	{
+		/* 服务器侧的失败原因必须原样带出来：不同运营商的报错差得很远，
+		   统一成一句「下载失败」等于让用户无从下手。 */
+		code: 'EUICC_ES9P_FAILED',
+		text: function (e) { return (e && e.message) || '运营商服务器返回失败'; }
+	},
+	{
+		/*
+		 * ★ 2026-09-19 真机实测：这是模组固件的能力上限（AT+CSIM 单条响应
+		 *   只回 256 字节），不是配置问题也不是组包 bug —— 重试没有任何意义。
+		 *   必须单独一条：落到缺省分支只会显示一句原始 message，
+		 *   用户看不出「这是设备做不到」，会反复重试甚至怀疑是插件坏了。
+		 */
+		code: 'EUICC_CSIM_TRUNCATED',
+		text: function (e) {
+			return '当前设备无法下载 Profile：'
+				+ ((e && e.message) || '模组 AT+CSIM 单条响应上限 256 字节')
+				+ ' 这是模组固件的限制，重试无效；读取 Profile、启用 / 禁用 / 删除不受影响。';
+		}
+	},
+	{
+		/* P07：ES10 结果码优先用中文人话（替代裸串「ES10 result n」） */
+		code: 'EUICC_OP_FAILED',
+		when: function (e) { return e.result != null; },
+		text: function (e) { return Euicc.es10ResultText(e.result); }
+	},
+	{
+		/* R08：优先用 §1.5① 错误矩阵的人话文案 + 提示 */
+		code: 'EUICC_OP_FAILED',
+		when: function (e) { return !!e.swText; },
+		text: function (e) { return e.swText + (e.swHint ? '；' + e.swHint : ''); }
+	}
+];
+
 return L.view.extend({
 	render: function () {
 		var page = Mt5700.page('eSIM 管理', '管理卡槽内 eUICC 卡上的 Profile（启用 / 禁用 / 删除 / 重命名）');
@@ -110,10 +273,9 @@ return L.view.extend({
 			}
 			ipObsBody.appendChild(E('div', { 'class': 'mt5700-esim-sectitle' },
 				'最近观测（最多 ' + IP_OBS_MAX + ' 条）'));
+			/* 单条记录的判定词：查表（嵌套三元读到第三层要数两遍括号） */
 			ipObs.slice(-IP_OBS_MAX).forEach(function (it) {
-				var verdict = it.changed === 'yes' ? '出口 IP 已变'
-					: it.changed === 'no' ? '出口 IP 未变'
-						: '出口 IP 无法判定';
+				var verdict = IP_CHANGE_TEXT[it.changed] || '出口 IP 无法判定';
 				ipObsBody.appendChild(E('div', { 'class': 'mt5700-hint mt5700-mono' },
 					it.time + '  ' + it.key));
 				ipObsBody.appendChild(E('div', { 'class': 'mt5700-hint mt5700-mono' },
@@ -128,17 +290,18 @@ return L.view.extend({
 			 *   ③ 无法判定            → 基线或本次没取到，是「不知道」不是「没变」
 			 *                          （红线 23：不许把读不出来当成结论）。
 			 */
+			/*
+			 * 三种结论各成一类。原来是一条 if/else-if 链，每支都 appendChild 一整块；
+			 * 现在 when 判据与文案并排放在一张表里，第四种结论只要加一行。
+			 * ★ 没有 default：三种都不命中就什么都不渲染 —— 「没有可比基线」
+			 *   时不该出现任何结论块，那不是 fourth case。
+			 */
 			var last = ipObs[ipObs.length - 1];
-			if (last.changed === 'no') {
-				ipObsBody.appendChild(E('div', { 'class': 'mt5700-notice-warning mt5700-mt-sm' },
-					'换了 Profile 但出口 IP 没变 —— 该运营商/APN 会复用同一个出口地址，' +
-					'此环境下「靠切 Profile 换出口 IP」不成立（承载地址也可能一样，见上面的记录）。'));
-			} else if (last.changed === 'yes') {
-				ipObsBody.appendChild(E('div', { 'class': 'mt5700-notice mt5700-mt-sm' },
-					'出口 IP 已变化 —— 本机上「切 Profile ⇒ 换出口 IP」成立。'));
-			} else if (last.exit === '未取到' || last.exit === '后端未升级') {
-				ipObsBody.appendChild(E('div', { 'class': 'mt5700-notice-warning mt5700-mt-sm' },
-					'本次没取到出口 IP（' + last.exit + '），因此**无法判定**换没换 —— 这不是「没变」。'));
+			for (var vi = 0; vi < IP_OBS_VERDICT.length; vi++) {
+				if (!IP_OBS_VERDICT[vi].when(last)) continue;
+				ipObsBody.appendChild(E('div', { 'class': IP_OBS_VERDICT[vi].cls },
+					IP_OBS_VERDICT[vi].text(last)));
+				break;
 			}
 		}
 
@@ -235,73 +398,22 @@ return L.view.extend({
 			return (e && e.message) || '未知错误';
 		}
 
-		function handleErr(e) {
+
+
+		/* 第一条命中的规则即答案；没有任何命中时回显原始 message。 */
+		function matchErrText(e) {
 			var code = e && e.code;
-			var msg;
-			if (code === 'EUICC_NO_EUICC') {
-				msg = '这张卡不是 eUICC，无法管理 Profile';
-			} else if (code === 'EUICC_POLICY_DENIED') {
-				msg = '该 Profile 的策略禁止此操作（常见于运营商预置 Profile 禁止删除）';
-			} else if (code === 'EUICC_BUSY') {
-				msg = '卡片工具箱正忙，约 10 秒后重试';
-			} else if (code === 'EUICC_NO_CSIM') {
-				msg = '当前固件不支持 AT+CSIM，无法与卡通信';
-			} else if (code === 'EUICC_NO_CARD') {
-				msg = '卡槽内未检测到 SIM 卡（AT 报 NOCARD），请检查插卡';
-			} else if (code === 'EUICC_AT_ERROR') {
-				/*
-				 * R05：与「固件不支持 AT+CSIM」区分开 —— 这里明确是 AT 层没拿到应答。
-				 *
-				 * ★ 2026-09-20 真机：下载中途最常见的不是「服务挂了」，而是
-				 *   「卡还在处理、模组没回结束码」（写卡时卡侧要做密钥运算与非易失
-				 *   写入，单条跳到秒级是常态）。把它一律说成「AT 服务未就绪」会误导
-				 *   用户去查服务，而实际上服务一直是好的、只是卡慢。这里拆开说。
-				 */
-				var em = String((e && e.message) || '');
-				if (em.indexOf('查不到') >= 0) {
-					/* 末块超时 + 核验时卡上确实没有这个 Profile → 是真的没装上 */
-					msg = '安装没有完成：卡在处理最后一块时超时，之后重新读取 Profile 列表，'
-						+ '卡上查不到这份 Profile。请整包重下；若反复失败，'
-						+ '多半是这份 Profile 比卡的处理上限大（可试试重启模组后再下）。';
-				} else if (em.indexOf('AT 通道正常') >= 0) {
-					msg = '卡一直在忙、始终没吐回结果（补取也已用尽），但 AT 通道本身是好的。'
-						+ '收尾安装阶段偶发，等几分钟让卡彻底空闲后整包重下即可。';
-				} else if (em.indexOf('AT 通道本身也无响应') >= 0) {
-					msg = '模组侧被上一条指令堵住了：连最简单的 AT 都收不到应答。'
-						+ '这与 AT 服务无关（服务一直在跑），需要重启模组或整机断电一次才能恢复。';
-				} else if (Euicc.isAtTimeoutError && Euicc.isAtTimeoutError(e)) {
-					msg = '卡片没有在预期时间内回话。写卡时卡侧要做密钥运算与非易失写入，'
-						+ '偶尔会比预期慢（已尝试向卡补取结果）。'
-						+ '若反复出现，请确认下载期间没有重拨 / 动接口，然后整包重下。';
-				} else {
-					msg = 'AT 服务未就绪（未连接到调制解调器或拒绝了指令），请检查 AT 服务';
-				}
-			} else if (code === 'EUICC_NO_ES9P') {
-				msg = '设备侧缺少 ES9+ 通道（rpcd 没有 mt5700.es9p 或设备上没有 curl）'
-					+ '，无法与运营商服务器通信';
-			} else if (code === 'EUICC_ES9P_FAILED') {
-				/* 服务器侧的失败原因必须原样带出来：不同运营商的报错差得很远，
-				   统一成一句「下载失败」等于让用户无从下手。 */
-				msg = (e && e.message) || '运营商服务器返回失败';
-			} else if (code === 'EUICC_CSIM_TRUNCATED') {
-				/*
-				 * ★ 2026-09-19 真机实测：这是模组固件的能力上限（AT+CSIM 单条响应
-				 *   只回 256 字节），不是配置问题也不是组包 bug —— 重试没有任何意义。
-				 *   必须单独成支：落到 else 分支只会显示一句原始 message，
-				 *   用户看不出「这是设备做不到」，会反复重试甚至怀疑是插件坏了。
-				 */
-				msg = '当前设备无法下载 Profile：' + ((e && e.message) || '模组 AT+CSIM 单条响应上限 256 字节')
-					+ ' 这是模组固件的限制，重试无效；读取 Profile、启用 / 禁用 / 删除不受影响。';
-			} else if (code === 'EUICC_OP_FAILED' && e.result != null) {
-				/* P07：ES10 结果码优先用中文人话（替代裸串「ES10 result n」） */
-				msg = Euicc.es10ResultText(e.result);
-			} else if (code === 'EUICC_OP_FAILED' && e.swText) {
-				/* R08：优先用 §1.5① 错误矩阵的人话文案 + 提示 */
-				msg = e.swText + (e.swHint ? '；' + e.swHint : '');
-			} else {
-				msg = (e && e.message) || '操作失败';
+			for (var i = 0; i < ERR_TEXT.length; i++) {
+				var r = ERR_TEXT[i];
+				if (r.code !== code) continue;
+				if (r.when && !r.when(e)) continue;
+				return typeof r.text === 'function' ? r.text(e) : r.text;
 			}
-			Mt5700.error(msg);
+			return (e && e.message) || '操作失败';
+		}
+
+		function handleErr(e) {
+			Mt5700.error(matchErrText(e || {}));
 		}
 
 		/* ---------- 引导态：G3 无卡（§1.6） ---------- */
@@ -1916,12 +2028,18 @@ return L.view.extend({
 				/* 「添加」区要用到 ES9+ 通道的可用性，先问一次再渲染，
 				   否则那块区域会先画出来再变一次，观感是闪一下。 */
 				probeEs9p(function () {
-					if (p.state === 'no_card') renderNoCard();
-					else if (p.state === 'no_csim') renderNoCsim(p);
-					else if (p.state === 'no_euicc') renderNoEuicc();
-					else if (p.state === 'blocked') renderBlocked(p);
-					else if (p.state === 'error') renderError(p);
-					else renderOk(p);
+					/* 探测态 → 渲染函数。原来是五段 if/else-if，加一种态要在链尾接一段，
+					   而 renderOk 是 default 这件事藏在 else 里、一眼看不出来。
+					   表驱动后「哪个态由谁画」是一张清单，default 也写成显式的一行。 */
+					var PROBE_VIEW = {
+						no_card: renderNoCard,
+						no_csim: renderNoCsim,
+						no_euicc: renderNoEuicc,
+						blocked: renderBlocked,
+						error: renderError
+					};
+					var view = PROBE_VIEW[p.state] || renderOk;
+					view(p);
 				});
 			}).catch(function (e) {
 				renderError({ error: (e && e.code) || (e && e.message) || '未知错误' });

@@ -429,8 +429,36 @@ ok('P04 esim.js showPendingReceipts 首行 if (busy) 守卫', /function showPend
 ok('P05 esim.js 日志区用 mt5700-mono mt5700-terminal-log', /mt5700-mono mt5700-terminal-log/.test(esimSrc));
 /* P06：删除确认给出可回答的答案（完整 AID 裸值写入提示） */
 ok('P06 esim.js 删除确认给出完整 AID 末 4 位提示', /请输入该 Profile 的 AID 末 4 位（AID：/.test(esimSrc));
-/* P07：handleErr 优先采用 ES10 中文文案（e.result != null 分支） */
-ok('P07 esim.js handleErr 优先用 es10ResultText（e.result 分支）', /else if \(code === 'EUICC_OP_FAILED' && e\.result != null\)[\s\S]{0,80}?Euicc\.es10ResultText\(e\.result\)/.test(esimSrc));
+/*
+ * P07：handleErr 优先采用 ES10 中文文案（e.result 那条规则）。
+ *
+ * 2026-11-06 表驱动改写：if/else-if 链变成 ERR_TEXT 里的两条有序规则
+ * （同 code 多条判据时靠数组顺序定优先级）。判据同步改成**顺序不变量** ——
+ * es10ResultText 的位置必须早于 swText 拼接的位置。
+ * 这比原来的「两符号相距 80 字符」更强：跨多少行、隔多少注释都算，
+ * 而原来那条在两条规则之间加一段长注释就会假红。
+ */
+var OP_RESULT_AT = esimSrc.indexOf('Euicc.es10ResultText(e.result)');
+var OP_SWTEXT_AT = esimSrc.indexOf('e.swText + (e.swHint');
+ok('P07 esim.js handleErr 优先用 es10ResultText（result 规则排在 swText 前）',
+	OP_RESULT_AT >= 0 && OP_SWTEXT_AT >= 0 && OP_RESULT_AT < OP_SWTEXT_AT);
+/*
+ * P07 反向：把 result 那条规则整条删掉，正向判据必须跟着假。
+ *
+ * 判「删掉之后 es10ResultText 不再出现」而不是再抄一遍顺序断言 ——
+ * 顺序不变量成立的前提就是那两个符号都在；少任何一个，indexOf 返回 -1，
+ * 正向判据自然失败。这样反向与正向共用同一份事实，不会各说各话。
+ * 正则精确匹配那三行：将来重排格式导致匹配不上时，这条会判红提醒更新判据，
+ * 而不是默默变成一条永远通过的假测试。
+ */
+function opResultRuleGone(src) {
+	return src.indexOf('Euicc.es10ResultText(e.result)') < 0;
+}
+ok('P07 反向：删掉 result 规则后，顺序不变量必须不再成立',
+	!opResultRuleGone(esimSrc)
+	&& opResultRuleGone(esimSrc.replace(
+		/code: 'EUICC_OP_FAILED',\n\t*when: function \(e\) \{ return e\.result != null; \},\n\t*text: function \(e\) \{ return Euicc\.es10ResultText\(e\.result\); \}/,
+		'__NOPE__')));
 /* P12：下载进度条复用 Mt5700.signalBar，且**写入阶段按段推进** */
 ok('P12 esim.js 下载进度用 Mt5700.signalBar(…, 100)', /Mt5700\.signalBar\([^)]*,\s*100\)/.test(esimSrc));
 /*
@@ -520,8 +548,8 @@ function hasTruncationGuard(src) {
 	return hasWant && hasGot && hasCmp && hasBoundary && hasThrow;
 }
 function hasTruncationBranch(src) {
-	/* handleErr 里的独立分支 */
-	return /code === 'EUICC_CSIM_TRUNCATED'/.test(src);
+	/* handleErr 里的独立规则（2026-11-06 表驱动后是 ERR_TEXT 数组里的一条） */
+	return /code: 'EUICC_CSIM_TRUNCATED'/.test(src);
 }
 
 ok('A1 euicc.js 有 TLV 声明长度比对 + 抛 EUICC_CSIM_TRUNCATED 的守卫', hasTruncationGuard(euiccSrc));
@@ -541,9 +569,9 @@ ok('A3 反向：去掉 256 边界判据必须判红',
 ok('A4 反向：去掉抛错必须判红',
 	hasTruncationGuard(replaceAll(euiccSrc, 'EUICC_CSIM_TRUNCATED', '__NOPE__')) === false);
 
-ok('B1 esim.js handleErr 有 EUICC_CSIM_TRUNCATED 独立分支', hasTruncationBranch(esimSrc));
-ok('B2 反向：删掉该分支（回到裸 message）必须判红',
-	hasTruncationBranch(esimSrc.replace("code === 'EUICC_CSIM_TRUNCATED'", "code === '__NEVER__'")) === false);
+ok('B1 esim.js handleErr 有 EUICC_CSIM_TRUNCATED 独立规则', hasTruncationBranch(esimSrc));
+ok('B2 反向：删掉该规则（回到裸 message）必须判红',
+	hasTruncationBranch(esimSrc.replace("code: 'EUICC_CSIM_TRUNCATED'", "code: '__NEVER__'")) === false);
 
 const sw6a80 = Euicc.swInfo('6A80');
 ok('C1 swInfo(6A80) 文案不再写死「本地 TLV 组装有误」',
@@ -772,12 +800,14 @@ asyncTests.push((function () {
 })());
 
 /* 源码侧：页面必须真的有一个「暂态阻断」面板，且文案给出下一步动作 */
+/* 2026-11-06：状态分流从五段 if/else-if 改成 PROBE_VIEW 查表，判据跟着改形态，
+   强度不变 —— 仍然要求「renderBlocked 存在」且「它真的被 blocked 态挂上」。 */
 ok('V3 esim.js 有 renderBlocked 且被状态分流调用',
-	/function renderBlocked\(/.test(esimSrc) && /p\.state === 'blocked'/.test(esimSrc));
+	/function renderBlocked\(/.test(esimSrc) && /blocked: renderBlocked/.test(esimSrc));
 ok('V4 阻断面板文案给出下一步（重启模组 / 整机断电重上电），并说明反复操作无意义',
 	/重启模组/.test(esimSrc) && /反复操作不会改变结果/.test(esimSrc));
 ok('V4 反向：若把分流条件改掉，V3 必须判红',
-	/p\.state === 'blocked'/.test(replaceAll(esimSrc, "p.state === 'blocked'", "p.state === 'error'")) === false);
+	/blocked: renderBlocked/.test(replaceAll(esimSrc, "blocked: renderBlocked", "blocked: __NEVER__")) === false);
 
 /* ---------- V5. CGLA 通路 6999 —— **本机实际命中**的那条路径（2026-09-20 真机复现） ----------
  *

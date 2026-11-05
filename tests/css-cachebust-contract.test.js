@@ -58,6 +58,7 @@ const js = fs.readFileSync(JSP, 'utf8');
  *   2026-10-26  第四次重做「无缝分区」：去掉卡片式，改为浅色纸面 + 单列
  *   2026-11-06  下线语音通话（删 keypad/callbar/num-display 三件套）；新增身份读数
  *   2026-11-06  空态加图标（.mt5700-empty-ico）；修「空文件被当成读不到」→ 6.9.0
+ *   2026-11-06  总览页加数据新鲜度指示（.mt5700-freshness / -stale）→ 6.11.0
  *              行内复制按钮（IMSI/ICCID/IMEI）→ 6.7.0 / 6.8.0
  *              无缝分区（发丝线分隔）+ 区标题浅灰带；主色亮青 #0891b2；
  *              真机把页面自带双列摊平为单列以保证左边界严格对齐 → 5.13.0
@@ -65,7 +66,7 @@ const js = fs.readFileSync(JSP, 'utf8');
  *              组件（一句结论 + 四段链路 + 需要处理 + 影响预告）；主色改深青绿
  *              #0f766e（白字 5.5:1），信息色改蓝，二者不再同色系 → 5.14.0
  */
-const CSS_FINGERPRINT = '6ff544f40ee578a1';
+const CSS_FINGERPRINT = 'f0a9b3c77f029544';
 
 let pass = 0;
 const fails = [];
