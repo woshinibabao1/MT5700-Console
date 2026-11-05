@@ -227,6 +227,18 @@ ok('★ R02 通知文件读失败要单独存原因，不许写成空内容（�
 	/state\.notifyErr =/.test(code) && /读不到通知文件/.test(src));
 ok('★ R02 首屏不许显示「暂无日志」：未取过显示「加载中…」',
 	/!state\.primed \? '加载中…'/.test(code));
+/*
+ * 2026-11-06 真机实测：rpcd 的 file read 对 **0 字节文件**返回 ubus 状态码 5（NO_DATA）、
+ * 对不存在返回 6；只有真的有内容才回 0 + {data}。LuCI 的 rpc.declare 把 5/6 都 reject，
+ * 消息分别是「未收到数据」「未找到」，于是"刚装好、还没产生过通知"这种正常状态会在界面
+ * 上变成红字「读不到通知文件（/tmp/at-notifications.log）：未收到数据」。
+ * 空 ≠ 读失败，这条钉住 readFile 里的放行分支。
+ */
+ok('★ R02b 空文件（NO_DATA 5 / NOT_FOUND 6）必须放行，不当成读失败',
+	/function isEmptyRead/.test(code)
+	&& /code === 5 \|\| code === 6/.test(code)
+	&& /if \(isEmptyRead\(err\)\) return '';/.test(code));
+
 ok('★ R09 后端已提供但缓冲为空，要与「能力缺失」区分开',
 	/后端已提供日志接口，但当前缓冲为空/.test(src));
 ok('★ 三路取数真串行（steps.reduce），不是并发 Promise.all',

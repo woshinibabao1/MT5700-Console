@@ -220,9 +220,29 @@ return L.view.extend({
 		var fileRead = L.rpc.declare({ object: 'file', method: 'read', params: ['path'], expect: {} });
 		var fileWrite = L.rpc.declare({ object: 'file', method: 'write', params: ['path', 'data'], expect: {} });
 
+		/*
+		 * rpcd 的 file read 用 ubus 状态码区分三种情况（真机实测）：
+		 *   0 + {data:...}  有内容
+		 *   5  NO_DATA      **文件是空的**（0 字节）
+		 *   6  NOT_FOUND   文件不存在
+		 * LuCI 的 rpc.declare 把后两种都 reject（消息分别是「未收到数据」「未找到」），
+		 * 于是「刚装好、还没产生过通知」这种正常状态会在界面上变成红字
+		 * 「读不到通知文件」。空 ≠ 读失败：这里显式放行 5/6，只把其余当错误。
+		 */
+		function isEmptyRead(err) {
+			var code = err && (err.code != null ? err.code : null);
+			if (code === 5 || code === 6) return true;
+			return /未收到数据|未找到|No data|NO_DATA|NOT_FOUND|not found/i.test((err && err.message) || '');
+		}
+
 		function readFile(p) {
-			if (L.fs && typeof L.fs.read === 'function') return L.fs.read(p);
-			return fileRead(p).then(function (r) { return (r && r.data != null) ? r.data : ''; });
+			var first = (L.fs && typeof L.fs.read === 'function')
+				? L.fs.read(p)
+				: fileRead(p).then(function (r) { return (r && r.data != null) ? r.data : ''; });
+			return first.catch(function (err) {
+				if (isEmptyRead(err)) return '';
+				throw err;
+			});
 		}
 		function writeFile(p, content) {
 			if (L.fs && typeof L.fs.write === 'function') return L.fs.write(p, content);
@@ -378,9 +398,9 @@ return L.view.extend({
 				var emptyText = !state.primed ? '加载中…'
 					: (state.tab === 'dial' ? '后端已提供日志接口，但当前缓冲为空（进程重启后从零累积）'
 						: (state.tab === 'iface' ? '没有 at-webserver 相关的 syslog 行' : '暂无日志'));
-				listEl.appendChild(Mt5700.empty(emptyText));
+				listEl.appendChild(Mt5700.empty(emptyText, ICON_EMPTY_LOG));
 			} else if (!list.length) {
-				listEl.appendChild(Mt5700.empty('没有匹配的日志（试试清空关键词，或把级别切回「全部级别」）'));
+				listEl.appendChild(Mt5700.empty('没有匹配的日志（试试清空关键词，或把级别切回「全部级别」）', ICON_EMPTY_LOG));
 			} else {
 				var frag = document.createDocumentFragment();
 				/* 只渲染最后 400 行，避免一次插入过多节点导致滚动卡顿 */
@@ -391,17 +411,20 @@ return L.view.extend({
 				listEl.appendChild(frag);
 			}
 
-			var text = '共 ' + all.length + ' 条';
-			if (list.length !== all.length) text += '（过滤后 ' + list.length + ' 条）';
-			if (list.length > 400) text += '，仅显示最新 400 条';
-			if (folded > 0) text += '，相邻重复已合并 ' + folded + ' 条（行尾标注 ×N）';
+			/* 脚注由事实片段拼成：加一种提示只往数组里加一行，不再往 += 链上接。
+			   原来是五个 if 各 += 一次，漏个分号或少个括号就整句静默变短，
+			   而这种缩短在界面上只是"少了半句话"，没人会发现。 */
+			var bits = ['共 ' + all.length + ' 条'];
+			if (list.length !== all.length) bits.push('过滤后 ' + list.length + ' 条');
+			if (list.length > 400) bits.push('仅显示最新 400 条');
+			if (folded > 0) bits.push('相邻重复已合并 ' + folded + ' 条（行尾标注 ×N）');
 			/* ★ 两个数据源各自成句：iface 视图的条目一半来自后端内存日志、
 			   一半来自 syslog，只怪 syslog 会归错因。 */
 			if (state.tab === 'iface') {
-				if (state.backendLogs === false) text += ' · 后端日志不可用（模组拨号相关行缺失）';
-				if (!state.syslogOk) text += ' · syslog 不可读（rpcd 未加载 log 插件或 ACL 未授权）';
+				if (state.backendLogs === false) bits.push('后端日志不可用（模组拨号相关行缺失）');
+				if (!state.syslogOk) bits.push('syslog 不可读（rpcd 未加载 log 插件或 ACL 未授权）');
 			}
-			footerEl.textContent = text;
+			footerEl.textContent = bits.join(' · ');
 		}
 
 		/* 通知文件：切成「一条一行」并按搜索词过滤（导出与列表同一口径） */
@@ -412,6 +435,17 @@ return L.view.extend({
 			return recs.filter(function (r) { return r.text.toLowerCase().indexOf(q) >= 0; });
 		}
 
+		/* 各 tab 的说明条文案（查表，不再嵌套三元） */
+		var TAB_HINT = {
+			dial: '拨号过程（后端内存日志）：拨号对齐、PDP 与网卡、串口探测、URC 分发；重启后清空。',
+			iface: 'syslog 里 at-webserver 相关行：接口拉起、热插拔、DHCP / IPv6 取址。',
+			notify: '通知文件内容（短信、来电、信号变化、存储告警）。级别筛选只对前两个视图生效。'
+		};
+
+		/* 空态图标（内联 SVG path，无额外请求） */
+		var ICON_EMPTY_LOG = 'M7 3h7l4 4v14H7z M10 12h6 M10 16h4';
+		var ICON_EMPTY_NOTIFY = 'M21 11.6a8.4 8.4 0 0 1-8.4 8.4H8.3L4 22v-5.6a8.4 8.4 0 0 1 8.4-8.4h.2a8.4 8.4 0 0 1 8.4 8.4z';
+
 		function renderNotify() {
 			/* ★ 读不到文件 ≠ 文件是空的。读失败给红色错误态 + 重试，不降级成空态。 */
 			if (state.notifyErr) {
@@ -421,14 +455,26 @@ return L.view.extend({
 				footerEl.textContent = '数据源不可用';
 				return;
 			}
-			var total = parseNotify(state.notify).length;
-			var recs = notifyRecords();
+			/* 只 parse 一次：notifyRecords() 内部也会 parseNotify(state.notify)，
+			   文件几千行时这里等于白翻一倍 CPU，而通知 tab 有自动刷新。
+			   导出仍走 notifyRecords()（与列表同口径，契约测试盯着），这里不复用。 */
+			var all = parseNotify(state.notify);
+			var total = all.length;
+			var q = state.query.toLowerCase();
+			var recs = q
+				? all.filter(function (r) { return r.text.toLowerCase().indexOf(q) >= 0; })
+				: all;
 			if (!recs.length) {
-				listEl.appendChild(Mt5700.empty(state.primed
-					? (total ? '没有匹配的通知（试试清空关键词）'
-						: '暂无通知记录（短信、来电、信号变化与存储告警会写入此文件）')
-					: '加载中…'));
-				footerEl.textContent = '文件：' + notifyPath;
+				/* 空态三选一。原来是 `primed ? (total ? A : B) : C` 的嵌套三元，
+				   读一遍要数两层括号才敢改；拆开成先判加载中，剩下二选一。 */
+				var emptyText = !state.primed ? '加载中…'
+					: (total ? '没有匹配的通知（试试清空关键词）'
+						: '暂无通知记录（短信、来电、信号变化与存储告警会写入此文件）');
+				listEl.appendChild(Mt5700.empty(emptyText, ICON_EMPTY_NOTIFY));
+				/* 空文件 ≠ 读失败，脚注也说清是哪种空：真读失败已经走上边的
+				   errorState 分支，能走到这里就一定是「文件在，只是没内容/没匹配」。 */
+				footerEl.textContent = '文件：' + notifyPath
+					+ (total ? ' · 无匹配' : ' · 当前为空');
 				return;
 			}
 			var frag = document.createDocumentFragment();
@@ -447,9 +493,11 @@ return L.view.extend({
 				frag.appendChild(row);
 			}
 			listEl.appendChild(frag);
-			footerEl.textContent = '共 ' + total + ' 条'
-				+ (recs.length !== total ? '（过滤后 ' + recs.length + ' 条）' : '')
-				+ ' · 文件：' + notifyPath;
+			var nbits = ['共 ' + total + ' 条'];
+			if (recs.length !== total) nbits.push('过滤后 ' + recs.length + ' 条');
+			if (total > 400) nbits.push('显示最新 400 条');
+			nbits.push('文件：' + notifyPath);
+			footerEl.textContent = nbits.join(' · ');
 		}
 
 		function renderAll() {
@@ -458,13 +506,9 @@ return L.view.extend({
 			   —— 否则用户切回来会发现列表莫名少一截。 */
 			levelSel.disabled = (state.tab === 'notify');
 			clearRow.style.display = (state.tab === 'notify') ? '' : 'none';
-			var hint = state.tab === 'dial'
-				? '拨号过程（后端内存日志）：拨号对齐、PDP 与网卡、串口探测、URC 分发；重启后清空。'
-				: (state.tab === 'iface'
-					? 'syslog 里 at-webserver 相关行：接口拉起、热插拔、DHCP / IPv6 取址。'
-					: '通知文件内容（短信、来电、信号变化、存储告警）。');
-			if (state.tab === 'notify') hint += '（级别筛选只对前两个视图生效）';
-			hintEl.textContent = hint;
+			/* 提示语按 tab 查表：原来是 tab==='dial' ? A : (tab==='iface' ? B : C) 的
+			   两层嵌套，加第四个视图就得再套一层。表驱动加一行就完。 */
+			hintEl.textContent = TAB_HINT[state.tab] || '日志内容';
 			renderList();
 		}
 

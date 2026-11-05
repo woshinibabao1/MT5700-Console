@@ -1888,6 +1888,12 @@
   gap: var(--mt5700-space-sm);
 }
 
+.mt5700-empty-ico {
+  color: var(--mt5700-text-muted);
+  opacity: .5;
+  line-height: 0;
+}
+
 .mt5700-empty-text {
   font-size: var(--mt5700-font-size-sm);
   color: var(--mt5700-text-muted);

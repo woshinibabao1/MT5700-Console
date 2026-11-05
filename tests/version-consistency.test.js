@@ -47,7 +47,10 @@ const KNOWN_SAME_VERSION = {
 	icu_collections: '2.3.0', icu_locale_core: '2.3.0', icu_normalizer: '2.3.0',
 	icu_normalizer_data: '2.3.0', icu_properties: '2.3.0', icu_properties_data: '2.3.0',
 	icu_provider: '2.3.1',
-	'percent-encoding': '2.3.2'
+	'percent-encoding': '2.3.2',
+	/* 2026-11-06：本项目升到 2.6.1，subtle（rustls 依赖链上的 cryptography crate）
+	   在 crates.io 上同样有 2.6.1，纯属撞车，不是全局替换误伤。 */
+	subtle: '2.6.1'
 };
 
 let pass = 0;

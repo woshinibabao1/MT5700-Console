@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '6.8.0';
+var MT5700_CSS_VERSION = '6.9.0';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -869,8 +869,24 @@ var Mt5700 = (function () {
 		return el;
 	};
 
-	api.empty = function (text) {
+	/*
+	 * 空态。第二个参数是可选的 SVG path（d 属性串）。
+	 * 为什么加图标：宽卡片里一行灰字的空态看起来像"页面没渲染完"，
+	 * 加一个轻量线性图标才有"这里是空的、但渲染完成了"的语义。
+	 * 老调用点不传第二个参数，行为与改动前逐字一致。
+	 * 图标颜色走 currentColor（继承 muted），不引入第二套配色。
+	 */
+	api.empty = function (text, icon) {
 		var el = E('div', { 'class': 'mt5700-empty' });
+		if (icon) {
+			el.appendChild(E('div', { 'class': 'mt5700-empty-ico' }, [
+				E('svg', {
+					viewBox: '0 0 24 24', width: '26', height: '26',
+					fill: 'none', stroke: 'currentColor', 'stroke-width': '1.4',
+					'stroke-linecap': 'round', 'stroke-linejoin': 'round'
+				}, [ E('path', { d: icon }) ])
+			]));
+		}
 		el.appendChild(E('div', { 'class': 'mt5700-empty-text' }, text || '暂无数据'));
 		return el;
 	};
