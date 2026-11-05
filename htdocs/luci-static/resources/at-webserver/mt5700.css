@@ -12,7 +12,6 @@
    设备上的 CSS 内容已经是新的（实测 width:51px 在位），但浏览器仍在用旧副本
    —— 表现就是「代码改了、界面没变」。只 bump 版本号才有效，等缓存自然过期没用。
    守卫：tests/css-cachebust-contract.test.js（对本文件做指纹比对）。
-   ========================================================================== */
 
 /* ---------- CSS Variables ---------- */
 :root {
@@ -2991,103 +2990,48 @@
   .mt5700-esim-row-acts > .mt5700-btn { flex: 1 1 auto; justify-content: center; }
 }
 
-/* ==========================================================================
-   通话台组件（v5.6.0 新增，voice_call 页首发；按通用件设计，别处可直接用）
-   --------------------------------------------------------------------------
-   1) .mt5700-num-display  大号号码显示屏（等宽数字 / 聚焦环 / 占位符降档）
-   2) .mt5700-keypad       电话键盘（3 列方键 + 字母辅助 + 按压反馈）
-   3) .mt5700-callbar      通话动作条（按钮等宽，文案切换不抖动）
-   4) .mt5700-diag-verdict 结论色块（is-ok / is-warn / is-bad / is-idle）
-
-   命名与纪律沿用既有 mt5700-* 体系：
-   · 只走 :root 变量，不写死色值（暗色在文末 media query 覆盖）；
-   · 这些类是**增量**：叠加在 .mt5700-input / .mt5700-btn 基类之上，
-     不重复基类已有的背景/边框/过渡，避免两处定义漂移；
-   · 尺寸带 !important 的原则同 iOS 开关（Argon 会压 input 尺寸）——
-     显示屏与键盘是几何关键项，一样处理。
-   ========================================================================== */
-
-/* ---------- 1. 大号号码显示屏 ---------- */
-.mt5700-num-display {
-  font-size: 26px !important;
-  font-weight: 600;
-  letter-spacing: 2px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-  font-family: var(--mt5700-font-mono);
-  padding: 14px 16px !important;
-}
-
-.mt5700-num-display::placeholder {
-  font-size: 15px;
-  letter-spacing: 0;
-  font-weight: 400;
-  color: var(--mt5700-text-muted);
-}
-
-.mt5700-num-display:disabled {
-  opacity: 0.75;
-  cursor: default;
-}
-
-/* ---------- 2. 电话键盘 ---------- */
-.mt5700-keypad {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  max-width: 336px;
-  margin: var(--mt5700-space-sm) auto 0;
-}
-
-/*
- * 键面在 .mt5700-btn 基类上做增量：方键（不是扁条）、双行结构
- * （大号数字 + 字母辅助行）、按压回弹比普通按钮更明显。
- * ★ 不禁用键盘：同一排键两用 —— 空闲输号码、接通送 DTMF，
- *   所以这里不出现 :disabled 专属几何，禁用态交给基类。
- */
-.mt5700-keypad-key {
-  flex-direction: column;
-  gap: 1px;
-  min-height: 62px;
-  padding: 10px 0 8px !important;
-  border-radius: var(--mt5700-radius-md) !important;
-}
-
-.mt5700-keypad-key:active:not(:disabled) {
-  transform: scale(0.93);
-  transition-duration: 70ms;
-}
-
-.mt5700-keypad-key .k {
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1.15;
-}
-
-.mt5700-keypad-key .sub {
-  font-size: 10px;
-  letter-spacing: 1.5px;
-  line-height: 1.2;
-  min-height: 12px;
-  color: var(--mt5700-text-muted);
-}
-
-/* ---------- 3. 通话动作条 ---------- */
-/*
- * 接听/挂断/静音/铃声一行常驻。按钮等宽（flex:1）且给 min-width：
- * 文案会在「挂断↔拒接」「静音↔取消静音」之间切换，等宽保证整行不抖
- * （红线 41：固定尺寸区域，拒绝按数据量动态撑开）。
- */
-.mt5700-callbar {
+/* ---------- 身份读数一键复制 ----------
+   IMSI / ICCID / IMEI 常要整串发给客服，长串等宽数字手动划词选不齐。
+   只做行内小按钮：不占整行、不影响表格原本的 zebra 与对齐。 */
+.mt5700-copy-row {
   display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  align-items: stretch;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
 }
 
-.mt5700-callbar .mt5700-btn {
-  flex: 1 1 0;
-  min-width: 108px;
+.mt5700-copy-val {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.mt5700-copy {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  height: 22px;
+  font-size: 11px;
+  line-height: 20px;
+  border-radius: var(--mt5700-radius-sm);
+  border: 1px solid var(--mt5700-border);
+  background: transparent;
+  color: var(--mt5700-text-muted);
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+
+.mt5700-copy:hover,
+.mt5700-copy:focus-visible {
+  color: var(--mt5700-accent);
+  border-color: var(--mt5700-accent);
+}
+
+/* 窄屏：值本身已经 ellipsis，按钮不再挤压 */
+@media (max-width: 640px) {
+  .mt5700-copy { padding: 0 6px; }
 }
 
 /* ---------- 4. 结论色块 ---------- */
@@ -3115,7 +3059,6 @@
   .mt5700-gauge,
   .mt5700-speed-box,
   .mt5700-btn,
-  .mt5700-keypad-key,
   .mt5700-step,
   .mt5700-sms-item {
     transition: none !important;

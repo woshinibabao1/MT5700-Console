@@ -181,21 +181,6 @@ var rpcSmsLog = L.rpc.declare({
 	expect: {}
 });
 
-/*
- * 语音通话：dial / answer / hangup / dtmf / status。
- *
- * ★ number 与 digit 都只是白名单内的短串（后端 callNumberOk / callDtmfOk 再校验），
- *   命令串（ATD…; / ATA / ATH / AT+VTS=… / AT+CLCC）全部由后端拼 ——
- *   前端没有把任意字符串送进 AT 通道的路径。
- * ★ 老设备（rpcd 里没有 mt5700.call）时 response 为 undefined，由 fetchCall
- *   统一翻成 success:false + 明确文案（与 vowifi/smslog 同一约定）。
- */
-var rpcCall = L.rpc.declare({
-	object: 'mt5700',
-	method: 'call',
-	params: ['action', 'number', 'digit', 'record'],
-	expect: {}
-});
 
 function withTimeout(p, ms, msg) {
 	/*
@@ -1419,39 +1404,7 @@ function numOrNull(s) {
 	return isNaN(n) ? null : n;
 }
 
-function parseCcallState(line) {
-	var f = line.slice('^CCALLSTATE:'.length).split(',');
-	if (f.length < 3) return null;
-	return {
-		type: 'CALL',
-		event: 'CCALLSTATE',
-		callId: numOrNull(f[0]),
-		state: numOrNull(f[1]),
-		/* 0 3GPP CS / 1 IMS / 2 3GPP2 CS / 3 不在任何域。实测本机全程为 1，
-		 * 正好解释了「+CREG: 0,0 却能拨通」—— 语音走 IMS，不依赖 CS 注册。*/
-		domain: numOrNull(f[2]),
-		raw: line
-	};
-}
 
-/*
- * ^CEND: <call_id>,<duration>,<end_Source>,<cc_cause>
- * duration 直接就是秒数（实测 `1,25,104,0` 对应 25 秒通话），
- * 比前端 Date.now() 差值可靠：切后台、页面重载都不会丢。
- */
-function parseCend(line) {
-	var f = line.slice('^CEND:'.length).split(',');
-	if (f.length < 2) return null;
-	return {
-		type: 'CALL',
-		event: 'CEND',
-		callId: numOrNull(f[0]),
-		duration: numOrNull(f[1]),
-		source: numOrNull(f[2]),
-		cause: numOrNull(f[3]),
-		raw: line
-	};
-}
 
 function parseRawData(text) {
 	var out = [];
@@ -1482,19 +1435,6 @@ function parseRawData(text) {
 		} else if (line.indexOf('^REJINFO') === 0) {
 			// 网络拒绝原因主动上报，解析后进 REJINFO 类型
 			out.push({ type: 'REJINFO', raw: line, parsed: Parse.parseRejInfo(line) });
-		} else if (line.indexOf('^CCALLSTATE:') === 0) {
-			var cs = parseCcallState(line);
-			if (cs) out.push(cs);
-		} else if (line.indexOf('^CEND:') === 0) {
-			var ce = parseCend(line);
-			if (ce) out.push(ce);
-		} else if (line.indexOf('^ORIG:') === 0 || line.indexOf('^CONF:') === 0 ||
-			line.indexOf('^CONN:') === 0) {
-			/*
-			 * 这三条只当「状态该变了的信号」用：它们的参数是呼叫标识与厂商
-			 * 自定义位，没有 CLCC 那样完整的状态枚举。保留 raw 便于排查。
-			 */
-			out.push({ type: 'CALL', event: line.slice(1, line.indexOf(':')), raw: line });
 		}
 		/*
 		 * ^SRVST（服务状态）**不再解析分发**：对应功能「服务状态监听」已整块下线
@@ -1901,85 +1841,6 @@ function fetchSmsLog(action, entry, id) {
 	});
 }
 
-/*
- * 语音通话动作。
- *
- * 用法：fetchCall('status') / fetchCall('dial', '1008611') /
- *       fetchCall('answer') / fetchCall('hangup') / fetchCall('dtmf', null, '5')
- *
- * 返回：
- *   dial/answer/hangup/dtmf → Promise<{success, action, sent, raw, error}>
- *     sent=false + error  ＝后端拒绝或通道故障，命令没到模组
- *   status                  → Promise<{success, action, calls: [{id,dir,state,mode,mpty,number,type}]}>
- *     calls 为空数组＝**确实没有通话**（与「读不到」是两件事，红线 23）
- *   info                    → Promise<{success, action, mute, volume}>
- *     mute/volume 为 null ＝后端没拿到该项（不是「值是 0」）
- *   loglist                 → Promise<{success, action, records: [{number,dir,result,duration,time}]}>
- *   logadd（record=JSON 串） → Promise<{success, action, added, count}>
- *   logclear                → Promise<{success, action, cleared}>
- *
- * ★ record 走 **JSON 字符串**：与 smslog 的 entry 同一约定（ubus args schema
- *   声明为字符串，对象在传输层容易被展平）。由调用方 JSON.stringify。
- *
- * 超时 14s：与 sendCommand 同口径（后端最坏 8s 排队 + 3s 写入 + 2s 应答）。
- */
-function fetchCall(action, number, digit, record) {
-	return withTimeout(
-		rpcCall(
-			action || '',
-			number == null ? '' : String(number),
-			digit == null ? '' : String(digit),
-			record == null ? '' : String(record)
-		),
-		14000, '通话操作超时'
-	).then(function (resp) {
-		if (!resp || resp.success === false) {
-			return {
-				success: false,
-				action: action,
-				sent: false,
-				calls: null,
-				/*
-				 * 失败分支必须显式给 stage: null，不能省。省略的话前端读到
-				 * undefined，与「还没查到过」混同；而这里的真实语义是
-				 * 「查过了，失败了」—— 前端要能把它与空闲区分开（红线 23）。
-				 */
-				stage: null,
-				records: null,
-				error: (resp && resp.error) || 'rpcd 没有 mt5700.call 方法（后端未升级）'
-			};
-		}
-		return {
-			success: true,
-			action: resp.action || action,
-			sent: resp.sent !== false,
-			raw: resp.raw || '',
-			calls: Array.isArray(resp.calls) ? resp.calls : null,
-			/*
-			 * stage 必须在这里透传：后端 callOverallStage 给的总态令牌
-			 * （active/held/waiting/ringing/alerting/dialing/idle）。
-			 * ★ 曾经的坑：本层漏了它，视图 st.stage 恒为 null，徽标一直退回
-			 *   CALL_STATE 的 0-5 粗判，厂商粒度的状态机等于白写（后端在回、
-			 *   前端在读，只有中间这层没搬）。null 保留「还没读到过」的语义
-			 *   —— 与 'idle' 不同，后者是读到了且确实空闲（红线 23）。
-			 */
-			stage: (resp.stage == null) ? null : resp.stage,
-			records: Array.isArray(resp.records) ? resp.records : null,
-			mute: (resp.mute == null) ? null : resp.mute,
-			volume: (resp.volume == null) ? null : resp.volume,
-			added: resp.added === true,
-			count: (resp.count == null) ? null : resp.count,
-			cleared: resp.cleared === true,
-			error: resp.error || ''
-		};
-	}).catch(function (err) {
-		return {
-			success: false, action: action, sent: false,
-			calls: null, stage: null, records: null,
-			error: (err && err.message) || '通话操作失败'
-		};
-	});
-}
 
 /**
  * 触发一次自愈（只重启本插件的 AT 服务，不动网络）。
@@ -2007,7 +1868,6 @@ var AtWs = {
 	exitIp: fetchExitIp,
 	vowifi: fetchVowifi,
 	vowifiSet: fetchVowifiSet,
-	call: fetchCall,
 	es9pAvailable: es9pAvailable,
 	extractATData: extractATData,
 	extractATDataMultiline: extractATDataMultiline,
@@ -2025,8 +1885,6 @@ var AtWs = {
 	parseMONSC: parseMONSC,
 	parseHFREQINFO: parseHFREQINFO,
 	parseRawData: parseRawData,
-	parseCcallState: parseCcallState,
-	parseCend: parseCend,
 	psRegText: psRegText,
 	operatorFromCode: operatorFromCode,
 	qciLabel: qciLabel,

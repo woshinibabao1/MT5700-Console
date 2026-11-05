@@ -3,12 +3,13 @@ name: Build OpenWrt packages (apk + ipk)
 # 云编译 OpenWrt 软件包：
 #   - 最新主线（main snapshot，OpenWrt 24.10+ 包管理器 apk）→ 产出 .apk
 #   - 老版本 23.05（opkg 包管理器）→ 产出 .ipk
-# 架构矩阵：**只出 aarch64_cortex-a53**（主线 apk + 老版 23.05 ipk）。
-# ★ 2026-09-28 裁减：原先还编 x86_64 两个组合。本插件是 CPE 上控制 5G 模组的，
-#   目标机全是 aarch64（MT7987A / qualcommax 这类），x86 产物没有任何用户 ——
-#   留着只是让每次推送多烧一倍机时、并把 Release 资产翻倍、还让"按架构选包"变复杂。
-#   若日后真需要 x86，把下面两条 include 加回去，并同步改 Verify dist completeness
-#   里的期望值（那里按架构 × 包格式逐个断言覆盖）。
+# 架构与包格式：**按目标可选**（手动 workflow_dispatch 的 target 输入）。
+#   all（默认，也是打标签发版时的行为）= aarch64_cortex-a53 × {主线 apk, 23.05 ipk}
+#   apk / ipk / x86 = 只出那一个组合，省机时。
+# ★ x86_64 组合在 2026-09-28 曾被裁掉（本插件的目标机全是 aarch64 CPE），现应要求
+#   加回为**可选**：默认仍不进 all，只有显式选 x86 才编，不影响发版节奏。
+#   矩阵由 plan job 用 fromJSON 生成，Release 侧的产物校验与它同源（expect/combos），
+#   所以加组合时只要改 plan job 一处，不会出现"矩阵加了、校验没加"的漂移。
 # 触发：push 到 main、打 v* 标签、或手动 workflow_dispatch
 # 另加 pull_request：合并前先跑 rust-check（见该 job 的说明）。
 # 注意：PR 只跑检查，不跑打包、更不会发布 Release（build/release 两个 job 都有条件）。
@@ -30,6 +31,19 @@ on:
     tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
+    inputs:
+      # 构建目标：手动触发时可选，避免每次都要跑全部组合。
+      #   all = 两个 aarch64 组合（主线 apk + 23.05 ipk），与打标签时一致
+      #   apk = 只要 aarch64 主线 apk
+      #   ipk = 只要 aarch64 23.05 ipk
+      #   x86 = 只要 x86_64 主线 apk（供软路由/虚拟机侧调试）
+      # ★ x86 默认不进 all：目标机是 aarch64 CPE（MT7987A 等），x86 没有常规用户，
+      #   放进 all 只会让每次发版多烧几分钟机时、并把 Release 资产翻倍。
+      target:
+        description: 'Build target (package format / architecture)'
+        type: choice
+        default: all
+        options: [ all, apk, ipk, x86 ]
 
 # ★ 2026-09-28 新增（用户反馈「频繁推送非常浪费时间」）：
 #   原来没有 concurrency —— 每次推送到 main 都排一个**数小时**的 docker 打包，
@@ -162,10 +176,47 @@ jobs:
           fi
           echo "code=${code}" >> "$GITHUB_OUTPUT"
 
+  # ---- 组合规划：把手动触发的 target 翻成矩阵，tag 触发固定为两个 aarch64 组合 ----
+  # 为什么单独一个 job：GitHub 的 matrix 不能按 inputs 过滤，只能用 fromJSON 喂。
+  # 期望组合数也由这里产出，release 侧的产物校验跟着走同一份数据，
+  # 不会出现「矩阵加了 x86、校验还在按 2 个断言」的漂移。
+  plan:
+    needs: [rust-check, contract-check]
+    if: |
+      always() &&
+      (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      expect: ${{ steps.gen.outputs.expect }}
+      combos: ${{ steps.gen.outputs.combos }}
+    steps:
+      - id: gen
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          APK='{"image":"aarch64_cortex-a53-main","arch":"aarch64_cortex-a53","rust":"aarch64-unknown-linux-musl","ver":"main","target":"qualcommax/ipq50xx","fmt":"apk"}'
+          IPK='{"image":"aarch64_cortex-a53-23.05.5","arch":"aarch64_cortex-a53","rust":"aarch64-unknown-linux-musl","ver":"23.05.5","target":"mediatek/filogic","fmt":"ipk"}'
+          X86='{"image":"x86_64-main","arch":"x86_64","rust":"x86_64-unknown-linux-musl","ver":"main","target":"x86/64","fmt":"apk"}'
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            case "${TARGET}" in
+              apk) M="[${APK}]";        C="aarch64_cortex-a53:apk" ;;
+              ipk) M="[${IPK}]";        C="aarch64_cortex-a53:ipk" ;;
+              x86) M="[${X86}]";        C="x86_64:apk" ;;
+              *)   M="[${APK},${IPK}]"; C="aarch64_cortex-a53:apk aarch64_cortex-a53:ipk" ;;
+            esac
+          else
+            M="[${APK},${IPK}]"; C="aarch64_cortex-a53:apk aarch64_cortex-a53:ipk"
+          fi
+          echo "matrix=${M}" >> "$GITHUB_OUTPUT"
+          echo "expect=$(printf '%s\n' ${C} | wc -w | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "combos=${C}" >> "$GITHUB_OUTPUT"
+          echo "==> 本次构建组合: ${C}"
+
   build:
     # 闸门：rust-check / contract-check 挂了就不打包、更不发布。没有 needs 的话
     # 两个 job 并行跑，检查结果只能靠人盯着看，等于没拦。
-    needs: [rust-check, contract-check, needs_code]
+    needs: [rust-check, contract-check, needs_code, plan]
     # ★ 2026-09-28：只在**打标签**或**手动触发**时打包；push 到 main 不打包（见文件头 on: 段）。
     #   注意仍然 needs rust-check / contract-check —— 检查挂了就不打包、更不发布。
     #   needs_code（「本次是否只动了 tests/tools/文档」）保留在 needs 里：它在 tag/手动
@@ -177,23 +228,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # 组合来自 plan job：手动触发可选 apk / ipk / x86，tag 固定两个 aarch64
       matrix:
-        include:
-          # ---- 最新主线 → .apk ----
-          # 镜像 tag 格式：openwrt/sdk:<架构>-<版本>（已用 Docker Hub API 核实）
-          - image: aarch64_cortex-a53-main
-            arch: aarch64_cortex-a53
-            rust: aarch64-unknown-linux-musl
-            ver: main
-            target: qualcommax/ipq50xx
-            fmt: apk
-          # ---- 老版本 23.05 → .ipk ----
-          - image: aarch64_cortex-a53-23.05.5
-            arch: aarch64_cortex-a53
-            rust: aarch64-unknown-linux-musl
-            ver: 23.05.5
-            target: mediatek/filogic
-            fmt: ipk
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -314,24 +351,22 @@ jobs:
       - name: Verify dist completeness
         run: |
           set -e
-          # 主包（前端+后端合一）必须覆盖全部 2 个构建组合（aarch64_cortex-a53 × apk/ipk）
+          # 期望组合数来自 plan job：只选一个目标时这里就是 1，不拿写死的 2 卡它
+          expect="${{ needs.plan.outputs.expect }}"
+          combos="${{ needs.plan.outputs.combos }}"
           count=$(find dist -type f -name '*-luci-app-mt5700*' -not -name '*luci-i18n*' | wc -l)
-          echo "==> luci-app-mt5700 主包: ${count} 个"
-          if [ "$count" -lt 2 ]; then
-            echo "::error::主包仅有 ${count} 个（期望 2 个：1 架构 × apk/ipk），拒绝发布不完整的 Release"
+          echo "==> luci-app-mt5700 主包: ${count} 个（期望 ${expect}）"
+          if [ "$count" -lt "$expect" ]; then
+            echo "::error::主包仅有 ${count} 个（期望 ${expect}：${combos}），拒绝发布不完整的 Release"
             find dist -type f | sort
             exit 1
           fi
-          # 架构覆盖：单包内含二进制，必须每个架构都有
-          # ★ 2026-09-28：矩阵只剩 aarch64_cortex-a53（见文件头「架构矩阵」注释）。
-          #   这两个循环是与矩阵**成对**的约束：加回架构时必须同步扩这里，
-          #   否则新架构的包压根不会被断言覆盖（缺了也照样发布）。
-          for arch in aarch64_cortex-a53; do
-            for fmt in apk ipk; do
-              f=$(find dist -type f -name "${arch}-luci-app-mt5700*.${fmt}" -not -name '*luci-i18n*' -print -quit)
-              [ -n "$f" ] || { echo "::error::缺少 ${arch}-${fmt} 主包"; exit 1; }
-              echo "==> 已覆盖 ${arch}/${fmt}: $(basename "$f")"
-            done
+          # 逐个组合断言：单包内含二进制，每个入选组合都必须真的出包
+          for combo in ${combos}; do
+            arch="${combo%%:*}"; fmt="${combo##*:}"
+            f=$(find dist -type f -name "${arch}-luci-app-mt5700*.${fmt}" -not -name '*luci-i18n*' -print -quit)
+            [ -n "$f" ] || { echo "::error::缺少 ${arch}-${fmt} 主包"; exit 1; }
+            echo "==> 已覆盖 ${arch}/${fmt}: $(basename "$f")"
           done
 
       - name: Clean up previous release (same tag)

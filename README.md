@@ -26,7 +26,7 @@
 | 服务 / 配置 | 服务 `at-webserver` · 二进制 `/usr/bin/at-webserver-rust` · UCI `/etc/config/at-webserver` |
 | 链路 | LuCI → rpcd + ucode → Rust（`127.0.0.1:8765`，仅回环）→ 模组 AT |
 | 默认连接 | PCUI 串口 `/dev/ttyUSB1`（TCP 备用） |
-| 适用 | OpenWrt 23.05（ipk）/ 24.10+（apk）· **只发布 `aarch64_cortex-a53`**（CPE 目标机架构；源码可自行交叉编译其它架构） |
+| 适用 | OpenWrt 23.05（ipk）/ 24.10+（apk）· Release 固定发布 `aarch64_cortex-a53`（CPE 目标机架构）；手动构建可选 `apk` / `ipk` / `x86`，x86 供软路由与虚拟机侧调试 |
 
 > 后端只监听回环，页面经 rpcd 代理，依赖 LuCI 登录态与 ACL。
 
@@ -73,7 +73,7 @@ ls -l /usr/bin/at-webserver-rust        # 后端应存在
 
 ## 页面
 
-**12 个**，都挂在「移动网络 → MT5700M模块管理」下：
+**11 个**，都挂在「移动网络 → MT5700M模块管理」下：
 
 | 页面 | 做什么 |
 |:--|:--|
@@ -81,7 +81,6 @@ ls -l /usr/bin/at-webserver-rust        # 后端应存在
 | 网络设置 | 5G 接入模式（SA/NSA）、锁频（频点 / 小区 / Band）、**定时锁频编排**、邻区扫描与就地锁定、网络拒绝原因 |
 | 拨号设置 | 自动拨号与 APN、拨号方式与 USB 端口模式、网口模式与 DMZ、PDP 上下文管理 |
 | 模组设置 | 设备信息、SIM 槽位与 PIN、飞行模式、设备控制（LED / PCIe / 网卡速率）、NR 能力、网络系统配置、VoWiFi 五道门评估 |
-| 语音通话 | 拨号、接听、拒接、挂断、DTMF、通话记录。**只有信令，没有声音** —— 见 [已知限制](#已知限制) |
 | eSIM 管理 | eUICC Profile 的下载 / 启用 / 禁用 / 重命名 / 删除，卡容量与待发回执 |
 | 模组升级 | FOTA 远程固件升级 |
 | 短信中心 | 收发短信与联系人会话，长短信按 UDH 自动合并成一条 |
@@ -91,7 +90,7 @@ ls -l /usr/bin/at-webserver-rust        # 后端应存在
 | 服务配置 | 后端进程状态、连接方式（串口 / TCP）、RPC 端口与密钥、事件通知与 WebHook |
 
 <details>
-<summary><b>全部页面截图（12 张）</b> —— 均取自真机，IMEI / IMSI / ICCID / EID / 公网 IP / 小区标识已打码；其中 <code>04-schedule</code> 取自并入网络设置之前的独立页面</summary>
+<summary><b>全部页面截图（11 张）</b> —— 均取自真机，IMEI / IMSI / ICCID / EID / 公网 IP / 小区标识已打码；其中 <code>04-schedule</code> 取自并入网络设置之前的独立页面</summary>
 
 <br>
 
@@ -170,17 +169,6 @@ printf '%s\n' '{"id":1,"method":"at","params":{"cmd":"AT+CSQ"}}' | nc 127.0.0.1 
 ---
 
 ## 已知限制
-
-### 通话只有信令，没有声音
-
-| | |
-|:--|:--|
-| 能用 | 拨号、接听、拒接、挂断、通话状态与时长、DTMF、通话记录；来电时页面响铃 |
-| 不能用 | **通话内容听不到**（本地与对端都没有声音） |
-| 原因 | MT5700M-CN 的 USB 双配置共 6 个接口，没有一个 Audio Class，10 个端点全是 Bulk、零 isochronous。手册 244 条命令没有音频数据通道，`AT^SETMODE` 九个模式全为数据口。车载 PCM 引脚（GPIO 520–524）在通话中采样 2000 次均为 0 |
-| 出路 | 换一颗带 **USB Audio Class** 的模组（厂商音频基线为 RM520N-GL）。插件本身不带音频驱动（2.4.48 起移出，本机用不到），换模组后驱动需由固件自带的 kmod 提供 |
-
-模组侧「车载模式」确实是开着的（`AT+CLVL=?` 返回 `(1-12)` ⇒ `wpgPcmFlag=1`），但引脚无波形、SoC 的 `audio-controller@11210000` 是 `status=disabled`、内核零 ALSA 符号 —— 三层同时为空，换固件也解决不了。
 
 ### VoWiFi 评估通过 ≠ 能打电话
 

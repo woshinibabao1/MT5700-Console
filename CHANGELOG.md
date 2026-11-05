@@ -5,6 +5,60 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.6.0] - 2026-11-06
+
+### Removed — 语音通话整块下线
+
+页面「语音通话」及其全部挂点移除。理由是这台机器的语音音频**在物理上不通**：
+模组 USB 六个接口没有一个 Audio Class、零等时端点，`AT^SETMODE` 九种模式全为数据口，
+车载 PCM 引脚通话中采样全 0，SoC AFE `status=disabled`、内核零 ALSA 符号 ——
+信令全通但听不到声音，界面只是一台拨号器。
+
+同步清掉（按「下线功能要四处同生共死」的清单逐项核对，`find-orphans.py` 复查无残留）：
+
+- 页面 `admin/modem/5g/comm/voice` 与 `htdocs/.../view/at-webserver/voice_call.js`
+- 菜单条目、导航里的语音项与图标（`mt5700.js` 的 `SH_NAV` / `SH_ICON`）
+- `mt5700.uc` 的 ubus 方法 `mt5700.call` 及其 15 个辅助函数（号码白名单 / CLCC 解析 /
+  状态机 / 通话记录读写）
+- ACL 里的 `mt5700.call`（read 与 write 两处）
+- `rpc.js` 的 `rpcCall('call')` 声明、`fetchCall`、`parseCcallState` / `parseCend`
+  与 `parseRawData` 里的通话 URC 分发
+- CSS 的 `num-display` / `keypad` / `callbar` 三件套（`diag-verdict` 是网络总览与接入
+  设置两页共用的通用件，保留）
+- `tests/voice-call-contract.test.js`、`tests/call-passthrough-contract.test.js`，
+  以及 `verify-guards.py` 里 24 条语音专属守卫和它们的 5 个键
+
+**保留未动**：Rust 侧 `urc.rs` / `atclient.rs` 的 `^CCALLSTATE` / `^CEND` 分类与
+`incoming_call` 推送。本机没有 Rust 工具链，这类行为改动无法本地验证（红线 64），
+而它只是事件生成、不影响任何功能；前端事件名单仍认 `incoming_call`。
+`isUnsolicitedText` 里的 `RING` / `NO CARRIER` / `^CEND` 也保留 —— 万一有人从 AT 终端
+手动开过上报，这些 URC 仍能被归类成「非命令响应」。
+
+### Changed — 构建目标改为可选：apk / ipk / x86
+
+手动 `workflow_dispatch` 新增 `target` 输入（`all` / `apk` / `ipk` / `x86`）。
+原来矩阵写死两个 aarch64 组合，想只要一种产物也得把两个都跑一遍。
+
+- 新增 `plan` job 把 `target` 翻成矩阵（GitHub 的 matrix 不能按 inputs 过滤，
+  只能用 `fromJSON` 喂），`build` 改用 `include: ${{ fromJSON(...) }}`
+- `x86` 组合 = `x86_64-main` + `x86_64-unknown-linux-musl` + `x86/64`，
+  供软路由 / 虚拟机侧调试；**默认不进 `all`**（目标机是 aarch64 CPE），
+  打标签发版仍固定两个 aarch64 组合
+- Release 侧的产物校验改为读 plan 的 `expect` / `combos`，不再写死「2 个」——
+  只选一个目标时期望值就是 1，加组合时也只要改 plan 一处
+- `scripts/sdk-build.sh` 无需改动：它本就接受任意 `<ARCH> <RUST_TRIPLE> <VER> <TARGET_DIR>`，
+  x86_64 musl 的 zig target 映射也已在位
+
+### Added — 身份读数一键复制
+
+「设备与身份」里的 IMSI / ICCID / IMEI 常要整串发给运营商或客服，原先只能手动划词
+（长串等宽数字在手机上几乎选不齐）。三行各加一个行内「复制」按钮，成功 / 失败 /
+超时都有文案反馈。
+
+复制能力放在共享库 `Mt5700.copyText()`，并对 **http 下的非安全上下文**做了
+`execCommand('copy')` 退路 —— 只调 `navigator.clipboard` 在 CPE 上会静默失败，
+按钮点了没反应。CSS 6.7.0 → 6.8.0。
+
 ## [2.5.6] - 2026-10-27
 
 ### Changed — 设备与身份删掉「手机号」「SIM 热插拔」两行

@@ -58,10 +58,8 @@ TARGETS = {
     # 「单一真源」契约（tests/single-source-contract.test.js）覆盖多个文件，
     # 每个被它守着的文件都要能单独变异 —— 一份文件一个键，别混。
     "rpcjs": ATWB / "rpc.js",
-    # rpc.js 再挂一个键：**通话响应透传**（stage / preflight 四字段）。
     # 2026-10-16 真实故障：中间这层没搬字段，后端在回、前端在读，唯独它没传 ——
     # 真机用 ubus 直调验证时**绕过**了这一层，所以没能暴露。见 MUTATIONS 175-177。
-    "rpcjs8": ATWB / "rpc.js",
     "parsejs": ATWB / "parse.js",
     "termjs": ATWB.parent / "view" / "at-webserver" / "terminal.js",
     "smssetjs": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
@@ -173,23 +171,14 @@ TARGETS = {
     "nsjs3": ATWB.parent / "view" / "at-webserver" / "network_status.js",
     # ★ 再挂两个键（2026-10-16「厂商 beta 固件的电话功能移植」）：
     #   状态机令牌 / preflight 前置检查 / 记录 direction 三组守卫横跨
-    #   htdocs 的 voice_call.js 与 ucode 的 mt5700.uc，都跑 tests/voice-call-contract。
     #   ★ 复用 uc / uc2..uc8 会**跑错测试**（各自固定跑 exitip / vowifi / bootstrap /
     #     at-batch / cellscan / busy-fastfail / at-read-classification / sms-sent-log），
     #     变异生效却没人判红 —— 红线 16b。
-    "voicejs": ATWB.parent / "view" / "at-webserver" / "voice_call.js",
-    # ★ 2026-10-22 UI 文案守卫：**同一文件另挂一个键**（红线 16b：复用 voicejs
-    #   会让变异生效却没人判红 —— 那个键跑的是 voice-call-contract）。
     #   守的是「界面不许再贴取证报告」：那条能力提示一旦被写回 208 字的实测
     #   报告，用户就得在打电话的页面上读实验记录。
-    "voicecopy": ATWB.parent / "view" / "at-webserver" / "voice_call.js",
-    # ★ 2026-10-22 通话事件驱动改造：Rust 侧的 URC 分类是**另一层**
     #   ——is_exclusive_urc 管「要不要 emit」，is_passthrough_urc 管
     #   「emit 时带不带 broadcast」，两者只改一处就会出现「URC 被并进
     #   AT+CLCC 应答体、前端一条收不到、而所有本地测试全绿」。
-    #   跨层断言写在 voice-call-contract 里，所以单独挂键，别复用 voicejs。
-    "rustat": ROOT / "src" / "rust" / "src" / "atclient.rs",
-    "uc9": ROOT / "root" / "usr" / "share" / "rpcd" / "ucode" / "mt5700.uc",
 }
 
 # 每个目标改动后该跑哪个契约测试（esim.js / mt5700.css 都归 esim-contract）
@@ -267,15 +256,9 @@ TARGET_TEST = {
     # ★ 制式判定（NSA 下 ^MONSC 只报 LTE 锚点）—— 别复用 nsjs / nsjs2。
     "nsjs3": ROOT / "tests" / "sysmode-label.test.js",
     # ★ 厂商 beta 固件电话功能移植（2026-10-16）：两个键都跑语音契约。
-    "voicejs": ROOT / "tests" / "voice-call-contract.test.js",
-    "voicecopy": ROOT / "tests" / "ui-copy-contract.test.js",
-    "rustat": ROOT / "tests" / "voice-call-contract.test.js",
-    "uc9": ROOT / "tests" / "voice-call-contract.test.js",
-    # ★ rpc.js 的第三个键：**通话响应透传**（2026-10-16 真实故障）。
     #   既有 7 个 rpcjs* 键分别跑 single-source / vowifi / retry-offload /
     #   cellscan-removed / busy-fastfail / at-read-classification / sms-sent-log，
     #   复用任何一个都会「变异生效却没人判红」（红线 16b）。
-    "rpcjs8": ROOT / "tests" / "voice-call-contract.test.js",
 }
 
 def _resolve_node() -> str:
@@ -1871,224 +1854,9 @@ MUTATIONS = [
     #   承载域判据 / 四字段透传 / ready 宽松取值）已随 v2.4.27 preflight 下线
     #   一并删除 —— 变异条目必须与断言同生共死，否则每次跑守卫都报
     #   "锚点出现 0 次"，把真问题淹掉。
-    (
-        # 把「不是数组」判据退回 `=== null`：后端若不回 calls 字段，
-        # undefined === null 为假 ⇒ 报错分支不可达 ⇒ 通道故障看起来像空闲
-        # —— 这正是本次修掉的真实 bug（红线 23）。
-        "视图：失败判据退回 res.calls === null（报错分支变死代码，故障像空闲）",
-        "voicejs",
-        "if (!Array.isArray(res.calls)) {",
-        "if (res.calls === null) {",
-        "视图判据用 Array.isArray，不是 === null（否则报错分支是死代码）",
-    ),
-    (
-        # 令牌表缺一项：后端给出 held 时前端查不到 → 退回「状态未知」。
-        "视图：STAGE_TEXT 少了 held 令牌（保持中的通话显示成「状态未知」）",
-        "voicejs",
-        "\t\t\theld: '通话保持',\n",
-        "",
-        "STAGE_TEXT 覆盖后端会给出的全部令牌",
-    ),
-    (
-        # 记录不再写 direction：厂商口径的消费方与老记录兼容链一起断。
-        "视图：记录不再写 direction 字符串（只剩 dir 整数）",
-        "voicejs",
-        "direction: (t.dir === 1) ? 'incoming' : 'outgoing',",
-        "direction: 'incoming',",
-        "视图记录写出 direction 字段",
-    ),
-    (
-        # 失败分支不显式回 calls:null：前端拿到 undefined，判据若同时退化就会误判。
-        "ucode：callStatus 无响应分支丢掉 calls: null",
-        "uc9",
-        "calls: null, error: 'AT 通道无响应' }",
-        "error: 'AT 通道无响应' }",
-        "callStatus 无响应分支显式回 calls: null",
-    ),
-    (
-        # 把厂商的 Quectel 私有命令当成「数据」留在代码行里（注释外）。
-        # 它是 MT5700M-CN 手册里没有的命令，一旦被下发就是未定义行为（红线 27）。
-        "ucode：代码行里混进 Quectel 私有命令 AT+QCFG（红线 27）",
-        "uc9",
-        "let r = rpcCall('at', { cmd: 'AT+CLCC' });",
-        "let r = rpcCall('at', { cmd: 'AT+CLCC', qcfg: 'AT+QCFG=\"ims\"' });",
-        "★ Quectel 私有命令只出现在注释里（不得成为真实下发命令）",
-    ),
-    (
-        # 总态优先级倒置：同时「已接通」与「来电振铃」时挑错的那个。
-        "ucode：callOverallStage 优先级倒置（已接通被来电振铃盖住）",
-        "uc9",
-        "['active', 'held', 'waiting', 'ringing', 'alerting', 'dialing']",
-        "['dialing', 'alerting', 'ringing', 'waiting', 'held', 'active']",
-        "总态优先级序 active > held > waiting > ringing > alerting > dialing",
-    ),
-    (
-        # ★★ 2026-10-16 真实故障（不是假想）：rpc.js 的 fetchCall 没搬 stage。
-        #   ucode 真机确实回 "stage":"idle"，视图也确实读 res.stage，但中间这层
-        #   没透传 ⇒ res.stage 恒 undefined ⇒ st.stage 恒 null ⇒ 徽标一直退回
-        #   CALL_STATE 的 0-5 粗判。上一轮真机验证用 ubus 直调**绕过**了这一层，
-        #   所以没暴露。守卫必须覆盖「相邻两层的字段名」而不只是单层。
-        "rpc.js：fetchCall 漏搬 stage（后端在回、前端在读，中间层丢弃）",
-        "rpcjs8",
-        "stage: (resp.stage == null) ? null : resp.stage,",
-        "/* stage 未透传 */",
-        "★ fetchCall 透传 stage（后端在回、前端在读，这一层不能漏）",
-    ),
-    (
-        # 按钮禁用不再看通道故障：用户对着一个已经断了的通道反复点。
-        "视图：applyGates 不再把通道故障算进禁用",
-        "voicejs",
-        "var blocked = st.busy || st.channelError;",
-        "var blocked = st.busy;",
-        "applyGates 把「通道故障」算进禁用（厂商 !s.status?.error 那一半）",
-    ),
-    (
-        # 通话中还能再拨一个号（第二个 ATD 会被模组拒，前端该自己挡住）。
-        "视图：通话中「拨打」仍可点（会发出第二条 ATD）",
-        "voicejs",
-        "dialBtn.disabled = blocked || (st.phase !== 'idle');",
-        "dialBtn.disabled = blocked;",
-        "拨打只在 idle 可点（通话中不该还能再拨一个）",
-    ),
-    (
-        # 接听判定丢掉 blocked：通道忙/故障时接听键仍可点，对着一个
-        # 注定失败的通道反复点（厂商 usable 里 !s.status?.error 那一半）。
-        "视图：接听判定丢掉 blocked（通道故障时仍可点接听）",
-        "voicejs",
-        "answerBtn.disabled = blocked",
-        "answerBtn.disabled = false && blocked",
-        "接听只在来电（incoming）可点 —— 判据用 phase 不用 stage 令牌",
-    ),
-    (
-        # 通话按钮退回 display 隐藏：用户原地反馈「没看到接停电话」——
-        # 来电只响几秒，藏起来的接听键根本指望不上。
-        "视图：通话按钮退回 display 隐藏（用户看不到接听/挂断）",
-        "voicejs",
-        "\t\thangupBtn.textContent = (st.phase === 'incoming') ? '拒接' : '挂断';\n\n\t\tapplyGates();",
-        "\t\tanswerBtn.style.display = (st.phase === 'incoming') ? '' : 'none';\n\t\thangupBtn.textContent = (st.phase === 'incoming') ? '拒接' : '挂断';\n\n\t\tapplyGates();",
-        "通话按钮常驻可见，不用 display 隐藏（用户原话：没看到接停电话）",
-    ),
-    (
-        # 铃声开关不纳入禁用判据：通道忙/故障时还能切铃声，判据漏一个按钮。
-        "视图：铃声开关不纳入 applyGates（禁用判据漏一个按钮）",
-        "voicejs",
-        "\t\tringBtn.disabled = blocked;\n",
-        "",
-        "铃声开关也纳入 applyGates（通道忙时不该切铃声）",
-    ),
-    (
-        # 接听判据从 phase 退回 stage 令牌：老后端没有 stage（st.stage=null）时，
-        # 来电振铃中接听键却是灰的 —— 令牌细但脆，现算的 phase 才稳。
-        "视图：接听判据退回 stage 令牌（老后端上来电接听键是灰的）",
-        "voicejs",
-        "answerBtn.disabled = blocked || (st.phase !== 'incoming');",
-        "answerBtn.disabled = blocked\n\t\t\t|| ((st.stage !== 'ringing') && (st.stage !== 'waiting'));",
-        "接听只在来电（incoming）可点 —— 判据用 phase 不用 stage 令牌",
-    ),
-    (
-        # 建页后不灰化：connectThen 握手完成前按钮是默认可用态，
-        # 空闲时「接听/挂断」亮着是个假象。
-        "视图：建页后不立即 applyGates（握手前按钮是可用态假象）",
-        "voicejs",
-        "\tapplyGates();\n\n\t/* 浏览器要求用户手势后才能出声",
-        "\n\t/* 浏览器要求用户手势后才能出声",
-        "建页后立即 applyGates 一次（connectThen 握手前按钮不能是可用态）",
-    ),
-    (
-        # 读失败后不复位通道标志 ⇒ 一次抖动就让按钮永久灰化。
-        "视图：status 读成功后不复位 channelError（按钮永久灰化）",
-        "voicejs",
-        "\t\t\tst.channelError = false;\n",
-        "\t\t\t/* 未复位 */\n",
-        "status 读失败置 channelError 且成功时复位（否则永久灰化）",
-    ),
-    (
-        # 禁用判据散落回 setBusy —— 第二套判据必然与 applyGates 漂移。
-        "视图：setBusy 里另写一套 disabled（禁用判据漂移）",
-        "voicejs",
-        "\t\t\tapplyGates();\n\t\t}\n\n\t\tfunction setErr(msg) {",
-        "\t\t\tdialBtn.disabled = on;\n\t\t}\n\n\t\tfunction setErr(msg) {",
-        "setBusy 只改 busy 标志并转交 applyGates",
-    ),
     # 原「视图：三态记号退回 core（CS 未过 + IMS 已过…）」条目已随 v2.4.27
     # 的 preflight 下线一并删除：被变异的代码与被守卫的断言同时不存在了。
-    # ★ 2026-10-22 通话事件驱动（^CCALLSTATE）：四条视图 + 一条 Rust。
     #   锚点唯一性已核（各出现 1 次）。
-    (
-        # 把 URC 的 state 直接当 phase 用 —— 这是最容易犯、也最难查的错：
-        # ^CCALLSTATE 的 3=connected 与 CLCC 的 0=active 是两套编号，
-        # 写进 applyCalls 会整体错位，而页面「看起来还在动」。
-        "视图：URC 直接改 phase（两套状态编号混用）",
-        "voicejs",
-        "\t\t\tif (d.domain != null) { st.domain = d.domain; }",
-        "\t\t\tif (d.domain != null) { st.domain = d.domain; }\n\t\t\tst.phase = 'active';",
-        "URC 只当触发器",
-    ),
-    (
-        # 去掉合并窗口：同一批 URC（^CONN 与 ^CCALLSTATE 常常同毫秒到）
-        # 会连发几条 CLCC，串行占满 AT 通道（单条 65~133ms）。
-        "视图：URC 触发刷新没有合并窗口（同批 URC 连发 CLCC）",
-        "voicejs",
-        "\t\t\tif (now - lastStatusAt < 250) {",
-        "\t\t\tif (now - lastStatusAt < 0) {",
-        "250ms 合并窗口",
-    ),
-    (
-        # 时长退回前端差值：切后台、页面重载就丢，而 ^CEND 的第二个字段
-        # 本来就是模组给的秒数（实测 25 对应 25 秒通话）。
-        "视图：通话时长不用 ^CEND（回落到前端差值）",
-        "voicejs",
-        "duration: (t.endedDuration != null) ? t.endedDuration\n"
-        "\t\t\t\t\t: (t.answeredAt ? Math.round((Date.now() - t.answeredAt) / 1000) : 0),",
-        "duration: (t.answeredAt ? Math.round((Date.now() - t.answeredAt) / 1000) : 0),",
-        "通话时长优先用 ^CEND",
-    ),
-    (
-        # 新一通不清残留：上一通没来得及用上的 ^CEND 时长会被记到这一通头上。
-        "视图：新一通开始不清 ^CEND 残留（时长记到下一通）",
-        "voicejs",
-        "\t\t\t\t\tpendingDuration = null;\n\t\t\t\t\ttrack = {",
-        "\t\t\t\t\ttrack = {",
-        "新一通开始清掉",
-    ),
-    (
-        # 后端不再把 ^CCALLSTATE 登记为 passthrough：命令等待期（每 2 秒一次
-        # AT+CLCC）这条 URC 会被并进应答体，前端收不到 —— 而本地测试仍全绿，
-        # 因为断言只查了前端。变异它验证的正是那条跨层断言。
-        "Rust：is_passthrough_urc 漏掉 ^CCALLSTATE（命令等待期广播位丢失）",
-        "rustat",
-        '    if line.starts_with("^CCALLSTATE:")\n',
-        '    if line.starts_with("^XXCCALLSTATE:")\n',
-        "is_passthrough_urc 登记了五条通话 URC",
-    ),
-    (
-        # 不还原共享单例的 pollInterval：切走之后每个页面都按 500ms 拉 events，
-        # 白挤 rpcd 单线程（红线 63）。
-        "视图：离开页面不还原事件轮询间隔（其它页面被按 500ms 拉 events）",
-        "voicejs",
-        "\t\t\tc.pollInterval = savedPollInterval;\n",
-        "\t\t\t/* 未还原 */\n",
-        "把事件轮询压到 500ms",
-    ),
-    (
-        # 不清合并定时器：离开语音页之后还会触发一次 refreshStatus，
-        # 等于对着一张已卸载的页面往模组打一条 CLCC。
-        "视图：离开页面不清 URC 合并定时器（走后仍打一条 CLCC）",
-        "voicejs",
-        "\t\t\tif (kickTimer) { clearTimeout(kickTimer); kickTimer = 0; }\n",
-        "\n",
-        "离开页面清掉 URC 合并定时器",
-    ),
-    (
-        # 把取证语言写回用户文案：2026-10-22 之前语音页那条提示就是这么开的头，
-        # 全句 208 字，讲 USB 六个接口、手册 244 条命令、要不要重编固件。
-        # 用户点进「语音通话」是要打电话，不是读实验记录。
-        "文案：能力提示里写回「实测（日期）」（界面变实验记录）",
-        "voicecopy",
-        "\t\t}, '这一页只管信令：能拨能接",
-        "\t\t}, '实测（2026-10-22）这一页只管信令：能拨能接",
-        "没有内部取证语言",
-    ),
     (
         # 本固件 ucode 不支持 throw 语句：一处 throw = 整个 mt5700.uc 编译失败 =
         # rpcd 不注册 mt5700 对象 = 所有页面 -32000（2026-10-22 真机事故）。

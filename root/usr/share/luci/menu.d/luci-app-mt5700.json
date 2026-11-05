@@ -89,14 +89,6 @@
 			"type": "firstchild"
 		}
 	},
-	"admin/modem/5g/comm/voice": {
-		"title": "语音通话",
-		"order": 10,
-		"action": {
-			"type": "view",
-			"path": "at-webserver/voice_call"
-		}
-	},
 	"admin/modem/5g/comm/sms": {
 		"title": "短信中心",
 		"order": 20,

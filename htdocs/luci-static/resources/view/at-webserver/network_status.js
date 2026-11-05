@@ -413,10 +413,32 @@ return L.view.extend({
 			   前者本机卡没写 MSISDN（AT+CNUM 恒 not found），显示出来只是一句
 			   「未写入」；后者的开关在「模组配置 → SIM 卡」页能看能改，
 			   总览再列一遍既不能点也改不了。 */
+			/* IMSI / ICCID / IMEI 经常要整串复制给运营商或客服，而这里原先只能手动
+			   划词选中 —— 长串等宽数字在手机上几乎选不整齐。加一个行内复制按钮。
+			   ★ 复制走 Mt5700.copyText：它内部对 http（非安全上下文）有 execCommand
+			     退路，直接调 navigator.clipboard 在 CPE 上会静默失败。 */
+			function copyableRow(label, value) {
+				if (!value) return [label, '—'];
+				var btn = E('button', {
+					'class': 'mt5700-copy', type: 'button',
+					title: '复制' + label, 'aria-label': '复制' + label
+				}, '复制');
+				btn.addEventListener('click', function () {
+					Mt5700.copyText(value).then(function (ok) {
+						btn.textContent = ok ? '已复制' : '复制失败';
+						setTimeout(function () { btn.textContent = '复制'; }, 1600);
+					});
+				});
+				return [label, E('div', { 'class': 'mt5700-copy-row' }, [
+					E('span', { 'class': 'mt5700-copy-val' }, value),
+					btn
+				])];
+			}
+
 			var rows = [
-				['IMSI', fullNum(st.imsi)],
-				['ICCID', fullNum(st.iccid)],
-				['IMEI', fullNum(st.imei)],
+				copyableRow('IMSI', fullNum(st.imsi)),
+				copyableRow('ICCID', fullNum(st.iccid)),
+				copyableRow('IMEI', fullNum(st.imei)),
 				['模块 / 固件', (st.model || '—') + ' / ' + (st.fw || '—')]
 			];
 

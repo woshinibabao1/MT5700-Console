@@ -85,7 +85,7 @@ const users = views.filter(function (f) {
 	return fs.readFileSync(path.join(VIEW_DIR, f), 'utf8').indexOf('Mt5700.connectThen') >= 0;
 });
 ok('★ 全部需要首刷的页面都走 Mt5700.connectThen（当前 ' + users.length + ' 个页面）',
-	users.length >= 10, '实际：' + users.join(', '));
+	users.length >= 9, '实际：' + users.join(', '));
 
 /* ---------- ② 认证失败：后端统一翻译成可行动文案 ---------- */
 

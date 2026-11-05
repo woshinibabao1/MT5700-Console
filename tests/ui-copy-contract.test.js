@@ -221,10 +221,6 @@ ok('单条 UI 中文字符串不超过 ' + MAX_CN + ' 字（界面不是实验�
 
 /* ---------- ④ 关键告知不能被精简掉 ---------- */
 
-const voiceSrc = fs.readFileSync(path.join(DIRS[1], 'voice_call.js'), 'utf8');
-ok('语音页仍常驻「听不到声音」告知（精简不等于删掉）',
-	voiceSrc.includes('通话内容听不到'));
-
 const readme = path.join(ROOT, 'README.md');
 ok('README 有「已知限制」章节承接被移出界面的依据',
 	fs.existsSync(readme) && fs.readFileSync(readme, 'utf8').includes('## 已知限制'));

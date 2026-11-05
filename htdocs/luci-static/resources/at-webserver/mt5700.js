@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '6.6.1';
+var MT5700_CSS_VERSION = '6.8.0';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -1434,13 +1434,12 @@ var Mt5700 = (function () {
 		device: '<rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M11 18.5h2"/>',
 		upgrade: '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/>',
 		sms: '<path d="M21 12a8 8 0 0 1-8 8H8l-4 3v-6.5A8 8 0 0 1 12 4h1a8 8 0 0 1 8 8z"/>',
-		voice: '<path d="M5 4h3.5l2 4.5-2.2 1.6a12 12 0 0 0 5.6 5.6l1.6-2.2L20 15.5V19a1.5 1.5 0 0 1-1.7 1.5A15.5 15.5 0 0 1 3.5 5.7 1.5 1.5 0 0 1 5 4z"/>',
 		at: '<path d="M5 6h14M5 12h9M5 18h12"/>',
 		logs: '<path d="M6 3h9l4 4v14H6z"/><path d="M9 12h7M9 16h5"/>',
 		service: '<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2 2M16.4 16.4l2 2M18.4 5.6l-2 2M7.6 16.4l-2 2"/>'
 	};
 
-	/* 12 个真实页面全在导航里 —— 少一个就是「藏起来的入口等于没有」 */
+	/* 11 个真实页面全在导航里 —— 少一个就是「藏起来的入口等于没有」 */
 	var SH_NAV = [
 		{ g: '概览', items: [
 			{ p: 'overview', u: 'admin/modem/5g/status', t: '总览' }
@@ -1456,8 +1455,7 @@ var Mt5700 = (function () {
 		] },
 		{ g: '通信', items: [
 			{ p: 'sms', u: 'admin/modem/5g/comm/sms', t: '短信' },
-			{ p: 'smscfg', u: 'admin/modem/5g/comm/sms-settings', t: '短信设置' },
-			{ p: 'voice', u: 'admin/modem/5g/comm/voice', t: '语音' }
+			{ p: 'smscfg', u: 'admin/modem/5g/comm/sms-settings', t: '短信设置' }
 		] },
 		{ g: '工具', items: [
 			{ p: 'at', u: 'admin/modem/5g/tools/terminal', t: 'AT 终端' },
@@ -1768,6 +1766,45 @@ var Mt5700 = (function () {
 		var el = E('div', { 'class': 'mt5700-sh-slot' });
 		el.setAttribute('data-sh-slot', name || 'tools');
 		return el;
+	};
+
+	/*
+	 * 复制文本到剪贴板。
+	 *
+	 * ★ 为什么必须留 execCommand 退路：CPE 的 LuCI 跑在 http://192.168.x.x 下，
+	 *   不是安全上下文，navigator.clipboard 直接不存在（或 writeText 立刻 reject）。
+	 *   只写 clipboard API 的实现在真机上等于"按钮点了没反应"。
+	 * ★ 退路同样要清理临时 textarea：它 position:fixed 且 opacity:0，不删会留在
+	 *   DOM 里被后续查询命中，也可能被读屏软件念出来。
+	 * 返回 Promise<boolean>，调用方据此换按钮文案。
+	 */
+	function legacyCopy(text) {
+		try {
+			var ta = document.createElement('textarea');
+			ta.value = text;
+			ta.setAttribute('readonly', '');
+			ta.style.position = 'fixed';
+			ta.style.top = '-1000px';
+			ta.style.opacity = '0';
+			document.body.appendChild(ta);
+			ta.select();
+			ta.setSelectionRange(0, ta.value.length);
+			var ok = document.execCommand('copy');
+			document.body.removeChild(ta);
+			return ok;
+		} catch (e) {
+			return false;
+		}
+	}
+
+	api.copyText = function (text) {
+		var s = String(text == null ? '' : text);
+		if (!s) return Promise.resolve(false);
+		if (navigator.clipboard && navigator.clipboard.writeText) {
+			return navigator.clipboard.writeText(s).then(function () { return true; },
+				function () { return legacyCopy(s); });
+		}
+		return Promise.resolve(legacyCopy(s));
 	};
 
 	api.E = E;

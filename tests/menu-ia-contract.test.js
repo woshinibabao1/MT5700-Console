@@ -54,12 +54,12 @@ if (menu) {
 		if (!fs.existsSync(file)) badPath.push(k + ' → ' + a.path);
 	});
 	ok('view 的 path 全部命中真实视图文件', badPath.length === 0, badPath.join('；'));
-	ok('view 数量 = 12（少一个就说明有页被漏掉）', views === 12, '实际 ' + views);
+	ok('view 数量 = 11（少一个就说明有页被漏掉）', views === 11, '实际 ' + views);
 
-	/* 12 个页面清单：删页面必须同时改这里 —— 这是有意的摩擦 */
+	/* 11 个页面清单：删页面必须同时改这里 —— 这是有意的摩擦 */
 	const EXPECT = [
 		'network_status', 'network_settings', 'dial', 'modem_settings', 'upgrade',
-		'esim', 'voice_call', 'sms_center', 'sms_settings', 'terminal', 'logs', 'service'
+		'esim', 'sms_center', 'sms_settings', 'terminal', 'logs', 'service'
 	];
 	EXPECT.forEach((p) => {
 		const hit = keys.some((k) => (menu[k].action || {}).path === 'at-webserver/' + p);
