@@ -1,0 +1,52 @@
+#!/bin/sh
+# MT5700 Console —— 全局统一 TTL
+#
+# 背景（这台设备上真实发生过）：5G 模组出来的包经路由器转发后，TTL 会被减 1。
+# 部分运营商按 TTL 判断「这是共享/二手流量」并直接丢弃或限速，表现为
+# **客户端 TCP 全超时、但 ICMP 与 DNS 通、路由器自己 TCP 也通** ——
+# 三个现象一起出现时，第一嫌疑就是 TTL，而不是 DNS 也不是防火墙。
+#
+# 做法：在 mangle/postrouting 上把出口包的 TTL 统一写成一个固定值（默认 128，
+# 与常见家用路由器出口一致），让运营商看不到「被减过一次」的痕迹。
+#
+# ★ 为什么用 nft 而不是 iptables：本机固件是 fw4（nftables），
+#   `iptables` 命令在这里是 iptables-nft 包装，两种写法最终落到同一张表，
+#   但混用会让 `nft list ruleset` 里的规则看起来"时有时无"。统一走 nft。
+# ★ 为什么挂在 firewall.d 而不是自己的 init.d：fw4 reload 会 flush 整张
+#   ruleset 重建，挂在 init.d 里的规则会在任何一次防火墙重载后静默消失，
+#   而界面上的开关还显示"已开启"。firewall.d 由 fw4 自己调度，永远跟着重建。
+# ★ 规则带 `comment "mt5700-ttl"`：识别自己的规则只能靠这个标记，
+#   不能靠"srcnat 链里第一条 ttl 规则"——那可能是别处（如 passwall）加的。
+
+MT5700_TTL_COMMENT="mt5700-ttl"
+
+# 只认这两个键；缺失一律按"关闭"处理（默认不动用户的网络）。
+TTL_ENABLED="$(uci -q get at-webserver.config.ttl_enabled || echo 0)"
+[ "$TTL_ENABLED" = "1" ] || exit 0
+
+TTL_VALUE="$(uci -q get at-webserver.config.ttl_value || echo 128)"
+
+# 防御性校验：脚本可能被 fw4 在任何时机调用，也可能配置文件被手改坏。
+# 只接受 1-255 的纯数字，其余回落 128 —— 0 会让包一出路由器就被丢掉，
+# 那是彻底的断网，比不改 TTL 严重得多。
+case "$TTL_VALUE" in
+	'' | *[!0-9]*) TTL_VALUE=128 ;;
+esac
+if [ "$TTL_VALUE" -lt 1 ] || [ "$TTL_VALUE" -gt 255 ] 2>/dev/null; then
+	TTL_VALUE=128
+fi
+
+# 幂等：先清掉可能残留的旧规则再添加。
+# fw4 reload 本来会 flush，但本脚本也可能被手动执行（或 fw4 因故重跑 include），
+# 不清就会叠加出多条同值规则 —— 功能上等价，但 ruleset 会越攒越乱。
+for h in $(nft -a list chain inet fw4 srcnat 2>/dev/null |
+	grep "$MT5700_TTL_COMMENT" | grep -o 'handle [0-9]*' | cut -d' ' -f2); do
+	nft delete rule inet fw4 srcnat handle "$h" 2>/dev/null
+done
+
+# 不限定 oifname：postrouting hook 只对「转发」与「本机发出」的包生效，
+# LAN 侧互访不走 forward，不受影响；路由器自己的 DNS/NTP 包 TTL 变 128 也无害。
+# 限定 WAN 口名反而要多解析一层 fw4 内部结构，那种依赖会在 fw4 升级时静默失效。
+nft add rule inet fw4 srcnat ip ttl set "$TTL_VALUE" comment "$MT5700_TTL_COMMENT" 2>/dev/null
+
+exit 0

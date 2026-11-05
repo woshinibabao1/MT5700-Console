@@ -179,6 +179,31 @@ ok('★ 反向自检：缺字段归 0 会被判红', R_REJ_ZERO.test(badRej));
 const badRust = 'fn since(&self, since: u64) -> (u64, Vec<serde_json::Value>) {';
 ok('★ 反向自检：since 不带 budget 会被判红',
 	!R_SINCE_BUDGET.test(badRust));
+/* ---------- SVG 必须走 svgEl（2026-11-06 真机故障） ---------- */
+
+/*
+ * 2.6.1 给空态加图标时写成 `E('svg', …, [ E('path', …) ])`，真机上渲染出
+ * 「[object HTMLUnknownElement] 暂无通知记录」。两个原因叠加：
+ *   ① E() 用 document.createElement('svg') —— HTML 文档里没有 svg 这个 HTML
+ *      标签，拿到的是 HTMLUnknownElement，没有任何 SVG 行为；
+ *   ② E() 第三参只认单个 DOM 节点（判据 nodeType），传数组会走
+ *      `el.textContent = String(text)`，而 String([元素]) 就是那个方括号串。
+ * 判据取「api.empty 函数体内不得出现 E( 打头的 svg/path」—— 具体到函数体，
+ * 不影响别处正当的 E('div', …) 用法，也不会因为重排函数位置而失效。
+ */
+const mt5700 = read(path.join(ATW, 'mt5700.js'));
+/* 锚到函数体边界（`\n\t};`），不用 indexOf('api.page') —— api.page 定义在
+   api.empty 之前，那样切片会取成空串（第一版就是这么写错的）。 */
+const emptyFn = (mt5700.match(/api\.empty = function[\s\S]*?\n\t};/) || [''])[0];
+ok('★ 空态图标用 svgEl 而非 E（HTML 命名空间画不出 SVG）',
+	emptyFn.includes("svgEl('svg'") && emptyFn.includes("svgEl('path'")
+	&& !/E\(\s*['"]svg['"]/.test(emptyFn) && !/E\(\s*['"]path['"]/.test(emptyFn));
+ok('★ 反向：把 svgEl 换回 E 必须判红',
+	!(function () {
+		const broken = emptyFn.replace(/svgEl\('svg'/g, "E('svg'").replace(/svgEl\('path'/g, "E('path'");
+		return broken.includes("svgEl('svg'") && !/E\(\s*['"]svg['"]/.test(broken);
+	})());
+
 
 console.log('通过 ' + pass + ' 项，失败 ' + fails.length + ' 项');
 if (fails.length) {

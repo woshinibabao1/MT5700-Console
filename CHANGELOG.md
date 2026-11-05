@@ -5,6 +5,38 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.6.4] - 2026-11-06
+
+### Fixed — 空态图标渲染成 `[object HTMLUnknownElement]`（2.6.1 引入，真机实测）
+
+日志页三个视图的空态在真机上显示成
+`[object HTMLUnknownElement] 暂无通知记录（短信、来电、信号变化与存储告警会写入此文件）`
+—— 图标位置是一串方括号文本。2.6.1 给 `Mt5700.empty(text, icon)` 加图标参数时引入。
+
+两个原因叠加，缺一个都出不来这个现象：
+
+1. **`E()` 建不出 SVG 元素**。它走 `document.createElement('svg')`，而 HTML 文档里没有
+   `svg` 这个 HTML 标签 —— 拿到的是 **`HTMLUnknownElement`**，没有任何 SVG 行为，
+   画面上什么都不显示。SVG 必须用 `document.createElementNS(svgNS, tag)`，
+   本文件里的 `svgEl()` 正是这么做的（`signalBar` / `ringGauge` 一直在用）。
+2. **`E()` 的第三参不认数组**。它只把「带 `nodeType` 的单个节点」当子元素，
+   其余一律 `el.textContent = String(text)`。传进去的 `[ E('path', …) ]` 是数组，
+   `String([元素])` 出来的就是 `'[object HTMLUnknownElement]'` —— 于是那串方括号
+   文本被塞进了 `.mt5700-empty-ico` 里，图标没画出来，文字却多了一行。
+
+修复：`api.empty` 改走 `svgEl()`（`createElementNS`），并用显式的
+`createElement` + `appendChild` 组装，不再依赖 `E()` 的第三参语义。
+**没有改 `E()` 本身** —— 它在 12 个视图层有 362 处调用，改公共函数的风险远大于收益。
+
+新增回归断言（`single-source-contract`）：`api.empty` 函数体内不得出现 `E('svg'` /
+`E('path'`，且必须出现 `svgEl('svg'` / `svgEl('path'`；附反向用例（换回 `E` 必须判红）。
+锚点取函数体边界（`api.empty = function` 到 `\n\t};`）—— 不能用
+`indexOf('api.page')` 定下界，`api.page` 的定义位置在 `api.empty` **之前**。
+
+已部署到真机（`/www/luci-static/resources/at-webserver/mt5700.js`，
+md5 `17309fec04ad0ac60bf5610dd434dba2`，原文件备份在 `/root/mt5700.js.bak-20261106`），
+刷新日志页即可看到图标。
+
 ## [2.6.3] - 2026-11-06
 
 ### Changed — 减少 if/else 第二批（前端 2 个文件 + Rust 2 个文件）

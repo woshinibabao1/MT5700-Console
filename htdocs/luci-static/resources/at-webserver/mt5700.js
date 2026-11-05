@@ -879,13 +879,26 @@ var Mt5700 = (function () {
 	api.empty = function (text, icon) {
 		var el = E('div', { 'class': 'mt5700-empty' });
 		if (icon) {
-			el.appendChild(E('div', { 'class': 'mt5700-empty-ico' }, [
-				E('svg', {
-					viewBox: '0 0 24 24', width: '26', height: '26',
-					fill: 'none', stroke: 'currentColor', 'stroke-width': '1.4',
-					'stroke-linecap': 'round', 'stroke-linejoin': 'round'
-				}, [ E('path', { d: icon }) ])
-			]));
+			/*
+			 * ★ 必须用 svgEl，不能用 E（2026-11-06 真机故障）：
+			 *   ① E() 走 document.createElement('svg') —— HTML 文档里没有 svg 这个
+			 *      HTML 标签，返回的是 **HTMLUnknownElement**，没有任何 SVG 行为，
+			 *      画面上什么都不显示；
+			 *   ② E() 的第三参只认"单个 DOM 节点"（判据是 nodeType），传**数组**
+			 *      会落到 `el.textContent = String(text)`，而 String([元素]) 正是
+			 *      '[object HTMLUnknownElement]' —— 于是用户看到的是
+			 *      「[object HTMLUnknownElement] 暂无通知记录」。
+			 *   svgEl() 用 createElementNS，且本文件里 signalBar / ringGauge 一直在用。
+			 */
+			var ico = E('div', { 'class': 'mt5700-empty-ico' });
+			var svg = svgEl('svg', {
+				viewBox: '0 0 24 24', width: '26', height: '26',
+				fill: 'none', stroke: 'currentColor', 'stroke-width': '1.4',
+				'stroke-linecap': 'round', 'stroke-linejoin': 'round'
+			});
+			svg.appendChild(svgEl('path', { d: icon }));
+			ico.appendChild(svg);
+			el.appendChild(ico);
 		}
 		el.appendChild(E('div', { 'class': 'mt5700-empty-text' }, text || '暂无数据'));
 		return el;
