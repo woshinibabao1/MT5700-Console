@@ -293,6 +293,101 @@ ok('非位图校验：回读为空时是 unknown（不臆断）',
 ok('非位图校验：未下发的字段不参与（空 want 不产生条目）',
 	Parse.sysCfgApplyCheck({ roam: '' }, { roam: '1' }).length === 0);
 
+/* ---------- E. 重新排版：分区标题真的插对位置、且真的渲染出来 ----------
+ *
+ * 2026-11-06：五个下拉平铺时看不出「接入顺序 + 两个频段」是一类事
+ * （搜网）、“服务域 + 漫游”是另一类（注册），于是用 Mt5700.formSection 切成两段。
+ *
+ * 只断言「源码里有 formSection('搜网优先级')」是不够的 —— 那和
+ * 「参数传了没人消费」是同一类假绿（红线 85）。这里分两层：
+ *   ① 静态：两个分区标题相对 formGroup 的位置正确
+ *   ② 真跑：最小 DOM stub 加载 mt5700.js，调 formSection() 查返回节点的结构
+ */
+const SEC_ACQ = modemJs.indexOf("formSection('搜网优先级')");
+const SEC_REG = modemJs.indexOf("formSection('注册方式')");
+const G_ACQ = modemJs.indexOf("formGroup('网络接入顺序'");
+const G_BAND = modemJs.indexOf("formGroup('2G / 3G 频段'");
+const G_LTE = modemJs.indexOf("formGroup('4G / LTE 频段'");
+const G_SRV = modemJs.indexOf("formGroup('服务域'");
+const G_ROAM = modemJs.indexOf("formGroup('漫游'");
+
+ok('分区标题「搜网优先级」在接入顺序之前',
+	SEC_ACQ > 0 && G_ACQ > SEC_ACQ, JSON.stringify({ SEC_ACQ, G_ACQ }));
+ok('分区标题「注册方式」夹在两个频段与服务域之间',
+	SEC_REG > G_LTE && SEC_REG < G_SRV, JSON.stringify({ SEC_REG, G_LTE, G_SRV }));
+ok('五段式分组完整（搜网 3 项 + 注册 2 项，没有字段落在标题之外）',
+	G_ACQ > SEC_ACQ && G_BAND > G_ACQ && G_LTE > G_BAND
+	&& G_SRV > SEC_REG && G_ROAM > G_SRV);
+
+const mtSrc = fs.readFileSync(path.join(RES, 'at-webserver/mt5700.js'), 'utf8')
+	.replace(/'require [^']*';/g, '');
+
+function makeEl(tag) {
+	const el = {
+		tagName: tag, nodeType: 1, children: [], className: '', textContent: '',
+		style: {}, _attrs: {},
+		classList: {
+			add: function (c) { el.className = (el.className + ' ' + c).trim(); },
+			contains: function (c) { return el.className.split(/\s+/).indexOf(c) >= 0; }
+		},
+		appendChild: function (c) { el.children.push(c); return c; },
+		setAttribute: function (k, v) { el._attrs[k] = v; },
+		addEventListener: function () {}
+	};
+	return el;
+}
+
+function loadMt(src) {
+	const ctx = {
+		console: console,
+		document: {
+			querySelectorAll: function () { return []; },
+			head: { appendChild: function () {} },
+			createElement: makeEl,
+			createTextNode: function (t) { return { nodeType: 3, textContent: t }; }
+		},
+		window: undefined,
+		L: {
+			Class: { extend: function (x) { return x; } },
+			rpc: { declare: function () { return function () { return Promise.resolve({}); }; } },
+			uci: { load: function () { return Promise.resolve(); } }
+		}
+	};
+	vm.createContext(ctx);
+	return vm.runInContext('(function(){\n' + src + '\nreturn Mt5700;\n})()', ctx);
+}
+
+const Mt = loadMt(mtSrc);
+const sec = Mt.formSection('搜网优先级');
+ok('★★ formSection 真的渲染出标题节点（不是只返回一个空 div）',
+	sec.children.length === 1
+	&& sec.children[0].className === 'mt5700-form-section-title'
+	&& sec.children[0].textContent === '搜网优先级',
+	'实际：' + JSON.stringify({
+		n: sec.children.length,
+		cls: sec.children[0] && sec.children[0].className,
+		txt: sec.children[0] && sec.children[0].textContent
+	}));
+
+/* 反向自证：去掉 title 挂载后，上面那条必须判否 */
+const noTitle = mtSrc.replace(
+	",\n\t\t\tE('div', { 'class': 'mt5700-form-section-title' }, title));", ');');
+ok('自证：能在源码里定位 formSection 的标题挂载（否则反向用例空转）',
+	noTitle !== mtSrc);
+const secBad = loadMt(noTitle).formSection('X');
+ok('★ 反向：删掉标题挂载后必须判否',
+	secBad.children.length === 0,
+	'删了挂载仍产出一个 title 节点 —— 断言没在查这段代码');
+
+/* 样式必须真的存在，否则标题类名是在裸奔（红线 19a：未应用的类恒假） */
+const cssSrc = fs.readFileSync(path.join(RES, 'at-webserver/mt5700.css'), 'utf8');
+ok('分区标题与容器样式都已在 mt5700.css 里定义',
+	/\.mt5700-form-section\s*\{/.test(cssSrc)
+	&& /\.mt5700-form-section-title\s*\{/.test(cssSrc));
+ok('底部只读原始值有靠右样式（与保存按钮同排）',
+	/\.mt5700-form-raw\s*\{/.test(cssSrc)
+	&& /mt5700-form-raw/.test(modemJs));
+
 /* ---------- 汇总 ---------- */
 
 if (fails.length) {

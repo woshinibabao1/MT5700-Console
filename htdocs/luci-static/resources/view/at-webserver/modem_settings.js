@@ -1080,31 +1080,24 @@ return L.view.extend({
 			'02': '只搜 3G，速率低，仅供排障使用。',
 			'99': '不改动接入顺序，只保存本页其它项。'
 		};
-		/* 值 → 制式代码原文（手册 13.2.3：08=NR 03=LTE 02=WCDMA） */
-		var ACQ_CODE = {
-			'080302': 'NR → LTE → WCDMA',
-			'08': 'NR',
-			'0302': 'LTE → WCDMA',
-			'03': 'LTE',
-			'0203': 'WCDMA → LTE',
-			'02': 'WCDMA',
-			'99': '不改动'
-		};
 		var acqSel = Mt5700.select(ACQ_OPTIONS, '080302');
 		var acqHint = E('div', { 'class': 'mt5700-hint' });
 		function paintAcq() {
 			sysCfg.acqorder = acqSel.value;
-			/* 未收录值查不到 ACQ_DESC 时给兜底，别渲染成「制式代码 0801 · （手册 13.2.3）」
-			   这种中间空一段、尾巴挂空括号的残句。 */
-			var desc = ACQ_DESC[acqSel.value] || '手册未收录该取值，保存即按原样写回';
-			acqHint.textContent = '制式代码 ' + acqSel.value
-				+ (ACQ_CODE[acqSel.value] ? '（' + ACQ_CODE[acqSel.value] + '）' : '')
-				+ ' · ' + desc + '（手册 13.2.3）';
+			/*
+			 * ★ 2026-11-06：这里原来印「制式代码 080302（NR → LTE → WCDMA）· <说明>
+			 *   （手册 13.2.3）」。用户改的是一个下拉，不是一张对照表 —— 码值与手册
+			 *   条款号是排障口径，属于 README（红线 87）。现在只留一句人话。
+			 *   未收录值的兜底也去掉了「手册」二字（用户拿不到手册编号也没用）。
+			 */
+			acqHint.textContent = ACQ_DESC[acqSel.value] || '该取值未收录，保存即按原样写回';
 			applySrvConstraint();
 		}
 		acqSel.addEventListener('change', paintAcq);
-		sysBody.appendChild(Mt5700.formGroup('网络接入顺序', acqSel,
-			'模组按什么先后顺序搜索网络制式'));
+		/* 五个字段按功能域分两段：搜网（怎么找网）／注册（找到之后怎么登）。
+		 * 平铺时用户看不出「两个频段」和「接入顺序」是一类事（见 formSection 注释）。 */
+		sysBody.appendChild(Mt5700.formSection('搜网优先级'));
+		sysBody.appendChild(Mt5700.formGroup('网络接入顺序', acqSel));
 		sysBody.appendChild(acqHint);
 
 		/* ---------- 2. 2G / 3G 频段 ----------
@@ -1131,17 +1124,14 @@ return L.view.extend({
 			if (!bandSel.value) {
 				bandHint.textContent = '保持模组当前设置，本项不下发';
 				return;
-		}
-			/* ANY(3FFFFFFF) 在本机固件上回 OK 但不写入，带一句说明，省得下次有人再填回来 */
-			var bandNote = (bandSel.value === Parse.BAND_ALL_MASK)
-				? '（本机固件不吃 ANY 值 3FFFFFFF，此处改用逐频段的位叠加，实测可落盘）'
-				: '（位图，改动前先记下卡片底部的只读原始值）';
-			bandHint.textContent = '码 ' + bandSel.value + ' · '
-				+ Parse.decodeBandMask(bandSel.value) + bandNote;
+			}
+			/* 只留解码结果。原来前缀是「码 00680380 ·」，后面还挂「（位图，改动前先
+			   记下卡片底部的只读原始值）」—— 位图码已经在「模组当前值」那行里，
+			   这里再印一遍是同一份数据说两遍（红线 87）。 */
+			bandHint.textContent = Parse.decodeBandMask(bandSel.value);
 		}
 		bandSel.addEventListener('change', paintBand);
-		sysBody.appendChild(Mt5700.formGroup('2G / 3G 频段', bandSel,
-			'GSM / WCDMA 频带位图，一般保持「自动」'));
+		sysBody.appendChild(Mt5700.formGroup('2G / 3G 频段', bandSel));
 		sysBody.appendChild(bandHint);
 
 		/* ---------- 3. 4G / LTE 频段 ----------
@@ -1164,16 +1154,17 @@ return L.view.extend({
 			 * 本机常驻在能力全集上时保存完看不出任何变化，容易被当成"改不了"，
 			 * 所以这里提前讲清，保存后的校验也只按位图子集判定。
 			 */
-			var lteNote = (lteSel.value === Parse.LTE_BAND_ALL_MASK)
-				? '（模组会按本机硬件能力掩码裁剪；若保存后回读仍是当前值，'
-					+ '说明已经是能力全集，而非没生效）'
-				: '';
-			lteHint.textContent = '码 ' + lteSel.value + ' · '
-				+ Parse.decodeLteBandMask(lteSel.value) + lteNote;
+			/*
+			 * ALL 会被本机硬件能力掩码裁剪 —— 这是**生效**不是失败。但正因为如此，
+			 * 本机常驻在能力全集上时保存完看不出任何变化，容易被当成"改不了"，
+			 * 所以只有选「全部频段」时补一句。原文案还带「码 XXXXX ·」前缀与
+			 * 「非没生效」的自辩，压到一句（红线 87）。
+			 */
+			lteHint.textContent = Parse.decodeLteBandMask(lteSel.value)
+				+ (lteSel.value === Parse.LTE_BAND_ALL_MASK ? ' · 模组会按本机能力裁剪' : '');
 		}
 		lteSel.addEventListener('change', paintLte);
-		sysBody.appendChild(Mt5700.formGroup('4G / LTE 频段', lteSel,
-			'LTE 频带位图，一般保持「常用」'));
+		sysBody.appendChild(Mt5700.formGroup('4G / LTE 频段', lteSel));
 		sysBody.appendChild(lteHint);
 
 		/* ---------- 4. 服务域 ---------- */
@@ -1189,15 +1180,14 @@ return L.view.extend({
 		var srvNote = E('div', { 'class': 'mt5700-hint' });
 		function paintSrv() {
 			sysCfg.srvdomain = parseInt(srvSel.value, 10);
-			/* 手册原名（CS_ONLY 等）只出现在这里：它是排障对手册用的，
-			   塞进下拉 label 会让「仅语音」变成「0 · 仅语音（CS_ONLY）」这种代号串。 */
-			var code = Parse.SRV_DOMAIN_CODE[sysCfg.srvdomain];
-			srvHint.textContent = (code ? '服务域 ' + sysCfg.srvdomain + '（' + code + '，手册 13.2.3）· ' : '')
-				+ (SRV_DESC[sysCfg.srvdomain] || '');
+			/* ★ 2026-11-06：原来前缀是「服务域 2（CS_PS，手册 13.2.3）·」。
+			   CS_ONLY / CS_PS 这些原名与手册条款号属于排障口径（parse.js 的
+			   SRV_DOMAIN_CODE 仍保留着，只是不再印到界面上）。 */
+			srvHint.textContent = SRV_DESC[sysCfg.srvdomain] || '';
 		}
 		srvSel.addEventListener('change', paintSrv);
-		sysBody.appendChild(Mt5700.formGroup('服务域', srvSel,
-			'注册到语音域、数据域还是两者'));
+		sysBody.appendChild(Mt5700.formSection('注册方式'));
+		sysBody.appendChild(Mt5700.formGroup('服务域', srvSel));
 		sysBody.appendChild(srvHint);
 		sysBody.appendChild(srvNote);
 
@@ -1214,12 +1204,11 @@ return L.view.extend({
 			sysCfg.roam = parseInt(roamSel.value, 10);
 			var full = !!(sysRanges.roam && sysRanges.roam.max >= 3);
 			var text = (full ? Parse.ROAM_TEXT : Parse.ROAM_TEXT_BASIC)[sysCfg.roam];
-			roamHint.textContent = '已选：' + (text || sysCfg.roam)
-				+ (full ? '（国内与国际可分别设置）' : '（本机只能整体开关漫游）');
+			roamHint.textContent = (text || sysCfg.roam)
+				+ (full ? '（国内与国际可分别设置）' : '（只能整体开关）');
 		}
 		roamSel.addEventListener('change', paintRoam);
-		sysBody.appendChild(Mt5700.formGroup('漫游', roamSel,
-			'是否允许接入非归属运营商的网络'));
+		sysBody.appendChild(Mt5700.formGroup('漫游', roamSel));
 		sysBody.appendChild(roamHint);
 		sysBody.appendChild(roamNote);
 
@@ -1243,12 +1232,14 @@ return L.view.extend({
 				paintSrv();
 			}
 			srvNote.textContent = hasLteOrNr
-				? '当前接入顺序包含 4G / 5G，模组不允许「仅语音(0)」与「不限(3)」，已自动禁用。'
+				? '4G / 5G 在用时，模组不允许「仅语音」与「不限」，已自动禁用。'
 				: '';
 		}
 
-		/* ---------- 模组当前原始值（只读，便于排障对标） ---------- */
-		var sysRaw = E('div', { 'class': 'mt5700-hint' }, '模组当前值：读取中…');
+		/* ---------- 模组当前原始值（只读，排障对标用） ----------
+		 * ★ 2026-11-06：原来它单独占一行挂在保存按钮下方，把卡片尾巴撑出两行、
+		 *   还和按钮错开。现在与按钮同排、靠右（.mt5700-form-raw），窄屏自动换行。 */
+		var sysRaw = E('div', { 'class': 'mt5700-hint mt5700-form-raw' }, '模组当前值：读取中…');
 
 		sysBody.appendChild(Mt5700.panelActions(
 			Mt5700.primaryButton('保存网络配置', function () {
@@ -1302,9 +1293,9 @@ return L.view.extend({
 						}
 					});
 				}).catch(function () { Mt5700.error('网络系统配置更新失败'); });
-			})
+			}),
+			sysRaw
 		));
-		sysBody.appendChild(sysRaw);
 
 		/* 下拉里没有的值（模组被手工写过）→ 补一个选项顶上去，绝不静默改写成预设 */
 		function ensureOption(sel, value, label) {

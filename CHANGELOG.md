@@ -5,6 +5,58 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.7.6] - 2026-11-06
+
+### Removed — 下线「无线与频段 → 自定义 DNS」
+
+它做的事是写 `network.<iface>.dns` + `peerdns`，保存后触发接口重新协商（短暂断网）。
+而 LuCI 原生的「网络 → 接口 → 高级设置」本来就能改同一组值 —— 两处入口、两个真相。
+
+四处同步清（红线 62）：
+
+| 位置 | 清掉的内容 |
+|---|---|
+| `network_settings.js` | `require uci`、`detectNetIface` / `isIPv4` / `loadDnsConfig` / `saveDns` / `commitDns` / `renderDns` 六个函数、`dnsCard` 整块 |
+| `luci-app-mt5700.json`（ACL） | `uci` 的 `network` 读写权限（已无任何使用者） |
+| `tests/` | `dns-edit-contract.test.js` 整个文件；`connection-tools-contract` 里指向它的说明改为「已下线」 |
+| 注释 | 区块顺序说明由「出口与 DNS」改为「出口」 |
+
+**保留** `.mt5700-dns-row` / `.mt5700-dns-label` 两个样式：名字带 dns，实际是通用的
+「标签 + 输入框」行布局，TTL 卡正在用（删了那两行会塌成上下堆叠）。
+
+### Changed — 重新排版「模组信息 → 网络系统配置」
+
+原来 5 个下拉平铺，每一项下面是**两行说明**（`formGroup` 的静态 hint + 一个动态 hint），
+底部再把「模组当前值」单独占一行挂在保存按钮下方。
+
+现在：
+
+- **按功能域分两段**（新增 `Mt5700.formSection()`）：`搜网优先级`（接入顺序、2G/3G、4G/LTE）
+  / `注册方式`（服务域、漫游）。字段顺序与标签不变，只加视觉分组。
+- **每项只留一行说明**：删掉 `formGroup` 的静态 hint，把动态 hint 当作唯一说明。
+- **「模组当前值」与保存按钮同排靠右**（`.mt5700-form-raw`，窄屏 640px 以下自动换行回左对齐），
+  不再单独占一行把卡片尾巴撑长。
+- **去内部语言**（承接 2.7.5 的口径）：
+  - `制式代码 080302（NR → LTE → WCDMA）· …（手册 13.2.3）` → 只留一句人话
+  - `码 00680380 · …（位图，改动前先记下…）` → 只留解码结果
+  - `服务域 2（CS_PS，手册 13.2.3）· …` → 只留说明
+  - `当前接入顺序包含 4G / 5G，模组不允许「仅语音(0)」与「不限(3)」` → 去掉码位
+  - `parse.js` 的 `decodeBandMask('680380')` 去掉尾巴「如需含 WCDMA 900，值为 …」
+    （那个组合在下拉里本来就是独立选项）
+- 死代码：`ACQ_CODE`（只在被删的那句里用过）一并移除。
+
+### Added — 排版守卫（真跑，不只看字符串）
+
+`syscfg-contract` 新增 8 项：
+
+- 静态：两个分区标题相对 `formGroup` 的**位置**正确，五个字段都落在标题之下；
+- 真跑：最小 DOM stub 加载 `mt5700.js`，调 `formSection()` 查返回节点的结构与文案；
+- 反向：删掉标题挂载后必须判否（否则这条断言只是在查字符串在不在）；
+- 样式：`.mt5700-form-section` / `-title` / `.mt5700-form-raw` 确已在 CSS 里定义
+  （红线 19a：类名写了但样式不存在 = 恒假）。
+
+CSS 6.14.0 → 6.15.0（指纹 `c9d29fba60a58cf1`）。
+
 ## [2.7.5] - 2026-11-06
 
 ### Changed — 邻区「未测量」的行不再被吞掉，全部显示

@@ -4,10 +4,6 @@
 'require at-webserver/ui';
 'require at-webserver/mt5700';
 'require at-webserver/schedule_panel';
-/* ★ 自定义 DNS 卡要读/写 network 配置，必须自己 require uci ——
-   L.uci 不 require 就不存在，缺了会被 loadDnsConfig 的判据当成「没有权限」，
-   表现为一张只读的「当前账号没有写权限」提示（静默丢功能，最难查）。 */
-'require uci';
 /* global L, AtWs, Parse, Ui, Mt5700, SchedulePanel */
 
 /**
@@ -49,149 +45,6 @@ return L.view.extend({
 		var optBody = E('div');
 		optCard._body.appendChild(optBody);
 		body.appendChild(optCard);
-
-		/* ---------- 自定义 DNS（network.<iface>.dns） ----------
-		 *
-		 * ★ 2026-10-27 从「网络状态」页迁来：原来它是总览明细表里两格可点的单元格
-		 *   （点「主/备 DNS」就地改），明细表整块下线后搬到这里 ——
-		 *   DNS 是**配置**，和 APN / 锁频同属「怎么连」，不该挂在只读的总览上。
-		 *
-		 * ★ 必须先分清两个「DNS」，否则改完会觉得没生效：
-		 *   ① 运营商通过 DHCP 下发的那个是模组自己报的，改 UCI 不会让它变；
-		 *   ② 这里写的是 network.<iface>.dns，由 netifd 落到
-		 *      /tmp/resolv.conf.d/resolv.conf.auto，**优先级高于**运营商下发的。
-		 * 所以两项都留空 = 删掉 dns 项并把 peerdns 还原成 1，彻底交回运营商。
-		 *
-		 * 权限：rpcd ACL 的 uci 读写白名单必须含 network。被拒时**静默降级为只读**
-		 * （dnsEditable=false，卡片里给一句说明），不报错、不留空白。
-		 */
-		var DNS_IFACE_FALLBACK = 'MT5700M';
-		var netIface = DNS_IFACE_FALLBACK;
-		var dnsCustom = [];
-		var dnsEditable = false;
-		var dnsInputs = [];
-
-		/* 反查模组所在的逻辑接口名：
-		 * ① 本机默认就叫 MT5700M，命中直接返回 —— 绝大多数情况走这条；
-		 * ② 改名过的场景兜底：取 device 形如 ethN 的那个（模组是 USB 网口）；
-		 * ③ 都拿不到 → 回退 MT5700M。
-		 * ★ 这里选错接口会把 DNS 写到别的接口上，所以宁可回退也不瞎猜。 */
-		function detectNetIface() {
-			try {
-				var secs = (L.uci && L.uci.sections) ? (L.uci.sections('network', 'interface') || []) : [];
-				var i, name;
-				for (i = 0; i < secs.length; i++) {
-					name = secs[i]['.name'];
-					if (name === DNS_IFACE_FALLBACK) return DNS_IFACE_FALLBACK;
-				}
-				for (i = 0; i < secs.length; i++) {
-					if (/^eth\d+$/.test(String(secs[i].device || '').trim())) return secs[i]['.name'];
-				}
-			} catch (e) { /* 读不到就用默认值，不影响页面其余部分 */ }
-			return DNS_IFACE_FALLBACK;
-		}
-
-		function isIPv4(v) {
-			var p = String(v).trim().split('.');
-			if (p.length !== 4) return false;
-			for (var i = 0; i < 4; i++) {
-				if (!/^\d{1,3}$/.test(p[i])) return false;
-				var n = parseInt(p[i], 10);
-				if (isNaN(n) || n < 0 || n > 255) return false;
-			}
-			return true;
-		}
-
-		function loadDnsConfig() {
-			if (!L.uci || !L.uci.load) return Promise.resolve();
-			return L.uci.load('network').then(function () {
-				netIface = detectNetIface();
-				var dns = L.uci.get('network', netIface, 'dns');
-				dnsCustom = Array.isArray(dns) ? dns.slice(0, 2)
-					: (dns ? String(dns).split(/\s+/).filter(Boolean).slice(0, 2) : []);
-				dnsEditable = true;
-			}).catch(function () {
-				/* ★ 读不到 ≠ 没有自定义 DNS：ACL 拒绝时只关掉编辑能力，
-				   不能把 dnsCustom 当成「用户没配过」来显示。 */
-				dnsEditable = false;
-			});
-		}
-
-		/* 保存：写 UCI → save（触发 netifd reload，接口重新协商 = 短暂断网）。
-		   按钮文案直接写明「会重连」，不另加确认弹窗（用户偏好少拦一层）。 */
-		function saveDns(list) {
-			var cfg = 'network', sec = netIface;
-			if (list.length) {
-				L.uci.set(cfg, sec, 'dns', list);
-				/* peerdns=0：只认用户填的，避免「主/备」语义被下发值冲淡 */
-				L.uci.set(cfg, sec, 'peerdns', '0');
-			} else {
-				if (L.uci.unset) L.uci.unset(cfg, sec, 'dns');
-				else L.uci.set(cfg, sec, 'dns', '');
-				L.uci.set(cfg, sec, 'peerdns', '1');
-			}
-			AtWs.uci.markDirty();
-			return AtWs.uci.uciSave('network').then(function () {
-				dnsCustom = list;
-				AtWs.uci.clearDirty();
-				Mt5700.info('已保存并应用，网络正在重连');
-			}, function (err) {
-				AtWs.uci.clearDirty();
-				Mt5700.error('保存失败：' + ((err && err.message) || '未知错误'));
-				throw err;
-			});
-		}
-
-		var dnsCard = Mt5700.card('自定义 DNS',
-			'留空即使用运营商下发的 DNS；保存会重新连接网络（短暂断网）');
-		var dnsBody = E('div');
-		dnsCard._body.appendChild(dnsBody);
-		/* ★ 不在此处 append：它与「出口 TTL」同属「出口与 DNS」，排到锁频之后，
-		   详见文件末尾「区块顺序」那段注释。 */
-
-		function commitDns() {
-			var vals = [dnsInputs[0] ? dnsInputs[0].value.trim() : '', dnsInputs[1] ? dnsInputs[1].value.trim() : ''];
-			for (var i = 0; i < vals.length; i++) {
-				if (vals[i] && !isIPv4(vals[i])) {
-					Mt5700.error('请填 IPv4 地址，例如 223.5.5.5（留空表示恢复运营商下发）');
-					return;
-				}
-			}
-			/* 主空备非空时把备自动前提：DNS 列表不能有洞 */
-			var list = vals.filter(Boolean);
-			dnsInputs.forEach(function (inp) { if (inp) inp.disabled = true; });
-			saveDns(list).then(renderDns, renderDns);
-		}
-
-		function renderDns() {
-			dnsBody.innerHTML = '';
-			dnsInputs = [];
-			if (!dnsEditable) {
-				dnsBody.appendChild(E('p', { 'class': 'mt5700-hint' },
-					'当前账号没有写 network 配置的权限，DNS 需要在系统侧修改'
-					+ '（uci set network.' + netIface + '.dns=...）。'));
-				return;
-			}
-			[[0, '主 DNS', '例如 223.5.5.5'], [1, '备 DNS', '可留空']].forEach(function (spec) {
-				var row = E('div', { 'class': 'mt5700-dns-row' });
-				row.appendChild(E('label', { 'class': 'mt5700-dns-label' }, spec[1]));
-				var inp = Mt5700.input('text', spec[2], dnsCustom[spec[0]] || '');
-				row.appendChild(inp);
-				dnsBody.appendChild(row);
-				dnsInputs[spec[0]] = inp;
-			});
-			var bar = E('div', { 'class': 'mt5700-action-row mt5700-mt-sm' });
-			bar.appendChild(Mt5700.primaryButton('保存并应用', commitDns));
-			dnsBody.appendChild(bar);
-			dnsBody.appendChild(E('p', { 'class': 'mt5700-hint mt5700-mt-sm' },
-				'写入 network.' + netIface + '.dns 并重新连接该接口。'
-				+ '两项都留空 = 恢复运营商下发的 DNS。'));
-		}
-
-		/* 先给一句「读取中」，不要先按 dnsEditable=false 画一遍：
-		   那会在有权限的机器上闪一下「没有写权限」的错误提示。 */
-		dnsBody.appendChild(E('p', { 'class': 'mt5700-hint' }, '正在读取当前配置…'));
-		loadDnsConfig().then(renderDns, renderDns);
 
 		/* ---------- 出口 TTL ---------- */
 		/*
@@ -364,21 +217,30 @@ return L.view.extend({
 		 */
 		SchedulePanel.render(body);
 
-		/* ---------- 区块顺序：接入与频段 → 出口与 DNS → 网络诊断 ----------
+		/* ---------- 区块顺序：接入与频段 → 出口 → 网络诊断 ----------
 		 *
-		 * 2026-11-06 重排。原来 DNS 卡与 TTL 卡夹在「5G 接入模式」和「锁频设置」之间：
-		 *   optCard(接入) → dnsCard → ttlCard → lockCard(锁频) → 定时锁频 → 邻区 → 拒绝
-		 * 结果是「改怎么连」被切成两段 —— 接入模式与锁频是一件事，中间插进两个
-		 * 出口/DNS 的卡，读到第三张时已经忘了第一张在说什么。
+		 * 2026-11-06 重排。原来自定义 DNS 卡与 TTL 卡夹在「5G 接入模式」和
+		 * 「锁频设置」之间，把「改怎么连」切成了两段 —— 接入模式与锁频是一件事，
+		 * 中间插进两张出口侧的卡，读到第三张时已经忘了第一张在说什么。
 		 *
 		 * 现在按**功能域连续**排：
 		 *   ① 接入与频段：5G 接入模式 → 锁频设置 → 定时锁频
-		 *   ② 出口与 DNS：自定义 DNS → 出口 TTL（都是"包出去长什么样"）
+		 *   ② 出口：出口 TTL
 		 *   ③ 网络诊断：邻区扫描 → 网络拒绝（只读观测，放最后）
 		 * ★ 只改追加顺序，不动任何卡片的定义与内部逻辑，所以事件监听、定时器、
 		 *   清理路径全部照旧（它们都按变量闭包，与 DOM 顺序无关）。
+		 *
+		 * ★ 2026-11-06 晚：自定义 DNS 卡整体下线（用户口径）。
+		 *   它是对 network.<iface>.dns + peerdns 的 UCI 写入，保存会触发接口
+		 *   重新协商（短暂断网）；同一件事在 LuCI 的「网络 → 接口 → 高级设置」
+		 *   本来就能改，本页再放一份等于两处入口两个真相。
+		 *   随之清掉：require uci、detectNetIface / isIPv4 / loadDnsConfig /
+		 *   saveDns / commitDns / renderDns 六个函数，以及整个
+		 *   tests/dns-edit-contract.test.js。
+		 * ★ `.mt5700-dns-row` / `.mt5700-dns-label` 两个样式**保留** —— 名字里带
+		 *   dns 但实际是通用的「标签 + 输入框」行布局，TTL 卡正在用（删了 TTL
+		 *   那两行会塌成上下堆叠）。
 		 */
-		body.appendChild(dnsCard);
 		body.appendChild(ttlCard);
 
 		/* ---------- 邻区扫描（^MONNC + ^NRSSBID 的 SSB 邻区，合并去重） ---------- */

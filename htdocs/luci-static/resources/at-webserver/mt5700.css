@@ -1077,6 +1077,30 @@
   margin-bottom: var(--mt5700-space-md);
 }
 
+/*
+ * 表单分区标题（.mt5700-form-group 是平铺的，没有分组概念）。
+ * 一条细下划线 + 小字大写，把「一类事」框在一起；不加背景、不加边框，
+ * 免得在这张卡里又冒出第二个「卡片」，看起来像卡片套卡片。
+ */
+.mt5700-form-section {
+  margin-top: var(--mt5700-space-lg);
+}
+
+.mt5700-form-section:first-child {
+  margin-top: 0;
+}
+
+.mt5700-form-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--mt5700-text-muted);
+  padding-bottom: 6px;
+  margin-bottom: var(--mt5700-space-sm);
+  border-bottom: 1px solid var(--mt5700-border-subtle);
+}
+
 .mt5700-label {
   display: block;
   font-size: 10px;
@@ -1933,6 +1957,25 @@
   flex-wrap: wrap;
   margin-top: var(--mt5700-space-md);
   align-items: center;
+}
+
+/*
+ * 与操作按钮同排的只读原始值（「模组当前值：…」）。
+ * 靠右贴住按钮行尾部：它是排障对标用的，不该独占一行把卡片撑长；
+ * 窄屏换行后恢复左对齐，否则换行后的第一行会孤零零贴在右边。
+ */
+.mt5700-form-raw {
+  margin-left: auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .mt5700-form-raw {
+    margin-left: 0;
+    text-align: left;
+    width: 100%;
+  }
 }
 
 /* ---------- 未保存更改应用条 (L4 浮层, sticky 置底) ---------- */

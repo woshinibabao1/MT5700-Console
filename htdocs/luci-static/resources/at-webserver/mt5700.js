@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '6.14.0';
+var MT5700_CSS_VERSION = '6.15.0';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -1273,6 +1273,18 @@ var Mt5700 = (function () {
 		group.appendChild(input);
 		if (hint) group.appendChild(E('div', { 'class': 'mt5700-hint' }, hint));
 		return group;
+	};
+
+	/*
+	 * 表单分区标题。
+	 * ★ 2026-11-06：一张卡里堆 5 个下拉时，用户看不出哪几项是一类事
+	 *   （「接入顺序 + 两个频段」是搜网，「服务域 + 漫游」是注册）。
+	 *   `formGroup` 是平铺的，没有分组概念，于是在中间加一条带下划线的
+	 *   小标题把功能域切开 —— 只做视觉分组，不动任何字段的定义与顺序。
+	 */
+	api.formSection = function (title) {
+		return E('div', { 'class': 'mt5700-form-section' },
+			E('div', { 'class': 'mt5700-form-section-title' }, title));
 	};
 
 	api.input = function (type, placeholder, value) {

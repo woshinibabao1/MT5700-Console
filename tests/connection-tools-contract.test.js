@@ -409,7 +409,8 @@ eq('全空 → 0 行', makeAddrList({ diag: { addrs: [] }, dhcpv4: null, dhcpv6:
    删掉的每一行都要说清「信息去哪了」，否则下次有人会把它们当成被误删又加回来：
      · 地址 / 网关 → 结论卡那句「已获取地址 …，网关 …」
      · 注册 / IMS / RRC → 「断网排查」抽屉（L1/L2 体检本来就在查）
-     · DNS → 「网络设置」页的自定义 DNS 卡（它是配置，不是读数）
+     · DNS → 「网络设置」页的自定义 DNS 卡（2026-11-06 该卡也已下线，DNS 统一在
+       LuCI 原生「网络 → 接口」里改，见 CHANGELOG 2.7.6）
    所以这里取反钉死「表不许回来」，同时钉住「结论卡要的两项必须还在」。 */
 ok('★ 明细表渲染入口已彻底删除（renderConnDetail / 两张构造表）',
 	!/renderConnDetail/.test(nsCodeOnly)
