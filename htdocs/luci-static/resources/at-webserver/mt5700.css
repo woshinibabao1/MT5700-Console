@@ -3946,8 +3946,10 @@ body.mt5700-sh-on {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  padding: 8px 12px;
-  margin-bottom: 12px;
+  /* padding 6px：控件本身 32px，6+32+6=44 才是一条工具条该有的高度。
+     原来的 8px + margin-bottom 12px 让这块占 68px，比它承载的内容胖一倍。 */
+  padding: 6px 12px;
+  /* ★ 不设 margin：栅格子项的间距只由 gap 决定，见下方「栅格对齐修正」 */
   border-radius: var(--mt5700-radius-md);
   background: var(--mt5700-surface-sunken);
   border: 1px solid var(--mt5700-border-subtle);
@@ -3992,7 +3994,8 @@ body.mt5700-sh-on {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  padding: 2px 2px 10px;
+  /* 不设 padding-bottom：与下方抽屉的间距交给栅格 gap */
+  padding: 2px 2px 0;
 }
 
 .mt5700-sh .mt5700-actionbar-title {
@@ -4011,10 +4014,46 @@ body.mt5700-sh-on {
 }
 
 .mt5700-sh .mt5700-actionbar-note {
-  flex: 1 1 260px;
+  /* ★ 独占一行（flex-basis 100%）：原来是 flex:1 1 260px，和按钮抢同一行，
+     实测只剩 472px 宽、被压成两行且第二行只剩「息服务。」几个字。
+     这条说明是「重启模组会发生什么」的安全告知，被挤成两行残句等于没写。 */
+  flex: 1 0 100%;
   min-width: 0;
   margin: 0;
   font-size: 11px;
+  line-height: 1.5;
+}
+
+/* ==========================================================================
+   栅格对齐修正（2026-11-06 真机实测）
+   --------------------------------------------------------------------------
+   .mt5700-page-body 本身就是 12 列栅格、gap 14px，但若干子元素**各自还带 margin**，
+   于是同一种「两块之间」出现了四种间距。getBoundingClientRect 实测：
+
+     工具条底 166 → 结论卡顶 206 = 40px   （gap14 + tools.mb12 + verdict.mt14）
+     结论卡底 426 → KPI 顶 516   = 90px   （verdict.mb4 + todo.mt10 + todo 高 + todo.mb2 + gap14）
+     卡片底 879 → 常用动作顶 893 = 14px   （只有 gap，正确）
+
+   在栅格里，区块间距**只应有一个来源** —— gap。下面把自带 margin 归零。
+   用 `>` 直接子选择器限定：嵌套在卡片内部的同名块（比如卡片里的 todo）不受影响。
+   ========================================================================== */
+.mt5700-sh .mt5700-page-body > .mt5700-verdict,
+.mt5700-sh .mt5700-page-body > .mt5700-todo,
+.mt5700-sh .mt5700-page-body > .mt5700-page-tools {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+/* KPI 的图表槽必须**同起点、同高度**。
+   实测：.spark 从 591 起、高 30；.bars 从 585 起、高 34 —— 同一行四张卡里，
+   三张有图表的卡彼此差 6px 起点、4px 高度，肉眼就是「四个格子不齐」。
+   统一成 margin-top 6px + height 32px 后，两者起点（585+6=591）与底边（591+32=623）
+   与卡片 padding-bottom 完全贴合。 */
+.mt5700-sh .kpi > .spark,
+.mt5700-sh .kpi > .bars {
+  margin-top: 6px;
+  height: 32px;
+  min-height: 32px;
 }
 
 /* 通用按钮行（.mt5700-action-row）：网络设置页也在用，保留。

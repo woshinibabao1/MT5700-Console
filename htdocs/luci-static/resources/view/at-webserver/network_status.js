@@ -117,6 +117,10 @@ return L.view.extend({
 		var devCard = Mt5700.card('设备与身份', 'SIM、模块标识与模块温度');
 		devCard.classList.add('mt5700-c5');
 		var devBody = E('div');
+		/* 先放占位：数据到位前 renderDevCard 会整块重画。没有这句时，
+		   首次进入页面（或读 SIM 超时）这张卡只有标题带、下方整片空白，
+		   与左边有内容的卡并排像渲染失败。 */
+		devBody.appendChild(E('p', { 'class': 'mt5700-hint' }, '正在读取 SIM 与模块信息…'));
 		devCard._body.appendChild(devBody);
 
 		/* ⑥ 断网排查：这一页别处全是读数，这里放**能做事的工具**。
@@ -396,7 +400,11 @@ return L.view.extend({
 		function renderDevCard() {
 			if (!devBody) return;
 			var st = devState;
-			if (!st) return;
+			if (!st) {
+				devBody.innerHTML = '';
+				devBody.appendChild(E('p', { 'class': 'mt5700-hint' }, '正在读取 SIM 与模块信息…'));
+				return;
+			}
 			devBody.innerHTML = '';
 			var simText = Parse.simShort(st.sim);
 			// 11（已初始化）**不算**告警：本卡长期停在 1,11，实测短信收发正常，
@@ -1509,6 +1517,25 @@ return L.view.extend({
 			return 'bad';
 		}
 
+		/*
+		 * RSRQ 的判级（dB，实测取值约 -3 ~ -20，越接近 0 越好）。
+		 *
+		 * ★ 不能复用 sigTone()：它走 Parse.signalLevel()，阈值是**按 RSRP 定的**
+		 *   （-80 / -90 / -100 / -110），而且把 `>= 0` 当作无效值 —— RSRQ 全为负数，
+		 *   套上去每一档都会落进「exc」，四个读数里只有一个永远绿，等于没有判级。
+		 * ★ 同一个原因，原先摆在那个位置的 SINR 其实**从未着过色**：SINR 正常是
+		 *   正数（如 8.6），被 `>= 0 ⇒ 无效` 直接判成无色，看上去像"这一项没有等级"。
+		 *   换成 RSRQ 后必须有自己的阈值，否则只是把"永远无色"换成"永远绿色"。
+		 */
+		function rsrqTone(v) {
+			if (v == null || v === '' || !isFinite(Number(v))) return '';
+			var n = Number(v);
+			if (n >= 0) return '';           /* 0 及以上不是合法 RSRQ */
+			if (n >= -10) return 'ok';       /* ≥ -10 dB：优 */
+			if (n >= -15) return 'warn';     /* -10 ~ -15：中 */
+			return 'bad';                    /* < -15：差 */
+		}
+
 		function renderVerdict() {
 			var cell = state.cell || {};
 			var registered = hasAnyPsService(state.psRegStatEps, state.psRegStat, cell);
@@ -1619,7 +1646,9 @@ return L.view.extend({
 				],
 				nums: [
 					{ label: 'RSRP', value: cell.rsrp, unit: 'dBm', tone: sigTone(cell.rsrp) },
-					{ label: 'SINR', value: cell.sinr, unit: 'dB', tone: sigTone(cell.sinr) },
+					/* 2026-11-06 用户口径：右上角第二个读数用 RSRQ 而不是 SINR。
+					   SINR 仍保留在 KPI「信号质量」与载波表里，不重复但也没丢。 */
+					{ label: 'RSRQ', value: cell.rsrq, unit: 'dB', tone: rsrqTone(cell.rsrq) },
 					{ label: '下行', value: down.value, unit: down.unit },
 					{ label: '上行', value: up.value, unit: up.unit }
 				],
