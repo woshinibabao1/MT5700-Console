@@ -88,5 +88,20 @@ eq('真机 CGSMS=3 → preferCs', cg && cg.preferCs, true);
 eq('CGSMS=1（只选 CS）同样 preferCs', Parse.parseCgsms('+CGSMS: 1').preferCs, true);
 eq('CGSMS=2（优先 PS）→ preferCs=false', Parse.parseCgsms('+CGSMS: 2').preferCs, false);
 
-console.log('通过 ' + pass + ' 项，失败 0 项');
-console.log('短信承载域 / CS 域解析契约测试全部通过');
+/* ---------- 汇总 ----------
+ * ★★★ 2026-11-06 修：此前这里直接印死「失败 0 项」「全部通过」，
+ *   既不打印 fails 也不 process.exit(1)。后果是**任何断言失败都只让
+ *   通过数从 16 掉到 15，退出码永远是 0**：
+ *       verify-guards 的 [15]「CS 域判定丢掉 stat=5」变异因此被放过，
+ *       CI 报「变异被放过」，而这条守卫从上一轮删可达性卡片重写本文件起
+ *       就已经是死的（红线 18：测试自己也会失效）。
+ *   现行口径与全仓一致：失败项以 `'  ✗ '` 打头（verify-guards 按这个前缀
+ *   统计「判红 N 处」），有失败即 exit 1。
+ */
+if (fails.length) {
+	console.log('\n✗ ' + fails.length + ' 项断言失败：');
+	fails.forEach(function (f) { console.log('  ✗ ' + f); });
+	process.exit(1);
+}
+console.log('  ✓ ' + pass + ' 项断言通过（CS 域 stat 口径 / CGSMS 取向）');
+process.exit(0);

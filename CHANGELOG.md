@@ -5,6 +5,45 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.7.4] - 2026-11-06
+
+### Fixed — CI 挂红：`sms-reachability-contract.test.js` 是一份恒绿的测试
+
+`js: 守卫有效性验证` 报 `[15] ✗ 变异被放过：CS 域判定丢掉 stat=5（rc=0, 关键词命中=False）`。
+
+根因不在守卫、不在 parse.js，而是**测试文件自己不会失败**。上一轮删「短信可达性」
+卡片时重写了它，结尾变成：
+
+```js
+console.log('通过 ' + pass + ' 项，失败 0 项');
+console.log('短信承载域 / CS 域解析契约测试全部通过');
+```
+
+`fails` 数组一直在收集，却从不打印、也从不 `process.exit(1)`。后果：把
+`registered: r.stat === 1 || r.stat === 5` 改成 `=== 1` 之后，输出从
+「通过 16 项」掉成「通过 15 项」，**退出码仍是 0**，`run-all.js`（只看退出码）
+报 PASS，只有变异验证能把这件事捅出来。
+
+全仓审计了一遍：88 个测试文件里只有这一个没有非零出口，其余都用了
+`process.exit(fail ? 1 : 0)` 这类条件退出。
+
+修法与加固：
+
+- `tests/sms-reachability-contract.test.js`：补标准汇总块（失败项以 `  ✗ ` 打头，
+  有失败即 exit 1），口径与全仓一致。
+- **新增 `tests/test-exit-contract.test.js`（元守卫，9 项）**：扫全部被
+  `run-all.js` 收集的测试文件，断言每个都存在「参数不是裸 0」的 `process.exit`。
+  判定前先剥注释 —— 初版没剥，把说明里那句「也不 `process.exit(1)`」当成了真代码，
+  故意违反时照样报绿；这条已写进自证 F/G。
+- 刻意**不做**「禁止字面量『失败 0 项』」这条：实测 8 个文件命中，逐个看下来全是
+  正确写法（`if (fails.length) { … exit(1) }` 之后的成功行），启发式只会逼人改写法。
+
+### 说明 — `parseCsDomain` / `parseCgsms` 目前没有页内消费方
+
+可达性卡片下线后，这两个解析函数只剩定义与测试，`htdocs` 里已无调用点。
+它们不下发命令、不占串口，本次按「保留公开 API」处理；是否连解析层一并清掉，
+待定。
+
 ## [2.7.3] - 2026-11-06
 
 ### Fixed — 「载波聚合」与「常用动作」之间的大间隔（真机 getBoundingClientRect 实测）
