@@ -65,14 +65,14 @@ var SchedulePanel = (function () {
 			'关闭后后端不再按时段切换锁频；开启后才能编辑下方编排'));
 		schedChk.addEventListener('change', function () {
 			var on = schedChk.checked;
-			/* 立即跟随开关灰/亮表单，不必等 uci commit 与后端重载（体感与真实状态一致） */
-			setFormDisabled(!on);
+			/* 立即跟随开关显示/隐藏表单，不必等 uci commit 与后端重载（体感与真实状态一致） */
+			setFormVisible(on);
 			try {
 				L.uci.set('at-webserver', 'config', 'schedule_enabled', on ? '1' : '0');
 			} catch (e) {
 				Mt5700.error('无法写入配置');
 				schedChk.checked = !on;
-				setFormDisabled(!schedChk.checked);
+				setFormVisible(schedChk.checked);
 				return;
 			}
 			AtWs.uci.uciCommit('at-webserver').then(function () {
@@ -81,7 +81,7 @@ var SchedulePanel = (function () {
 			}).catch(function () {
 				Mt5700.error('保存失败');
 				schedChk.checked = !on;
-				setFormDisabled(!schedChk.checked);
+				setFormVisible(schedChk.checked);
 			});
 		});
 
@@ -398,24 +398,30 @@ var SchedulePanel = (function () {
 			if (!draft) {
 				formBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 					'暂时读不到当前配置（AT+SCHED? 无应答），稍后切回本页会自动重试。'));
+				setFormVisible(!!schedChk.checked);
 				return;
 			}
 			buildForm();
-			var on = !!schedChk.checked;
-			if (!on) {
-				formBody.insertBefore(E('div', { 'class': 'mt5700-hint' },
-					'定时锁频当前是关闭的：打开上方「启用定时锁频」开关后才能修改并保存。'
-					+ '下面是现有配置，先供查看。'),
-					formBody.firstChild);
-			}
-			setFormDisabled(!on);
+			setFormVisible(!!schedChk.checked);
 		}
 
-		/* 开关关闭时把整张表单灰掉（不隐藏）：原生 disabled 自带灰化外观 */
-		function setFormDisabled(off) {
+		/*
+		 * 开关关闭时**整块隐藏**编排表单（2026-11-06 用户口径）。
+		 *
+		 * 原先是"灰掉不隐藏"：为了让用户能先看清楚有哪些配置项。实际用起来，
+		 * 关闭状态下露着一整屏灰输入框 + 一句「先供查看」，信息密度高但什么也做不了 ——
+		 * 用户要的是「没开就别占地方」。
+		 *
+		 * ★ 隐藏的同时仍然 disabled：display:none 只是不渲染，Tab 键与读屏软件
+		 *   仍可能落到这些控件上；而且一旦隐藏期间控件可编辑，就等于绕开了
+		 *   「先开开关才能改」这条约束。
+		 * ★ 不做动画：这一块是整个表单（含时段编辑器），高度变化大，展开动画会闪。
+		 */
+		function setFormVisible(visible) {
+			formBody.style.display = visible ? '' : 'none';
 			var els = formBody.querySelectorAll('input, select, textarea, button');
 			for (var i = 0; i < els.length; i++) {
-				els[i].disabled = !!off;
+				els[i].disabled = !visible;
 			}
 		}
 

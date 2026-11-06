@@ -50,7 +50,10 @@ const KNOWN_SAME_VERSION = {
 	'percent-encoding': '2.3.2',
 	/* 2026-11-06：本项目升到 2.6.1，subtle（rustls 依赖链上的 cryptography crate）
 	   在 crates.io 上同样有 2.6.1，纯属撞车，不是全局替换误伤。 */
-	subtle: '2.6.1'
+	subtle: '2.6.1',
+	/* 2026-11-06：本项目升到 2.7.2，tokio-macros 在 crates.io 上同样有 2.7.2
+	   （tokio 的 proc-macro 依赖），纯属撞车，不是全局替换误伤。 */
+	'tokio-macros': '2.7.2'
 };
 
 let pass = 0;
