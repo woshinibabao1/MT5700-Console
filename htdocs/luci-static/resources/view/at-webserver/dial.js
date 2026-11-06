@@ -236,7 +236,9 @@ return L.view.extend({
 
 		/* ---------- 卡片：网口模式 + 后路由 + DMZ ---------- */
 		var infCard = Mt5700.card('网口模式与 DMZ', '网口数传模式、后路由与 DMZ 主机');
-		var infBody = E('div', { 'class': 'mt5700-grid mt5700-grid-2' });
+		/* ★ 2026-11-06：网口模式 / 后路由 / DMZ 三项并排（原来是 grid-2，
+		 *   三个字段排成 2+1 —— 第三项独占半行，右半边空着）。 */
+		var infBody = E('div', { 'class': 'mt5700-grid' });
 		infCard._body.appendChild(infBody);
 		body.appendChild(infCard);
 

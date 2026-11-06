@@ -369,16 +369,19 @@ return L.view.extend({
 				lockState.activeRat = v;
 				renderLockEditor();
 			});
-			lockEditorBox.appendChild(Mt5700.formGroup('制式', ratSeg.el,
-				'两制式分别保存；切换后点「保存设置」只下发当前制式'));
-
 			var typeSeg = Mt5700.segmented(TYPE_OPTIONS.map(function (o) {
 				return { label: o.label, value: o.value };
 			}), lockState[kind + 'Type'], function (v) {
 				lockState[kind + 'Type'] = v;
 				renderItems();
 			});
-			lockEditorBox.appendChild(Mt5700.formGroup('锁频类型', typeSeg.el));
+			/* ★ 2026-11-06：制式与锁频类型都是分段控件、各只占一小段，
+			 *   并排一行省掉一整行高度（用户口径「小选项没必要一行一个」）。 */
+			lockEditorBox.appendChild(Mt5700.formGrid(
+				Mt5700.formGroup('制式', ratSeg.el,
+					'两制式分别保存；切换后点「保存设置」只下发当前制式'),
+				Mt5700.formGroup('锁频类型', typeSeg.el)
+			));
 
 			var mobWrap = E('div');
 			lockEditorBox.appendChild(mobWrap);

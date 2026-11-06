@@ -290,15 +290,19 @@ return L.view.extend({
 			{ label: 'PCUI 串口（默认，优先 /dev/ttyUSB1）', value: 'SERIAL' },
 			{ label: '网络连接（TCP，备用）', value: 'NETWORK' }
 		], 'SERIAL');
-		connBody.appendChild(Mt5700.formGroup('连接类型', connTypeSel));
+		/* ★ 2026-11-06：三项并排。都是短控件，一行一个时卡片右半片整片空着
+		 *   （用户口径「小选项没必要一行一个，浪费大片区域」）。 */
 
 		var hostInput = Mt5700.input('text', '192.168.8.1', '');
-		connBody.appendChild(Mt5700.formGroup('网络主机', hostInput));
 
 		var netPortInput = Mt5700.input('number', '20249', '');
 		netPortInput.min = 1;
 		netPortInput.max = 65535;
-		connBody.appendChild(Mt5700.formGroup('网络端口', netPortInput, '模组 TCP 端口，默认 20249'));
+		connBody.appendChild(Mt5700.formGrid(
+			Mt5700.formGroup('连接类型', connTypeSel),
+			Mt5700.formGroup('网络主机', hostInput),
+			Mt5700.formGroup('网络端口', netPortInput, '模组 TCP 端口，默认 20249')
+		));
 
 		/* 串口：下拉 + 自定义；选项来自系统 /dev 识别结果 */
 		var serialSel = Mt5700.select([], '');
@@ -341,11 +345,14 @@ return L.view.extend({
 		serialSel.addEventListener('change', function () {
 			serialCustom.style.display = serialSel.value === '__custom__' ? '' : 'none';
 		});
-		connBody.appendChild(Mt5700.formGroup('串口设备', serialSel, '列出系统已识别的 ttyUSB/ttyACM/ttyS 设备'));
-		connBody.appendChild(Mt5700.formGroup('自定义串口路径', serialCustom, '仅在选择「自定义路径」时生效'));
-
 		var baudInput = Mt5700.input('number', '115200', '');
-		connBody.appendChild(Mt5700.formGroup('波特率', baudInput));
+
+		/* 串口三项并排：设备路径 + 自定义路径 + 波特率 */
+		connBody.appendChild(Mt5700.formGrid(
+			Mt5700.formGroup('串口设备', serialSel, '列出系统已识别的 ttyUSB/ttyACM/ttyS 设备'),
+			Mt5700.formGroup('自定义串口路径', serialCustom, '仅在选择「自定义路径」时生效'),
+			Mt5700.formGroup('波特率', baudInput)
+		));
 
 		/* ---------- RPC 服务 ---------- */
 		var wsCard = Mt5700.card('RPC 服务', 'LuCI 经 rpcd/ucode 代理连接后端使用的端口、监听范围与密钥');
@@ -357,19 +364,22 @@ return L.view.extend({
 		var wsPortInput = Mt5700.input('number', '8765', '');
 		wsPortInput.min = 1;
 		wsPortInput.max = 65535;
-		wsBody.appendChild(Mt5700.formGroup('RPC 端口', wsPortInput, '默认 8765'));
 
 		var wsBindSel = Mt5700.select([
 			{ label: '仅本机（127.0.0.1，经 rpcd 代理）', value: '127.0.0.1' },
 			{ label: '所有接口（0.0.0.0，可被外部访问）', value: '0.0.0.0' }
 		], '127.0.0.1');
-		wsBody.appendChild(Mt5700.formGroup('RPC 监听范围', wsBindSel,
-			'对外监听请务必设置认证密钥；未设置密钥时后端会自动降回仅本机（127.0.0.1），LuCI 不受影响'));
 
 		var phoneNoteInput = Mt5700.input('text', '例如 13800138000', '');
-		wsBody.appendChild(Mt5700.formGroup('本机号码备注', phoneNoteInput,
-			'纯记录，只在当前输入框里回显（总览不再显示手机号）。'
-			+ 'SIM 卡没写 MSISDN 时（AT+CNUM 回 not found），记这里备查。'));
+
+		/* ★ 2026-11-06：端口 + 监听范围两列，号码备注 + 密钥两列（见下方第二组）。
+		 *   监听范围的 hint 较长，放在格子里会把它撑高 —— 但它本来就是这段里
+		 *   最需要读的一句话，跟着字段走比堆在卡尾更好找。 */
+		wsBody.appendChild(Mt5700.formGrid(
+			Mt5700.formGroup('RPC 端口', wsPortInput, '默认 8765'),
+			Mt5700.formGroup('RPC 监听范围', wsBindSel,
+				'对外监听请务必设置认证密钥；未设置时后端自动降回仅本机')
+		));
 
 		/*
 		 * ★ 认证密钥用 password 类型。
@@ -381,7 +391,11 @@ return L.view.extend({
 		 *   需要查看原值时用 `uci show at-webserver | grep auth_key`。
 		 */
 		var authKeyInput = Mt5700.input('password', '留空表示无需认证', '');
-		wsBody.appendChild(Mt5700.formGroup('认证密钥', authKeyInput, 'ucode 代理自动附带该密钥；LuCI 登录态由 rpcd 会话保证'));
+		/* 号码备注 + 密钥并排（纯记录项与凭据项，都是短输入框） */
+		wsBody.appendChild(Mt5700.formGrid(
+			Mt5700.formGroup('本机号码备注', phoneNoteInput, '纯记录，不参与任何下发'),
+			Mt5700.formGroup('认证密钥', authKeyInput, 'ucode 代理自动附带；LuCI 登录态由 rpcd 会话保证')
+		));
 
 		/* ---------- 通知配置 ---------- */
 		var notifCard = Mt5700.card('通知', '事件通知与 WebHook');
@@ -415,10 +429,13 @@ return L.view.extend({
 		var notifySignal = mkCheck();
 		var notifyMem = mkCheck();
 
-		notifBody.appendChild(Mt5700.formGroup('来电通知', notifyCalls.wrap));
-		notifBody.appendChild(Mt5700.formGroup('新短信通知', notifySms.wrap));
-		notifBody.appendChild(Mt5700.formGroup('信号变化通知', notifySignal.wrap));
-		notifBody.appendChild(Mt5700.formGroup('短信存储满通知', notifyMem.wrap));
+		/* ★ 2026-11-06：四个通知开关并排（都是单行勾选，一行一个纯浪费） */
+		notifBody.appendChild(Mt5700.formGrid(
+			Mt5700.formGroup('来电通知', notifyCalls.wrap),
+			Mt5700.formGroup('新短信通知', notifySms.wrap),
+			Mt5700.formGroup('信号变化通知', notifySignal.wrap),
+			Mt5700.formGroup('短信存储满通知', notifyMem.wrap)
+		));
 
 		var webhookInput = Mt5700.input('text', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx', '');
 		notifBody.appendChild(Mt5700.formGroup('企业微信 WebHook', webhookInput, '通知将推送到该 WebHook 地址'));

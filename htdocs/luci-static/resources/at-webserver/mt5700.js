@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '6.15.0';
+var MT5700_CSS_VERSION = '6.18.0';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -1285,6 +1285,25 @@ var Mt5700 = (function () {
 	api.formSection = function (title) {
 		return E('div', { 'class': 'mt5700-form-section' },
 			E('div', { 'class': 'mt5700-form-section-title' }, title));
+	};
+
+	/*
+	 * 表单栅格：把若干 formGroup 排成一行放几个。
+	 * ★ 2026-11-06：用户口径「几个小选项没必要一行一个，浪费大片区域」——
+	 *   「服务域」「漫游」这种选项文字只有 4~6 个字的字段，各占一整行时
+	 *   卡片纵向被拉得很长，而横向大半是空的。
+	 *
+	 * ★★ 复用现成的 `.mt5700-grid`（它本来就是 auto-fit + minmax(240px,1fr)），
+	 *   此前 `.mt5700-form-grid` 是重复造轮子 —— 项目里早有这套栅格（dial.js /
+	 *   upgrade.js 用的 `mt5700-grid mt5700-grid-2` 就是它）。已把那个类删掉，
+	 *   统一走 `.mt5700-grid`；`grid-2` 需要固定两列时继续用它覆盖。
+	 */
+	api.formGrid = function () {
+		var grid = E('div', { 'class': 'mt5700-grid' });
+		for (var i = 0; i < arguments.length; i++) {
+			if (arguments[i]) grid.appendChild(arguments[i]);
+		}
+		return grid;
 	};
 
 	api.input = function (type, placeholder, value) {

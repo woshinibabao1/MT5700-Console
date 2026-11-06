@@ -1160,9 +1160,12 @@ return L.view.extend({
 				smdpInput.addEventListener('input', sync);
 				midInput.addEventListener('input', sync);
 				oidInput.addEventListener('input', sync);
-				inputBox.appendChild(Mt5700.formGroup('SM-DP+ 服务器', smdpInput, '运营商给的下载服务器域名'));
-				inputBox.appendChild(Mt5700.formGroup('匹配码', midInput, 'Activation Code / Matching ID'));
-				inputBox.appendChild(Mt5700.formGroup('OID', oidInput, '多数运营商不需要'));
+				/* ★ 2026-11-06：三项并排（服务器 / 匹配码 / OID 都是短输入框） */
+				inputBox.appendChild(Mt5700.formGrid(
+					Mt5700.formGroup('SM-DP+ 服务器', smdpInput, '运营商给的下载服务器域名'),
+					Mt5700.formGroup('匹配码', midInput, 'Activation Code / Matching ID'),
+					Mt5700.formGroup('OID', oidInput, '多数运营商不需要')
+				));
 				/* 两步建（2026-10-22 审计）：全局 E 的多参形态与本仓 Mt5700.E
 				 * 「只挂第 3 参」的约定相反 —— 将来若有人统一 E 实现，这九个字
 				 * 会被静默丢掉。 */

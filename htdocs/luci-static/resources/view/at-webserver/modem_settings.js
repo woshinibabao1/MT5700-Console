@@ -124,10 +124,12 @@ return L.view.extend({
 		simSlotSelProxy.addEventListener('change', function () {
 			handleSimSwitch(parseInt(simSlotSelProxy.value, 10));
 		});
-		simBody.appendChild(Mt5700.formGroup('SIM 槽位', simSlotSelProxy));
-
 		var hpSwitch = makeSwitch(function (checked, input) { handleSimHotPlug(checked, input); });
-		simBody.appendChild(Mt5700.formGroup('SIM 卡热插拔', hpSwitch));
+		/* 槽位与热插拔并排：两个都只占一小块，一行一个时卡片右半片空着 */
+		simBody.appendChild(Mt5700.formGrid(
+			Mt5700.formGroup('SIM 槽位', simSlotSelProxy),
+			Mt5700.formGroup('SIM 卡热插拔', hpSwitch)
+		));
 		var hpChk = hpSwitch.querySelector('input');
 
 		/* ================= PIN 码管理 ================= */
@@ -159,9 +161,12 @@ return L.view.extend({
 		var pinNewInput = pinInput('请输入新 PIN 码');
 		var pinConfirmInput = pinInput('请再次输入新 PIN 码');
 
-		pinBody.appendChild(Mt5700.formGroup('输入 PIN 码', pinCurInput, '当前 PIN 码，用于验证身份或开启/关闭 PIN 锁'));
-		pinBody.appendChild(Mt5700.formGroup('新 PIN 码', pinNewInput, '4-8 位数字'));
-		pinBody.appendChild(Mt5700.formGroup('确认新 PIN 码', pinConfirmInput));
+		/* 三个 PIN 输入框并排：都是 8~10 位数字，一行一个会拉出三倍高度 */
+		pinBody.appendChild(Mt5700.formGrid(
+			Mt5700.formGroup('输入 PIN 码', pinCurInput, '当前 PIN 码，用于验证身份或开启/关闭 PIN 锁'),
+			Mt5700.formGroup('新 PIN 码', pinNewInput, '4-8 位数字'),
+			Mt5700.formGroup('确认新 PIN 码', pinConfirmInput)
+		));
 
 		var pinLockBtn = Mt5700.button('启用 PIN 锁', function () { togglePinLock(); }, 'primary');
 		pinBody.appendChild(Mt5700.panelActions(
@@ -442,8 +447,10 @@ return L.view.extend({
 				});
 			});
 		});
-		ctrlBody.appendChild(Mt5700.formGroup('LED 指示灯', ledSwitch,
-			'指示灯亮灭开关（0 关 / 1 开，出厂默认关闭；需重启模组生效）'));
+		/* ★ 2026-11-06：LED / PCIe / 网卡三格都是小控件，统一在下面用 formGrid
+		 *   并排（先建好、最后一起挂载），不再各占一整行。 */
+		var ledGroup = Mt5700.formGroup('LED 指示灯', ledSwitch,
+			'指示灯亮灭开关，掉电保存，需重启模组生效');
 		var ledChk = ledSwitch.querySelector('input');
 
 		/* ---------- 2. PCIe 控制器（AT^TDPMCFG，手册 11.16） ---------- */
@@ -461,9 +468,8 @@ return L.view.extend({
 				});
 			});
 		});
-		ctrlBody.appendChild(Mt5700.formGroup('PCIe 控制器', pwrSwitch,
-			'开启或关闭模组内部 PCIe 控制器供电（手册 11.16，关闭可省一点模组功耗）；'
-			+ '本机 5G 模组以 USB 方式供网，此项与上网速率无关，掉电保存'));
+		var pwrGroup = Mt5700.formGroup('PCIe 控制器', pwrSwitch,
+			'关闭可省一点模组功耗，掉电保存；本机以 USB 供网，与上网速率无关');
 		var pwrChk = pwrSwitch.querySelector('input');
 
 		/* ---------- 3. PCIe 网卡 PHY（AT^TDPCIELANCFG，手册 11.19） ---------- */
@@ -490,9 +496,11 @@ return L.view.extend({
 				});
 			});
 		});
-		ctrlBody.appendChild(Mt5700.formGroup('网卡速率', nicSel,
-			'模组 PCIe 网口所接的 PHY 型号，决定该口能协商到的速率（1G / 2.5G）；'
-			+ '修改后需重启模组才生效'));
+		ctrlBody.appendChild(Mt5700.formGrid(
+			ledGroup,
+			pwrGroup,
+			Mt5700.formGroup('网卡速率', nicSel, '决定该网口能协商到的速率，需重启模组生效')
+		));
 		var nicStatus = E('div', { 'class': 'mt5700-hint' }, '网卡速率：读取中…');
 		ctrlBody.appendChild(nicStatus);
 
@@ -533,7 +541,9 @@ return L.view.extend({
 				}
 			}).catch(function () { Mt5700.error('载波聚合设置失败'); });
 		});
-		nrBody.appendChild(Mt5700.formGroup('NR 载波聚合', caSwitch, '允许模组做 NR 载波聚合'));
+		/* ★ 2026-11-06：NR 三项（载波聚合 / VoNR / DSS）都是小控件，统一在下面
+		 *   用 formGrid 并排；说明段落跟在整组之后，不再插在字段中间。 */
+		var caGroup = Mt5700.formGroup('NR 载波聚合', caSwitch, '允许模组做 NR 载波聚合');
 		var caChk = caSwitch.querySelector('input');
 
 		/*
@@ -542,7 +552,7 @@ return L.view.extend({
 		 */
 		var caStateBox = E('div', { 'class': 'mt5700-hint' },
 			'当前载波数与聚合状态见「网络状态 → 载波与聚合」；此处只配置能力开关。');
-		nrBody.appendChild(caStateBox);
+		/* 不在此处挂载（见下方 formGrid 之后的统一挂载） */
 
 		var vonrSel = Mt5700.select([
 			{ label: '关闭', value: '0' },
@@ -569,7 +579,7 @@ return L.view.extend({
 				return revertVoNr();
 			});
 		});
-		nrBody.appendChild(Mt5700.formGroup('VoNR', vonrSel));
+		var vonrGroup = Mt5700.formGroup('VoNR', vonrSel);
 
 		var dssSwitch = makeSwitch(function (checked, input) {
 			send('AT^NRRCCAPCFG=5,' + (checked ? 1 : 0) + ',0').then(function (res) {
@@ -580,7 +590,9 @@ return L.view.extend({
 				}
 			}).catch(function () { Mt5700.error('DSS 配置失败'); });
 		});
-		nrBody.appendChild(Mt5700.formGroup('NR DSS', dssSwitch, 'LTE/NR 动态频谱共享'));
+		var dssGroup = Mt5700.formGroup('NR DSS', dssSwitch, 'LTE/NR 动态频谱共享');
+		nrBody.appendChild(Mt5700.formGrid(caGroup, vonrGroup, dssGroup));
+		nrBody.appendChild(caStateBox);
 		var dssChk = dssSwitch.querySelector('input');
 
 		function fetchNRCapability() {
@@ -1097,8 +1109,6 @@ return L.view.extend({
 		/* 五个字段按功能域分两段：搜网（怎么找网）／注册（找到之后怎么登）。
 		 * 平铺时用户看不出「两个频段」和「接入顺序」是一类事（见 formSection 注释）。 */
 		sysBody.appendChild(Mt5700.formSection('搜网优先级'));
-		sysBody.appendChild(Mt5700.formGroup('网络接入顺序', acqSel));
-		sysBody.appendChild(acqHint);
 
 		/* ---------- 2. 2G / 3G 频段 ----------
 		 * 与「网络接入顺序」同一套路：label 只给中文，十六进制位图码移出选项、
@@ -1131,8 +1141,8 @@ return L.view.extend({
 			bandHint.textContent = Parse.decodeBandMask(bandSel.value);
 		}
 		bandSel.addEventListener('change', paintBand);
-		sysBody.appendChild(Mt5700.formGroup('2G / 3G 频段', bandSel));
-		sysBody.appendChild(bandHint);
+		/* ★ 不在此处挂载：两个频段是同类项，等到下面 4G/LTE 定义完再一起塞进
+		   同一个 formGrid 并排（见「两个频段并排」那段）。 */
 
 		/* ---------- 3. 4G / LTE 频段 ----------
 		 * 紧跟着 2G/3G 放：两者都是「频段位图」，拆开会让同类设置散在卡片两头。 */
@@ -1164,8 +1174,14 @@ return L.view.extend({
 				+ (lteSel.value === Parse.LTE_BAND_ALL_MASK ? ' · 模组会按本机能力裁剪' : '');
 		}
 		lteSel.addEventListener('change', paintLte);
-		sysBody.appendChild(Mt5700.formGroup('4G / LTE 频段', lteSel));
-		sysBody.appendChild(lteHint);
+		/* 搜网三项并排：三个下拉的选项都很短（「5G 优先」「自动（推荐）」「不修改」），
+		 * 一行一个时卡片右半边整片空着（用户口径「小选项没必要一行一个」）。
+		 * 用 formGrid 的 auto-fit —— 卡片被压窄时自动落回两列/单列，不必写断点。 */
+		sysBody.appendChild(Mt5700.formGrid(
+			Mt5700.formGroup('网络接入顺序', acqSel, acqHint),
+			Mt5700.formGroup('2G / 3G 频段', bandSel, bandHint),
+			Mt5700.formGroup('4G / LTE 频段', lteSel, lteHint)
+		));
 
 		/* ---------- 4. 服务域 ---------- */
 		var SRV_DESC = {
@@ -1186,10 +1202,8 @@ return L.view.extend({
 			srvHint.textContent = SRV_DESC[sysCfg.srvdomain] || '';
 		}
 		srvSel.addEventListener('change', paintSrv);
-		sysBody.appendChild(Mt5700.formSection('注册方式'));
-		sysBody.appendChild(Mt5700.formGroup('服务域', srvSel));
-		sysBody.appendChild(srvHint);
-		sysBody.appendChild(srvNote);
+		/* ★ 不在此处挂载：服务域与漫游是同类项（都是短选项），等漫游定义完
+		   一起并排放（见下方「注册方式两列」那段）。 */
 
 		/*
 		 * ---------- 5. 漫游（选项按 =? 实测范围动态生成） ----------
@@ -1208,9 +1222,15 @@ return L.view.extend({
 				+ (full ? '（国内与国际可分别设置）' : '（只能整体开关）');
 		}
 		roamSel.addEventListener('change', paintRoam);
-		sysBody.appendChild(Mt5700.formGroup('漫游', roamSel));
-		sysBody.appendChild(roamHint);
-		sysBody.appendChild(roamNote);
+		/* 注册方式两列：服务域与漫游的选项都只有 4~6 个字，各占一整行时
+		 * 卡片下半截整片空白（用户口径「小选项没必要一行一个，浪费大片区域」）。
+		 * note 挂在各自格子里 —— 说明跟着字段走，两列时不会串到隔壁去。 */
+		var srvGroup = Mt5700.formGroup('服务域', srvSel, srvHint);
+		srvGroup.appendChild(srvNote);
+		var roamGroup = Mt5700.formGroup('漫游', roamSel, roamHint);
+		roamGroup.appendChild(roamNote);
+		sysBody.appendChild(Mt5700.formSection('注册方式'));
+		sysBody.appendChild(Mt5700.formGrid(srvGroup, roamGroup));
 
 		/*
 		 * 手册 13.2.3 注 2 的硬约束：设置的模式里含有 L(03) 或 NR(08) 时，
@@ -1414,7 +1434,8 @@ return L.view.extend({
 				}
 			}).catch(function () { Mt5700.error('温度保护设置失败'); input.checked = !checked; });
 		});
-		thermBody.appendChild(Mt5700.formGroup('温度保护功能', thermSwitch));
+		/* ★ 2026-11-06：温度保护三项都是开关/短数字，统一在下面 formGrid 并排 */
+		var thermGroup = Mt5700.formGroup('温度保护功能', thermSwitch);
 		var thermChk = thermSwitch.querySelector('input');
 
 		/*
@@ -1439,7 +1460,7 @@ return L.view.extend({
 				}
 			}).catch(function () { Mt5700.error('高温时关闭 CA/MIMO 设置失败'); input.checked = !checked; });
 		});
-		thermBody.appendChild(Mt5700.formGroup('高温时关闭 CA/MIMO', thermCaSwitch));
+		var thermCaGroup = Mt5700.formGroup('高温时关闭 CA/MIMO', thermCaSwitch);
 		var thermCaChk = thermCaSwitch.querySelector('input');
 
 		var thermIntervalInput = Mt5700.input('number', '5', '5');
@@ -1469,7 +1490,11 @@ return L.view.extend({
 				}).catch(function () { Mt5700.error('温度检测间隔设置失败'); });
 			}, 600);
 		});
-		thermBody.appendChild(Mt5700.formGroup('检测间隔（秒）', thermIntervalInput));
+		thermBody.appendChild(Mt5700.formGrid(
+			thermGroup,
+			thermCaGroup,
+			Mt5700.formGroup('检测间隔（秒）', thermIntervalInput)
+		));
 
 		thermBody.appendChild(thermLogsEl);
 		thermBody.appendChild(thermThresholdsEl);

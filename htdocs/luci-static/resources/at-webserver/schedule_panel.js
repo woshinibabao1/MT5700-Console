@@ -225,7 +225,10 @@ var SchedulePanel = (function () {
 			checkIntervalInput.addEventListener('blur', function () {
 				checkIntervalInput.value = String(draft.check_interval);
 			});
-			formBody.appendChild(Mt5700.formGroup('检测间隔（秒）', checkIntervalInput, '多久检查一次当前时段'));
+			/* ★ 2026-11-06：两个数字框 + 三个勾选并排。它们都只占一小块，
+			 *   一行一个时卡片右半片整片空着（用户口径「小选项没必要一行一个」）。 */
+			var intervalGroup = Mt5700.formGroup('检测间隔（秒）', checkIntervalInput,
+				'多久检查一次当前时段');
 
 			var timeoutInput = Mt5700.input('number', '30', String(draft.timeout));
 			timeoutInput.min = 30;
@@ -236,19 +239,25 @@ var SchedulePanel = (function () {
 			timeoutInput.addEventListener('blur', function () {
 				timeoutInput.value = String(draft.timeout);
 			});
-			formBody.appendChild(Mt5700.formGroup('无服务超时（秒）', timeoutInput, '模组无服务超过此时长自动解锁'));
+			var timeoutGroup = Mt5700.formGroup('无服务超时（秒）', timeoutInput,
+				'模组无服务超过此时长自动解锁');
+
+			formBody.appendChild(Mt5700.formGrid(intervalGroup, timeoutGroup));
 
 			var unlockLte = mkCheck(function (checked) { draft.unlock_lte = checked; });
 			unlockLte.querySelector('input').checked = !!draft.unlock_lte;
-			formBody.appendChild(Mt5700.formGroup('解锁时下发 LTE 解锁', unlockLte));
 
 			var unlockNr = mkCheck(function (checked) { draft.unlock_nr = checked; });
 			unlockNr.querySelector('input').checked = !!draft.unlock_nr;
-			formBody.appendChild(Mt5700.formGroup('解锁时下发 NR 解锁', unlockNr));
 
 			var toggleAirplane = mkCheck(function (checked) { draft.toggle_airplane = checked; });
 			toggleAirplane.querySelector('input').checked = !!draft.toggle_airplane;
-			formBody.appendChild(Mt5700.formGroup('切换飞行模式使其生效', toggleAirplane));
+
+			formBody.appendChild(Mt5700.formGrid(
+				Mt5700.formGroup('解锁时下发 LTE 解锁', unlockLte),
+				Mt5700.formGroup('解锁时下发 NR 解锁', unlockNr),
+				Mt5700.formGroup('切换飞行模式使其生效', toggleAirplane)
+			));
 
 			formBody.appendChild(periodEditor('night', draft.night));
 			formBody.appendChild(periodEditor('day', draft.day));

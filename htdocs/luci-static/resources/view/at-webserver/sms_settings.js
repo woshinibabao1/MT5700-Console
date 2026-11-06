@@ -166,11 +166,16 @@ return L.view.extend({
 			}).catch(function () { Mt5700.error('IMS 设置失败'); loadIMS(); });
 		});
 		var imsChk = imsSwitch.querySelector('input');
-		smsBody.appendChild(Mt5700.formGroup('IMS 短信', imsSwitch, '开启后可收发短信'));
 
 		var smsOnSwitch = mkCheck(function (checked) { toggleSMS(checked); });
 		var smsOnChk = smsOnSwitch.querySelector('input');
-		smsBody.appendChild(Mt5700.formGroup('短信功能', smsOnSwitch, '开启时按顺序下发 CEUS/IMSSWITCH/CFUN/CGDCONT/CSCA 配置'));
+		/* ★ 2026-11-06：两个开关并排。原 hint 里写着「按顺序下发 CEUS/IMSSWITCH/
+		 *   CFUN/CGDCONT/CSCA 配置」—— 用户不认识这些命令也给不出任何操作，
+		 *   属于实现细节（红线 87），换成「做了什么」。 */
+		smsBody.appendChild(Mt5700.formGrid(
+			Mt5700.formGroup('IMS 短信', imsSwitch, '开启后可收发短信'),
+			Mt5700.formGroup('短信功能', smsOnSwitch, '开启后自动完成短信相关配置')
+		));
 
 		/*
 		 * 短信格式（AT+CMGF）—— 只读展示。

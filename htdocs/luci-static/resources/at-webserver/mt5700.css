@@ -739,11 +739,36 @@
 
 /* ==========================================================================
    网格布局
+   --------------------------------------------------------------------------
+   ★ 2026-11-06：`auto-fill` → `auto-fit`。auto-fill 会**保留空轨道**：
+   两个字段放进 1100px 宽的卡片时会被摊成 4 列、两个元素各占 1/4 宽，右半边
+   空一大片 —— 正是用户抱怨的「浪费大片区域」。auto-fit 会把空轨道收掉，
+   元素按实际数量铺满。
+   同时补 `> .mt5700-form-group` 的归零：formGroup 自带的 margin-bottom 在
+   栅格里由 gap 接管，不归零的话每格底下多 12px、相邻两列高度对不齐。
    ========================================================================== */
 .mt5700-grid {
   display: grid;
   gap: var(--mt5700-space-md);
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  align-items: start;
+  /*
+   * ★ 2026-11-06：必须给自己留下边距。
+   *   子项 .mt5700-form-group 的 margin-bottom 在栅格里被归零（改由 gap 接管），
+   *   若容器本身也没有下边距，**相邻两个 grid 会直接贴在一起** ——
+   *   实测表现为「上一行格子的 hint」和「下一行格子的 label」文字重叠
+   *   （网络端口的说明压在「波特率」上）。静态测试全绿，只有截图才看得见。
+   */
+  margin-bottom: var(--mt5700-space-md);
+}
+
+.mt5700-grid:last-child {
+  margin-bottom: 0;
+}
+
+.mt5700-grid > .mt5700-form-group {
+  margin-bottom: 0;
+  min-width: 0;               /* 允许 select 收缩，否则长选项会把格子撑破 */
 }
 
 .mt5700-grid-2 { grid-template-columns: repeat(2, 1fr); }

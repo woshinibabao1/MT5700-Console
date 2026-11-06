@@ -300,24 +300,41 @@ ok('非位图校验：未下发的字段不参与（空 want 不产生条目）'
  *
  * 只断言「源码里有 formSection('搜网优先级')」是不够的 —— 那和
  * 「参数传了没人消费」是同一类假绿（红线 85）。这里分两层：
- *   ① 静态：两个分区标题相对 formGroup 的位置正确
- *   ② 真跑：最小 DOM stub 加载 mt5700.js，调 formSection() 查返回节点的结构
+ *   ① 静态：分段标题与栅格的**挂载语句**顺序正确
+ *   ② 真跑：最小 DOM stub 加载 mt5700.js，调 formSection()/formGrid() 查节点结构
+ *
+ * ★★ 2026-11-06 第二次踩：初版判据是「formGroup 的 index 递增」。改成栅格后，
+ *   服务域/漫游是**先创建 formGroup、后挂载**的（为了把两个塞进同一个 grid），
+ *   源码里 `formGroup('服务域'` 的调用点跑到了 `formSection('注册方式')` **前面**，
+ *   而渲染顺序恰好相反 —— index 递增只能说明「代码写在前面」，不等于 DOM 顺序。
+ *   现在只按 sysBody.appendChild(...) 的挂载语句判序，并真查每个 grid 装了谁。
  */
-const SEC_ACQ = modemJs.indexOf("formSection('搜网优先级')");
-const SEC_REG = modemJs.indexOf("formSection('注册方式')");
-const G_ACQ = modemJs.indexOf("formGroup('网络接入顺序'");
-const G_BAND = modemJs.indexOf("formGroup('2G / 3G 频段'");
-const G_LTE = modemJs.indexOf("formGroup('4G / LTE 频段'");
-const G_SRV = modemJs.indexOf("formGroup('服务域'");
-const G_ROAM = modemJs.indexOf("formGroup('漫游'");
+const MOUNT_ACQ_SEC = modemJs.indexOf("sysBody.appendChild(Mt5700.formSection('搜网优先级'))");
+const MOUNT_ACQ_GRID = modemJs.indexOf('sysBody.appendChild(Mt5700.formGrid(');
+const MOUNT_REG_SEC = modemJs.indexOf("sysBody.appendChild(Mt5700.formSection('注册方式'))");
+const MOUNT_REG_GRID = modemJs.indexOf('sysBody.appendChild(Mt5700.formGrid(srvGroup, roamGroup))');
 
-ok('分区标题「搜网优先级」在接入顺序之前',
-	SEC_ACQ > 0 && G_ACQ > SEC_ACQ, JSON.stringify({ SEC_ACQ, G_ACQ }));
-ok('分区标题「注册方式」夹在两个频段与服务域之间',
-	SEC_REG > G_LTE && SEC_REG < G_SRV, JSON.stringify({ SEC_REG, G_LTE, G_SRV }));
-ok('五段式分组完整（搜网 3 项 + 注册 2 项，没有字段落在标题之外）',
-	G_ACQ > SEC_ACQ && G_BAND > G_ACQ && G_LTE > G_BAND
-	&& G_SRV > SEC_REG && G_ROAM > G_SRV);
+ok('搜网段先挂标题、再挂字段',
+	MOUNT_ACQ_SEC > 0 && MOUNT_ACQ_GRID > MOUNT_ACQ_SEC,
+	JSON.stringify({ MOUNT_ACQ_SEC, MOUNT_ACQ_GRID }));
+ok('注册段先挂标题、再挂栅格',
+	MOUNT_REG_SEC > 0 && MOUNT_REG_GRID > MOUNT_REG_SEC,
+	JSON.stringify({ MOUNT_REG_SEC, MOUNT_REG_GRID }));
+ok('五段式分组完整（搜网段在前、注册段在后，中间没有字段落单）',
+	MOUNT_REG_SEC > MOUNT_ACQ_GRID, JSON.stringify({ MOUNT_ACQ_GRID, MOUNT_REG_SEC }));
+
+/* ★ 并排而不是各占一行：五个短选项必须真的进 formGrid（距离设上限，
+   避免正则跨过整段代码误匹配到别处的 formGrid）。
+   ★★ 2026-11-06 二次调整：接入顺序的选项其实也很短（「5G 优先」4 个字），
+   所以三个搜网字段排成一行三列，而不是「接入顺序独占 + 两个频段两列」。 */
+ok('★ 三个搜网字段并排（同一个 formGrid，不是各占一行）',
+	/formGrid\([\s\S]{0,300}formGroup\('网络接入顺序'[\s\S]{0,300}formGroup\('2G \/ 3G 频段'[\s\S]{0,300}formGroup\('4G \/ LTE 频段'/
+		.test(modemJs));
+ok('服务域与漫游并排（同一个 formGrid）',
+	/formGrid\(srvGroup, roamGroup\)/.test(modemJs));
+ok('★ 每项说明都挂进各自格子（两列时不串行）',
+	/srvGroup\.appendChild\(srvNote\)/.test(modemJs)
+	&& /roamGroup\.appendChild\(roamNote\)/.test(modemJs));
 
 const mtSrc = fs.readFileSync(path.join(RES, 'at-webserver/mt5700.js'), 'utf8')
 	.replace(/'require [^']*';/g, '');
@@ -387,6 +404,43 @@ ok('分区标题与容器样式都已在 mt5700.css 里定义',
 ok('底部只读原始值有靠右样式（与保存按钮同排）',
 	/\.mt5700-form-raw\s*\{/.test(cssSrc)
 	&& /mt5700-form-raw/.test(modemJs));
+
+/* ★★ formGrid 也必须真跑：它的全部价值就是「把两个 formGroup 装进同一个
+ *   display:grid 容器」。如果只返回一个普通 div、或者 CSS 没定义 grid，
+ *   页面上照样是上下堆叠 —— 用户看到的和改之前一模一样，而断言全绿。 */
+const grid = Mt.formGrid(
+	Mt.formGroup('A', makeEl('select'), 'ha'),
+	Mt.formGroup('B', makeEl('select'), 'hb')
+);
+ok('★★ formGrid 返回的是项目统一的 mt5700-grid 容器（不另造一套）',
+	grid.className === 'mt5700-grid',
+	'实际 class：' + JSON.stringify(grid.className));
+ok('★★ formGrid 真的把两个字段都收进来了（不是只留最后一个）',
+	grid.children.length === 2
+	&& grid.children[0].children[0].textContent === 'A'
+	&& grid.children[1].children[0].textContent === 'B',
+	'实际子项数：' + grid.children.length);
+
+/* formGroup 的 hint 传节点时必须挂载，而不是被 String() 成 [object Object] */
+const hintNode = { nodeType: 3, textContent: '动态说明' };
+const gWithNode = Mt.formGroup('C', makeEl('select'), hintNode);
+ok('★ formGroup 的 hint 传 DOM 节点时被真的挂上（不是字符串化）',
+	gWithNode.children[2] && gWithNode.children[2].children[0] === hintNode,
+	'第三格没有挂上节点 —— 两列布局里动态 hint 会整段消失');
+
+/* 反向自证：删掉 appendChild 循环后，grid 必须只剩空壳 */
+const noLoop = mtSrc.replace(
+	'if (arguments[i]) grid.appendChild(arguments[i]);', 'void arguments[i];');
+ok('自证：能在源码里定位 formGrid 的挂载循环', noLoop !== mtSrc);
+ok('★ 反向：去掉挂载循环后 formGrid 必须判否',
+	loadMt(noLoop).formGrid(makeEl('div'), makeEl('div')).children.length === 0);
+
+ok('★ 栅格用 auto-fit（auto-fill 会保留空轨道，两个字段被摊成 4 列 → 右半片空着）',
+	/\.mt5700-grid\s*\{[\s\S]{0,220}display:\s*grid/.test(cssSrc)
+	&& /\.mt5700-grid\s*\{[\s\S]{0,220}auto-fit/.test(cssSrc),
+	'仍是 auto-fill —— 元素数量少于轨道数时会被摊薄');
+ok('★ 栅格里的 formGroup 归零 margin-bottom（否则每格底下多一圈、两列对不齐）',
+	/\.mt5700-grid\s*>\s*\.mt5700-form-group\s*\{[\s\S]{0,120}margin-bottom:\s*0/.test(cssSrc));
 
 /* ---------- 汇总 ---------- */
 
