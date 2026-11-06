@@ -79,7 +79,6 @@ TARGETS = {
     #   ★ 复用 parsejs2 / smssetjs 会**跑错测试**（它们分别固定跑 exitip-contract
     #   与 single-source-contract）→ 变异生效但没人判红 → 比没守卫更危险（红线 16b）。
     "parsejs3": ATWB / "parse.js",
-    "smssetjs2": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
     # ★ 再挂三个键（2026-09-24）：VoWiFi 判定的守卫在自己的 vowifi-contract 里。
     #   复用 uc / rpcjs / msjs 会**跑错测试**（它们分别固定跑 exitip-contract、
     #   single-source-contract、device-control-contract）→ 变异生效却没人判红
@@ -159,7 +158,7 @@ TARGETS = {
     #   · smssetjs4 → 短信设置页改用页面级 staged（去掉两个卡片级保存按钮）
     #   · msjs3     → 模组设置「高温时关闭 CA/MIMO」原本是空回调（改了存不下来）
     #   · nsjs2     → 网络状态慢档按「谁先用」拆两段预热
-    #   ★ 复用 smssetjs / smssetjs2 / smssetjs3 / msjs / msjs2 / nsjs / warmjs
+    #   ★ 复用 smssetjs / smssetjs3 / msjs / msjs2 / nsjs / warmjs
     #     都会**跑错测试**（红线 16b：变异生效却没人判红）。
     "smssetjs4": ATWB.parent / "view" / "at-webserver" / "sms_settings.js",
     "msjs3": ATWB.parent / "view" / "at-webserver" / "modem_settings.js",
@@ -207,7 +206,6 @@ TARGET_TEST = {
     "uc": ROOT / "tests" / "exitip-contract.test.js",
     "parsejs2": ROOT / "tests" / "exitip-contract.test.js",
     "parsejs3": ROOT / "tests" / "sms-reachability-contract.test.js",
-    "smssetjs2": ROOT / "tests" / "sms-reachability-contract.test.js",
     "uc2": ROOT / "tests" / "vowifi-contract.test.js",
     "ucsyn": ROOT / "tests" / "ucode-syntax-guard.test.js",
     "rpcjs2": ROOT / "tests" / "vowifi-contract.test.js",
@@ -516,15 +514,6 @@ MUTATIONS = [
         "if (!s) return null;",
         "if (!s) return '0.0.0.0';",
         "空串 → null（不是 0.0.0.0）",
-    ),
-    (
-        # ★ 锚点唯一性已核：sms_settings.js 里 `preferCs && !v.cs.registered`
-        #   只出现 1 次（renderReachability 的判据表达式，缩进 3 个 tab）。
-        "短信可达性退化成单条件（只看承载域，不交叉 CS 域实测 → 回落 GSM/UMTS 时误报）",
-        "smssetjs2",
-        "\t\t\telse if (v.cgsms.preferCs && !v.cs.registered) {",
-        "\t\t\telse if (v.cgsms.preferCs) {",
-        "两个条件在同一个 && 表达式里",
     ),
     (
         # ★ 锚点唯一性已核：parse.js 里 `registered: r.stat === 1 || r.stat === 5`

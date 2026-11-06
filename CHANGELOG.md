@@ -5,6 +5,65 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.7.3] - 2026-11-06
+
+### Fixed — 「载波聚合」与「常用动作」之间的大间隔（真机 getBoundingClientRect 实测）
+
+两栏卡片（c7 载波聚合 + c5 设备与身份）被栅格拉成等高，实测：
+
+```
+CARD0 载波聚合    623x113  contentH=113  slack=0
+CARD1 设备与身份  441x113  contentH=75   slack=38   ← 内容只有 75，被拉到 113
+PREV-OF-ACTIONBAR boxBottom=708 contentBottom=670 actionbarTop=722
+```
+
+矮的那一栏被拉齐后留下 38px 空洞，再加 gap 14 —— 就是用户说的「间隔很大」。
+两边谁高取决于数据（载波多时左高、SIM 信息多时右高），所以两头都会遇到。
+
+**修法**：给「常用动作」加分区线 `border-top` + `padding-top: 12px`，
+与其它分区的 border-top 同一套语言。那 14px 于是变成"分区之间的留白"，
+读起来是有意的，而不是内容断了一截。
+
+### Changed — 网络设置页按功能域重排
+
+原来 `5G 接入模式 → 自定义 DNS → 出口 TTL → 锁频设置 → 定时锁频 → 邻区扫描 → 网络拒绝`：
+「怎么连」被切成两段，读到第三张卡时已经忘了第一张在说什么。
+
+现在按三组连续排列：
+
+| 组 | 区块 |
+|:--|:--|
+| 接入与频段 | 5G 接入模式 → 锁频设置 → 定时锁频 |
+| 出口与 DNS | 自定义 DNS → 出口 TTL |
+| 网络诊断 | 邻区扫描 → 网络拒绝 |
+
+只改 appendChild 顺序，卡片定义、事件监听、定时器与清理路径全部照旧（都按变量闭包）。
+
+### Changed — 短信设置：删「短信可达性」、存储位置默认模组内存
+
+- **整块删除「短信可达性」卡片**（-3872 字节 / 100 行）：含 `loadReachability`、
+  `renderReachability`、AT+CREG?/CGSMS?/CIREG? 取数链与加载流程里的调用。
+  `tests/sms-reachability-contract.test.js` 随之瘦身为**纯解析层**（parseCsDomain /
+  parseCgsms 仍是公开 API 且 stat 口径踩过真机校准，守卫不该跟着卡片一起消失）；
+  `verify-guards.py` 删掉 smssetjs2 的键与它驱动的那条守卫；
+  `ui-consistency` 的「悬浮条在卡片之后」锚点从已删的「短信可达性」换成 `cacheCard`。
+- **存储位置默认改成「模组内存」(ME)**：`AT+CPMS=?` 实测返回 `("SM","ME")`，
+  原来取第一项 = SIM 卡，而 SM 槽位远少于 ME（真机 `+CPMS: "ME",99,300`），
+  写满后新短信直接被拒 —— 用户第一次进这页就默认停在最容易满的那个存储上。
+  只在**拿不到当前值**时兜底；模组报了 mem1 仍以模组为准。
+
+### Changed — 性能：温度改增量更新，函数提到渲染循环外
+
+- `renderTemp()` 原来直接 `renderDevCard()`：这张卡是 5 行表格 + 3 个复制按钮，
+  而温度每 30 秒变一次 —— 等于每 30 秒重建整张表和 4 个事件监听器。
+  更糟的是正在显示的「已复制」反馈连同定时器一起被丢掉，用户点完复制、2 秒后
+  那两个字自己跳回「复制」，看着像没生效。
+  现在稳态下每 30 秒只写一次 `textContent`（`devTempNode` 直引那一格）；
+  温度从"有"变"读不到"、或首次出现时才退回整卡重绘。
+- `copyableRow()` 从 `renderDevCard` 内部提到 render 作用域：每次重绘不再重建函数与闭包。
+
+CSS 6.12.0 → 6.13.0（指纹 `38413129a48e6089`）。三个页面已部署真机并复核 md5。
+
 ## [2.7.2] - 2026-11-06
 
 ### Changed — 定时锁频：开关关闭时整块隐藏编排表单

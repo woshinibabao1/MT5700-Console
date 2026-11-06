@@ -84,7 +84,7 @@ has('悬浮条只挂一次（多了会出现两条叠在一起）',
 	'staged.el 被 append 了 ' + (SMSSET_C.match(/body\.appendChild\(staged\.el\);/g) || []).length + ' 次');
 has('悬浮条追加在卡片之后（position: sticky + bottom 才贴得住视口底部）',
 	SMSSET_C.indexOf('body.appendChild(staged.el)') > SMSSET_C.indexOf('已发记录') ||
-	SMSSET_C.indexOf('body.appendChild(staged.el)') > SMSSET_C.indexOf('短信可达性'),
+	SMSSET_C.indexOf('body.appendChild(staged.el)') > SMSSET_C.indexOf('body.appendChild(cacheCard)'),
 	'提前追加会停在页面中间');
 has('应用/撤销后回到模组真实状态（onChanged 必须重新加载）',
 	/var staged = Mt5700\.staged\(\{ onChanged: function \(\) \{ loadAll\(\); \} \}\);/.test(SMSSET_C),

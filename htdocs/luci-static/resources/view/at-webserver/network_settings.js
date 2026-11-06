@@ -146,7 +146,8 @@ return L.view.extend({
 			'留空即使用运营商下发的 DNS；保存会重新连接网络（短暂断网）');
 		var dnsBody = E('div');
 		dnsCard._body.appendChild(dnsBody);
-		body.appendChild(dnsCard);
+		/* ★ 不在此处 append：它与「出口 TTL」同属「出口与 DNS」，排到锁频之后，
+		   详见文件末尾「区块顺序」那段注释。 */
 
 		function commitDns() {
 			var vals = [dnsInputs[0] ? dnsInputs[0].value.trim() : '', dnsInputs[1] ? dnsInputs[1].value.trim() : ''];
@@ -206,7 +207,7 @@ return L.view.extend({
 			'把经路由器转发的包统一成同一个 TTL，规避运营商按 TTL 判定共享流量');
 		var ttlBody = E('div');
 		ttlCard._body.appendChild(ttlBody);
-		body.appendChild(ttlCard);
+		/* 同上：排到锁频之后，与 DNS 相邻。 */
 
 		var ttlState = { primed: false };
 		var ttlSel = null, ttlInput = null, ttlSaveBtn = null;
@@ -362,6 +363,23 @@ return L.view.extend({
 		 * ★ 它自己的 15s 轮询由 SchedulePanel.dispose() 收，见下方 _dispose。
 		 */
 		SchedulePanel.render(body);
+
+		/* ---------- 区块顺序：接入与频段 → 出口与 DNS → 网络诊断 ----------
+		 *
+		 * 2026-11-06 重排。原来 DNS 卡与 TTL 卡夹在「5G 接入模式」和「锁频设置」之间：
+		 *   optCard(接入) → dnsCard → ttlCard → lockCard(锁频) → 定时锁频 → 邻区 → 拒绝
+		 * 结果是「改怎么连」被切成两段 —— 接入模式与锁频是一件事，中间插进两个
+		 * 出口/DNS 的卡，读到第三张时已经忘了第一张在说什么。
+		 *
+		 * 现在按**功能域连续**排：
+		 *   ① 接入与频段：5G 接入模式 → 锁频设置 → 定时锁频
+		 *   ② 出口与 DNS：自定义 DNS → 出口 TTL（都是"包出去长什么样"）
+		 *   ③ 网络诊断：邻区扫描 → 网络拒绝（只读观测，放最后）
+		 * ★ 只改追加顺序，不动任何卡片的定义与内部逻辑，所以事件监听、定时器、
+		 *   清理路径全部照旧（它们都按变量闭包，与 DOM 顺序无关）。
+		 */
+		body.appendChild(dnsCard);
+		body.appendChild(ttlCard);
 
 		/* ---------- 邻区扫描（^MONNC + ^NRSSBID 的 SSB 邻区，合并去重） ---------- */
 		var neighAutoTimer = null;

@@ -397,6 +397,32 @@ return L.view.extend({
 
 		var devState = null;
 
+		/* IMSI / ICCID / IMEI 经常要整串复制给运营商或客服，而这里原先只能手动
+		   划词选中 —— 长串等宽数字在手机上几乎选不整齐。加一个行内复制按钮。
+		   ★ 复制走 Mt5700.copyText：它内部对 http（非安全上下文）有 execCommand
+		     退路，直接调 navigator.clipboard 在 CPE 上会静默失败。 */
+		function copyableRow(label, value) {
+			if (!value) return [label, '—'];
+			var btn = E('button', {
+				'class': 'mt5700-copy', type: 'button',
+				title: '复制' + label, 'aria-label': '复制' + label
+			}, '复制');
+			btn.addEventListener('click', function () {
+				Mt5700.copyText(value).then(function (ok) {
+					btn.textContent = ok ? '已复制' : '复制失败';
+					setTimeout(function () { btn.textContent = '复制'; }, 1600);
+				});
+			});
+			return [label, E('div', { 'class': 'mt5700-copy-row' }, [
+				E('span', { 'class': 'mt5700-copy-val' }, value),
+				btn
+			])];
+		}
+
+		/* 「设备与身份」卡里温度那一格的节点引用。renderTemp 只改这一格 ——
+		   详见它的注释。卡片整体重绘时同步更新。 */
+		var devTempNode = null;
+
 		function renderDevCard() {
 			if (!devBody) return;
 			var st = devState;
@@ -428,28 +454,6 @@ return L.view.extend({
 			   前者本机卡没写 MSISDN（AT+CNUM 恒 not found），显示出来只是一句
 			   「未写入」；后者的开关在「模组配置 → SIM 卡」页能看能改，
 			   总览再列一遍既不能点也改不了。 */
-			/* IMSI / ICCID / IMEI 经常要整串复制给运营商或客服，而这里原先只能手动
-			   划词选中 —— 长串等宽数字在手机上几乎选不整齐。加一个行内复制按钮。
-			   ★ 复制走 Mt5700.copyText：它内部对 http（非安全上下文）有 execCommand
-			     退路，直接调 navigator.clipboard 在 CPE 上会静默失败。 */
-			function copyableRow(label, value) {
-				if (!value) return [label, '—'];
-				var btn = E('button', {
-					'class': 'mt5700-copy', type: 'button',
-					title: '复制' + label, 'aria-label': '复制' + label
-				}, '复制');
-				btn.addEventListener('click', function () {
-					Mt5700.copyText(value).then(function (ok) {
-						btn.textContent = ok ? '已复制' : '复制失败';
-						setTimeout(function () { btn.textContent = '复制'; }, 1600);
-					});
-				});
-				return [label, E('div', { 'class': 'mt5700-copy-row' }, [
-					E('span', { 'class': 'mt5700-copy-val' }, value),
-					btn
-				])];
-			}
-
 			var rows = [
 				copyableRow('IMSI', fullNum(st.imsi)),
 				copyableRow('ICCID', fullNum(st.iccid)),
@@ -464,10 +468,12 @@ return L.view.extend({
 			   温度属慢档 30s 才取一次，刚进页面会短暂显示「—」，排查项同样按「未读到」处理。 */
 			var mt = maxModuleTemp();
 			if (mt.max != null) {
-				rows.push(['5G模块温度', E('span',
+				devTempNode = E('span',
 					{ title: '各传感器明细（℃）：' + mt.vals.join(' / ') },
-					mt.max + ' ℃')]);
+					mt.max + ' ℃');
+				rows.push(['5G模块温度', devTempNode]);
 			} else {
+				devTempNode = null;
 				rows.push(['5G模块温度', '—']);
 			}
 
@@ -2053,9 +2059,28 @@ return L.view.extend({
 		}
 
 		function renderTemp() {
-			/* 各路温度已并入「SIM 与设备」卡的那一张表（见 renderDevCard），
-			   这里只触发重绘，不再单独占一块磁贴区。 */
-			renderDevCard();
+			/* 各路温度已并入「SIM 与设备」卡的那一张表（见 renderDevCard）。 */
+			var mt = maxModuleTemp();
+			/*
+			 * ★ 只改温度那一格，不整卡重绘。
+			 *   原来是直接 renderDevCard()：这张卡是 5 行表格 + 3 个复制按钮，
+			 *   而温度每 30 秒变一次，等于每 30 秒把整张表和 4 个事件监听器重建一遍；
+			 *   更糟的是正在显示的"已复制"反馈连同它的定时器一起被丢掉，
+			 *   用户点了复制、2 秒后那两个字自己跳回"复制"，看着像没生效。
+			 *   现在稳态下每 30 秒只写一次 textContent。
+			 */
+			if (devTempNode) {
+				if (mt.max == null) {
+					/* 温度从"有"变"读不到"：那一行要退回「—」，只能整卡重绘 */
+					renderDevCard();
+					return;
+				}
+				devTempNode.textContent = mt.max + ' ℃';
+				devTempNode.title = '各传感器明细（℃）：' + mt.vals.join(' / ');
+				return;
+			}
+			/* 之前没有温度行、现在有了 —— 需要整卡重绘才能把这一行插进表格 */
+			if (mt.max != null) renderDevCard();
 		}
 
 		/* 调制方式展示：256QAM MCS 27 · 1 层（大小写与格式固定） */

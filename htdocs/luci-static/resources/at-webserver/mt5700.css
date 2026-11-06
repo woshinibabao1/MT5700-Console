@@ -3994,8 +3994,14 @@ body.mt5700-sh-on {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  /* 不设 padding-bottom：与下方抽屉的间距交给栅格 gap */
-  padding: 2px 2px 0;
+  /* 分区线：与其它分区的 border-top 同一套语言。
+     ★ 没有这条线时，这块紧贴上方卡片的说明文字，读起来像"上一张卡的尾巴"；
+       更要紧的是两栏卡片（c7/c5）高度不等时，矮栏被栅格拉齐后留下的空白
+       会直接变成与「常用动作」之间的一个大洞（实测 c5 内容 75px、被拉到 113px，
+       空 38px，再加 gap 14 —— 看上去就是「间隔很大」）。
+       加上线之后，那 14px 是"分区之间的留白"，读起来是有意的。 */
+  border-top: 1px solid var(--mt5700-divider);
+  padding: 12px 2px 0;
 }
 
 .mt5700-sh .mt5700-actionbar-title {
