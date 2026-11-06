@@ -399,7 +399,7 @@ return L.view.extend({
 		neighTools.appendChild(neighRefreshBtn);
 
 		var neighCard = Mt5700.card('邻区扫描',
-			'SSB 服务小区与波束 + 邻区表（^MONNC 含 RSRQ、^NRSSBID 的 SSB 邻区），按强度排序、可就地锁定', neighTools);
+			'服务小区波束与邻区，按强度排序，可就地锁定', neighTools);
 		var neighBody = E('div');
 		neighCard._body.appendChild(neighBody);
 		body.appendChild(neighCard);
@@ -417,7 +417,7 @@ return L.view.extend({
 		 *   所以这里不做「开始/停止监听」开关 —— 订阅是纯前端行为，一直挂着即可。
 		 */
 		var rejectCard = Mt5700.card('网络拒绝',
-			'^REJINFO 主动上报的拒绝原因（注册 / PDU 会话被拒时实时更新）');
+			'注册 / PDU 会话被拒时的原因，实时更新');
 		var rejectBody = E('div');
 		rejectCard._body.appendChild(rejectBody);
 		body.appendChild(rejectCard);
@@ -925,29 +925,25 @@ return L.view.extend({
 			/*
 			 * 模组会为「邻区列表里配置了、但本轮没真正测量」的小区返回填充行：
 			 * RSRP/RSRQ/SINR 全是手册 13.10 的无效值（-157/-44/-24），解析后为 null。
-			 * 这些行只有 PCI 有值，三列信号全空，占着版面且极易被读成「数据丢失」。
-			 * 它们对选小区没有决策价值，故不单列成行，改为末尾统计并说明原因
-			 * —— 让人一眼看出是模组没测，而不是界面把数据弄丢了。
+			 *
+			 * ★ 2026-11-06 改：这些行**照样列出来**。原先只留一行「另有 N 个未测量，
+			 *   故未列出——这不是界面丢数据」把行吞掉，用户的第一反应是「你丢了
+			 *   我家一半小区」。而那些行并非无用：锁定只需要 ARFCN + PCI，根本不需要
+			 *   测量值 —— 吞掉它们等于把可锁的小区一起藏了。现在按强度排在末尾，
+			 *   信号三列显示「—」、强度列显示「未测量」，一眼能分辨。
 			 */
-			var shown = [];
-			var unmeasured = 0;
-			merged.forEach(function (c) {
-				if (c.rsrp == null && c.rsrq == null && c.sinr == null) unmeasured++;
-				else shown.push(c);
-			});
 			neighBody.appendChild(E('div', { 'class': 'mt5700-card-subtitle mt5700-mt-md' },
-				'邻区（' + shown.length + ' 个，按 RSRP 从强到弱）'));
-			if (!shown.length) {
-				neighBody.appendChild(Mt5700.empty(unmeasured
-					? '模组上报了 ' + unmeasured + ' 个邻区，但都未测量（可能刚驻留或网络未配置测量）'
-					: '暂无邻区数据，点击右上「扫描邻区」'));
+				'邻区（' + merged.length + ' 个，按信号强度排序）'));
+			if (!merged.length) {
+				neighBody.appendChild(Mt5700.empty('暂无邻区数据，点击右上「扫描邻区」'));
 				renderNeighborHints();
 				return;
 			}
-			var rows = shown.map(function (c) {
+			var rows = merged.map(function (c) {
 				var band = Parse.arfcnToBand(c.rat, c.arfcn);
 				var btn = Mt5700.button('锁定', function () { lockNeighbor(c); }, 'secondary');
 				btn.disabled = band == null;
+				var unmeasured = c.rsrp == null && c.rsrq == null && c.sinr == null;
 				return [
 					c.rat + (c.src === 'SSB' ? '（SSB）' : ''),
 					band != null ? (c.rat === 'NR' ? 'n' + band : 'B' + band) : '—',
@@ -957,38 +953,39 @@ return L.view.extend({
 					c.rsrp != null ? c.rsrp + ' dBm' : '—',
 					c.rsrq != null ? c.rsrq + ' dB' : '—',
 					c.sinr != null ? c.sinr + ' dB' : '—',
-					Mt5700.rsrpBar(c.rsrp),
+					unmeasured
+						? E('span', { 'class': 'mt5700-hint' }, '未测量')
+						: Mt5700.rsrpBar(c.rsrp),
 					btn
 				];
 			});
 			neighBody.appendChild(Mt5700.table(
-				['制式', '频段', 'ARFCN', 'SCS', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度', '操作'], rows, { striped: true }));
-			if (unmeasured) {
-				neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'另有 ' + unmeasured + ' 个小区模组只上报了邻区关系、未给出测量值'
-					+ '（RSRP/RSRQ/SINR 均为无效填充值），故未列出——这不是界面丢数据。'));
-			}
+				['制式', '频段', 'ARFCN', 'SCS', 'PCI', 'RSRP', 'RSRQ', 'SINR', '强度', '操作'], rows,
+				{ striped: true, rowClass: function (i) { return merged[i] && merged[i].rsrp == null
+					&& merged[i].rsrq == null && merged[i].sinr == null ? 'mt5700-row-unmeasured' : ''; } }));
 			renderNeighborHints();
 		}
 
-		/* 表格下方的说明。早退路径（无邻区）也要调用，故抽成函数。 */
+		/* 表格下方的说明。早退路径（无邻区）也要调用，故抽成函数。
+		 *
+		 * ★ 2026-11-06：原来这里挂 4 段解说（数据源命令名、飞行模式+PCI 叮嘱、
+		 *   SCS 的 3GPP 条款推导、RSRQ 由哪条命令回填）。用户口径「类似的解说太多」
+		 *   —— 界面只回答问题「现在能不能用、不能用怎么办」，推导与出处属于 README。
+		 *   留下的两条：查询失败（要不要重试）＋ 锁定会断网（做之前得知道）。
+		 */
 		function renderNeighborHints() {
-			var names = { MONNC: '邻区列表 ^MONNC', NRSSBID: 'SSB 测量 ^NRSSBID',
-				MONSC: '服务小区 ^MONSC（同频实测 SCS）' };
+			var names = { MONNC: '邻区列表', NRSSBID: 'SSB 测量', MONSC: '服务小区' };
 			var failed = Object.keys(neighFailures).filter(function (k) { return neighFailures[k]; });
 			if (failed.length) {
 				neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'本轮以下数据源查询失败，相关列已降级显示（其余照常）：'
-					+ failed.map(function (k) { return names[k] || k; }).join('、')));
+					'本轮没取到：'
+					+ failed.map(function (k) { return names[k] || k; }).join('、')
+					+ '（相关列显示为空，可重试）'));
 			}
 			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-				'锁定会先切飞行模式再下发锁频并恢复；同频多个小区时注意区分 PCI。'));
+				'锁定会短暂断网：先切飞行模式，下发后自动恢复。'));
 			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-				'SCS = 子载波间隔（^NRFREQLOCK 的 scstype，15/30/60/120/240 kHz）：'
-				+ '与当前服务小区同频点的邻区用 ^MONSC 的实测值，异频邻区只能按 3GPP TS 38.104'
-				+ '规定的 SSB SCS 推断并加「*」标注——模组不报邻区 SCS，这是唯一不猜的做法。'));
-			neighBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-				'RSRQ 由 ^MONNC 提供（^NRSSBID 邻区不带 RSRQ），已按 ARFCN+PCI 关联回填。'));
+				'SCS 带 * 表示该邻区不报此项，按频段推断。'));
 		}
 
 		var neighFailures = {};
@@ -1047,8 +1044,6 @@ return L.view.extend({
 			var s = ssb && ssb.serving;
 			if (!s) {
 				ssbBody.appendChild(Mt5700.empty('暂无 SSB 信息（点击右上「刷新 SSB 信息」）'));
-				ssbBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'^NRSSBID 只在 NR 连接态、且网侧配置了测量时上报；空闲态或非 NR 组网时为空。'));
 				return;
 			}
 			var mhz = Parse.nrArfcnToMHz(s.arfcn);
@@ -1071,8 +1066,7 @@ return L.view.extend({
 
 			ssbBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 				'小区标识 ' + (s.cid || '—')
-				+ (best ? ' · 最强波束 #' + best.id + '（' + best.rsrp + ' dBm）' : '')
-				+ ' · SSB ARFCN 可直接填进「锁频设置」的频点栏（锁定频点用）'));
+				+ (best ? ' · 最强波束 #' + best.id + '（' + best.rsrp + ' dBm）' : '')));
 
 			/*
 			 * 波束怎么显示：8 行明细对固定安装的路由器几乎没信息量（这些数一天都不变），
@@ -1081,8 +1075,7 @@ return L.view.extend({
 			 *   · 摘要给出最强/次强与其余上限，判断是否只吃到一束（可能偏离主瓣）。
 			 */
 			if (!beams.length) {
-				ssbBody.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'本次上报未包含波束数据（^NRSSBID 的波束测量需网侧配置并上报）。'));
+				ssbBody.appendChild(E('div', { 'class': 'mt5700-hint' }, '本次上报不含波束数据。'));
 				return;
 			}
 			var byId = beams.slice().sort(function (a, b) { return a.id - b.id; });
@@ -1107,8 +1100,7 @@ return L.view.extend({
 			ssbBody.appendChild(E('div', { 'class': 'mt5700-hint' },
 				'最强 #' + best.id + '（' + best.rsrp + ' dBm）'
 				+ (second ? ' · 次强 #' + second.id + '（' + second.rsrp + ' dBm）' : '')
-				+ (rest.length ? ' · 其余 ' + rest.length + ' 束 ≤ ' + restMax + ' dBm' : '')
-				+ '。一般只有 1~2 束强；若最强束编号在挪动天线后变化，说明方向变了。'));
+				+ (rest.length ? ' · 其余 ' + rest.length + ' 束 ≤ ' + restMax + ' dBm' : '')));
 		}
 
 
@@ -1142,11 +1134,10 @@ return L.view.extend({
 			var cur = modeKey(triple);
 			if (!cur) {
 				seg.setValue(null);
-				accessInfo.textContent = '当前为 AT^C5GOPTION=' + triple.join(',')
-					+ '（不在手册标准的三种组合内），选择上方任一模式即切到标准组合。';
+				accessInfo.textContent = '当前组合不在上述三种之内，选择上方任一模式即可切换。';
 			} else {
 				var m2 = ACCESS_MODES.filter(function (x) { return x.value === cur; })[0];
-				accessInfo.textContent = '当前：' + m2.label + '（AT^C5GOPTION=' + triple.join(',') + '）· ' + m2.hint;
+				accessInfo.textContent = '当前：' + m2.label + ' · ' + m2.hint;
 			}
 			optBody.appendChild(accessInfo);
 			optBody.appendChild(E('div', { 'class': 'mt5700-hint' },
@@ -1156,7 +1147,7 @@ return L.view.extend({
 		function setAccessMode(value) {
 			var m = ACCESS_MODES.filter(function (x) { return x.value === value; })[0];
 			if (!m) return;
-			Mt5700.confirm('切换 5G 接入模式为「' + m.label + '」（AT^C5GOPTION=' + m.triple.join(',') + '）？'
+			Mt5700.confirm('切换 5G 接入模式为「' + m.label + '」？'
 				+ '切换期间会短暂断网，且需要软重启才生效。', function () {
 				Mt5700.info('正在切换接入模式（先切飞行模式）…');
 				withRadioOff(function () {

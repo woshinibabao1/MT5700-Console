@@ -142,12 +142,113 @@ ok('渲染不依赖取数成功（失败也 renderNeighbors）',
 	/renderNeighbors\(\);/.test(settingsJs.slice(settingsJs.indexOf('function loadNeighbors'))),
 	'renderNeighbors 未在兜底后调用');
 
-/* ---------- A4. 未测量的占位行 ---------- */
+/* ---------- A4. 未测量的占位行 ----------
+ *
+ * ★★ 2026-11-06 口径反转（用户原话：「邻区和 ssb 不允许隐藏要全部显示」）：
+ *   原实现把「模组只报了邻区关系、RSRP/RSRQ/SINR 全是手册无效值」的行**吞掉**，
+ *   只在表尾写一句「另有 N 个小区…故未列出——这不是界面丢数据」，后来还补了
+ *   SCS/RSRQ 两段推导说明。用户看到的第一反应是「你丢了这么多小区」——
+ *   而那句解释只证明了「不是 bug」，没有把行给回来。
+ *
+ *   而且吞掉它们是真的丢功能：**锁定只需要 ARFCN + PCI，根本不需要测量值**。
+ *   现在全部列出、按强度排在末尾，信号三列显示「—」、强度列显示「未测量」，
+ *   整行弱化（.mt5700-row-unmeasured）。
+ *
+ *   下面同时钉住正反两面：既要「用 merged 全量渲染」，也要「没有分流丢弃」。
+ *   只写正向的话，将来把分流加回来但改个变量名，断言照样绿。
+ */
+ok('★ 邻区表用 merged 全量渲染，不分流丢弃未测量行',
+	/merged\.length \+ ' 个，按信号强度排序）'/.test(settingsJs) &&
+	/var rows = merged\.map\(/.test(settingsJs),
+	'渲染源不是 merged —— 又按测量值分流了');
+ok('★ 不再有「按三列信号分流 + 只留测过的」旧写法',
+	!/unmeasured\+\+/.test(settingsJs) && !/shown\.push\(c\)/.test(settingsJs),
+	'仍存在 unmeasured++ / shown.push(c) 分流');
+ok('★ 未测量行在强度列明确标注（不是留白让人以为丢数据）',
+	/E\('span', \{ 'class': 'mt5700-hint' \}, '未测量'\)/.test(settingsJs));
+ok('★ 未测量行整行弱化（否则与真数据行长得一样）',
+	/'mt5700-row-unmeasured'/.test(settingsJs) && /rowClass/.test(settingsJs),
+	'传了 rowClass 却没人消费 = 样式永远不生效');
+/* ★ 剥注释再判：注释里**必须**保留被删文案的原文（否则下一个人不知道
+ *   删的是什么、为什么删），只有字符串字面量里出现才算回流。 */
+const NO_COMMENT = settingsJs
+	.replace(/\/\*[\s\S]*?\*\//g, '')
+	.replace(/(^|[^:])\/\/.*$/gm, '$1');
+ok('★ 被吞行的旧说明彻底删除（不是改成更短的说法）',
+	!/故未列出/.test(NO_COMMENT) && !/这不是界面丢数据/.test(NO_COMMENT));
 
-ok('三列信号全空的填充行不再占版面',
-	/c\.rsrp == null && c\.rsrq == null && c\.sinr == null\) unmeasured\+\+/.test(settingsJs));
-ok('被折叠的行有明确说明（避免被读成界面丢数据）',
-	/个小区模组只上报了邻区关系、未给出测量值/.test(settingsJs));
+/* ---------- A5. rowClass 必须真的落到 <tr> 上 ----------
+ *
+ * 「参数传过去了」≠「消费方认」。2026-11-06 真踩：给 Mt5700.table 传了
+ * options.rowClass，而组件**根本没读过这个字段** —— 表格照样渲染，只是没有
+ * 任何一行被弱化。静态断言 `/rowClass/.test(src)` 全绿，界面却毫无变化；
+ * 这正是红线 85「后端正确 ≠ 页面拿到」的同型问题（那一层是传输，这层是渲染）。
+ *
+ * 所以这里用最小 DOM stub **真跑一次** table()，直接查生成的 <tr> 类名。
+ */
+const MTJS = path.join(RES, 'at-webserver/mt5700.js');
+const mtSrc = fs.readFileSync(MTJS, 'utf8').replace(/'require [^']*';/g, '');
+
+function makeEl(tag) {
+	const el = {
+		tagName: tag, nodeType: 1, children: [], className: '', textContent: '',
+		style: {}, _attrs: {},
+		classList: {
+			add: function (c) { el.className = (el.className + ' ' + c).trim(); },
+			contains: function (c) { return el.className.split(/\s+/).indexOf(c) >= 0; }
+		},
+		appendChild: function (c) { el.children.push(c); return c; },
+		setAttribute: function (k, v) { el._attrs[k] = v; },
+		addEventListener: function () {}
+	};
+	return el;
+}
+
+function loadMt(src) {
+	const ctx = {
+		console: console,
+		document: {
+			querySelectorAll: function () { return []; },
+			head: { appendChild: function () {} },
+			createElement: makeEl,
+			createTextNode: function (t) { return { nodeType: 3, textContent: t }; }
+		},
+		window: undefined,
+		L: {
+			Class: { extend: function (x) { return x; } },
+			rpc: { declare: function () { return function () { return Promise.resolve({}); }; } },
+			uci: { load: function () { return Promise.resolve(); } }
+		}
+	};
+	vm.createContext(ctx);
+	return vm.runInContext('(function(){\n' + src + '\nreturn Mt5700;\n})()', ctx);
+}
+
+function rowClasses(Mt) {
+	const wrap = Mt.table(['a', 'b'], [['1', '2'], ['3', '4']], {
+		rowClass: function (i) { return i === 1 ? 'mt5700-row-unmeasured' : ''; }
+	});
+	const tbody = wrap.children[0].children.filter(function (c) { return c.tagName === 'tbody'; })[0];
+	return tbody.children.map(function (tr) { return tr.className; });
+}
+
+const cls = rowClasses(loadMt(mtSrc));
+ok('★★ table 的 rowClass 真的落到 <tr> 上（不是只把参数传过去）',
+	cls[0] === '' && cls[1] === 'mt5700-row-unmeasured',
+	'实际类名：' + JSON.stringify(cls));
+
+/* 反向自证：整块删掉后，上面那条必须判否 —— 否则它只是在查「字符串在不在」 */
+const RC_MARK = "if (typeof options.rowClass === 'function') {";
+const rcStart = mtSrc.indexOf(RC_MARK);
+const rcTail = mtSrc.indexOf('if (extra) tr.className = extra;');
+ok('自证：能在源码里定位到 rowClass 分支（否则下面的反向用例是空转）',
+	rcStart >= 0 && rcTail > rcStart);
+const rcEnd = mtSrc.indexOf('}', rcTail) + 1;
+const mtNoRowClass = mtSrc.slice(0, rcStart) + mtSrc.slice(rcEnd);
+const clsBad = rowClasses(loadMt(mtNoRowClass));
+ok('★ 反向：删掉 rowClass 分支后必须判否',
+	clsBad[1] !== 'mt5700-row-unmeasured',
+	'删了分支仍然带类名 —— 说明上面那条断言根本没在查这段代码');
 
 /* ---------- B. SSB 邻区 RSRQ 回填与波束保留 ---------- */
 
@@ -177,8 +278,14 @@ ok('SSB 可补齐 MONNC 缺测的 SINR', /if \(row\.sinr == null\) row\.sinr = n
 ok('合并行标注来源，避免误以为是纯 MONNC 数据', /row\.src = 'MONNC\+SSB';/.test(settingsJs));
 ok('SSB 独有的邻区仍然单独成行', /src: 'SSB', beams: n\.beams/.test(settingsJs));
 ok('制式列对 SSB 独有行保留（SSB）后缀', /c\.src === 'SSB' \? '（SSB）' : ''/.test(settingsJs));
-ok('向用户说明 RSRQ 的来源与关联方式',
-	/已按 ARFCN\+PCI 关联回填/.test(settingsJs), '缺少 RSRQ 来源说明');
+/* ★ 2026-11-06：原断言「向用户说明 RSRQ 的来源与关联方式」（要求页面出现
+ *   「已按 ARFCN+PCI 关联回填」）随用户口径「类似的解说太多」一并反转 ——
+ *   RSRQ 从哪条命令回填是**实现细节**，用户要做的是看数值、必要时锁定，
+ *   不是读数据血缘。现改为**禁止**这类血缘说明回到界面（红线 87）。
+ *   数据本身仍然回填（见上面 if (row.rsrq == null) 那条），只是不解释。 */
+ok('★ 界面不再解释 RSRQ 的数据血缘',
+	!/已按 ARFCN\+PCI 关联回填/.test(settingsJs) && !/RSRQ 由 \^/.test(settingsJs),
+	'血缘说明回流到界面了');
 
 /* ---------- C. 真机样本：解析层事实 ---------- */
 
@@ -286,11 +393,14 @@ ok('monncRsrq 只认 NR 邻区', /c\.rat === 'NR'/.test(statusJs));
 /*
  * ③ ^NRSSBID 只报「按波束能量排序的前 4 个」小区，辅载波上的小区常常排不进去
  *    （本机 9 次采样只有 1 次命中）。整行空白容易被误读成「没刷新」，必须写清原因。
+ * ★ 2026-11-06：原因照写，但只写用户能行动的那一层 ——「邻区测量只覆盖最强 4 个
+ *   小区」。原文案带命令名（^NRSSBID）、「前 4 强邻区都不在辅载波频带内」的推导
+ *   和「不是刷新失败」的自辩，属于开发视角。结论不变，句子从 3 句压到 1 句。
  */
 ok('辅载波匹配不到邻区时给出解释，而不是留一片空白',
-	/前 4 强邻区都不在辅载波频带内/.test(statusJs));
-ok('文案明确说明这是命令局限而非刷新失败',
-	/不是刷新失败/.test(statusJs));
+	/辅载波信号为空：邻区测量只覆盖最强的 4 个小区/.test(statusJs));
+ok('★ 该解释不再向用户暴露命令名与自辩口吻',
+	!/前 4 强邻区都不在辅载波频带内/.test(statusJs) && !/不是刷新失败/.test(statusJs));
 
 /* ---------- 汇总 ---------- */
 

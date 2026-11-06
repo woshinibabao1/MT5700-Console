@@ -533,8 +533,7 @@ return L.view.extend({
 				}
 			}).catch(function () { Mt5700.error('载波聚合设置失败'); });
 		});
-		nrBody.appendChild(Mt5700.formGroup('NR 载波聚合', caSwitch,
-			'下发 AT^NRRCCAPCFG=3,<0|1>；读回用 AT^NRRCCAPQRY=3（已在本机验证可用）'));
+		nrBody.appendChild(Mt5700.formGroup('NR 载波聚合', caSwitch, '允许模组做 NR 载波聚合'));
 		var caChk = caSwitch.querySelector('input');
 
 		/*
@@ -635,8 +634,7 @@ return L.view.extend({
 		vowifiSwitchWrap.appendChild(vowifiSwitch);
 		vowifiSwitch.addEventListener('change', function () { requestVowifiSet(vowifiSwitch.checked); });
 		vowifiCard._body.appendChild(Mt5700.formGroup('VoWiFi（本机 IMS 能力）', vowifiSwitchWrap,
-			'开＝AT^IMSSWITCH=1,0,0，关＝AT^IMSSWITCH=0,0,0（掉电保存）。'
-			+ '开关只管本机 IMS，通不通还要看下面五道门。'));
+			'掉电保存。开关只管本机 IMS，通不通还要看下面五道门。'));
 		var vowifiSetMsg = E('p', { 'class': 'mt5700-hint mt5700-mt-sm' }, '');
 		vowifiCard._body.appendChild(vowifiSetMsg);
 
@@ -797,7 +795,7 @@ return L.view.extend({
 			/* 评估或开关正在跑时锁住：两条路都会碰串口，并发会让回读拿到别人的包 */
 			vowifiSwitch.disabled = !known || !!(t.busy || t.setBusy);
 			vowifiSetMsg.textContent = t.setMsg
-				|| (known ? '' : '读不到 ^IMSSWITCH —— 当前状态未知，点「刷新」或「评估 VoWiFi」重试');
+				|| (known ? '' : '读不到当前状态，点「刷新」或「评估 VoWiFi」重试');
 			/* 「无法开启」是这一块要让用户看见的结论 → 用现成的红色小字类，
 			   不另造 CSS 类（另造一个不存在的类名是静默失效）。 */
 			var bad = t.setMsg.indexOf('无法开启') === 0 || t.setMsg.indexOf('失败') >= 0
@@ -830,7 +828,7 @@ return L.view.extend({
 				return;
 			}
 			if (!on) {
-				Mt5700.confirm('关闭会下发 AT^IMSSWITCH=0,0,0，IMS 短信与 VoLTE 语音会一起断掉。确定关闭？',
+				Mt5700.confirm('关闭后 IMS 短信与 VoLTE 语音会一起断掉。确定关闭？',
 					function () { doVowifiSet(0); }, '确定关闭',
 					function () { renderVowifiSwitch(); });
 				return;
@@ -855,14 +853,14 @@ return L.view.extend({
 					/* ★ 拒绝不是失败：一条写命令都没下发，把原因逐条说出来 */
 					t.setMsg = '无法开启：' + blockersToText(r.blockers);
 				} else if (r.applied && r.effective) {
-					t.setMsg = (on ? '已开启' : '已关闭') + '本机 IMS 能力（实测 ^IMSSWITCH=' + r.imsswitch + '）'
+					t.setMsg = (on ? '已开启' : '已关闭') + '本机 IMS 能力（当前值 ' + r.imsswitch + '）'
 						+ (r.verdict === 'capable' ? '' : '，但 VoWiFi 仍不成立：' + blockersToText(r.blockers));
 				} else if (r.applied && r.unknown) {
-					t.setMsg = (on ? '开启' : '关闭') + '命令已下发，但回读不到 ^IMSSWITCH —— 请点「评估」刷新确认';
+					t.setMsg = (on ? '开启' : '关闭') + '命令已下发，但读不到当前状态 —— 请点「评估」刷新确认';
 				} else if (r.applied) {
 					/* 下发成功但没生效：只收敛到实测值，不反向重下发（手册三条失败条件仍在） */
-					t.setMsg = (on ? '开启' : '关闭') + '已下发但未生效（实测 ^IMSSWITCH=' + r.imsswitch + '）；'
-						+ '手册列出的常见原因是存在进行中的 IMS 业务，或语音优选模式为 PS_ONLY';
+					t.setMsg = (on ? '开启' : '关闭') + '已下发但未生效（当前值 ' + r.imsswitch + '）；'
+						+ '常见原因是存在进行中的 IMS 业务';
 				} else {
 					t.setMsg = '下发失败：' + (r.error || '未知原因');
 				}
@@ -1390,12 +1388,10 @@ return L.view.extend({
 				 * 讲清楚 —— 否则用户会以为是本页没做全，实际是本机固件不给。
 				 */
 				roamNote.textContent = (sysRanges.roam.max >= 3
-					? '本机 ^SYSCFGEX=? 实报 roam ' + sysRanges.roam.min + '-' + sysRanges.roam.max
-						+ '：NV「漫游特性」已激活，国内漫游与国际漫游可分别设置（4 档齐全）。'
-					: '本机 ^SYSCFGEX=? 实报 roam ' + sysRanges.roam.min + '-' + sysRanges.roam.max
-						+ '：NV「漫游特性」未激活，模组只支持整体开关漫游，'
-						+ '不提供「国内」与「国际」分别设置；固件若上报 0-3，本页会自动换成四档。')
-					+ '（手册 13.2.3）';
+					? '本机报告 ' + sysRanges.roam.min + '-' + sysRanges.roam.max
+						+ ' 档：国内漫游与国际漫游可分别设置。'
+					: '本机报告 ' + sysRanges.roam.min + '-' + sysRanges.roam.max
+						+ ' 档：只能整体开关漫游，不提供「国内」与「国际」分别设置。');
 				paintRoam();
 				/* 只读探测失败：界面保持「—」或原值，下一轮刷新会再试；不弹错是因为一次查询失败不值得打断用户操作 */
 			}).catch(function () {});

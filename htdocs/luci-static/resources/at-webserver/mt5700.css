@@ -1411,6 +1411,16 @@
 
 .mt5700-table tbody tr:last-child td { border-bottom: none; }
 
+/*
+ * 「模组只报了邻区关系、没给测量值」的行。
+ * 信号三列全是「—」，若与真数据行同样式，会被读成「界面把数据弄丢了」；
+ * 弱化整行 + 强度列写「未测量」，一眼能分开。锁定按钮仍可点（锁频只要 ARFCN+PCI）。
+ */
+.mt5700-table tbody tr.mt5700-row-unmeasured td {
+  color: var(--mt5700-text-muted, #7a8794);
+  opacity: 0.75;
+}
+
 .mt5700-table tbody tr:hover {
   background: rgba(15, 118, 110, 0.045);
 }

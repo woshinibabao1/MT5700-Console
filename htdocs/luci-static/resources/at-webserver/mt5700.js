@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '6.13.0';
+var MT5700_CSS_VERSION = '6.14.0';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -1225,7 +1225,7 @@ var Mt5700 = (function () {
 			tr0.appendChild(E('td', { colspan: headers.length, 'class': 'mt5700-empty' }, '暂无数据'));
 			tbody.appendChild(tr0);
 		} else {
-			rows.forEach(function (row) {
+			rows.forEach(function (row, rowIndex) {
 				/* 分组标题行：传 { group: '地址' }。
 				   几组「项目 → 值」合并进一张表时用它分隔，比拆成多张表少两套表头。 */
 				if (row && row.group != null && !row.nodeType) {
@@ -1237,6 +1237,13 @@ var Mt5700 = (function () {
 					return;
 				}
 				var tr = E('tr');
+				/* 逐行样式：options.rowClass(i, row) 返回类名（''/null 表示不加）。
+				   ★ 2026-11-06 新增。邻区表要「未测量」的行整行弱化，否则三列 — 的行
+				   和真数据行长得一样，用户分不清「模组没测」与「界面没画」。 */
+				if (typeof options.rowClass === 'function') {
+					var extra = options.rowClass(rowIndex, row);
+					if (extra) tr.className = extra;
+				}
 				row.forEach(function (cell) {
 					if (typeof cell === 'object' && cell.nodeType) {
 						var td = E('td');

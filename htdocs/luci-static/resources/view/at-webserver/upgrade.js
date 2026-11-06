@@ -547,7 +547,7 @@ return L.view.extend({
 					break;
 				case 70:
 					stopTimer();
-					Mt5700.error('固件升级失败（^FOTASTATE: 70）：请排查环境影响因素后重试');
+					Mt5700.error('固件升级失败：请排查环境影响因素后重试');
 					failReset();
 					break;
 				default: break;

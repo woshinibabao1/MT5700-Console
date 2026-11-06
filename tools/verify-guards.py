@@ -890,10 +890,11 @@ MUTATIONS = [
     ),
     (
         # ★ 关 IMS 会断掉 IMS 短信与 VoLTE 语音 —— 必须确认，且取消要把开关拨回去。
+        # ★ 2026-11-06：确认文案去掉了命令名（用户口径「解说太多」），锚点同步。
         "关 IMS 不再确认（误点一下就断掉短信与 VoLTE）",
         "vowifijs",
-        "\t\t\tif (!on) {\n\t\t\t\tMt5700.confirm('关闭会下发 AT^IMSSWITCH=0,0,0，"
-        "IMS 短信与 VoLTE 语音会一起断掉。确定关闭？',\n\t\t\t\t\tfunction () { doVowifiSet(0); }, '确定关闭',"
+        "\t\t\tif (!on) {\n\t\t\t\tMt5700.confirm('关闭后 IMS 短信与 VoLTE 语音会一起断掉。确定关闭？',\n"
+        "\t\t\t\t\tfunction () { doVowifiSet(0); }, '确定关闭',"
         "\n\t\t\t\t\tfunction () { renderVowifiSwitch(); });\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tdoVowifiSet(1);",
         "\t\t\tdoVowifiSet(on ? 1 : 0);",
         "关 IMS 要先确认",

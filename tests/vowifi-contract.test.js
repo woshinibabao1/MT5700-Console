@@ -704,7 +704,7 @@ ok('★★ 开关状态取实测值，不是本地勾选记忆（掉电保存的
 ok('★★ 读不到开关状态时不许显示成「关」（红线 23：读不到 ≠ 确实是 0）',
 	/vowifiSwitch\.disabled = !known \|\| !!\(t\.busy \|\| t\.setBusy\);/.test(viewSrc));
 ok('★★ 关 IMS 要先确认（会断掉 IMS 短信与 VoLTE 语音），取消时把开关拨回去',
-	/Mt5700\.confirm\('关闭会下发 AT\^IMSSWITCH=0,0,0/.test(viewSrc)
+	/Mt5700\.confirm\('关闭后 IMS 短信与 VoLTE 语音会一起断掉/.test(viewSrc)
 	&& /function \(\) \{ doVowifiSet\(0\); \}, '确定关闭',\s*\n\s*function \(\) \{ renderVowifiSwitch\(\); \}/
 		.test(viewSrc));
 ok('★★ 被拒绝时前端要说出「无法开启：原因」，不是笼统的「设置失败」',
@@ -712,7 +712,7 @@ ok('★★ 被拒绝时前端要说出「无法开启：原因」，不是笼统
 ok('★ 开了但 VoWiFi 仍不成立时，要把还差什么一起说出来',
 	/'，但 VoWiFi 仍不成立：' \+ blockersToText\(r\.blockers\)/.test(viewSrc));
 ok('★ 回读不到不许说「已生效」（unknown 单独成一句）',
-	/'命令已下发，但回读不到 \^IMSSWITCH/.test(viewSrc));
+	/'命令已下发，但读不到当前状态/.test(viewSrc));
 ok('★ 开关与评估两条路互斥（都碰串口，并发会让回读拿到别人的包）',
 	/!known \|\| !!\(t\.busy \|\| t\.setBusy\)/.test(viewSrc)
 	&& /if \(t\.busy \|\| t\.setBusy\) \{ renderVowifiSwitch\(\); return; \}/.test(viewSrc));

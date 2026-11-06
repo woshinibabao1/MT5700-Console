@@ -647,7 +647,7 @@ return L.view.extend({
 					name: '服务域与制式', cmd: 'AT^SYSCFGEX?',
 					judge: function (data) {
 						var str = AtWs.extractATData(String(data), '^SYSCFGEX');
-						if (!str) return { level: 'warn', text: '取不到 ^SYSCFGEX（不影响上网本身）' };
+						if (!str) return { level: 'warn', text: '取不到服务域配置（不影响上网本身）' };
 						var d = str.split(',');
 						var SRV = { 0: '仅语音 CS_ONLY', 1: '仅数据 PS_ONLY', 2: '语音+数据 CS_PS', 3: '不限 ANY', 4: '不修改' };
 						var sv = d.length >= 4 ? Number(String(d[3]).replace(/"/g, '').trim()) : NaN;
@@ -1316,8 +1316,7 @@ return L.view.extend({
 
 		function clearFlowStats() {
 			Mt5700.confirm('清零流量统计？本次与累计的流量、连接时长都会归零，且无法恢复。'
-				+ '只清统计计数器、不会断网（手册 16.11 ^DSFLOWCLR）。'
-				+ '适合核对套餐周期，或测某个应用耗了多少流量。', function () {
+				+ '只清统计计数器，不会断网。', function () {
 				return AtWs.client.sendCommand('AT^DSFLOWCLR').then(function (res) {
 					if (!res || !res.success) {
 						Mt5700.error('清零失败：' + ((res && res.error) || '模组未响应'));
@@ -1814,7 +1813,7 @@ return L.view.extend({
 
 			if (!count) {
 				carrierBox.appendChild(E('div', { 'class': 'mt5700-hint' },
-					'未读到载波信息。^HFREQINFO? 在 RRC null 态不支持查询，会返回错误。'));
+					'当前无载波信息（网络未下发或处于空闲态）。'));
 				return;
 			}
 
@@ -1927,23 +1926,20 @@ return L.view.extend({
 			 * （本机：SSB 524910 vs 载波中心 528960；SSB 504990 vs 载波中心 513000）。
 			 * 不写出来，用户拿手机一对就会以为页面算错了（这是真实报障，发生过两次）。
 			 */
-			hint += ' ARFCN 列取各载波的 SSB 频点（与手机工程软件一致）；'
-				+ '^HFREQINFO 的 <dl_fcn> 是载波中心，仅在测不到 SSB 时兜底显示。';
+			hint += ' ARFCN 为 SSB 频点；测不到 SSB 时显示载波中心。';
 			if (centerRows.length) {
-				hint += ' 第 ' + centerRows.join('、') + ' 载波本轮没测到 SSB 频点，'
-					+ '显示的是载波中心，与手机的数值会对不上。';
+				hint += ' 第 ' + centerRows.join('、') + ' 载波未测到 SSB 频点，显示的是载波中心。';
 			}
 			if (usedSsbid) {
-				hint += ' 辅载波 PCI/RSRP/SINR 来自 ^NRSSBID 邻区测量（按频点配对），'
-					+ 'RSRQ 由 ^MONNC 按 ARFCN+PCI 关联回填（^NRSSBID 邻区不带 RSRQ）。';
+				hint += ' 辅载波信号取自邻区测量。';
 			} else if (list.length > 1) {
 				/*
 				 * ^NRSSBID 只报「按波束能量排序的前 4 个」小区，辅载波上的小区
 				 * 常常排不进去（本机 9 次采样里只有 1 次命中）。此时整行空白容易被
-				 * 误读成「没刷新」，必须把原因写出来。
+				 * 误读成「没刷新」，必须把原因写出来 —— 但只写用户能行动的那一层：
+				 * 「邻区测量只覆盖最强 4 个」，不写是哪条 AT 命令的限制。
 				 */
-				hint += ' 当前 ^NRSSBID 的前 4 强邻区都不在辅载波频带内，故辅载波信号列为空——'
-					+ '这是该命令只报 4 个小区的固有局限，不是刷新失败。';
+				hint += ' 辅载波信号为空：邻区测量只覆盖最强的 4 个小区。';
 			}
 			if (slowFailures.loadSecondary) {
 				hint += ' 注意：本轮辅载波数据拉取失败（已保留上一次读数）。';

@@ -160,8 +160,8 @@ return L.view.extend({
 					}
 					/* 下发成功但实际没生效 —— 不反向重发，收敛到实测值并如实告知 */
 					loadIMS();
-					Mt5700.error((checked ? '开启' : '关闭') + ' IMS 已下发但未生效（当前实测值 ' + v.actual +
-						'）；手册列出的常见原因是存在进行中的 IMS 业务，或语音优选模式为 PS_ONLY');
+					Mt5700.error((checked ? '开启' : '关闭') + ' IMS 已下发但未生效（当前值 ' + v.actual +
+						'）；常见原因是存在进行中的 IMS 业务');
 				});
 			}).catch(function () { Mt5700.error('IMS 设置失败'); loadIMS(); });
 		});

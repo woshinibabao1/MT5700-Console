@@ -115,7 +115,20 @@ const FORBIDDEN = [
 	{ re: /\bNXDOMAIN\b/, why: 'DNS 返回码（排障术语）' },
 	{ re: /\bmnc\d{3}\b/, why: '探针构造的 PLMN（内部对照）' },
 	{ re: /REFERENCE/, why: '指向开发记忆文档' },
-	{ re: /详见\s*REF/, why: '指向开发记忆文档' }
+	{ re: /详见\s*REF/, why: '指向开发记忆文档' },
+	/*
+	 * ★★ 2026-11-06 新增（用户口径「类似的解说太多了」）。
+	 *   界面里遍布「^MONNC 含 RSRQ」「RSRQ 由 ^MONNC 关联回填」「^NRSSBID 只报
+	 *   前 4 个」这类句子 —— 它们是**实现视角**：用户既不认识这些命令，也没法
+	 *   用它做任何事，只会在排障时多读三行。
+	 *
+	 *   故意只禁**裸**命令名（^MONNC），不禁 `AT^MONNC=...`：后者是让用户照着
+	 *   在终端敲的「怎么办」，属于必须保留的一类。判据因此写成「^ 前面不是 T」。
+	 *   形如 `AT^SYSCFGEX=,,2` 的可执行命令不会被这条规则命中。
+	 */
+	{ re: /(^|[^T])\^[A-Z][A-Z0-9]{2,}/, why: 'AT 命令名（内部实现细节，用户无法据此做任何操作）' },
+	/* 数据血缘自辩：「已按 ARFCN+PCI 关联回填」这类，用户要的是值不是出处 */
+	{ re: /关联回填/, why: '数据血缘说明（实现细节）' }
 ];
 
 function scanViolations(strings) {
@@ -153,6 +166,17 @@ ok('检测器能抓到「手册条数」',
 	selfHits.some(function (h) { return h.why.indexOf('手册条数') >= 0; }));
 ok('检测器不误伤正常文案',
 	scanViolations([{ text: '这一页只管信令，通话内容听不到', line: 1 }]).length === 0);
+
+/* ★★ 命令名规则的三个边界都得钉住，否则「加了一条规则」可能是加了一条恒假的 */
+ok('检测器能抓到裸命令名（^MONNC 之类）',
+	scanViolations([{ text: 'RSRQ 由 ^MONNC 提供', line: 1 }])
+		.some(function (h) { return h.why.indexOf('AT 命令名') >= 0; }));
+ok('★ 不误伤可执行命令（AT^SYSCFGEX=,,2 是让用户去敲的「怎么办」）',
+	scanViolations([{ text: '把服务域改成 2（语音+数据）：AT^SYSCFGEX=,,2', line: 1 }]).length === 0,
+	'把可执行命令也禁了 —— 用户就没有照做的入口了');
+ok('检测器能抓到「关联回填」这类血缘说明',
+	scanViolations([{ text: '已按 ARFCN+PCI 关联回填', line: 1 }])
+		.some(function (h) { return h.why.indexOf('数据血缘') >= 0; }));
 
 /* 词法扫描器也要自证：注释里的违规词必须被跳过 */
 const LEX_SAMPLE = [
