@@ -5,6 +5,56 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.7.8] - 2026-11-15
+
+### Changed — UI 现代化：把手写的换成浏览器原生能力
+
+用 **Modern Web Guidance**（Chrome / Edge / Firefox / MDN 共同维护的前端指南库）
+把前端过了一遍，只改**实现方式**，不动既定的视觉语言（卡片、配色、间距没改）。
+
+**弹窗改原生 `<dialog>`**（`mt5700.js` / `ui.js` / `sms_center.js` 三处）
+
+原来三种弹窗（确认、输入、短信批量删除）都是自己拼一个 `position:fixed` 的遮罩
+div，代价是：键盘 Tab 会跑到弹窗背后的页面上；按 Esc 关不掉，只能点遮罩；弹窗
+背后的页面还能滚；读屏软件不知道「这是个模态框、标题是什么」。改用
+`showModal()` 后这四件事全由浏览器负责。
+
+两类浏览器各留退路：`closedby` 不支持时（Safari）用「按下与松开都落在弹窗矩形外」
+判定点遮罩关闭 —— 只判 `click` 的 `e.target` 会把「点在内边距上」也当关闭；
+`showModal` 都没有的旧浏览器退回原来的 div 遮罩。「取消」拿初始焦点，
+破坏性弹窗里回车不该落在「确定」上。
+
+**表格补语义**（`Mt5700.table`）
+
+`<caption>` + `<th scope="col">` + 容器 `role="region" tabindex="0"`：读屏进入
+表格会先念表名、每个单元格都知道自己属于哪一列；表格横向溢出时键盘也能滚动它
+（以前只能鼠标拖）。视觉零变化，caption 走 `.mt5700-sr-only`。
+
+**中文输入法的回车不再误发送**（3 处）
+
+短信输入框 / AT 终端 / 自动刷新自定义间隔原来只判 `e.key === 'Enter'`。中文
+输入法「确认候选词」也是这个 Enter —— 打「你好」时第一次回车会把半条短信发出去。
+现在统一加 `!e.isComposing && e.keyCode !== 229`。
+
+**原生控件跟随壳的明暗**（`color-scheme`）
+
+浏览器自己画的 UI（`select` 下拉列表、滚动条、输入光标、`::backdrop`）只认
+`color-scheme`，不认 CSS 变量。补上之后：深色外壳里的下拉不再是白底，固定浅色
+纸面里也不会冒出深色滚动条；切主题时同步 `<meta name="color-scheme">`。
+
+**提示条能被读屏听见**
+
+`toast` 加 `role="status"/"alert"` 与 `aria-live`，且**先入 DOM 再写文字**
+（先造带文字的节点再插入，多数读屏会整条漏掉）。
+
+**版本**：`MT5700_CSS_VERSION` 6.18.0 → 6.19.0（CSS 指纹同步）。
+
+守卫：`tests/ui-modern-contract.test.js`（34 项，含 4 条「故意改坏必须判红」自证）。
+
+验证：`node tests/run-all.js` 全绿。**真机未验证** —— 当前设备 SSH 密码与
+`.workbuddy/memory` 记录的 `root/root` 不符，需拿到新凭据后跑
+`audit_all_pages.py` / `audit_metrics.py` 补测。
+
 ## [2.7.7] - 2026-11-06
 
 ### Changed — 「小选项没必要一行一个」推广到全站

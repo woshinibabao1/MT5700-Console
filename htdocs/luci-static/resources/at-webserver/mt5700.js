@@ -19,7 +19,7 @@
  * 后，设备上 CSS 内容已经是新的，用户浏览器却还在用旧副本 —— 代码改了界面没变。
  * 守卫：tests/css-cachebust-contract.test.js（mt5700.css 内容指纹一变就必须改这里）。
  */
-var MT5700_CSS_VERSION = '6.18.0';
+var MT5700_CSS_VERSION = '6.19.0';
 (function () {
 	var cssPath = '/luci-static/resources/at-webserver/mt5700.css?v=' + MT5700_CSS_VERSION;
 	var links = document.querySelectorAll('link[rel="stylesheet"]');
@@ -817,40 +817,152 @@ var Mt5700 = (function () {
 	/* ================= 模态框 ================= */
 
 	/*
-	 * onCancel 是后加的第四个参数，可选：给「点击开关后弹确认」这类场景用，
-	 * 取消时把开关拨回去。没有它时，加了确认反而会让界面状态与实际不符。
+	 * 原生 <dialog> 底座（2026-11-15）。
+	 *
+	 * ★ 为什么换掉手写遮罩：原来的弹窗是一个 fixed 的 div，浏览器不会替我们
+	 *   做**焦点陷阱、Esc 关闭、背景 inert、关闭后焦点归还**。键盘用户 Tab 会
+	 *   一路跑到弹窗背后的页面上；读屏软件也拿不到「这是个模态框、标题是什么」。
+	 *   原生 showModal() 一次性把这些拿全，我们只负责把它画成原来那张卡。
+	 *
+	 * ★ 遮罩点击为什么用 pointerdown + pointerup 双判定：只判 click 的
+	 *   `e.target === mask`，会把「在弹窗里按下、拖到遮罩上松手」也算成点击遮罩
+	 *   —— 正改 IMEI 时手一抖就把输入丢了。按下与松开都落在弹窗矩形外才算关闭。
+	 *
+	 * ★ 兼容：不支持 showModal 的旧浏览器（Safari < 15.4）退回原来的 div 遮罩，
+	 *   行为与改前一致。**不引 polyfill**（项目底线：不加载外部脚本）。
+	 *
+	 * opts: { title, body(节点或文本), wide, buttons:[{label,variant,value,autofocus}], onClose(value) }
+	 *   返回遮罩元素本身（旧代码把它当 div 用，接口保持不变）。
 	 */
-	api.confirm = function (message, onOk, okText, onCancel) {
-		var mask = E('div', { 'class': 'mt5700-modal-mask' });
-		var box = E('div', { 'class': 'mt5700-modal' });
-		var text = E('div', { 'class': 'mt5700-modal-body' }, message);
+	var _dlgSeq = 0;
+
+	function supportsDialog() {
+		return typeof HTMLDialogElement !== 'undefined' &&
+			typeof HTMLDialogElement.prototype.showModal === 'function';
+	}
+
+	function outsideDialog(dlg, e) {
+		var r = dlg.getBoundingClientRect();
+		return e.clientX < r.left || e.clientX > r.right ||
+			e.clientY < r.top || e.clientY > r.bottom;
+	}
+
+	api.modal = function (opts) {
+		opts = opts || {};
+		var native = supportsDialog();
+		var mask, closed = false, picked = false, result;
+
+		if (native) {
+			mask = document.createElement('dialog');
+			mask.className = 'mt5700-modal-mask';
+			/* closedby 支持时由浏览器做 light-dismiss（点遮罩关闭）；不支持的在下面补一段
+			   指针判定 —— 这是 graceful degradation，Esc 与返回手势无论如何都有。 */
+			if ('closedBy' in HTMLDialogElement.prototype) {
+				mask.setAttribute('closedby', 'any');
+			}
+		} else {
+			mask = E('div', { 'class': 'mt5700-modal-mask' });
+		}
+
+		var box = E('div', { 'class': 'mt5700-modal' + (opts.wide ? ' mt5700-modal-wide' : '') });
+
+		/* 可访问名：一定要指向可见标题，否则读屏只念「对话框」 */
+		if (opts.title) {
+			var titleId = 'mt5700-dlg-title-' + (++_dlgSeq);
+			var head = E('div', { 'class': 'mt5700-modal-header' });
+			head.appendChild(E('div', { 'class': 'mt5700-modal-title', id: titleId }, opts.title));
+			box.appendChild(head);
+			mask.setAttribute('aria-labelledby', titleId);
+		}
+		box.appendChild(E('div', { 'class': 'mt5700-modal-body' }, opts.body));
+
 		var actions = E('div', { 'class': 'mt5700-modal-footer' });
-		var cancel = api.ghostButton('取消', function () {
-			if (mask.parentNode) mask.parentNode.removeChild(mask);
-			if (onCancel) onCancel();
+		(opts.buttons || []).forEach(function (b) {
+			var btn = api.button(b.label, function () { finish(b.value); }, b.variant);
+			if (b.autofocus) btn.setAttribute('autofocus', '');
+			actions.appendChild(btn);
 		});
-		var ok = api.primaryButton(okText || '确定', function () {
-			if (mask.parentNode) mask.parentNode.removeChild(mask);
-			if (onOk) onOk();
-		});
-		actions.appendChild(cancel);
-		actions.appendChild(ok);
-		box.appendChild(text);
 		box.appendChild(actions);
 		mask.appendChild(box);
-		mask.addEventListener('click', function (e) {
-			if (e.target === mask && mask.parentNode) mask.parentNode.removeChild(mask);
-		});
+
+		function teardown() {
+			if (closed) return;
+			closed = true;
+			if (mask.parentNode) mask.parentNode.removeChild(mask);
+			if (opts.onClose) opts.onClose(result);
+		}
+
+		function finish(value) {
+			if (closed || picked) return;
+			picked = true;
+			result = value;
+			if (native && mask.open) {
+				/* 交给 close 事件统一收尾：Esc / 点遮罩也走同一条路，
+				   两条路各收一次会重复执行 onClose */
+				mask.close();
+			} else {
+				teardown();
+			}
+		}
+
+		if (native) {
+			mask.addEventListener('close', teardown);
+			if (!('closedBy' in HTMLDialogElement.prototype)) {
+				var pressedOutside = false;
+				mask.addEventListener('pointerdown', function (e) {
+					pressedOutside = outsideDialog(mask, e);
+				});
+				mask.addEventListener('pointerup', function (e) {
+					if (pressedOutside && outsideDialog(mask, e)) finish(undefined);
+					pressedOutside = false;
+				});
+			}
+		} else {
+			mask.addEventListener('click', function (e) {
+				if (e.target === mask) finish(undefined);
+			});
+		}
+
 		document.body.appendChild(mask);
+		if (native) mask.showModal();
 		return mask;
+	};
+
+	/*
+	 * onCancel 是后加的第四个参数，可选：给「点击开关后弹确认」这类场景用，
+	 * 取消时把开关拨回去。没有它时，加了确认反而会让界面状态与实际不符。
+	 * Esc 与点遮罩关闭都按「取消」处理（旧实现里这两种方式关不掉，等于卡死）。
+	 */
+	api.confirm = function (message, onOk, okText, onCancel) {
+		return api.modal({
+			body: message,
+			/* 安全的那个动作拿初始焦点：破坏性弹窗里回车不该落在「确定」上 */
+			buttons: [
+				{ label: '取消', variant: 'ghost', value: 'cancel', autofocus: true },
+				{ label: okText || '确定', variant: 'primary', value: 'ok' }
+			],
+			onClose: function (value) {
+				if (value === 'ok') { if (onOk) onOk(); }
+				else if (onCancel) onCancel();
+			}
+		});
 	};
 
 	/* ================= Toast 通知 ================= */
 
 	api.toast = function (message, type) {
 		type = type || 'info';
-		var t = E('div', { 'class': 'mt5700-toast mt5700-toast-' + type }, message);
+		/* role/aria-live：原来这个提示只对眼睛存在 —— 读屏用户在「保存失败」
+		   这类关键节点上收不到任何反馈。错误用 alert 抢话，其余用 status。 */
+		var t = E('div', {
+			'class': 'mt5700-toast mt5700-toast-' + type,
+			role: type === 'error' ? 'alert' : 'status',
+			'aria-live': type === 'error' ? 'assertive' : 'polite'
+		});
 		document.body.appendChild(t);
+		/* ★ 必须先入 DOM 再写文字：aria-live 只播报「已存在的区域里发生的变化」，
+		   先造一个带文字的节点再插入，多数读屏会整条漏掉。 */
+		t.textContent = message;
 		setTimeout(function () { t.classList.add('mt5700-toast-hide'); }, 3000);
 		setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 3500);
 	};
@@ -1203,17 +1315,31 @@ var Mt5700 = (function () {
 
 	/* ================= 表格 ================= */
 
+	/*
+	 * ★ 2026-11-15 无障碍补齐（视觉零改动，只加语义）：
+	 *   · <caption>：表格得有个名字。藏在 .mt5700-sr-only 里，读屏进入表格时
+	 *     会先念「邻区列表 数据表」，这是它跟旁边一堆 div 的唯一区别。
+	 *   · th scope="col"：不写 scope，读屏只能按位置猜表头，遇到分组行就念串。
+	 *   · 容器 role="region" + tabindex="0"：表格横向溢出时容器才是滚动区，
+	 *     而键盘用户原本根本进不去（只能鼠标拖滚动条）。
+	 */
+	var _tblSeq = 0;
+
 	api.table = function (headers, rows, options) {
 		options = options || {};
-		var wrapper = E('div', { 'class': 'mt5700-table-wrapper' });
+		var wrapper = E('div', { 'class': 'mt5700-table-wrapper', role: 'region', tabindex: '0' });
 		var table = E('table', { 'class': 'mt5700-table' });
+		var captionId = 'mt5700-table-cap-' + (++_tblSeq);
+		table.appendChild(E('caption', { 'class': 'mt5700-sr-only', id: captionId },
+			options.caption || (headers.join('、') + ' 数据表')));
+		wrapper.setAttribute('aria-labelledby', captionId);
 		if (options.striped) table.classList.add('mt5700-table-striped');
 
 		// 表头
 		var thead = E('thead');
 		var tr = E('tr');
 		headers.forEach(function (h) {
-			tr.appendChild(E('th', {}, h));
+			tr.appendChild(E('th', { scope: 'col' }, h));
 		});
 		thead.appendChild(tr);
 		table.appendChild(thead);
@@ -1551,10 +1677,26 @@ var Mt5700 = (function () {
 		} catch (e) { return 'dark'; }
 	}
 
+	/* <meta name="color-scheme"> 决定浏览器自绘 UI（select 下拉列表、滚动条、
+	   ::backdrop）用哪套配色。只改 data-theme 而不改它，深色壳里的下拉依旧是
+	   白底、浅色壳里的滚动条却按系统变深。LuCI 模板不给我们改 head，就地补一个。 */
+	function shColorSchemeMeta(theme) {
+		try {
+			var m = document.querySelector('meta[name="color-scheme"]');
+			if (!m) {
+				m = document.createElement('meta');
+				m.setAttribute('name', 'color-scheme');
+				document.head.appendChild(m);
+			}
+			m.setAttribute('content', theme === 'light' ? 'light' : 'dark');
+		} catch (e) { /* 无所谓 */ }
+	}
+
 	function shThemeApply(root, theme) {
 		root.setAttribute('data-theme', theme);
 		/* html 上也挂一份：弹窗层在 body 上、不在壳内，靠它继承到同一套明暗 */
 		try { document.documentElement.setAttribute('data-theme', theme); } catch (e) { /* 无所谓 */ }
+		shColorSchemeMeta(theme);
 		var btn = root.querySelector('.sh-theme');
 		if (btn) btn.innerHTML = '';
 		if (btn) {

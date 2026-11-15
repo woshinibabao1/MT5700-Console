@@ -77,7 +77,12 @@ return L.view.extend({
 			placeholder: '输入短信内容，回车发送（Shift+Enter 换行）'
 		});
 		msgInput.addEventListener('keydown', function (e) {
-			if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+			/* ★ 中文输入法里回车是「确认候选词」，不是「发送」。
+			   不判 isComposing 的话，打「你好」时第一次回车就把半条短信发出去了。 */
+			if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+				e.preventDefault();
+				send();
+			}
 		});
 		var hintEl = E('div', { 'class': 'mt5700-hint' }, '');
 		inputWrap.appendChild(msgInput);
@@ -1133,12 +1138,61 @@ return L.view.extend({
 
 		var openMask = null;
 
+		/*
+		 * 遮罩层（2026-11-15）：现代浏览器走原生 <dialog> —— Esc 关闭、焦点陷阱、
+		 * 背景 inert、关闭后焦点归还全部由浏览器负责；旧浏览器退回 div，
+		 * 行为与改前完全一致。**不引 polyfill**（项目底线）。
+		 */
+		function makeMask() {
+			if (typeof HTMLDialogElement !== 'undefined' &&
+				typeof HTMLDialogElement.prototype.showModal === 'function') {
+				var d = document.createElement('dialog');
+				d.className = 'mt5700-modal-mask';
+				if ('closedBy' in HTMLDialogElement.prototype) {
+					d.setAttribute('closedby', 'any');
+				} else {
+					bindBackdropDismiss(d);
+				}
+				return d;
+			}
+			return E('div', { 'class': 'mt5700-modal-mask' });
+		}
+
+		function mountMask(mask) {
+			document.body.appendChild(mask);
+			if (mask.tagName === 'DIALOG') mask.showModal();
+		}
+
+		function outsideRect(el, e) {
+			var r = el.getBoundingClientRect();
+			return e.clientX < r.left || e.clientX > r.right ||
+				e.clientY < r.top || e.clientY > r.bottom;
+		}
+
+		/* 没有 closedby 的浏览器（Safari）：按下与松开都落在弹窗矩形外才算点遮罩。
+		   只判 click 的 e.target，会把「点在弹窗内边距或子元素缝隙上」也当成关闭。 */
+		function bindBackdropDismiss(d) {
+			var pressed = false;
+			d.addEventListener('pointerdown', function (e) { pressed = outsideRect(d, e); });
+			d.addEventListener('pointerup', function (e) {
+				if (pressed && outsideRect(d, e)) d.close();
+				pressed = false;
+			});
+		}
+
 		function closeMask(mask) {
 			if (openMask === mask) openMask = null;
-			if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
+			if (!mask) return;
+			/* dialog 必须先 close() 退出 top layer：直接删节点会留下一个「还开着」的
+			   模态框，整页保持 inert —— 表现就是「弹窗没了，点哪都没反应」。 */
+			if (mask.tagName === 'DIALOG' && mask.open) mask.close();
+			if (mask.parentNode) mask.parentNode.removeChild(mask);
 		}
 
 		function bindMaskClose(mask) {
+			/* dialog 的遮罩关闭由 makeMask 里的 closedby / 指针判定负责，
+			   这里再绑一次 click 会重复、且内边距点击会误关 */
+			if (mask.tagName === 'DIALOG') return;
 			mask.addEventListener('click', function (e) {
 				if (e.target === mask) closeMask(mask);
 			});
@@ -1159,7 +1213,7 @@ return L.view.extend({
 		 * 短信正文是不可信输入。
 		 */
 		function batchDelete() {
-			var mask = E('div', { 'class': 'mt5700-modal-mask' });
+			var mask = makeMask();
 			openMask = mask;
 			var box = E('div', { 'class': 'mt5700-modal mt5700-modal-wide' });
 			var header = E('div', { 'class': 'mt5700-modal-header' });
@@ -1176,7 +1230,7 @@ return L.view.extend({
 				box.appendChild(emptyFoot);
 				mask.appendChild(box);
 				bindMaskClose(mask);
-				document.body.appendChild(mask);
+				mountMask(mask);
 				return;
 			}
 
@@ -1270,7 +1324,7 @@ return L.view.extend({
 
 			mask.appendChild(box);
 			bindMaskClose(mask);
-			document.body.appendChild(mask);
+			mountMask(mask);
 			sync();
 		}
 

@@ -74,7 +74,8 @@ return L.view.extend({
 		terminal.appendChild(inputRow);
 
 		cmdInput.addEventListener('keydown', function (e) {
-			if (e.key === 'Enter') send();
+			/* 输入法确认候选词的 Enter 不算执行（命令是英文，但参数/注释常要打中文） */
+			if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) send();
 		});
 
 		/* ---------- 常用命令 ---------- */

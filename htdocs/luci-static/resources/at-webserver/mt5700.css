@@ -126,6 +126,29 @@
   --mt5700-transition-slow: 300ms ease;
 }
 
+/* ---------- 原生控件配色（color-scheme） ----------
+   浏览器自己画的那部分 UI —— select 下拉列表、滚动条、日期选择器、输入光标、
+   <dialog> 的 ::backdrop —— 只认 color-scheme，不认我们的 CSS 变量。
+   不钉的话：深色外壳里的下拉永远是白底，浅色纸面里的滚动条却跟着系统变深。
+   两套壳各自钉死，且**不跟随系统**（外观由用户在壳里自己选）。 */
+/* 默认浅色：本插件不是"跟随系统"的页面。根上不写，系统深色时页面滚动条
+   会是深色，而内容区是浅色纸面 —— 滚动条像从别人家借来的。 */
+:root {
+  color-scheme: light;
+}
+
+.mt5700-sh {
+  color-scheme: dark;
+}
+
+/* v9 外壳的浅色档（.mt5700-page 的浅色声明写在它自己那条规则里） */
+.mt5700-sh[data-theme="light"] {
+  color-scheme: light;
+}
+
+html[data-theme="dark"] body.mt5700-sh-on { color-scheme: dark; }
+html[data-theme="light"] body.mt5700-sh-on { color-scheme: light; }
+
 /* ==========================================================================
    L1 - 应用壳与环境背景层
    ========================================================================== */
@@ -154,6 +177,9 @@
      本插件是固定浅色纸面，继承下来就是白底浅灰字（实测 1.6:1，等于看不见）。
      所有没单独指定颜色的文本（表格单元格、hint、li、textarea 占位符）都靠这一行。 */
   color: var(--mt5700-text);
+  /* 原生控件配色：本页是固定浅色纸面，select 下拉/滚动条/输入光标也必须是浅色，
+     不能因为系统是深色就变成黑底（那会与页面底色打架）。 */
+  color-scheme: light;
 }
 
 /* 宿主深色兜底（Argon 的 dark.css 用 !important 钉死了表单控件）
@@ -1419,6 +1445,21 @@
   cursor: not-allowed;
 }
 
+/* ---------- 仅供读屏的文字 ----------
+   表格的 <caption> 要存在于 DOM 才能给读屏软件提供表名，但视觉上不该多一行字。
+   用 clip-path 而不是 left:-9999px：后者在 RTL 或横向滚动容器里会把布局撑宽。 */
+.mt5700-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ---------- 表格 ----------
    表头改成「11px 中性小标 + 凹陷底」：表格是数据区，标题不该跟卡片标题抢层级；
    行高由 12px 收紧到 9px，一屏能多看到 3~4 行（读数类表格更实用）。 */
@@ -1427,6 +1468,14 @@
   border-radius: var(--mt5700-radius-md);
   border: 1px solid var(--mt5700-border-subtle);
   background: var(--mt5700-card-bg);
+  /* 横向滚到头时别把整页带着一起滑 */
+  overscroll-behavior-x: contain;
+}
+
+/* 表格容器可聚焦（键盘能滚它），所以必须看得见焦点 */
+.mt5700-table-wrapper:focus-visible {
+  outline: 2px solid var(--mt5700-accent);
+  outline-offset: 2px;
 }
 
 .mt5700-table {
@@ -1818,7 +1867,9 @@
 /* ==========================================================================
    模态框 (最高 Z 层)
    ========================================================================== */
-.mt5700-modal-mask {
+/* 遮罩：两套并存 —— 原生 <dialog>（现代浏览器）与 div（Safari < 15.4 兜底）。
+   dialog 自带 top layer 与背景 inert，不需要 z-index；z-index 只留给 div 那套。 */
+div.mt5700-modal-mask {
   position: fixed;
   inset: 0;
   background: rgba(15, 23, 42, 0.45);
@@ -1829,6 +1880,40 @@
   justify-content: center;
   z-index: 9999;
   padding: var(--mt5700-space-md);
+}
+
+/* dialog 的 UA 样式是 inset:0 + margin:auto + fit-content，
+   要先铺满全屏才能当「遮罩层」用，内部的 .mt5700-modal 才是那张卡。
+   ★ 只给 [open] 设 display：无条件写 display:flex 会盖掉 UA 的
+   `dialog:not([open]){display:none}`，关着的弹窗也会被画出来。 */
+dialog.mt5700-modal-mask {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  padding: var(--mt5700-space-md);
+  border: 0;
+  background: transparent;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+dialog.mt5700-modal-mask[open] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+dialog.mt5700-modal-mask::backdrop {
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  /* ::backdrop 默认 overflow:visible，不是滚动容器 → 不设这行，滚动手势会穿透到背后页面 */
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 
 .mt5700-modal {

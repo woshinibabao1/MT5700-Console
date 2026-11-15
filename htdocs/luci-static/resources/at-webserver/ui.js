@@ -70,17 +70,16 @@ var Ui = (function () {
 
 
 	api.promptModal = function (title, fields, onOk) {
-		var mask = E('div', { 'class': 'mt5700-modal-mask' });
-		var box = E('div', { 'class': 'mt5700-modal mt5700-modal-wide' });
-		var head = E('div', { 'class': 'mt5700-modal-header' });
-		var h = E('div', { 'class': 'mt5700-modal-title' }, title);
-		var body = E('div', { 'class': 'mt5700-modal-body' });
+		var body = E('div');
 		var inputs = {};
+		var first = null;
+		var seq = (api.promptModal._seq = (api.promptModal._seq || 0) + 1);
 		for (var i = 0; i < fields.length; i++) {
 			var f = fields[i];
 			var row = E('div', { 'class': 'mt5700-field' });
-			row.appendChild(E('div', { 'class': 'mt5700-label mt5700-field-label' }, f.label));
-			var ctrl = E('div', { 'class': 'mt5700-field-control' });
+			/* ★ label 用元素并 for 到控件：原先是个 div，读屏念不到「这一格是什么」，
+			   点标签也不会聚焦到输入框。类名不变，视觉零改动。 */
+			var fid = 'mt5700-pm-' + seq + '-' + i;
 			var input;
 			if (f.type === 'select') {
 				input = document.createElement('select');
@@ -99,34 +98,33 @@ var Ui = (function () {
 				if (f.value != null) input.value = String(f.value);
 				if (f.placeholder) input.placeholder = f.placeholder;
 			}
+			input.id = fid;
+			row.appendChild(E('label', { 'class': 'mt5700-label mt5700-field-label', 'for': fid }, f.label));
+			var ctrl = E('div', { 'class': 'mt5700-field-control' });
 			ctrl.appendChild(input);
 			if (f.hint) ctrl.appendChild(E('div', { 'class': 'mt5700-hint' }, f.hint));
 			row.appendChild(ctrl);
 			body.appendChild(row);
 			inputs[f.key] = input;
+			if (!first) first = input;
 		}
-		var actions = E('div', { 'class': 'mt5700-modal-footer' });
-		var cancel = api.button('取消', 'cbi-button-neutral', function () {
-			if (mask.parentNode) mask.parentNode.removeChild(mask);
+		/* 原生 dialog：autofocus 由 showModal() 生效，焦点直接落在第一格 */
+		if (first) first.setAttribute('autofocus', '');
+		return Mt5700.modal({
+			title: title,
+			wide: true,
+			body: body,
+			buttons: [
+				{ label: '取消', variant: 'secondary', value: 'cancel' },
+				{ label: '确定', variant: 'primary', value: 'ok' }
+			],
+			onClose: function (value) {
+				if (value !== 'ok') return;
+				var values = {};
+				for (var key in inputs) values[key] = inputs[key].value;
+				if (onOk) onOk(values);
+			}
 		});
-		var ok = api.button('确定', 'cbi-button-positive', function () {
-			var values = {};
-			for (var key in inputs) values[key] = inputs[key].value;
-			if (mask.parentNode) mask.parentNode.removeChild(mask);
-			if (onOk) onOk(values);
-		});
-		actions.appendChild(cancel);
-		actions.appendChild(ok);
-		head.appendChild(h);
-		box.appendChild(head);
-		box.appendChild(body);
-		box.appendChild(actions);
-		mask.appendChild(box);
-		mask.addEventListener('click', function (e) {
-			if (e.target === mask && mask.parentNode) mask.parentNode.removeChild(mask);
-		});
-		document.body.appendChild(mask);
-		return mask;
 	};
 
 	/* ---------- 连接状态条 ---------- */
@@ -298,8 +296,13 @@ var Ui = (function () {
 		});
 		/* 用 change（失焦/回车）而不是 input：逐字符通知会不停地重建定时器 */
 		custom.addEventListener('change', applyCustom);
+		/* isComposing / 229：中文输入法确认候选词时也会发 Enter，
+		   不判就会把「正在选字」当成「填完了」，间隔被中途改掉。 */
 		custom.addEventListener('keydown', function (e) {
-			if (e.key === 'Enter') { e.preventDefault(); applyCustom(); }
+			if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+				e.preventDefault();
+				applyCustom();
+			}
 		});
 		chk.addEventListener('change', function () {
 			enabled = chk.checked;
